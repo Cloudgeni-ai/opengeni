@@ -4,7 +4,7 @@ This is the orientation for how an OpenGeni agent run actually executes over
 time. It ties together three subsystems a contributor touching the session
 workflow, the worker activity, or the runtime must keep straight. Code wins
 over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
-`apps/worker/src/activities/agent-turn.ts`, `packages/runtime/src/index.ts`,
+`apps/worker/src/activities/agent-turn/` (orchestrator `run.ts`), `packages/runtime/src/index.ts`,
 `packages/runtime/src/model-input.ts`, and `packages/runtime/src/run-events.ts`.
 
 ## Turns
@@ -52,6 +52,18 @@ commit together. The response is built from those returned committed rows.
 NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
+
+An owner-authored `personalResourceAttachment` is part of that same accepted
+work transaction for create, Send, and Steer. The server derives the fixed
+personal Variable Set/Rig closure from the locked session; callers never issue
+a grant and then send work in a second operation. `once` is consumed against
+the logical turn id, so every recovery attempt for that turn copies the same
+immutable snapshot. It is never copied to a queue edit, goal continuation, or
+machine-input successor; editing a queued once-bearing turn is rejected.
+`session` and `always` remain live grant generations for later causal turns.
+Revocation cannot erase bytes already injected into a running sandbox, but it
+rejects every later resolution and recovery admission. Realtime session staging
+does not accept this intent because it has no initial logical-turn boundary.
 
 The same ordinary session can add and remove a realtime voice
 conversational transport without creating a second session, queue, or workflow.
@@ -534,6 +546,16 @@ Normal publication and crash recovery consume the same retained event value, so
 recovery cannot reconstruct a poorer MCP result from model-facing content or
 drop open protocol extension fields.
 
+Recoverable attempt transitions close ordinary in-flight receipts with an
+explicit outcome-unknown result but preserve every receipt carrying an
+`interruption_kind`. Those rows are the exact open-suffix authority a
+replacement attempt needs to replay the original approval or human-input
+trigger, including a result already consumed before worker loss. Capacity waits,
+recoverable pause/maintenance, provider failover, graceful shutdown, and worker
+death all follow that rule. Terminal failure/cancellation and superseding Steer
+close the entire turn ledger. Recovery never reconstructs this authority from
+history or `agent_run_states`.
+
 For MCP, the runtime reads the complete provider `CallToolResult` through the
 SDK's `callToolResult` seam and carries a private duplicate only until the exact
 audit projection is durable. An HTTP-successful result with `isError: true`
@@ -601,12 +623,62 @@ existing recovery projection because its receipt can mark a crash after memory
 was saved but before the original event publish. Only genuinely unresolved
 execution gets one explicit `interrupted / outcome unknown` closure.
 
-Claim, interruption, and event-writing settlement share one lock order:
-`workspace_inference_controls FOR SHARE` when the write is control-aware, then
-the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`,
-UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
-`FOR UPDATE`. Generic audit/title appends skip the control row but use the same
-workspace-key-share prefix. Event inserts also touch the workspace through their
+Claim, interruption, and event-writing settlement share one lock order: the
+workspace-control advisory lock plus `workspace_inference_controls FOR SHARE`
+when the write is control-aware, then the actual `workspaces` row
+`FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`, UUID-ordered exact
+turns `FOR UPDATE`, and UUID-ordered exact attempts `FOR UPDATE`.
+`lockWorkspaceInferenceControl` takes
+`pg_advisory_xact_lock[_shared](hashtextextended('workspace-control:<id>', 0))`
+in the same mode before the row lock. The row lock alone is unfair: PostgreSQL
+lets a new `FOR SHARE` join a share-locked tuple without queueing behind an
+already waiting `FOR UPDATE`, so with many sessions continuously claiming,
+settling, and appending, a Pause/Resume could wait for hours while every
+HTTP caller gave up and left its backend parked with a pinned snapshot. The
+heavyweight advisory queue is FIFO, so a mutator waits only for the holders that
+preceded it and sharers resume right after it commits. Only genuine control
+mutations (Pause/Resume/Cancel, workspace Pause/Resume, auto-resume, settings
+narrowing, quiescent tree deletion) take the exclusive prefix. Read projections
+(`getSession`, session lists, discovery) read the control row with lock `none`
+and never join the prefix queue. Send, Steer,
+queued Steer, and realtime ledger sync use
+`lockWorkspaceInferenceControlForAdmission`: the shared prefix while the target
+branch is active (it still excludes every control mutation, so the observed
+state cannot change inside the transaction), escalating to the exclusive prefix
+for a paused branch only after rolling back a savepoint, because an in-place
+upgrade deadlocks as soon as two sharers escalate together. Request-scoped API
+mutations pass `workspaceControlRequestLockTimeoutMs()`: one wall-clock budget
+shared by every lock step of the admission (advisory lock, row lock, and a
+savepoint escalation), so the total wait never exceeds the bound. The budget is
+the `@opengeni/config` setting `workspaceControlLockTimeoutMs`
+(`OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS`, positive integer milliseconds,
+default 20000, validated at boot); the API installs it into `@opengeni/db` once
+at app construction through `configureWorkspaceControlRequestLockTimeoutMs`,
+and nothing parses the env per request. Exceeding it fails with
+the typed retryable `WorkspaceControlBusyError` before any write; `app.onError`
+renders it for every route as HTTP 503 with `retryable: true`,
+`outcomeUnknown: false`, and `details.code: WORKSPACE_CONTROL_BUSY`, the MCP
+orchestration envelope reports `<tool>_workspace_busy` with a retry hint, and
+Slack interactions keep the raw error so their classifier retries it. Worker
+settlement and claims never pass a bound. The bounded request-scoped takers are
+exactly: Send, Steer, queued Steer, Pause/Resume/Cancel, workspace
+Pause/Resume, realtime ledger sync, queue move/edit/delete, composer draft save,
+the MCP agent message and agent Steer, `updateWorkspaceSettings` (settings
+narrowing, exclusive prefix), and `deleteSessionTreeIfQuiescent` (exclusive
+prefix); each accepts an optional `controlLockTimeoutMs`, the API routes and
+`@opengeni/core` commands pass the request budget, and a lifecycle caller that
+omits it keeps the unbounded wait. The remaining HTTP-originated shared takers
+stay unbounded by design: session create (`lockWorkspaceForSessionCreate`),
+goal clear/update (`clearSessionGoal`, `updateSessionGoalWithEvent`), the
+session MCP approval-policy and tool-policy writers
+(`appendSessionEventsWithLockedSessionUpdate`, shared with worker writers), and
+realtime session begin/end. They only hold `FOR SHARE`, so they wait solely
+behind an exclusive holder or a queued mutator and never behind each other; a
+bound there would trade a brief wait for a failed request. Generic
+audit/title appends skip the control row but use the same
+workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
+before insert so its turn/attempt FK checks cannot invert against event writers;
+retry only that idempotent prepare transaction on `40P01`/`40001`. Event inserts also touch the workspace through their
 foreign keys, so acquiring it later would reintroduce a claim/preemption
 deadlock; the session lock excludes competing mutation while remaining compatible
 with FK key-share checks. Start, requires-action, ordinary terminal, recoverable interruption,
@@ -688,6 +760,14 @@ parked indefinitely. When the selected root is a child, the same transaction
 also enqueues one deduplicated `child_terminal_result` with status `cancelled`
 for its surviving parent and copies the causal parent-turn delegation snapshot;
 cancelled descendants do not notify parents inside the same terminal subtree.
+Every child terminal result remains a durable pending machine input even when it
+arrives late. It may autonomously wake an idle parent only while the parent has
+an active goal, which is the durable obligation to keep working. A no-goal
+parent whose ordinary turn completed, a paused or completed goal, and an
+already-failed parent are settled authority: the result stays pending for a
+later human/new-goal turn and cannot manufacture a new inference or rewrite the
+settled public status by itself. A result arriving while the parent turn is live
+remains available to that turn's ordinary loop.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -1006,6 +1086,17 @@ explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
+An explicit Connected-Machine → managed-home route change uses the same durable
+same-logical-turn boundary without pretending the original attempt owns a cloud
+box. A machine-primary attempt never pre-leases home. When its active pointer is
+cleared to home, the routing proxy emits the typed
+`home_unavailable_this_turn` transition; failure settlement durably reconciles
+completed model/tool truth, closes only the unresolved tool suffix, records
+`sandbox_home_route_transition`, and returns `recovering`. The next attempt
+starts from the committed home pointer and establishes home normally. There is
+no new user message, silent fallback to the old machine, or blind replay of an
+ambiguous operation.
+
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with
 `requireApproval` both create a durable action request keyed by the logical turn
@@ -1163,6 +1254,20 @@ audit reads may return it, so it is never a secret boundary.
    model request projects that receipt to a deterministic artifact fact without
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
+   Model-visible tool results stay at or below 1 MiB. Overflow is a successful
+   tool: exact serialized bytes become a workspace File, a current-turn copy
+   lands at `tool-results/<operationId>.json` relative to the shell cwd (the
+   durable rematerialization path remains the virtual
+   `/workspace/tool-results/<operationId>.json`), and history/events keep the
+   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt whose
+   `sandboxPath` is that cwd-relative shell path. Later turns do not
+   rematerialize; retrieve old bytes through Files MCP plus shell. Spill write
+   failure is a bounded `result_too_large` error and never puts the huge payload
+   in history.
+   Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
+   `session_attempt_codemode_calls` is unchanged. See
+   `packages/runtime/src/tool-result-spill.ts` and
+   `apps/worker/src/activities/agent-turn/tool-result-spill.ts`.
    User attachments use a separate one-turn delivery rule. The accepted user
    row stores private stable file references beside the message. Only that
    triggering turn resolves metadata, optionally inlines supported bytes, and
@@ -1371,6 +1476,12 @@ strips provider item ids from every model-call input by default
 `reasoning.encrypted_content` instead
 (`OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT=true`), so requests are
 self-contained and reasoning continuity does not hinge on provider storage.
+New history rows omit Responses output-only item `status` at persist
+(`canonicalizePersistedHistoryItem`); pairing is `call_id`. The Codex
+subscription fetch still strips leftover item `status` on the wire for
+already-stored SuperGrok rows and mid-turn SDK items because the
+ChatGPT/Codex input schema 400s `Unknown parameter: 'input[N].status'`. That
+strip is request-local and does not rewrite stored history.
 If Codex nevertheless rejects that exact opaque artifact with its recognized
 HTTP-400 encrypted-content family, the current attempt atomically marks only
 the exact active reasoning/compaction row IDs and the current turn's latest
@@ -1427,6 +1538,20 @@ credential, and content values remain only in authenticated durable events.
 The database returns a milestone receipt only when the current transaction
 inserted the first canonical current-association checkpoint, so ordinary
 attempt recovery and callback replay cannot deterministically double-count it.
+That decision is a per-turn ledger, `session_turn_startup_milestones` (one row
+per turn, milestone, outcome; migration 0318): the event-append or settlement
+transaction performs `insert ... on conflict do nothing returning` for each
+checkpoint it inserted, and only a returned row is a receipt, measured from the
+turn's durable `created_at` to the canonical event's own `occurred_at`. It
+never re-reads the turn's `session_events` rows, so the cost is O(1) per model
+request instead of O(events in the turn) inside the transaction that holds the
+workspace inference-control row. The terminal failed first-byte outcome is
+fenced on ledger state (a provider-dispatch row exists and no completed
+first-byte row exists). A turn whose `turn.started` was already durable before
+a ledger-aware writer touched it (in flight across the ledger rollout) is
+sealed once with `pre_ledger_history` sentinel rows after one bounded probe for
+an earlier current `turn.started`, and emits no further startup receipts rather
+than re-observing a checkpoint with a duration equal to its age.
 A terminal `turn.failed` after provider dispatch contributes one bounded failed
 first-byte sample only when the logical turn produced no canonical byte in any
 attempt. A recoverable pre-byte attempt and a later tool-loop failure after a

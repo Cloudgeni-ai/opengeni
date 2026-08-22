@@ -5,6 +5,16 @@ repository-scoped Git credentials. App server configuration and workspace
 authority are separate facts: configured App credentials do not make a
 workspace binding healthy.
 
+This workspace-owned bot/install path is independent from the exact-user
+personal OAuth path in [`personal-github.md`](personal-github.md). The personal
+path uses a separate per-environment OAuth App, callback, encrypted Connection,
+and GitHub user identity. Neither credential may satisfy the other's authority
+checks.
+
+The PR Review Pack likewise uses a separately registered, workspace-owned
+provider app. It never inherits this platform App or a personal GitHub
+connection. See [`pr-review-pack.md`](pr-review-pack.md).
+
 ## Status contract
 
 `GET /v1/workspaces/:workspaceId/github/app` and the

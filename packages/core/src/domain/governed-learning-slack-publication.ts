@@ -68,7 +68,7 @@ export function governedLearningSlackProjection(
   if (event.kind === "activated") {
     const receipt = event.receipt;
     return {
-      summary: `Automatically activated a ${DESTINATION_LABEL[receipt.destination]} learned from ${SOURCE_LABEL[receipt.sourceKind]} (revision ${receipt.destinationNewVersion}). Review or undo it under Learning & autonomy.`,
+      summary: `Automatically activated a ${DESTINATION_LABEL[receipt.destination]} learned from ${SOURCE_LABEL[receipt.sourceKind]} (revision ${receipt.destinationNewVersion}). Undo is available through the workspace learning API.`,
       outcome: "activated",
       destination: receipt.destination,
       sourceKind: receipt.sourceKind,

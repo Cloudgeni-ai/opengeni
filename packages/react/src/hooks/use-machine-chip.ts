@@ -4,13 +4,13 @@ import type { SessionCapabilitiesState } from "./use-session-capabilities";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { connectionStatusForState } from "../types/machines";
 
-/** The one truthful machine indicator. Honest staleness beats
- *  fake liveness: a cold/asleep box reads "offline — as of <time>", never "live". */
+/** The one truthful machine indicator. Managed cold compute is sleeping; a
+ *  Connected Machine that is genuinely unreachable remains offline. */
 export type MachineChipState = "live" | "waking" | "offline";
 
 export type MachineChip = {
   state: MachineChipState;
-  /** A ready-to-render label ("Live" / "Waking…" / "Offline — as of 3m ago"). */
+  /** A ready-to-render label ("Live" / "Waking…" / "Sleeping · saved 3m ago"). */
   label: string;
   /** The capture time backing an offline/stale label (ISO), or null. M4 may
    *  reformat this; `label` already embeds a relative form. */
@@ -64,7 +64,8 @@ export function formatAsOf(capturedAt: string, now: number): string {
 export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
   const now = input.now ?? Date.now();
   const asOf = input.capturedAt ?? null;
-  const offlineLabel = asOf ? `Offline — as of ${formatAsOf(asOf, now)}` : "Offline";
+  const managedRestingLabel = asOf ? `Sleeping · saved ${formatAsOf(asOf, now)}` : "Sleeping";
+  const offlineLabel = "Offline";
 
   // A connected machine has no Modal group lease, so capability negotiation
   // legitimately reports `cold` until a stream holder is minted. Its fleet
@@ -86,6 +87,16 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
   const selfhostedOffline =
     input.activeIsSelfhosted === true && input.activeMachineState === "offline";
 
+  // Capability negotiation has definitively failed. A retained warm intent
+  // must not turn that error into the optimistic Waking state.
+  if (input.capabilitiesState === "error") {
+    return {
+      state: "offline",
+      label: input.activeIsSelfhosted === true ? offlineLabel : managedRestingLabel,
+      asOf,
+    };
+  }
+
   // 2. Actively coming up: negotiation in flight, an edit/terminal is warming, or
   //    the active machine is (re)connecting. Never when self-hosted is hard-offline.
   const machineWarming =
@@ -97,8 +108,14 @@ export function deriveMachineChip(input: DeriveMachineChipInput): MachineChip {
     return { state: "waking", label: "Waking…", asOf };
   }
 
-  // 3. Cold / asleep / offline / error → honest stale label.
-  return { state: "offline", label: offlineLabel, asOf };
+  // 3. Managed cold compute is sleeping with saved-workspace freshness. A
+  // Connected Machine is only described as Offline when its reachability is
+  // genuinely unavailable; capture time is not a heartbeat.
+  return {
+    state: "offline",
+    label: input.activeIsSelfhosted === true ? offlineLabel : managedRestingLabel,
+    asOf,
+  };
 }
 
 export type UseMachineChipOptions = DeriveMachineChipInput;

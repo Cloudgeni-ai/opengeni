@@ -34,6 +34,14 @@ export function isRunningStatus(status: SessionStatus): boolean {
   return RUNNING_STATUSES.has(status);
 }
 
+function hasActiveEffectiveControl(session: Session): boolean {
+  return (session.effectiveControl?.state ?? "active") === "active";
+}
+
+function isEffectivelyRunning(session: Session): boolean {
+  return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
+}
+
 /** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
 export function sessionActivityTime(session: Session): number {
   const updated = Date.parse(session.updatedAt);
@@ -112,11 +120,9 @@ export type GroupedSessions = {
  * within each bucket. Empty groups are dropped.
  */
 export function groupSessionsForRail(sessions: Session[], now: Date = new Date()): GroupedSessions {
-  const running = sessions
-    .filter((session) => isRunningStatus(session.status))
-    .sort(compareSessionActivity);
+  const running = sessions.filter(isEffectivelyRunning).sort(compareSessionActivity);
   const rest = sessions
-    .filter((session) => !isRunningStatus(session.status))
+    .filter((session) => !isEffectivelyRunning(session))
     .sort(compareSessionActivity);
 
   const buckets = new Map<SessionRecencyGroup, Session[]>();
@@ -158,6 +164,191 @@ export type SessionTreeNode = {
   /** A descendant (any depth, not the node itself) is running/queued/awaiting action. */
   hasActiveDescendant: boolean;
 };
+
+export type RailAggregateStatusKind =
+  | "send_failed"
+  | "needs_attention"
+  | "failed"
+  | "active"
+  | "unread"
+  | "active_work"
+  | "neutral";
+
+export type RailAggregateStatus = {
+  kind: RailAggregateStatusKind;
+  /** Number of sessions represented by the winning status. */
+  count: number;
+  /** Total sessions represented by the node or section. */
+  total: number;
+  label: string;
+};
+
+type RailStatusCounts = {
+  total: number;
+  sendFailed: number;
+  attention: number;
+  failed: number;
+  active: number;
+  unread: number;
+  activeWork: number;
+};
+
+function ownRailStatusCounts(
+  session: Session,
+  localDeliveryAttention: ReadonlyMap<string, number>,
+): RailStatusCounts {
+  return {
+    total: 1,
+    sendFailed: localDeliveryAttention.get(session.id) ?? 0,
+    attention: session.status === "requires_action" ? 1 : 0,
+    failed: session.status === "failed" ? 1 : 0,
+    active:
+      hasActiveEffectiveControl(session) &&
+      (session.status === "running" ||
+        session.status === "queued" ||
+        session.status === "recovering" ||
+        session.status === "waiting_capacity")
+        ? 1
+        : 0,
+    unread: session.unread ? 1 : 0,
+    activeWork: session.activelyWorking ? 1 : 0,
+  };
+}
+
+function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts): void {
+  target.total += source.total;
+  target.sendFailed += source.sendFailed;
+  target.attention += source.attention;
+  target.failed += source.failed;
+  target.active += source.active;
+  target.unread += source.unread;
+  target.activeWork += source.activeWork;
+}
+
+function railStatusCounts(
+  node: SessionTreeNode,
+  localDeliveryAttention: ReadonlyMap<string, number>,
+): RailStatusCounts {
+  const counts = ownRailStatusCounts(node.session, localDeliveryAttention);
+  const stats = node.session.treeStats;
+  if (stats) {
+    counts.total += stats.totalDescendants;
+    counts.attention += stats.attentionDescendants;
+    counts.failed += stats.failedDescendants;
+    counts.active += stats.runningDescendants + stats.queuedDescendants;
+    counts.unread += stats.unreadDescendants ?? 0;
+    counts.activeWork += stats.activelyWorkingDescendants ?? 0;
+
+    // Scheduled-task grouping appends older root runs as synthetic children of
+    // the newest run. They are not part of that run's server treeStats, unlike
+    // ordinary spawned children, so include only those extra roots here.
+    for (const child of node.children) {
+      if (child.session.parentSessionId !== node.session.id) {
+        addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      } else {
+        counts.sendFailed += loadedLocalDeliveryFailureCount(child, localDeliveryAttention);
+      }
+    }
+  } else {
+    for (const child of node.children) {
+      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+    }
+  }
+  return counts;
+}
+
+/**
+ * Durable treeStats already account for ordinary descendants' lifecycle state,
+ * but browser-local delivery failures have no server aggregate. Fold only that
+ * local fact through the loaded child tree so collapsed parents stay truthful.
+ */
+function loadedLocalDeliveryFailureCount(
+  node: SessionTreeNode,
+  localDeliveryAttention: ReadonlyMap<string, number>,
+): number {
+  return (
+    (localDeliveryAttention.get(node.session.id) ?? 0) +
+    node.children.reduce(
+      (total, child) => total + loadedLocalDeliveryFailureCount(child, localDeliveryAttention),
+      0,
+    )
+  );
+}
+
+/** One status for a collapsed parent or workstream, including all descendants. */
+export function summarizeRailNodes(
+  nodes: readonly SessionTreeNode[],
+  localDeliveryAttention: ReadonlyMap<string, number> = new Map(),
+): RailAggregateStatus {
+  const counts: RailStatusCounts = {
+    total: 0,
+    sendFailed: 0,
+    attention: 0,
+    failed: 0,
+    active: 0,
+    unread: 0,
+    activeWork: 0,
+  };
+  for (const node of nodes) {
+    addRailStatusCounts(counts, railStatusCounts(node, localDeliveryAttention));
+  }
+
+  if (counts.sendFailed > 0) {
+    return {
+      kind: "send_failed",
+      count: counts.sendFailed,
+      total: counts.total,
+      label: `${counts.sendFailed} message${counts.sendFailed === 1 ? "" : "s"} not sent`,
+    };
+  }
+
+  if (counts.attention > 0) {
+    return {
+      kind: "needs_attention",
+      count: counts.attention,
+      total: counts.total,
+      label: `${counts.attention} need${counts.attention === 1 ? "s" : ""} you`,
+    };
+  }
+  if (counts.failed > 0) {
+    return {
+      kind: "failed",
+      count: counts.failed,
+      total: counts.total,
+      label: `${counts.failed} failed`,
+    };
+  }
+  if (counts.active > 0) {
+    return {
+      kind: "active",
+      count: counts.active,
+      total: counts.total,
+      label: `${counts.active} working`,
+    };
+  }
+  if (counts.unread > 0) {
+    return {
+      kind: "unread",
+      count: counts.unread,
+      total: counts.total,
+      label: `${counts.unread} unread`,
+    };
+  }
+  if (counts.activeWork > 0) {
+    return {
+      kind: "active_work",
+      count: counts.activeWork,
+      total: counts.total,
+      label: `${counts.activeWork} actively working`,
+    };
+  }
+  return {
+    kind: "neutral",
+    count: 0,
+    total: counts.total,
+    label: counts.total > 0 ? "Read" : "Empty",
+  };
+}
 
 /**
  * Merge two projections of the same session for the rail. Detail/SSE data is
@@ -290,10 +481,10 @@ export function groupSessionsForBrowse(
 ): SessionForest {
   const now = options.now ?? new Date();
   const running = sessions
-    .filter((session) => isRunningStatus(session.status))
+    .filter(isEffectivelyRunning)
     .sort(compareSessionActivity)
     .map((session) => ({ session, children: [], hasActiveDescendant: false }));
-  const rest = sessions.filter((session) => !isRunningStatus(session.status));
+  const rest = sessions.filter((session) => !isEffectivelyRunning(session));
   if (groupBy === "created") {
     const buckets = new Map<SessionRecencyGroup, Session[]>();
     for (const session of rest) {
@@ -373,10 +564,77 @@ export function nodeIsActive(node: SessionTreeNode): boolean {
   const summarizedActive = Boolean(
     stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
   );
-  return isRunningStatus(node.session.status) || node.hasActiveDescendant || summarizedActive;
+  return isEffectivelyRunning(node.session) || node.hasActiveDescendant || summarizedActive;
 }
 
 /** Bucket already-built roots using the rail's activity and recency rules. */
+/**
+ * The scheduled task a session was created for, or null. The worker stamps this
+ * onto every session it generates for a run; it is deliberately read from
+ * metadata rather than a column, because that is where the scheduler writes it.
+ * A session a human started never carries the key, so it never groups.
+ */
+export function scheduledTaskIdOf(session: Session): string | null {
+  const value = (session.metadata as Record<string, unknown> | undefined)?.scheduledTaskId;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Collapse repeat runs of one scheduled task into a single rail entry.
+ *
+ * A schedule that fires hourly would otherwise push every other session out of
+ * the rail, so runs of the same task fold together. This deliberately does NOT
+ * introduce a scheduled-task row type: the newest run IS the entry, and the
+ * older runs become its children, so the group renders and behaves exactly like
+ * an ordinary session with spawned children. Clicking it opens the latest run,
+ * expanding it reveals the rest, and each one stays individually openable.
+ *
+ * A task with a single run is left completely alone - one session is not a
+ * flood, and wrapping it would only add a disclosure with nothing behind it.
+ *
+ * `roots` arrives running-first-then-recency, not purely newest-first, so the
+ * members are re-sorted by activity here: the umbrella must be the latest run,
+ * and the runs behind it must read newest to oldest. The group keeps the list
+ * position of whichever member ranked highest in the incoming order, so folding
+ * never pushes a live run down the rail.
+ */
+export function groupScheduledRuns(roots: SessionTreeNode[]): SessionTreeNode[] {
+  const membersByTask = new Map<string, SessionTreeNode[]>();
+  for (const node of roots) {
+    const taskId = scheduledTaskIdOf(node.session);
+    if (!taskId) continue;
+    const members = membersByTask.get(taskId) ?? [];
+    members.push(node);
+    membersByTask.set(taskId, members);
+  }
+  for (const members of membersByTask.values()) {
+    members.sort((left, right) => compareSessionActivity(left.session, right.session));
+  }
+  const grouped: SessionTreeNode[] = [];
+  const emitted = new Set<string>();
+  for (const node of roots) {
+    const taskId = scheduledTaskIdOf(node.session);
+    const members = taskId ? (membersByTask.get(taskId) ?? []) : [];
+    if (members.length < 2) {
+      grouped.push(node);
+      continue;
+    }
+    if (emitted.has(taskId!)) continue;
+    emitted.add(taskId!);
+    const [latestRun, ...olderRuns] = members as [SessionTreeNode, ...SessionTreeNode[]];
+    grouped.push({
+      ...latestRun,
+      // The latest run's own spawned children stay first; previous runs follow,
+      // so a subagent of the latest run never sorts below an older run.
+      children: [...latestRun.children, ...olderRuns],
+      hasActiveDescendant:
+        latestRun.hasActiveDescendant ||
+        olderRuns.some((run) => nodeIsActive(run) || run.hasActiveDescendant),
+    });
+  }
+  return grouped;
+}
+
 export function categorizeRailRoots(
   rootNodes: SessionTreeNode[],
   now: Date = new Date(),
@@ -489,12 +747,13 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
 
 function subtreeCounts(node: SessionTreeNode): RemovedCounts {
   const status = node.session.status;
+  const active = hasActiveEffectiveControl(node.session);
   const counts: RemovedCounts = {
     total: 1,
-    running: status === "running" || status === "recovering" ? 1 : 0,
-    queued: status === "queued" || status === "waiting_capacity" ? 1 : 0,
+    running: active && (status === "running" || status === "recovering") ? 1 : 0,
+    queued: active && (status === "queued" || status === "waiting_capacity") ? 1 : 0,
     attention: status === "requires_action" ? 1 : 0,
-    paused: node.session.effectiveControl.state === "paused" ? 1 : 0,
+    paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
   };
   const stats = node.session.treeStats;
@@ -604,16 +863,32 @@ export function buildPinnedRailSections(
   return {
     complete,
     pinned,
-    ordinary: categorizeRailRoots(ordinaryRoots, now),
+    ordinary: categorizeRailRoots(groupScheduledRuns(ordinaryRoots), now),
   };
 }
 
+/** The selected descendant under a collapsed node, projected one level deeper. */
+export function selectedDescendantNode(
+  node: SessionTreeNode,
+  selectedSessionId: string | null,
+): SessionTreeNode | null {
+  if (!selectedSessionId || node.session.id === selectedSessionId) return null;
+  for (const child of node.children) {
+    if (child.session.id === selectedSessionId) return child;
+    const selected = selectedDescendantNode(child, selectedSessionId);
+    if (selected) return selected;
+  }
+  return null;
+}
+
 /** Flatten the forest to the rows currently VISIBLE, given the expanded set —
- *  a node, then its children only when the node is expanded (depth-first). The
- *  rail's keyboard navigation walks this. */
+ *  a node, then its children only when the node is expanded (depth-first).
+ *  A collapsed branch keeps its selected descendant visible as one ordinary
+ *  child row, matching the rail projection. Keyboard navigation walks this. */
 export function visibleTreeRows(
   roots: SessionTreeNode[],
   expanded: ReadonlySet<string>,
+  selectedSessionId: string | null = null,
 ): { node: SessionTreeNode; depth: number }[] {
   const rows: { node: SessionTreeNode; depth: number }[] = [];
   const walk = (node: SessionTreeNode, depth: number): void => {
@@ -622,6 +897,9 @@ export function visibleTreeRows(
       for (const child of node.children) {
         walk(child, depth + 1);
       }
+    } else {
+      const selected = selectedDescendantNode(node, selectedSessionId);
+      if (selected) rows.push({ node: selected, depth: depth + 1 });
     }
   };
   for (const node of roots) walk(node, 0);
@@ -631,33 +909,34 @@ export function visibleTreeRows(
 export function visibleForestRows(
   forest: SessionForest,
   expanded: ReadonlySet<string>,
+  selectedSessionId: string | null = null,
 ): { node: SessionTreeNode; depth: number }[] {
-  return visibleTreeRows(forestRoots(forest), expanded);
+  return visibleTreeRows(forestRoots(forest), expanded, selectedSessionId);
 }
 
 /* --------------------------------------------------------------------------
-   Channel sections. When the workspace has channels, the rail groups ordinary
-   roots by their ROOT session's channel instead of recency buckets; a
-   workspace without channels keeps the recency rail unchanged.
+   Workstream sections. The hierarchy rail groups ordinary roots by their ROOT
+   session's channel, with unfiled roots in Recents.
    -------------------------------------------------------------------------- */
 
 export type ChannelRailSection = {
-  /** Stable render key: the channel id, or "inbox" for unfiled roots. */
+  /** Stable render key: the channel id, or "recents" for unfiled roots. */
   key: string;
   channelId: string | null;
-  /** Display name without the "#" prefix; the rail renders the hash. */
+  /** User-facing workstream name. */
   name: string;
   sessions: SessionTreeNode[];
 };
 
 /**
  * Group an ordinary rail forest's roots by channel. Channels render in the
- * given (server name-sorted) order — including empty ones, so a just-created
- * channel is immediately visible — with one trailing "Inbox" section for
- * unfiled roots (only when it has members). Within a section, active roots
+ * given (server-defined) order — pinned projects first, then ordinary ones —
+ * including empty ones, so a just-created project is immediately visible.
+ * The catch-all "Default" section for unfiled roots follows them (only when
+ * it has members). Within a section, active roots
  * keep floating above recency-ordered idle ones because the incoming forest
  * is flattened in that order. A root whose channel no longer exists folds
- * into the inbox rather than disappearing.
+ * into Default rather than disappearing.
  */
 export function channelRailSections(
   forest: SessionForest,
@@ -673,15 +952,25 @@ export function channelRailSections(
     list.push(node);
     byChannel.set(key, list);
   }
-  const sections: ChannelRailSection[] = channels.map((channel) => ({
-    key: channel.id,
-    channelId: channel.id,
-    name: channel.name,
-    sessions: byChannel.get(channel.id) ?? [],
-  }));
-  const inbox = byChannel.get(null) ?? [];
-  if (inbox.length > 0) {
-    sections.push({ key: "inbox", channelId: null, name: "inbox", sessions: inbox });
+  for (const list of byChannel.values()) {
+    list.sort((left, right) => {
+      const leftRank = nodeIsActive(left) ? 0 : left.session.activelyWorking ? 1 : 2;
+      const rightRank = nodeIsActive(right) ? 0 : right.session.activelyWorking ? 1 : 2;
+      return leftRank - rightRank || compareSessionActivity(left.session, right.session);
+    });
+  }
+  const sections: ChannelRailSection[] = [];
+  sections.push(
+    ...channels.map((channel) => ({
+      key: channel.id,
+      channelId: channel.id,
+      name: channel.name,
+      sessions: byChannel.get(channel.id) ?? [],
+    })),
+  );
+  const defaultSessions = byChannel.get(null) ?? [];
+  if (defaultSessions.length > 0) {
+    sections.push({ key: "default", channelId: null, name: "Default", sessions: defaultSessions });
   }
   return sections;
 }

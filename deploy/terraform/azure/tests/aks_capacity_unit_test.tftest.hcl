@@ -26,6 +26,26 @@ mock_provider "azurerm" {
     }
   }
 
+  mock_resource "azurerm_kubernetes_cluster_node_pool" {
+    defaults = {
+      id                   = "/subscriptions/test/resourceGroups/rg-opengeni-test/providers/Microsoft.ContainerService/managedClusters/opengeni-test-aks/agentPools/sandbox"
+      auto_scaling_enabled = true
+      max_count            = 20
+      max_pods             = 110
+      min_count            = 0
+      mode                 = "User"
+      name                 = "sandbox"
+      node_count           = 0
+      node_labels = {
+        "opengeni.ai/sandbox-pool" = "opensandbox"
+      }
+      node_taints     = ["opengeni.ai/sandbox=true:NoSchedule"]
+      os_disk_size_gb = 128
+      os_disk_type    = "Ephemeral"
+      vm_size         = "Standard_D4ds_v5"
+    }
+  }
+
   mock_data "azurerm_kubernetes_cluster_node_pool" {
     defaults = {
       auto_scaling_enabled = true
@@ -220,6 +240,89 @@ run "fixed_pool_retains_explicit_node_count" {
     )
     error_message = "Fixed pools must not receive autoscaling bounds."
   }
+}
+
+run "opensandbox_pool_is_disabled_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(azurerm_kubernetes_cluster_node_pool.sandbox) == 0
+    error_message = "The dedicated OpenSandbox node pool must remain disabled by default."
+  }
+
+  assert {
+    condition     = output.sandbox_node_pool == null
+    error_message = "Disabled OpenSandbox capacity must render a null output."
+  }
+}
+
+run "opensandbox_pool_uses_exact_capacity_isolation_contract" {
+  command = plan
+
+  variables {
+    sandbox_node_pool = {
+      enabled         = true
+      name            = "sandbox"
+      vm_size         = "Standard_D4ds_v5"
+      min_count       = 0
+      max_count       = 40
+      max_pods        = 110
+      zones           = ["1", "2", "3"]
+      os_disk_size_gb = 128
+      os_disk_type    = "Ephemeral"
+    }
+  }
+
+  assert {
+    condition = (
+      azurerm_kubernetes_cluster_node_pool.sandbox[0].mode == "User" &&
+      azurerm_kubernetes_cluster_node_pool.sandbox[0].auto_scaling_enabled &&
+      azurerm_kubernetes_cluster_node_pool.sandbox[0].min_count == 0 &&
+      azurerm_kubernetes_cluster_node_pool.sandbox[0].max_count == 40 &&
+      azurerm_kubernetes_cluster_node_pool.sandbox[0].max_pods == 110
+    )
+    error_message = "OpenSandbox compute must be an autoscaling AKS user pool with the reviewed bounds."
+  }
+
+  assert {
+    condition = (
+      azurerm_kubernetes_cluster_node_pool.sandbox[0].node_labels["opengeni.ai/sandbox-pool"] == "opensandbox" &&
+      length(azurerm_kubernetes_cluster_node_pool.sandbox[0].node_taints) == 1 &&
+      azurerm_kubernetes_cluster_node_pool.sandbox[0].node_taints[0] == "opengeni.ai/sandbox=true:NoSchedule"
+    )
+    error_message = "OpenSandbox node labels and taints must match the pinned BatchSandbox template exactly."
+  }
+}
+
+run "opensandbox_pool_rejects_invalid_bounds" {
+  command = plan
+
+  variables {
+    sandbox_node_pool = {
+      enabled   = true
+      min_count = 6
+      max_count = 5
+    }
+  }
+
+  expect_failures = [
+    var.sandbox_node_pool,
+  ]
+}
+
+run "opensandbox_pool_rejects_system_name" {
+  command = plan
+
+  variables {
+    sandbox_node_pool = {
+      enabled = true
+      name    = "system"
+    }
+  }
+
+  expect_failures = [
+    var.sandbox_node_pool,
+  ]
 }
 
 run "direct_autoscaling_omits_node_count" {

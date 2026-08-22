@@ -414,7 +414,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
   app.post("/v1/integrations/slack/commands", async (c) => {
     const signed = await readSignedSlackRequest(c, deps);
     const form = new URLSearchParams(signed.rawBody);
-    if (form.get("command") !== "/opengeni") {
+    if (form.get("command") !== deps.settings.slackCommand) {
       throw new HTTPException(400, { message: "invalid Slack command" });
     }
     const entry = normalizedFormInteraction(form, "slash_command");
@@ -3623,7 +3623,14 @@ function humanInputResponse(questions: HumanInputQuestion[], text: string) {
   const matches = question.options.filter(
     (option) => option.id.toLowerCase() === normalized || option.label.toLowerCase() === normalized,
   );
-  if (matches.length !== 1) return null;
+  if (matches.length !== 1) {
+    const other = text.trim();
+    if (!other) return null;
+    return {
+      outcome: "answered" as const,
+      answers: [{ questionId: question.id, values: [], other }],
+    };
+  }
   return {
     outcome: "answered" as const,
     answers: [{ questionId: question.id, values: [matches[0]!.id] }],
@@ -3638,7 +3645,9 @@ function formatQuestions(questions: HumanInputQuestion[]) {
         .slice(0, 10)
         .map((option) => option.label)
         .join(", ");
-      return `${index + 1}. ${boundedOutput(question.prompt)}${options ? ` (${options})` : ""}`;
+      return `${index + 1}. ${boundedOutput(question.prompt)}${
+        options ? ` (${options}, or reply with another value)` : ""
+      }`;
     })
     .join("\n");
 }

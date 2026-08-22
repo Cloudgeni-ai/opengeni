@@ -1,5 +1,6 @@
 {{- if .Values.worker.enabled }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" (.Values.worker.control.priorityClassName | default .Values.worker.priorityClassName) "tier" "control") }}
+{{- $opensandboxKubernetesInventoryEnabled := and (eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox") .Values.opensandbox.kubernetesInventory.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -69,9 +70,19 @@ spec:
               value: {{ .Values.worker.containerPort | quote }}
             - name: OPENGENI_WORKER_ROLE
               value: control
+            {{- if $opensandboxKubernetesInventoryEnabled }}
+            - name: OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE
+              value: {{ .Values.opensandbox.kubernetesInventory.namespace | quote }}
+            {{- end }}
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" (dict "root" . "objectStorageEndpoint" (include "opengeni.objectStorageInternalEndpoint" .)) | nindent 12 }}
             {{- end }}
+          {{- if $opensandboxKubernetesInventoryEnabled }}
+          volumeMounts:
+            - name: opensandbox-kubernetes-inventory
+              mountPath: /var/run/secrets/opengeni.io/opensandbox-kubernetes-inventory
+              readOnly: true
+          {{- end }}
           {{- if (((.Values.worker).probes).readiness).enabled }}
           readinessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).readiness) | nindent 12 }}
@@ -84,6 +95,21 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      {{- if $opensandboxKubernetesInventoryEnabled }}
+      volumes:
+        - name: opensandbox-kubernetes-inventory
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+      {{- end }}
       {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker-control" "values" .Values.worker) | nindent 8 }}

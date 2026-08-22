@@ -108,7 +108,7 @@ export const RememberActivationSummary = z.discriminatedUnion("destination", [
     destinationRevisionId: z.string().uuid().nullable(),
     effectiveAt: z.string().datetime().nullable(),
     authorityKind: z.enum(["automatic", "human_confirmed"]),
-    /** Learning & autonomy history exposes exact undo for this receipt. */
+    /** The `/learning` API/SDK history exposes exact undo for this receipt. */
     undo: z.literal("learning_history"),
   }),
   z.object({

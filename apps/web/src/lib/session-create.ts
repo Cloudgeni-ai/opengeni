@@ -21,7 +21,12 @@ import {
   type FirstPartyMcpToolName,
   type MachineView,
 } from "@opengeni/contracts";
-import type { CreateSessionRequest, NewSessionDraftOptions } from "@opengeni/sdk";
+import type {
+  CreateSessionRequest,
+  NewSessionDraftOptions,
+  NewSessionSelectionHistory,
+  PersonalResourceAttachmentIntent,
+} from "@opengeni/sdk";
 
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type {
@@ -60,7 +65,36 @@ export type ConnectedMachineTarget = {
 
 export type ComputeTarget = ManagedSandboxTarget | ConnectedMachineTarget;
 
+export function rememberedProjectCompute(
+  history: NewSessionSelectionHistory,
+  channelId: string | null,
+): ComputeTarget | null {
+  const project = history.projects.find((candidate) => candidate.channelId === channelId);
+  if (!project) return null;
+  if (!project.targetSandboxId) return { kind: "sandbox", backend: "" };
+  const machine = project.machines.find(
+    (candidate) => candidate.sandboxId === project.targetSandboxId,
+  );
+  return {
+    kind: "machine",
+    sandboxId: project.targetSandboxId,
+    folder: machine?.workingDir ? { kind: "path", path: machine.workingDir } : { kind: "root" },
+  };
+}
+
+export function rememberedMachineFolder(
+  history: NewSessionSelectionHistory,
+  channelId: string | null,
+  sandboxId: string,
+): MachineFolder {
+  const machine = history.projects
+    .find((project) => project.channelId === channelId)
+    ?.machines.find((candidate) => candidate.sandboxId === sandboxId);
+  return machine?.workingDir ? { kind: "path", path: machine.workingDir } : { kind: "root" };
+}
+
 export type SessionDraft = {
+  visibility: "private" | "workspace";
   // PROMOTED — the parent that gates the compute-dependent band.
   compute: ComputeTarget;
   // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
@@ -82,6 +116,7 @@ export function emptySessionDraft(
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
 ): SessionDraft {
   return {
+    visibility: "workspace",
     compute: { kind: "sandbox", backend: "" },
     variableSetId: "",
     rigId: "",
@@ -117,7 +152,11 @@ export type SessionDraftSubmission = {
   /** TurnSubmission extras merged into the create payload. */
   extras: Omit<TurnSubmission, "text">;
   /** Top-level create fields threaded into `startSession` separately. */
-  options: { targetSandboxId: string | null; workingDir: string | null };
+  options: {
+    targetSandboxId: string | null;
+    workingDir: string | null;
+    visibility?: "private" | "workspace";
+  };
   /** When true (a connected machine) the workspace's selected repos must NOT be
    *  cloned: the machine uses its own checkout & git auth (D3). This is the UI
    *  half of the clone-gating footgun fix — the selection is retained in context
@@ -131,6 +170,7 @@ export type BuildCreateSessionRequestInput = {
   /** Session-scoped system guidance that is not rendered in the chat timeline. */
   instructions?: string;
   startMode?: "realtime";
+  visibility?: "private" | "workspace";
   omitWorkspaceResources?: boolean;
   selectedTools: ToolRef[];
   defaultModel: string;
@@ -140,6 +180,7 @@ export type BuildCreateSessionRequestInput = {
   idempotencyKey: string;
   targetSandboxId?: string | null;
   workingDir?: string | null;
+  channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
@@ -153,6 +194,33 @@ export type PendingCreateAttempt = {
   signature: string;
   idempotencyKey: string;
 };
+
+export function classifyCreateSessionFailure(error: unknown): {
+  error: Error;
+  outcomeUnknown: boolean;
+} {
+  return {
+    error: error instanceof Error ? error : new Error(String(error)),
+    outcomeUnknown:
+      typeof error === "object" &&
+      error !== null &&
+      (error as { outcomeUnknown?: unknown }).outcomeUnknown === true,
+  };
+}
+
+/** A create may be retried with the same key only when the transport cannot
+ * prove whether the server committed it. Definitive HTTP results end that
+ * logical attempt so a corrected, reconfirmed request gets a fresh key. */
+export function retainCreateSessionAttemptAfterFailure(input: {
+  current: PendingCreateAttempt | null;
+  attempted: PendingCreateAttempt;
+  outcomeUnknown: boolean;
+}): PendingCreateAttempt | null {
+  if (input.current?.idempotencyKey !== input.attempted.idempotencyKey) {
+    return input.current;
+  }
+  return input.outcomeUnknown ? input.current : null;
+}
 
 /**
  * Build the one canonical create payload without mutating UI state. Resource
@@ -190,6 +258,7 @@ export function buildCreateSessionRequest(
     ...(input.startMode === "realtime"
       ? { startMode: "realtime" as const }
       : { initialMessage: input.submission.text }),
+    visibility: input.visibility ?? "workspace",
     instructions: input.instructions || undefined,
     resources,
     ...(tools === undefined ? {} : { tools }),
@@ -208,8 +277,14 @@ export function buildCreateSessionRequest(
     ...(input.submission.firstPartyMcpTools
       ? { firstPartyMcpTools: input.submission.firstPartyMcpTools }
       : {}),
+    ...(input.submission.personalResourceAttachment
+      ? {
+          personalResourceAttachment: input.submission.personalResourceAttachment,
+        }
+      : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
+    ...(input.channelId ? { channelId: input.channelId } : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
           expectedNewSessionDraftRevision: input.expectedNewSessionDraftRevision,
@@ -261,6 +336,7 @@ export function prepareCreateSessionAttempt(input: {
 export function submissionFromSessionDraft(
   draft: SessionDraft,
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined,
 ): SessionDraftSubmission {
   const goal = goalFromDraft(draft);
   const mcp = draft.customMcpPermissions
@@ -280,6 +356,7 @@ export function submissionFromSessionDraft(
       options: {
         targetSandboxId: draft.compute.sandboxId,
         workingDir: workingDirFromFolder(draft.compute.folder),
+        visibility: draft.visibility,
       },
       omitWorkspaceResources: true,
     };
@@ -290,11 +367,16 @@ export function submissionFromSessionDraft(
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
       ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
+      ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
       ...(goal ? { goal } : {}),
       ...mcp,
       ...visibleTools,
     },
-    options: { targetSandboxId: null, workingDir: null },
+    options: {
+      targetSandboxId: null,
+      workingDir: null,
+      visibility: draft.visibility,
+    },
     omitWorkspaceResources: false,
   };
 }
@@ -321,6 +403,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
+      visibility: draft.visibility,
       ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
@@ -330,6 +413,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   }
 
   return {
+    visibility: draft.visibility,
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
     ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
@@ -350,6 +434,7 @@ export function sessionDraftFromNewSessionDraftOptions(
   );
   return {
     ...base,
+    visibility: options.visibility ?? "workspace",
     compute: machine
       ? {
           kind: "machine",
@@ -435,6 +520,7 @@ const MANAGED_BACKEND_LABELS: Partial<Record<SandboxBackend, string>> = {
   blaxel: "Blaxel",
   cloudflare: "Cloudflare",
   vercel: "Vercel",
+  opensandbox: "OpenSandbox",
 };
 
 function backendLabel(backend: SandboxBackend): string {

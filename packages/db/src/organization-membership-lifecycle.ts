@@ -4,6 +4,7 @@ import {
   ListOrganizationMembersResponse,
   ListSelfOrganizationMembershipsResponse,
   OrganizationInvitation,
+  OrganizationAdministrationOverview,
   OrganizationMember,
   OrganizationRetentionDeletionClaim,
   OrganizationRetentionDatabaseFinalization,
@@ -11,6 +12,8 @@ import {
   OrganizationRetentionDeletionPreview,
   OrganizationRetentionDeletionResult,
   OrganizationRetentionPolicy,
+  OrganizationSummary,
+  type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
   type OrganizationMembershipRole,
@@ -20,6 +23,7 @@ import {
   type OrganizationRetentionDeletionPreview as OrganizationRetentionDeletionPreviewType,
   type OrganizationRetentionDeletionResult as OrganizationRetentionDeletionResultType,
   type OrganizationRetentionPolicy as OrganizationRetentionPolicyType,
+  type OrganizationSummary as OrganizationSummaryType,
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
@@ -459,6 +463,57 @@ export async function listOrganizationMembers(
   );
 }
 
+export async function getOrganizationAdministrationOverview(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<OrganizationAdministrationOverviewType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select get_organization_administration_overview(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId}
+        ) as result`,
+      );
+      return OrganizationAdministrationOverview.parse(row?.result);
+    },
+  );
+}
+
+export async function updateOrganizationName(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    name: string;
+    expectedUpdatedAt: string;
+    operationId: string;
+  },
+): Promise<OrganizationSummaryType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select update_organization_name(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId},
+          ${input.name},
+          ${input.expectedUpdatedAt}::timestamptz,
+          ${input.operationId}::uuid
+        ) as result`,
+      );
+      return OrganizationSummary.parse(row?.result);
+    },
+  );
+}
+
 export async function listOrganizationInvitations(
   db: Database,
   input: {
@@ -501,13 +556,48 @@ export async function listOrganizationInvitations(
 export async function createOrganizationInvitation(
   db: Database,
   input: CommandBase & {
-    targetSubjectId: string;
+    targetSubjectId: string | null;
     targetEmail: string;
+    targetName?: string;
+    initialWorkspaceIds?: string[];
     role: OrganizationMembershipRole;
     expiresAt: string;
   },
 ): Promise<OrganizationInvitationType> {
-  return OrganizationInvitation.parse(await runCommand(db, { action: "invite", ...input }));
+  const command = { action: "invite", ...input };
+  const result = await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select create_organization_invitation_v2(
+          ${JSON.stringify(command)}::jsonb
+        ) as result`,
+      );
+      if (!row) throw new Error("Organization invitation command returned no result");
+      return row.result;
+    },
+  );
+  return OrganizationInvitation.parse(result);
+}
+
+export async function bindPendingOrganizationInvitationsForVerifiedEmail(
+  db: Database,
+  input: { subjectId: string; email: string },
+): Promise<number> {
+  return await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Database;
+    await setSubjectRlsContext(txDb, input.subjectId);
+    const [row] = await rawRows<{ result: number | string }>(
+      txDb,
+      sql`select bind_pending_organization_invitations_for_verified_email(
+        ${input.subjectId}::text, ${input.email}::text
+      ) as result`,
+    );
+    return Number(row?.result ?? 0);
+  });
 }
 
 export async function acceptOrganizationInvitation(
@@ -520,8 +610,19 @@ export async function acceptOrganizationInvitation(
   // `accept` inserts the invited human's personal workspace, so like
   // suspend/offboard it acquires workspace rows and can be inside a lock cycle
   // with an ordinary workspace writer. It needs the identical replay.
+  const command = { action: "accept", ...input };
   const result = await withOrganizationLifecycleDeadlockReplay(async () =>
-    runCommand(db, { action: "accept", ...input }),
+    withRlsContext(db, { accountId: input.organizationId, workspaceId: null }, async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select accept_organization_invitation_v2(
+            ${JSON.stringify(command)}::jsonb
+          ) as result`,
+      );
+      if (!row) throw new Error("Organization invitation acceptance returned no result");
+      return row.result;
+    }),
   );
   return {
     invitation: OrganizationInvitation.parse((result as { invitation?: unknown }).invitation),

@@ -927,6 +927,29 @@ export function PackContents({ pack }: { pack: CapabilityPack }) {
         )}
       </PackSection>
 
+      <PackSection title="Event automations">
+        {(pack.automationTemplates?.length ?? 0) > 0 ? (
+          <div className="grid gap-1.5">
+            {pack.automationTemplates?.map((template) => (
+              <div key={template.id} className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span className="truncate text-xs font-medium">{template.name}</span>
+                  {template.connectionRequirement ? (
+                    <MetaChip dot="waiting">Setup required</MetaChip>
+                  ) : null}
+                </div>
+                <div className="line-clamp-2 text-2xs text-fg-subtle">{template.description}</div>
+                <div className="truncate font-mono text-2xs text-fg-subtle">
+                  {template.eventTypes.join(", ")}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <PackNone />
+        )}
+      </PackSection>
+
       {pack.variableSet ? (
         <PackSection title="Configuration requirements">
           <div className="text-2xs text-fg-subtle">

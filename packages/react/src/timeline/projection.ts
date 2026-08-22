@@ -1,5 +1,8 @@
 import {
   parseMediaGenerationResult,
+  type HumanInputAnswer,
+  type HumanInputQuestion,
+  type HumanInputResponse,
   type SessionEvent,
   type SessionStatus,
   type TimelineAnnotation,
@@ -18,6 +21,8 @@ import type {
   AuthNeededItem,
   ContextCompactionItem,
   GoalItem,
+  HumanInputAnswerSummary,
+  HumanInputItem,
   MachineInputBatchItem,
   MemoryItem,
   SandboxItem,
@@ -126,6 +131,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
+  const humanInputRequests = humanInputRequestsById(events);
+  const humanInputToolCallIds = new Set(
+    [...humanInputRequests.values()]
+      .map((request) => stringValue(request.toolCallId))
+      .filter(Boolean),
+  );
   const queuedAtByTurn = new Map<string, string>();
   const startupRecoveryRevisionByTurn = new Map<string, number>();
   const startupPhases = new Map<string, readonly [StartupPhaseItem, string | null, number]>();
@@ -309,6 +320,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         items.push({
           kind: "user-message",
           id: event.id,
+          ...(event.clientEventId
+            ? { reconciliationKey: `user-message:${event.clientEventId}` }
+            : {}),
           text: voiceMessage?.text ?? stringValue(payload.text),
           annotations: timelineAnnotations(payload.annotations),
           annotationSource: {
@@ -324,6 +338,18 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           tools: toolRefs(payload.tools),
           occurredAt: event.occurredAt,
         });
+        break;
+      }
+
+      case "user.humanInputResponse": {
+        // A structured answer resumes the frozen tool call rather than adding a
+        // synthetic user.message to model history. Keep the original question
+        // and the resolved human choice together as first-class chat history;
+        // neither belongs behind the generic activity fold.
+        const item = humanInputItemFromResponse(event, payload, humanInputRequests);
+        if (!item) break;
+        closeStreamingTail();
+        items.push(item);
         break;
       }
 
@@ -467,6 +493,12 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const callId = typeof payload.id === "string" ? payload.id : null;
         const args = payload.arguments ?? null;
         closeStreamingTail();
+        if (callId && humanInputToolCallIds.has(callId)) {
+          // The matching session.humanInput.requested / response lifecycle owns
+          // the visible chat card. Rendering the raw tool too would hide the
+          // decision behind a duplicate generic "Ask" step.
+          break;
+        }
         if (
           toolMatchesLeaf(name, WORKER_SPAWN_TOOL) ||
           toolMatchesLeaf(name, WORKER_MESSAGE_TOOL)
@@ -981,6 +1013,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "goal.paused":
       case "goal.resumed":
       case "goal.cleared":
+      case "goal.held":
       case "goal.continuation": {
         // Agent tool mutations already appear as tool-call rows in the activity
         // cluster. Re-emitting them as GoalRow landmarks splits "N steps" mid-turn.
@@ -991,7 +1024,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           kind: "goal",
           id: event.id,
           action: event.type.slice("goal.".length) as GoalItem["action"],
-          text: goalText(payload),
+          text:
+            event.type === "goal.held" && typeof payload.reason === "string" && payload.reason
+              ? payload.reason
+              : goalText(payload),
           occurredAt: event.occurredAt,
         });
         break;
@@ -1026,6 +1062,134 @@ function realtimeVoiceMessage(payload: Record<string, unknown>): {
       : null;
   }
   return null;
+}
+
+function humanInputRequestsById(events: SessionEvent[]): Map<string, Record<string, unknown>> {
+  const requests = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    if (event.type !== "session.humanInput.requested") continue;
+    const request = asRecord(asRecord(event.payload).request);
+    const requestId = stringValue(request.id);
+    if (requestId) requests.set(requestId, request);
+  }
+  return requests;
+}
+
+function humanInputItemFromResponse(
+  event: SessionEvent,
+  payload: Record<string, unknown>,
+  requests: Map<string, Record<string, unknown>>,
+): HumanInputItem | null {
+  const response = asRecord(payload.response);
+  const outcome = response.outcome;
+  if (
+    outcome !== "answered" &&
+    outcome !== "skipped" &&
+    outcome !== "expired" &&
+    outcome !== "cancelled"
+  ) {
+    return null;
+  }
+
+  const requestId = stringValue(payload.requestId);
+  const request = requests.get(requestId);
+  const questions = humanInputQuestions(request?.questions);
+  const normalizedResponse: HumanInputResponse =
+    outcome === "answered"
+      ? {
+          outcome,
+          answers: Array.isArray(response.answers)
+            ? response.answers
+                .map(asRecord)
+                .map(humanInputAnswer)
+                .filter((answer): answer is HumanInputAnswer => answer !== null)
+            : [],
+        }
+      : { outcome };
+  const questionsById = new Map(questions.map((question) => [question.id, question]));
+  const answers =
+    normalizedResponse.outcome === "answered"
+      ? normalizedResponse.answers.map((answer) =>
+          humanInputAnswerSummary(answer, questionsById.get(answer.questionId)),
+        )
+      : [];
+  return {
+    kind: "human-input",
+    id: event.id,
+    turnId: event.turnId ?? null,
+    requestId,
+    questions,
+    response: normalizedResponse,
+    answers,
+    occurredAt: event.occurredAt,
+  };
+}
+
+function humanInputQuestions(value: unknown): HumanInputQuestion[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(asRecord).flatMap((question) => {
+    const id = stringValue(question.id);
+    const prompt = stringValue(question.prompt);
+    const kind = question.kind;
+    if (
+      !id ||
+      !prompt ||
+      (kind !== "text" && kind !== "single_select" && kind !== "multi_select")
+    ) {
+      return [];
+    }
+    const options = Array.isArray(question.options)
+      ? question.options.map(asRecord).flatMap((option) => {
+          const optionId = stringValue(option.id);
+          const label = stringValue(option.label);
+          return optionId && label
+            ? [{ id: optionId, label, description: stringValue(option.description) || null }]
+            : [];
+        })
+      : [];
+    return [
+      {
+        id,
+        kind,
+        prompt,
+        label: stringValue(question.label) || null,
+        helpText: stringValue(question.helpText) || null,
+        options,
+        required: question.required === true,
+        allowOther: question.allowOther === true,
+      },
+    ];
+  });
+}
+
+function humanInputAnswer(value: Record<string, unknown>): HumanInputAnswer | null {
+  const questionId = stringValue(value.questionId);
+  if (!questionId) return null;
+  return {
+    questionId,
+    values: Array.isArray(value.values)
+      ? value.values.filter((answer): answer is string => typeof answer === "string")
+      : [],
+    ...(typeof value.other === "string" && value.other ? { other: value.other } : {}),
+  };
+}
+
+function humanInputAnswerSummary(
+  answer: HumanInputAnswer,
+  question: HumanInputQuestion | undefined,
+): HumanInputAnswerSummary {
+  const optionLabels = new Map(question?.options.map((option) => [option.id, option.label]) ?? []);
+  const values = answer.values.map((value) => optionLabels.get(value) || value);
+  if (answer.other) values.push(answer.other);
+  const fallbackLabel = answer.questionId
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+  return {
+    questionId: answer.questionId,
+    label: question?.label || question?.prompt || fallbackLabel,
+    prompt: question?.prompt || fallbackLabel,
+    values,
+  };
 }
 
 function providerNativeToolStatus(rawValue: unknown): ToolCallItem["status"] {
@@ -1484,6 +1648,7 @@ function isTurnBoundary(group: TimelineGroup | undefined): boolean {
     group?.kind === "turn" ||
     (group?.kind === "item" &&
       (group.item.kind === "user-message" ||
+        group.item.kind === "human-input" ||
         group.item.kind === "context-compaction" ||
         (group.item.kind === "machine-input-batch" &&
           group.item.members.some((member) => member.kind === "media_generation_result")) ||
@@ -1888,7 +2053,12 @@ function shouldSuppressAgentGoalLandmark(type: string, payload: Record<string, u
   if (type === "goal.completed") {
     return true;
   }
-  if (type === "goal.set" || type === "goal.updated" || type === "goal.paused") {
+  if (
+    type === "goal.set" ||
+    type === "goal.updated" ||
+    type === "goal.paused" ||
+    type === "goal.held"
+  ) {
     return payload.actor === "agent";
   }
   return false;

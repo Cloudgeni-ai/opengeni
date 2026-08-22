@@ -1,0 +1,30 @@
+{{- if and .Values.opengeni.opensandbox.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "opengeni-observability.fullname" . }}-opensandbox-controller
+  labels:
+    {{- include "opengeni-observability.labels" . | nindent 4 }}
+    opengeni.ai/monitoring: enabled
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.opengeni.opensandbox.namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opensandbox
+      app.kubernetes.io/component: controller-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - action: keep
+          sourceLabels: [__meta_kubernetes_service_name]
+          regex: {{ .Values.opengeni.opensandbox.metricsService | quote }}
+      metricRelabelings:
+        - action: keep
+          sourceLabels: [__name__]
+          regex: '^(?:controller_runtime_reconcile_(?:errors_)?total|controller_runtime_max_concurrent_reconciles|rest_client_requests_total|workqueue_(?:adds_total|depth|queue_duration_seconds_(?:bucket|count|sum)|retries_total|unfinished_work_seconds|work_duration_seconds_(?:bucket|count|sum)))$'
+{{- end }}

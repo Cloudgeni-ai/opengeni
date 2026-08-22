@@ -68,6 +68,7 @@ import {
 } from "./slack-bot";
 import {
   normalizeResources,
+  personalGitHubRepositoryResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
@@ -202,6 +203,7 @@ export async function createValidatedScheduledTask(input: {
           workspaceId: input.grant.workspaceId,
           settings: runtimeSettings,
           tools: [...agentConfig.tools, { kind: "mcp", id: "opengeni" }],
+          resources: agentConfig.resources,
           source: personalConnectionDelegationSourceForGrant(input.grant),
           authoritySelections: input.payload.connectionAuthorities,
           rejectUnselectedActivatedConnections: true,
@@ -666,6 +668,15 @@ export async function validatedScheduledTaskUpdate(input: {
   );
   if (input.payload.connectionAuthorities === undefined) {
     if (
+      materialExecutionChange &&
+      existingDelegations.some((delegation) => delegation.connectionType === "github_personal")
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "material changes to a personal GitHub-authorized task require explicit connectionAuthorities",
+      });
+    }
+    if (
       existingDelegations.length > 0 &&
       !isDeepStrictEqual(nextAgentConfig.tools, input.existing.agentConfig.tools)
     ) {
@@ -693,11 +704,20 @@ export async function validatedScheduledTaskUpdate(input: {
       }
     }
   } else if (input.payload.connectionAuthorities.length === 0) {
+    if (personalGitHubRepositoryResources(nextAgentConfig.resources).length > 0) {
+      throw new HTTPException(409, {
+        message:
+          "personal GitHub repository resources cannot be retained without connectionAuthorities",
+      });
+    }
     update.personalConnectionDelegations = [];
   } else {
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
       input.db,
-      input.existing.workspaceId,
+      // Same object as the subject just below, and as the freeze call further
+      // down: the task was loaded with `getScheduledTask(db, grant.workspaceId,
+      // ...)`, so this is `input.existing.workspaceId`, sourced consistently.
+      input.grant.workspaceId,
       input.settings,
       { subjectId: input.grant.subjectId },
     );
@@ -717,9 +737,15 @@ export async function validatedScheduledTaskUpdate(input: {
     });
     update.personalConnectionDelegations = await freezePersonalConnectionDelegations({
       db: input.db,
-      workspaceId: input.existing.workspaceId,
+      // Both halves of the authority question come from ONE object. The task was
+      // loaded with `getScheduledTask(db, grant.workspaceId, ...)`, so this is
+      // the same workspace as `input.existing.workspaceId`; taking it from the
+      // grant means the workspace can never drift from the `accountId` that
+      // `personalConnectionDelegationSourceForGrant` reads off the same grant.
+      workspaceId: input.grant.workspaceId,
       settings: runtimeSettings,
       tools: [...nextAgentConfig.tools, { kind: "mcp", id: "opengeni" }],
+      resources: nextAgentConfig.resources,
       source: personalConnectionDelegationSourceForGrant(input.grant),
       authoritySelections: input.payload.connectionAuthorities,
       rejectUnselectedActivatedConnections: true,

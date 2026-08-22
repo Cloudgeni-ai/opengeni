@@ -25,6 +25,11 @@ import type {
 } from "./editable-artifacts";
 
 export type SessionWorkflowClient = {
+  triggerAutomationRun?: (input: {
+    accountId: string;
+    workspaceId: string;
+    runId: string;
+  }) => Promise<void>;
   signalUserMessage: (input: {
     sessionId: string;
     eventId: string;
@@ -138,6 +143,8 @@ export type AppDependencies = {
   managedAuth?: ManagedAuth | null;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
+  /** Injectable GitHub transport for deterministic personal-OAuth tests. */
+  githubPersonalFetch?: typeof fetch;
   /** Injectable xAI OAuth/subscription transport for deterministic API/provider tests. */
   xaiFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */

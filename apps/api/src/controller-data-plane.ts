@@ -1,7 +1,54 @@
 import {
   BrowserControlRequestError,
   BrowserControlTransportError,
+  exposedPortAllowsHostFetch,
+  exposedPortEndpointFromUrl,
+  parseOpenSandboxSignedUriPath,
+  signedEndpointNeedsRefresh,
 } from "@opengeni/runtime/sandbox";
+
+/** Modal/Daytona/Blaxel tunnels serve browserd at `/`, so a cached
+ * controller-only session can host-fetch JSON. OpenSandbox's lifecycle proxy
+ * prefixes `/v1/sandboxes/<id>/proxy/<port>` and rewrites Authorization; JSON
+ * must stay on an exec-capable in-box curl session. OSEP-0011 signed URIs are
+ * Authorization-preserving and host-fetch like a native tunnel, but they are
+ * not durable cache keys. */
+export function controllerCacheAllowsHostFetch(url: string): boolean {
+  try {
+    return exposedPortAllowsHostFetch(exposedPortEndpointFromUrl(url));
+  } catch {
+    return false;
+  }
+}
+
+export function isOpenSandboxSignedControllerUrl(url: string): boolean {
+  try {
+    return parseOpenSandboxSignedUriPath(new URL(url).pathname) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** Signed Channel B URLs expire. Do not treat a lease-cached signed URI as an
+ * infinite controller endpoint. Unsigned native `/` tunnels stay cacheable. */
+export function controllerCachedUrlIsUsable(url: string, nowMs = Date.now()): boolean {
+  if (!controllerCacheAllowsHostFetch(url)) return false;
+  if (!isOpenSandboxSignedControllerUrl(url)) return true;
+  try {
+    return !signedEndpointNeedsRefresh(new URL(url).pathname, nowMs);
+  } catch {
+    return false;
+  }
+}
+
+export function shouldPersistControllerDataPlaneUrl(input: {
+  backend: string | null | undefined;
+  signedEndpoints: boolean;
+  url: string;
+}): boolean {
+  if (input.backend === "opensandbox" && input.signedEndpoints) return false;
+  return controllerCachedUrlIsUsable(input.url);
+}
 
 /** Prefer a lease-fenced controller endpoint for the idempotent create path.
  * Only a transport-class failure invalidates the cache and provisions once;

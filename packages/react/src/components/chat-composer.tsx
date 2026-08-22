@@ -209,7 +209,7 @@ export function ChatComposer({
                       <motion.span
                         layout
                         transition={{ duration: 0.36, ease: [0.22, 1, 0.36, 1] }}
-                        className="inline-flex min-w-0 items-center gap-1.5"
+                        className="inline-flex min-w-0 flex-1 items-center gap-1.5"
                       >
                         {controlsStart}
                       </motion.span>

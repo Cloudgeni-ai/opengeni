@@ -214,6 +214,33 @@ Proposed replacement:
 
 ## Related findings
 
+### 2026-08-22 addendum: exact webhook routing keys
+
+`automation_webhook_endpoints` is an additional deliberate non-RLS table. A
+public automation request arrives with only a random endpoint UUID; that exact
+key is the input used to discover the owning organization, workspace, and
+FORCE-RLS `automation_sources` row. Requiring an organization GUC before this
+lookup would therefore be circular in the same way as the workspace bootstrap.
+
+The exemption is deliberately credential-free and content-free. The table
+stores only the endpoint, organization, workspace, source UUIDs, and creation
+time. It stores no webhook secret, provider credential, event payload, trigger
+configuration, or agent input. The ingress adapter performs one equality lookup
+by the unguessable primary key, establishes the returned tenant scope, loads the
+source through FORCE RLS, and only then authenticates the bounded raw request
+with the encrypted source secret. No public list or metadata lookup is exposed.
+Source lifecycle code alone creates, rotates, or removes routing rows.
+
+The residual database-level exposure is correspondingly narrow: code that can
+issue arbitrary SQL as the runtime role could enumerate routing UUIDs and their
+tenant/source attribution, but could not read the source secret or any event or
+run content through this table. Moving the equality lookup behind a narrowly
+granted SECURITY DEFINER function remains a possible defence-in-depth follow-up;
+it is not equivalent to enabling tenant RLS, because the tenant is the result of
+the lookup. Until that seam exists, the exact-global-key exemption is pinned in
+`NON_RLS_RUNTIME_TABLES` and `packages/db/test/non-rls-authority-tables.test.ts`
+so it cannot widen silently.
+
 **`api_keys` hash branch.** The FORCE-RLS policy on `api_keys` is
 `optional_workspace_rls_visible(account_id, workspace_id) OR key_hash =
 opengeni_private.current_api_key_hash()`. The second branch carries no account,

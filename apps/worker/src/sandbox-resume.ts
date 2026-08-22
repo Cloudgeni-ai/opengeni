@@ -21,6 +21,7 @@
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
 import {
+  effectiveSandboxLifecycle,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
   type Settings,
@@ -35,7 +36,7 @@ import {
   failSandboxRematerialization,
   failWarmingToCold,
   getSandboxSessionEnvelope,
-  heartbeatLeaseHolder,
+  heartbeatLeaseHolderStatus,
   markSandboxRestoreVerifying,
   markWarmLeaseInstanceLost,
   markSandboxCheckpointArtifactDeletePending,
@@ -43,6 +44,7 @@ import {
   readLease,
   registerSandboxCheckpointArtifact,
   recordWarmingSandboxCreated,
+  reinstateTurnLeaseHolder,
   releaseWorkspaceArchiveCapture,
   releaseLeaseHolder,
   touchLeaseHolder,
@@ -55,6 +57,7 @@ import {
 import {
   captureVerifiedWorkspaceArchive,
   describeLegacyNativeSnapshotArchive,
+  inlineWorkspaceArchiveForRestore,
   MODAL_EXEC_READINESS_TIMEOUT_MS,
   SandboxExecReadinessError,
   WorkspaceArchiveIntegrityError,
@@ -64,6 +67,7 @@ import {
   providerWorkspaceCapturePolicy,
   SandboxProviderContinuityUnavailableError,
   requirePersistableReplacementSandboxEnvelope,
+  renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
   serializeReplacementSandboxEnvelope,
@@ -75,6 +79,15 @@ import {
   type RuntimeMetricsHooks,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
+import type { ObjectStorage } from "@opengeni/storage";
+import type { Observability } from "@opengeni/observability";
+import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
+import {
+  collectWorkspaceArchiveObjectKeys,
+  deleteUnpublishedWorkspaceArchiveObject,
+  deleteWorkspaceArchiveObjectKeys,
+  putVersion1TarArchiveOrInline,
+} from "./sandbox-archive-storage";
 
 // Re-exported for callers that just want the ack-kind union.
 export type ResumeHolderKind = LeaseHolderKind;
@@ -107,11 +120,18 @@ export function isRetryableDegradedRestore(restore: {
 export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
+  objectStorage?: ObjectStorage | null;
   /** Exact settings before a verified rig provider image overlaid the logical
    * pack/deployment image. Fresh-create NotFound fallback must preserve an
    * ID-only logical base instead of selecting the provider default. */
   logicalFallbackSettings?: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
+  /** Structured logger for lifecycle decisions (holder release reasons). Falls
+   * back to the console when a lean caller passes none. */
+  observability?: Pick<Observability, "info" | "warn">;
+  /** Test seam only: cadence of the private holder-liveness loop (default 10 s).
+   * Production keeps the default; the dead-worker reap horizon assumes it. */
+  holderLivenessIntervalMs?: number;
   /**
    * The logical turn-attempt lifetime, not merely the provider request lifetime.
    * Some provider SDK calls cannot be interrupted. Aborting this signal still
@@ -140,7 +160,7 @@ export type ResumeBoxIds = {
    *  disclosure/attribution). For a singleton group this == sandboxGroupId. */
   sessionId: string;
   /** The backend the box runs on (sessions.sandbox_backend). */
-  backend: string;
+  backend: Settings["sandboxBackend"];
   /** The OS axis (sessions.sandbox_os); default 'linux'. */
   os?: string;
   /**
@@ -315,10 +335,10 @@ async function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Modal may return a sandbox handle before its command router accepts the first
- * exec. The upstream session's yieldTimeMs starts only after sandbox.exec()
- * returns, so it cannot bound that initial RPC. Probe it before publishing the
- * lease as warm and enforce our own wall-clock deadline.
+ * A remote provider may return a sandbox handle before its command router
+ * accepts the first exec. The upstream session's yieldTimeMs starts only after
+ * sandbox.exec() returns, so it cannot bound that initial RPC. Probe it before
+ * publishing the lease as warm and enforce our own wall-clock deadline.
  */
 export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
@@ -350,25 +370,42 @@ export function safeSnapshotError(error: unknown): {
   errorCode: "snapshot_operation_failed";
   status?: number;
   origin: "sandbox-resume";
+  causeName?: string;
+  integrityCode?: string;
 } {
   const fields: {
     errorClass: "SnapshotOperationError";
     errorCode: "snapshot_operation_failed";
     status?: number;
     origin: "sandbox-resume";
+    causeName?: string;
+    integrityCode?: string;
   } = {
     errorClass: "SnapshotOperationError",
     errorCode: "snapshot_operation_failed",
     origin: "sandbox-resume",
   };
   try {
-    const rawStatus =
-      error && typeof error === "object"
-        ? ((error as { status?: unknown; statusCode?: unknown }).status ??
-          (error as { statusCode?: unknown }).statusCode)
-        : undefined;
-    const status = Number(rawStatus);
-    if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+    if (error && typeof error === "object") {
+      const candidate = error as {
+        name?: unknown;
+        code?: unknown;
+        status?: unknown;
+        statusCode?: unknown;
+      };
+      if (
+        typeof candidate.name === "string" &&
+        /^[A-Z][A-Za-z0-9]{2,62}Error$/u.test(candidate.name)
+      ) {
+        fields.causeName = candidate.name;
+      }
+      if (typeof candidate.code === "string" && /^[a-z0-9_]{1,64}$/u.test(candidate.code)) {
+        fields.integrityCode = candidate.code;
+      }
+      const rawStatus = candidate.status ?? candidate.statusCode;
+      const status = Number(rawStatus);
+      if (Number.isInteger(status) && status >= 100 && status <= 599) fields.status = status;
+    }
   } catch {
     // Public diagnostics are best-effort and must never replace the exact
     // internal snapshot failure.
@@ -499,23 +536,57 @@ function workspaceArchiveFieldsFromEnvelope(
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   const archive = sessionState?.workspaceArchive;
-  if (typeof archive !== "string" || archive.length === 0) {
+  const archiveRef = parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchiveRef);
+  const hasInline = typeof archive === "string" && archive.length > 0;
+  if (!hasInline && !archiveRef) {
     return null;
   }
   const previous = sessionState?.workspaceArchivePrev;
+  const previousRef = parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchivePrevRef);
   const metadata = sessionState?.workspaceArchiveMeta;
   const previousMetadata = sessionState?.workspaceArchivePrevMeta;
   const capturedAt = sessionState?.workspaceArchiveAt;
   return {
-    workspaceArchive: archive,
+    ...(hasInline && !archiveRef ? { workspaceArchive: archive } : {}),
+    ...(archiveRef ? { workspaceArchiveRef: archiveRef } : {}),
     ...(metadata !== undefined ? { workspaceArchiveMeta: metadata } : {}),
-    ...(typeof previous === "string" && previous.length > 0
+    ...(typeof previous === "string" && previous.length > 0 && !previousRef
       ? { workspaceArchivePrev: previous }
       : {}),
+    ...(previousRef ? { workspaceArchivePrevRef: previousRef } : {}),
     ...(previousMetadata !== undefined ? { workspaceArchivePrevMeta: previousMetadata } : {}),
     ...(typeof capturedAt === "string" && capturedAt.length > 0
       ? { workspaceArchiveAt: capturedAt }
       : {}),
+  };
+}
+
+async function materializeSpawnEnvelopeArchive(
+  envelope: unknown,
+  objectStorage: ObjectStorage | null | undefined,
+): Promise<unknown> {
+  if (!envelope || typeof envelope !== "object") return envelope;
+  const record = envelope as Record<string, unknown>;
+  const sessionState =
+    record.sessionState &&
+    typeof record.sessionState === "object" &&
+    !Array.isArray(record.sessionState)
+      ? (record.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState || !parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) {
+    return envelope;
+  }
+  if (!objectStorage) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_base64_invalid",
+      "workspace archive object storage is not configured",
+    );
+  }
+  return {
+    ...record,
+    sessionState: await inlineWorkspaceArchiveForRestore(sessionState, (key) =>
+      objectStorage.getObjectBytes(key),
+    ),
   };
 }
 
@@ -531,6 +602,93 @@ function legacyNativeArchiveFromEnvelope(envelope: Record<string, unknown> | nul
     sessionState.workspaceArchive,
     existing?.version === 1 ? Date.parse(existing.capturedAt) : Date.now(),
   );
+}
+
+export type SandboxDeadlineRotationCheckpointResult = {
+  /** The exact established epoch still carries a requested rotation and a
+   * complete current-generation archive: the turn may abort orderly. */
+  checkpointed: boolean;
+  /** What the defense-in-depth holder step observed before the capture. */
+  holder: Awaited<ReturnType<typeof reinstateTurnLeaseHolder>>["status"];
+  lease: Awaited<ReturnType<typeof readLease>>;
+};
+
+/**
+ * The orderly provider-deadline rotation checkpoint for one running turn. The
+ * turn-side lease heartbeat calls this once it observes a rotation-fenced lease
+ * at its established epoch/instance; `checkpointed: true` licenses the
+ * SandboxDeadlineRotationError abort that hands the same logical turn to the
+ * cold successor.
+ *
+ * Defense in depth: the warm capture claim requires exactly this turn's holder.
+ * If that holder was lost while the attempt is still the active writer (a stale
+ * release, a reap race), `reinstateTurnLeaseHolder` puts it back under the
+ * exact epoch/instance fence before the capture, so a lost holder cannot
+ * silently disable the orderly abort and leave the reaper to terminate the box
+ * under the running turn. Never captures when the epoch/instance changed.
+ */
+export async function persistSandboxDeadlineRotationCheckpoint(
+  services: SandboxResumeServices,
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    sandboxGroupId: string;
+  },
+  session: unknown,
+  expected: { leaseEpoch: number; instanceId: string },
+  signal?: AbortSignal,
+): Promise<SandboxDeadlineRotationCheckpointResult> {
+  const { db, settings } = services;
+  // A cancelled attempt must never briefly regain its holder: its eager
+  // cancellation listener may already have released it, and reinstating here
+  // would pin the lease behind an attempt that is being torn down.
+  if (signal?.aborted) {
+    return { checkpointed: false, holder: "attempt_fenced", lease: null };
+  }
+  const reinstated = await reinstateTurnLeaseHolder(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sandboxGroupId: ids.sandboxGroupId,
+    sessionId: ids.sessionId,
+    attemptId: ids.attemptId,
+    expectedEpoch: expected.leaseEpoch,
+    expectedInstanceId: expected.instanceId,
+    leaseTtlMs: settings.sandboxLeaseTtlMs,
+  });
+  if (reinstated.status === "reinstated") {
+    const message = "sandbox rotation checkpoint reinstated the live turn holder";
+    const fields = {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      sandboxGroupId: ids.sandboxGroupId,
+      leaseEpoch: expected.leaseEpoch,
+      liveness: reinstated.lease.liveness,
+    };
+    if (services.observability) services.observability.warn(message, fields);
+    else console.warn(message, fields);
+  }
+  if (reinstated.status !== "present" && reinstated.status !== "reinstated") {
+    return { checkpointed: false, holder: reinstated.status, lease: null };
+  }
+  await maybePersistWarmWorkspaceSnapshot(
+    services,
+    ids,
+    session,
+    expected.leaseEpoch,
+    signal,
+    true,
+  );
+  const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+  const checkpointed =
+    lease?.leaseEpoch === expected.leaseEpoch &&
+    lease.instanceId === expected.instanceId &&
+    lease.rotationRequestedAt !== null &&
+    lease.archiveComplete &&
+    signal?.aborted !== true;
+  return { checkpointed, holder: reinstated.status, lease };
 }
 
 /**
@@ -573,12 +731,20 @@ export async function maybePersistWarmWorkspaceSnapshot(
   }
   const persistable = session as {
     persistWorkspace?: () => Promise<Uint8Array | undefined>;
+    persistWorkspaceTar?: () => Promise<Uint8Array | undefined>;
+    backendId?: unknown;
     state?: {
       workspacePersistence?: unknown;
       providerState?: { workspacePersistence?: unknown };
     };
   };
-  if (typeof persistable.persistWorkspace !== "function") {
+  if (
+    typeof persistable.persistWorkspace !== "function" &&
+    typeof persistable.persistWorkspaceTar !== "function"
+  ) {
+    console.error("mid-session workspace snapshot skipped (no persist primitive)", {
+      backendId: typeof persistable.backendId === "string" ? persistable.backendId : null,
+    });
     return false;
   }
   // Filesystem and directory snapshots create retained Images without
@@ -597,12 +763,21 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // This work cannot pause or mutate the box, so keeping it outside the claim
     // minimizes the time that command admission must wait.
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-    if (
-      !lease ||
-      lease.leaseEpoch !== leaseEpoch ||
-      lease.liveness !== "warm" ||
-      lease.instanceId === null
-    ) {
+    const canWarmCapture =
+      lease?.liveness === "warm" && lease.instanceId !== null && lease.leaseEpoch === leaseEpoch;
+    const canForceDrainingCapture =
+      force === true &&
+      lease?.liveness === "draining" &&
+      lease.instanceId !== null &&
+      lease.leaseEpoch === leaseEpoch;
+    if (!lease || (!canWarmCapture && !canForceDrainingCapture)) {
+      console.error("mid-session workspace snapshot skipped (lease not warm)", {
+        sandboxGroupId: ids.sandboxGroupId,
+        expectedEpoch: leaseEpoch,
+        liveness: lease?.liveness ?? null,
+        leaseEpoch: lease?.leaseEpoch ?? null,
+        hasInstance: lease?.instanceId !== null && lease?.instanceId !== undefined,
+      });
       return false;
     }
     // A checkpoint of this exact mutation generation already protects every
@@ -611,9 +786,18 @@ export async function maybePersistWarmWorkspaceSnapshot(
     if (lease.archiveComplete) {
       return false;
     }
+    if (lease.instanceId === null) {
+      return false;
+    }
     const instanceId = lease.instanceId;
+    const captureLiveness: "warm" | "draining" = canWarmCapture ? "warm" : "draining";
     const capturePolicy = providerWorkspaceCapturePolicy(lease.backend, session);
     if (!capturePolicy || capturePolicy.liveInstance !== "preserved") {
+      console.error("mid-session workspace snapshot skipped (capture policy)", {
+        sandboxGroupId: ids.sandboxGroupId,
+        backend: lease.backend,
+        liveInstance: capturePolicy?.liveInstance ?? null,
+      });
       return false;
     }
     const nativeModalPersistence =
@@ -633,19 +817,29 @@ export async function maybePersistWarmWorkspaceSnapshot(
       captureId,
       expectedEpoch: leaseEpoch,
       expectedInstanceId: instanceId,
-      liveness: "warm",
+      liveness: captureLiveness,
       captureTimeoutMs,
       minIntervalMs: force ? 0 : intervalMs,
       providerReplaySafe: capturePolicy.takeover === "same_request",
       takeoverSafe: capturePolicy.takeover !== "exclusive",
-      warmAttempt: {
-        sessionId: ids.sessionId,
-        turnId: ids.turnId,
-        attemptId: ids.attemptId,
-        holderId: sandboxLeaseHolderIdForAttempt(ids.attemptId),
-      },
+      ...(captureLiveness === "warm"
+        ? {
+            warmAttempt: {
+              sessionId: ids.sessionId,
+              turnId: ids.turnId,
+              attemptId: ids.attemptId,
+              holderId: sandboxLeaseHolderIdForAttempt(ids.attemptId),
+            },
+          }
+        : {}),
     });
-    if (claimed.status !== "claimed") return false;
+    if (claimed.status !== "claimed") {
+      console.error("mid-session workspace snapshot skipped (capture claim)", {
+        sandboxGroupId: ids.sandboxGroupId,
+        status: claimed.status,
+      });
+      return false;
+    }
 
     let timeout: ReturnType<typeof setTimeout> | undefined;
     // Stamp WHEN this capture started: persistWarmSnapshot orders warm snapshots
@@ -695,12 +889,33 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // of the exact admission gate; a late callback cannot release a successor.
     const captureAndPublish = (async (): Promise<boolean> => {
       let candidate: { id: string } | null = null;
+      let workspaceArchiveRef: Awaited<
+        ReturnType<typeof putVersion1TarArchiveOrInline>
+      >["workspaceArchiveRef"];
       try {
         const archive = await captureVerifiedWorkspaceArchive(session, capturedAtMs, {
           requestId: claimed.claim.providerRequestId,
           strategy: capturePolicy.strategy,
         });
         candidate = await registerCandidate(archive);
+        const priorLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+        const priorKeys = collectWorkspaceArchiveObjectKeys(
+          (priorLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+        );
+        const published = await putVersion1TarArchiveOrInline({
+          backend: lease.backend,
+          objectStorage: services.objectStorage,
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sandboxGroupId: ids.sandboxGroupId,
+          archive: {
+            bytes: archive.bytes,
+            descriptor: archive.descriptor,
+            base64: archive.base64,
+          },
+          ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
+        });
+        workspaceArchiveRef = published.workspaceArchiveRef;
         const { wrote } = await persistWarmSnapshot(db, {
           accountId: ids.accountId,
           workspaceId: ids.workspaceId,
@@ -712,17 +927,40 @@ export async function maybePersistWarmWorkspaceSnapshot(
           expectedInstanceId: instanceId,
           expectedWorkspaceGeneration: claimed.claim.workspaceGeneration,
           captureId,
-          workspaceArchive: archive.base64,
           workspaceArchiveMeta: archive.descriptor,
+          ...published,
           checkpointArtifactId: candidate?.id ?? null,
           minIntervalMs: force ? 0 : intervalMs,
           capturedAtMs,
         });
+        if (published.workspaceArchiveRef && services.objectStorage) {
+          if (!wrote) {
+            await deleteUnpublishedWorkspaceArchiveObject(
+              services.objectStorage,
+              published.workspaceArchiveRef,
+              services.sandboxMetrics,
+            );
+          } else {
+            const afterLease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
+            const afterKeys = collectWorkspaceArchiveObjectKeys(
+              (afterLease?.resumeState as Record<string, unknown> | null | undefined) ?? null,
+            );
+            await deleteWorkspaceArchiveObjectKeys(
+              services.objectStorage,
+              [...priorKeys].filter((key) => !afterKeys.has(key)),
+            ).catch(() => undefined);
+          }
+        }
         if (!wrote && candidate) {
           await abandonCandidate(candidate.id, "snapshot_publication_fenced");
         }
         return wrote;
       } catch (error) {
+        await deleteUnpublishedWorkspaceArchiveObject(
+          services.objectStorage,
+          workspaceArchiveRef,
+          services.sandboxMetrics,
+        );
         if (candidate) await abandonCandidate(candidate.id, "snapshot_capture_failed");
         throw error;
       } finally {
@@ -951,36 +1189,122 @@ export async function resumeBoxForTurn(
           acquired.lease.liveness === "warm"
         ? { expectedEpoch: acquired.lease.leaseEpoch, leaseTtlMs }
         : null;
+  let providerRenewalTarget: { backend: Settings["sandboxBackend"]; instanceId: string } | null =
+    acquired.lease.liveness === "warm" && acquired.lease.instanceId
+      ? {
+          backend: ids.backend,
+          instanceId: acquired.lease.instanceId,
+        }
+      : null;
+  let providerRenewedAtMs = Date.now();
+  let providerRenewalInFlight: Promise<void> | null = null;
+  const maybeRenewProviderExpiration = async (force = false): Promise<void> => {
+    const target = providerRenewalTarget;
+    if (!target || providerRenewalInFlight) return;
+    const ttlSeconds = effectiveSandboxLifecycle(settings, target.backend).renewableTtlSeconds;
+    if (ttlSeconds === null) return;
+    const intervalMs = Math.max(10_000, Math.floor((ttlSeconds * 1000) / 3));
+    if (!force && Date.now() - providerRenewedAtMs < intervalMs) return;
+    providerRenewalInFlight = renewSandboxProviderExpiration({
+      backend: target.backend,
+      settings,
+      instanceId: target.instanceId,
+      ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
+    })
+      .then(() => {
+        providerRenewedAtMs = Date.now();
+      })
+      .finally(() => {
+        providerRenewalInFlight = null;
+      });
+    await providerRenewalInFlight;
+  };
+  // Release ONLY on holder death. `heartbeatLeaseHolderStatus` separates "this
+  // holder is gone / its attempt is no longer the active writer" from "the lease
+  // could not be extended" (rotation requested, draining, another epoch). The
+  // second is NOT a reason to release: once a provider-deadline rotation is
+  // requested the lease heartbeat is fenced by design while the still-running
+  // turn checkpoints, and the turn-side heartbeat owns that orderly
+  // SandboxDeadlineRotationError abort. Dropping the live holder here instead
+  // flips the lease to draining under the running turn, the reaper terminates
+  // the box, and the checkpoint then fails `attempt_fenced` (the staging
+  // ~61-minute box-age failure). Both loops therefore converge on
+  // "holder alive -> never release"; this loop keeps touching the holder.
+  const releaseDeadHolder = (reason: string): void => {
+    const message = "sandbox resume holder released: holder no longer live";
+    const fields = {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      sandboxGroupId: ids.sandboxGroupId,
+      holderKind: kind,
+      reason,
+    };
+    if (services.observability) services.observability.warn(message, fields);
+    else console.warn(message, fields);
+    void release().catch(() => undefined);
+  };
   holderLivenessTimer = setInterval(() => {
     const heartbeat = holderLeaseHeartbeat;
-    const refresh = heartbeat
-      ? heartbeatLeaseHolder(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sandboxGroupId: ids.sandboxGroupId,
-          kind,
-          holderId,
-          expectedEpoch: heartbeat.expectedEpoch,
-          leaseTtlMs: heartbeat.leaseTtlMs,
+    if (heartbeat) {
+      void heartbeatLeaseHolderStatus(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+        kind,
+        holderId,
+        expectedEpoch: heartbeat.expectedEpoch,
+        leaseTtlMs: heartbeat.leaseTtlMs,
+      })
+        .then((status) => {
+          if (heartbeat !== holderLeaseHeartbeat) return;
+          if (!status.holderAlive) {
+            // Reaped, released, or its exact attempt is no longer the active
+            // writer. Stop this otherwise-unbounded provider operation and
+            // idempotently drop any remaining holder state.
+            releaseDeadHolder(status.fence);
+            return;
+          }
+          if (status.fence === "epoch") {
+            // The lease epoch never regresses: a newer epoch means the box this
+            // holder was registered against is definitively superseded (lost
+            // instance replaced, re-established by a later turn). The holder
+            // row is stale authority for an instance that no longer exists;
+            // drop it promptly instead of pinning a successor's lease.
+            releaseDeadHolder(status.fence);
+            return;
+          }
+          // The box is still serving this live holder: keep the provider TTL
+          // renewed while the lease is ours (extended, or only rotation-fenced at
+          // the same epoch). A liveness fence (draining at our epoch) means the
+          // reaper now governs the instance; keep the holder but leave its
+          // expiry alone.
+          if (status.leaseExtended || status.fence === "rotation_requested") {
+            void maybeRenewProviderExpiration().catch(() => undefined);
+          }
         })
-      : touchLeaseHolder(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sandboxGroupId: ids.sandboxGroupId,
-          kind,
-          holderId,
-        });
-    void refresh
+        .catch(() => undefined);
+      return;
+    }
+    void touchLeaseHolder(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.sandboxGroupId,
+      kind,
+      holderId,
+    })
       .then((touched) => {
+        if (heartbeat !== holderLeaseHeartbeat) return;
         // A canonical turn holder is rejected once its exact attempt is no
-        // longer the active writer. Stop this otherwise-unbounded provider
-        // operation and idempotently drop any remaining holder state.
-        if (!touched && heartbeat === holderLeaseHeartbeat) {
-          void release().catch(() => undefined);
+        // longer the active writer (touch is attempt-fenced only; it never
+        // consults lease authority, so false here always means holder death).
+        if (!touched) {
+          releaseDeadHolder("holder_gone");
+          return;
         }
+        void maybeRenewProviderExpiration().catch(() => undefined);
       })
       .catch(() => undefined);
-  }, 10_000);
+  }, services.holderLivenessIntervalMs ?? 10_000);
   if ("unref" in holderLivenessTimer && typeof holderLivenessTimer.unref === "function") {
     holderLivenessTimer.unref();
   }
@@ -1115,7 +1439,19 @@ export async function resumeBoxForTurn(
       // `_sandbox` envelope is the per-session fallback. Without this a turn-first
       // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
       const providerCreateStartedAt = new Date();
-      const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
+      const persistArchiveSource =
+        spawnEnvelope && typeof spawnEnvelope === "object"
+          ? (spawnEnvelope as Record<string, unknown>)
+          : null;
+      const hydrateEnvelopeRaw = await materializeSpawnEnvelopeArchive(
+        persistArchiveSource,
+        services.objectStorage,
+      );
+      const hydrateEnvelope =
+        hydrateEnvelopeRaw && typeof hydrateEnvelopeRaw === "object"
+          ? (hydrateEnvelopeRaw as Record<string, unknown>)
+          : null;
+      const established = await establishSandboxSessionFromEnvelope(settings, hydrateEnvelope, {
         sessionId: ids.sessionId,
         recovery: "create-or-restore",
         backendOverride: ids.backend as never,
@@ -1126,6 +1462,11 @@ export async function resumeBoxForTurn(
           : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
+          providerRenewalTarget = {
+            backend: ids.backend,
+            instanceId: created.instanceId,
+          };
+          providerRenewedAtMs = Date.now();
           throwIfReleasedOrCancelled();
           if (
             rematerialization &&
@@ -1168,7 +1509,7 @@ export async function resumeBoxForTurn(
             }
           }
           const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
-            await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
+            await serializeReplacementSandboxEnvelope(created, persistArchiveSource),
             created.backendId,
           );
           const recorded = await recordWarmingSandboxCreated(db, {
@@ -1256,13 +1597,15 @@ export async function resumeBoxForTurn(
       });
       createdEstablished = established;
       throwIfReleasedOrCancelled();
-      // A sandbox handle is not sufficient evidence that Modal's command router
-      // is live. Do not publish a warm lease until one bounded no-op exec works.
+      // A sandbox handle is not sufficient evidence that an asynchronous
+      // provider's command router is live. Do not publish a warm lease until
+      // one bounded no-op exec works.
       // On timeout the catch below terminates the box and rolls warming -> cold,
       // so the next turn cold-creates instead of hanging forever on first use.
       await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
         sandboxGroupId: ids.sandboxGroupId,
       });
+      await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
@@ -1282,7 +1625,7 @@ export async function resumeBoxForTurn(
       // attempts terminate the replacement and fail closed; they never publish a
       // clean or mixed workspace.
       const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
-        await serializeReplacementSandboxEnvelope(established, spawnEnvelope),
+        await serializeReplacementSandboxEnvelope(established, persistArchiveSource),
         established.backendId,
       );
       throwIfReleasedOrCancelled();
@@ -1439,8 +1782,8 @@ export async function resumeBoxForTurn(
       });
       throwIfReleasedOrCancelled();
       // A durable `warm` row is an ownership assertion, not provider liveness.
-      // Modal may have ended the exact box at its finite timeout while OpenGeni
-      // was idle. Prove the command router before handing the session to the
+      // A provider may have ended the exact box while OpenGeni was idle. Prove
+      // the command router before handing the session to the
       // agent so terminal evidence enters the atomic warm->cold recovery path
       // below instead of surfacing inside a model-visible tool call.
       if (services.verifyAttachedSandboxReadiness) {
@@ -1450,6 +1793,11 @@ export async function resumeBoxForTurn(
           sandboxGroupId: ids.sandboxGroupId,
         });
       }
+      providerRenewalTarget = {
+        backend: ids.backend,
+        instanceId: established.instanceId,
+      };
+      await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
     } catch (error) {
       if (!isProviderSandboxNotFoundError(ids.backend, error)) {

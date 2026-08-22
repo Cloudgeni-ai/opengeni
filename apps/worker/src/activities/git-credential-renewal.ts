@@ -27,6 +27,8 @@ export type GitCredentialRenewalController = {
 export type GitCredentialRenewalOptions = {
   expectedProviders: readonly GitCredentialProvider[];
   initialExpiresAt?: GitTokenExpiries;
+  /** Override the default five-minute provider-token lead for shorter broker bearers. */
+  expiryLeadMs?: number;
   mint: () => Promise<MintedRunGitCredentials | undefined>;
   write: (tokens: GitTokenSeeds) => Promise<void>;
   now?: () => number;
@@ -47,6 +49,7 @@ export function nextGitCredentialRenewalDelay(
   expiresAt: GitTokenExpiries | undefined,
   providers: readonly GitCredentialProvider[],
   nowMs = Date.now(),
+  expiryLeadMs = GIT_CREDENTIAL_EXPIRY_LEAD_MS,
 ): number {
   let delay = GIT_CREDENTIAL_DEFAULT_REFRESH_MS;
   for (const provider of providers) {
@@ -56,7 +59,7 @@ export function nextGitCredentialRenewalDelay(
     if (!Number.isFinite(expiryMs)) continue;
     delay = Math.min(
       delay,
-      Math.max(GIT_CREDENTIAL_MIN_REFRESH_MS, expiryMs - nowMs - GIT_CREDENTIAL_EXPIRY_LEAD_MS),
+      Math.max(GIT_CREDENTIAL_MIN_REFRESH_MS, expiryMs - nowMs - expiryLeadMs),
     );
   }
   return delay;
@@ -126,7 +129,12 @@ export function startGitCredentialRenewalLoop(
       }
       if (stopped) return;
       retryDelayMs = GIT_CREDENTIAL_MIN_REFRESH_MS;
-      const nextDelayMs = nextGitCredentialRenewalDelay(minted.expiresAt, providers, now());
+      const nextDelayMs = nextGitCredentialRenewalDelay(
+        minted.expiresAt,
+        providers,
+        now(),
+        options.expiryLeadMs,
+      );
       try {
         options.onSuccess?.({ providers, nextDelayMs });
       } catch {
@@ -162,7 +170,9 @@ export function startGitCredentialRenewalLoop(
     return operation;
   };
 
-  scheduleRefresh(nextGitCredentialRenewalDelay(options.initialExpiresAt, providers, now()));
+  scheduleRefresh(
+    nextGitCredentialRenewalDelay(options.initialExpiresAt, providers, now(), options.expiryLeadMs),
+  );
 
   return {
     refreshNow,

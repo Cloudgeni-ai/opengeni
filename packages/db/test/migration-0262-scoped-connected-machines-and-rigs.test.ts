@@ -119,6 +119,11 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
           (${account!.id}, ${workspaceA.id}, ${otherSubject}),
           (${account!.id}, ${workspaceB.id}, ${otherSubject})
       `;
+      await admin`
+        insert into session_tenancy_activations (
+          account_id, activation_version, inventory_digest, parity_digest, activated_by
+        ) values (${account!.id}, 1, ${"9".repeat(64)}, ${"a".repeat(64)}, '0262-test')
+      `;
 
       const ownerA: Actor = {
         accountId: account!.id,
@@ -257,8 +262,8 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         await tx`
           select grant_id from issue_self_user_resource_grant(
             ${account!.id}::uuid, ${machineAuthority!.id}::uuid,
-            ${workspaceB.id}::uuid, 'connected_machine.use', 'session',
-            'workspace_shared', ${session.id}::uuid, true
+            ${workspaceB.id}::uuid, 'connected_machine', 'session',
+            'workspace_shared', ${session.id}::uuid, 1, true
           )
         `;
       });
@@ -412,8 +417,8 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         await tx`
           select grant_id from issue_self_user_resource_grant(
             ${account!.id}::uuid, ${sideMachineAuthority!.id}::uuid,
-            ${workspaceB.id}::uuid, 'connected_machine.use', 'always',
-            'user_private', null, true
+            ${workspaceB.id}::uuid, 'connected_machine', 'always',
+            'user_private', null, null, true
           )
         `;
       });
@@ -422,8 +427,8 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         await tx`
           select grant_id from issue_self_user_resource_grant(
             ${account!.id}::uuid, ${sideMachineAuthority!.id}::uuid,
-            ${workspaceA.id}::uuid, 'connected_machine.use', 'always',
-            'workspace_shared', null, true
+            ${workspaceA.id}::uuid, 'connected_machine', 'always',
+            'workspace_shared', null, null, true
           )
         `;
       });
@@ -432,8 +437,8 @@ describe("migration 0262 scoped Connected Machines and Rigs", () => {
         await tx`
           select grant_id from issue_self_user_resource_grant(
             ${account!.id}::uuid, ${sideMachineAuthority!.id}::uuid,
-            ${workspaceB.id}::uuid, 'connected_machine.use', 'session',
-            'workspace_shared', ${session.id}::uuid, true
+            ${workspaceB.id}::uuid, 'connected_machine', 'session',
+            'workspace_shared', ${session.id}::uuid, 1, true
           )
         `;
       });

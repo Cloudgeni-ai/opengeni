@@ -1,4 +1,5 @@
 import {
+  allowedFirstPartyMcpToolsForSession,
   configuredStaticUsageLimits,
   policyProviderIdForModel,
   type Settings,
@@ -138,7 +139,17 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },
-      prompt: goalContinuationPrompt,
+      // The hold guidance is only given when `goal_wait` is actually in this
+      // session's effective first-party selection (the same source the worker
+      // signs into the delegated token and the API uses to register tools), so
+      // a pre-existing narrowed selection is never told to call a missing tool.
+      prompt: (goal, autoContinuation, cap) =>
+        goalContinuationPrompt(goal, autoContinuation, cap, {
+          goalWaitAvailable: allowedFirstPartyMcpToolsForSession(
+            settings,
+            session.firstPartyMcpTools,
+          ).includes("goal_wait"),
+        }),
     });
     if (decision.events.length > 0) {
       await bus.publish(input.workspaceId, input.sessionId, decision.events);
@@ -156,7 +167,17 @@ export function goalContinuationPrompt(
   _goal: SessionGoal,
   _autoContinuation: number,
   _cap: number | null,
+  options: { goalWaitAvailable?: boolean } = {},
 ): string {
+  const waitingGuidance = options.goalWaitAvailable
+    ? [
+        "Waiting on child sessions or external events:",
+        "- When the next progress depends on child sessions you spawned or on an external event, do not sleep, loop, or poll sessions_list/session_get/session_events to wait for it.",
+        "- Re-check sessions_list or session_get once; if the work is still in flight, call opengeni__goal_wait with a concrete reason and a deadline (untilSeconds), then end your turn immediately. You will be woken by a child result, a message, a human prompt, or at the deadline, and this goal stays active.",
+        "- A hold is for child/external progress only. If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
+        "",
+      ]
+    : [];
   return [
     "Continue working toward the active session goal.",
     "",
@@ -186,6 +207,7 @@ export function goalContinuationPrompt(
     "",
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
     "",
+    ...waitingGuidance,
     "Blocked audit:",
     "- Do not call opengeni__goal_pause the first time a blocker appears.",
     "- Pause only when the same blocking condition has repeated for at least three consecutive goal turns and meaningful progress is impossible without user input or an external-state change.",

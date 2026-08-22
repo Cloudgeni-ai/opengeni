@@ -54,7 +54,7 @@ beforeAll(async () => {
           headers: new Headers(),
           response: {
             session: { id: authSessionId },
-            user: { id: userId, email, name: "Organization member" },
+            user: { id: userId, email, name: "Organization member", emailVerified: true },
           },
         }),
       },
@@ -143,6 +143,7 @@ describe("organization membership routes", () => {
                 id: targetUserId,
                 email: targetEmail,
                 name: "Invitation target",
+                emailVerified: true,
               },
             },
           }),
@@ -169,14 +170,31 @@ describe("organization membership routes", () => {
       id: string;
       revision: number;
     };
+    expect(invitation).not.toHaveProperty("targetRegistrationStatus");
+    const [storedBeforeBinding] = await shared.admin<Array<{ targetSubjectId: string | null }>>`
+      select target_subject_id as "targetSubjectId"
+      from organization_membership_invitations
+      where id = ${invitation.id}`;
+    expect(storedBeforeBinding?.targetSubjectId).toBeNull();
     const targetInvitations = await targetApp.request("http://x/v1/organization-invitations", {
       headers: { cookie: "session=present" },
     });
     expect(targetInvitations.status).toBe(200);
-    expect(await targetInvitations.json()).toMatchObject({
-      invitations: [expect.objectContaining({ id: invitation.id })],
-      nextCursor: null,
-    });
+    const targetInvitationsBody = (await targetInvitations.json()) as {
+      invitations: Array<{ id: string; revision: number }>;
+      nextCursor: string | null;
+    };
+    expect(targetInvitationsBody.nextCursor).toBeNull();
+    const listedInvitation = targetInvitationsBody.invitations.find(
+      (candidate) => candidate.id === invitation.id,
+    );
+    expect(listedInvitation).toBeDefined();
+    expect(listedInvitation).not.toHaveProperty("targetRegistrationStatus");
+    const [storedAfterBinding] = await shared.admin<Array<{ targetSubjectId: string | null }>>`
+      select target_subject_id as "targetSubjectId"
+      from organization_membership_invitations
+      where id = ${invitation.id}`;
+    expect(storedAfterBinding?.targetSubjectId).toBe(`user:${targetUserId}`);
     expect(
       (
         await targetApp.request("http://x/v1/organization-invitations?limit=101", {
@@ -194,7 +212,7 @@ describe("organization membership routes", () => {
           "content-type": "application/json",
         },
         body: JSON.stringify({
-          expectedRevision: invitation.revision,
+          expectedRevision: listedInvitation!.revision,
           operationId: crypto.randomUUID(),
         }),
       },
@@ -284,6 +302,150 @@ describe("organization membership routes", () => {
       expect(rejectedRetention.status).toBe(422);
     }
   });
+
+  test("creates a non-enumerating invitation before the email is registered", async () => {
+    if (!app) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    const email = `not-registered-${crypto.randomUUID()}@example.test`;
+    const response = await app.request(`http://x/v1/organizations/${accountId}/invitations`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        email,
+        name: "Future teammate",
+        initialWorkspaceIds: [],
+        role: "member",
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(response.status).toBe(201);
+    const invitation = await response.json();
+    expect(invitation).toMatchObject({
+      targetEmail: email,
+      targetName: "Future teammate",
+      initialWorkspaceIds: [],
+      status: "pending",
+    });
+    expect(invitation).not.toHaveProperty("targetRegistrationStatus");
+  });
+
+  test("renames the canonical organization and inventories every shared workspace without Personal workspaces", async () => {
+    if (!shared || !app) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string; personalWorkspaceId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    const personalWorkspaceId = membershipBody.memberships[0]!.personalWorkspaceId;
+    const sharedWorkspaceId = crypto.randomUUID();
+    const serviceSubject = `service:${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into workspaces (id, account_id, name, external_source, external_id)
+      values (
+        ${sharedWorkspaceId}, ${accountId}, 'Company platform', 'test', ${crypto.randomUUID()}
+      )`;
+    await shared.admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, subject_label, role, permissions
+      ) values (
+        ${accountId}, ${sharedWorkspaceId}, ${subjectId}, 'Organization member', 'admin',
+        ${shared.admin.json(["sessions:read", "workspace:read"])}::jsonb
+      ), (
+        ${accountId}, ${sharedWorkspaceId}, ${serviceSubject}, 'Deployment automation', 'service',
+        ${shared.admin.json(["workspace:read"])}::jsonb
+      )`;
+
+    const overviewResponse = await app.request(`http://x/v1/organizations/${accountId}/overview`, {
+      headers: { cookie: "session=present" },
+    });
+    expect(overviewResponse.status).toBe(200);
+    const overview = (await overviewResponse.json()) as {
+      organization: { name: string; updatedAt: string };
+      workspaces: Array<{
+        id: string;
+        name: string;
+        members: Array<{ subjectId: string; subjectLabel: string; principalKind: string }>;
+      }>;
+    };
+    expect(overview.workspaces.map((workspace) => workspace.id)).toContain(sharedWorkspaceId);
+    expect(overview.workspaces.map((workspace) => workspace.id)).not.toContain(personalWorkspaceId);
+    expect(
+      overview.workspaces.find((workspace) => workspace.id === sharedWorkspaceId),
+    ).toMatchObject({
+      name: "Company platform",
+      members: [
+        expect.objectContaining({
+          subjectId: serviceSubject,
+          subjectLabel: "Deployment automation",
+          principalKind: "service",
+        }),
+        expect.objectContaining({
+          subjectId,
+          subjectLabel: "Organization member",
+          principalKind: "human",
+        }),
+      ],
+    });
+
+    const operationId = crypto.randomUUID();
+    const rename = await app.request(`http://x/v1/organizations/${accountId}`, {
+      method: "PATCH",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Acme Engineering",
+        expectedUpdatedAt: overview.organization.updatedAt,
+        operationId,
+      }),
+    });
+    expect(rename.status).toBe(200);
+    const renamed = (await rename.json()) as { name: string; updatedAt: string };
+    expect(renamed).toMatchObject({ name: "Acme Engineering" });
+
+    const secondRename = await app.request(`http://x/v1/organizations/${accountId}`, {
+      method: "PATCH",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Acme Product",
+        expectedUpdatedAt: renamed.updatedAt,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(secondRename.status).toBe(200);
+    expect(await secondRename.json()).toMatchObject({ name: "Acme Product" });
+
+    const replay = await app.request(`http://x/v1/organizations/${accountId}`, {
+      method: "PATCH",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Acme Engineering",
+        expectedUpdatedAt: overview.organization.updatedAt,
+        operationId,
+      }),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(renamed);
+
+    // An ordinary managed-session bootstrap must not overwrite the name with
+    // the user's profile name after an administrator has deliberately renamed it.
+    await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const afterBootstrap = await app.request(`http://x/v1/organizations/${accountId}/overview`, {
+      headers: { cookie: "session=present" },
+    });
+    expect(await afterBootstrap.json()).toMatchObject({
+      organization: { name: "Acme Product" },
+    });
+  }, 180_000);
 
   test("returns only the current active membership and denies terminal membership state", async () => {
     if (!shared || !app) return;

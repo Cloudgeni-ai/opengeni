@@ -130,6 +130,99 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await shared?.release();
   }, 60_000);
 
+  test("acknowledges later output without leaving and reopening the active chat", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Unread active chat",
+      );
+      const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
+      let acknowledgementAttempts = 0;
+      await page.route(`**${attentionPath}`, async (route) => {
+        acknowledgementAttempts += 1;
+        if (acknowledgementAttempts === 1) {
+          await route.fulfill({
+            status: 503,
+            contentType: "application/json",
+            body: JSON.stringify({ message: "transient acknowledgement failure" }),
+          });
+          return;
+        }
+        await route.continue();
+      });
+      const firstAcknowledgement = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          new URL(response.url()).pathname === attentionPath &&
+          response.status() === 200,
+        { timeout: 10_000 },
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      const firstAcknowledgementResponse = await firstAcknowledgement;
+      const firstReadThrough = Number(
+        firstAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence,
+      );
+      expect(acknowledgementAttempts).toBeGreaterThanOrEqual(2);
+      expect(Number.isSafeInteger(firstReadThrough)).toBe(true);
+      // Let every initial tail/load projection settle so the next mutation can
+      // only be caused by the event appended below, not by a second initial
+      // render of the same chat.
+      await page.waitForTimeout(1_500);
+
+      const laterAcknowledgement = page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          new URL(response.url()).pathname === attentionPath,
+        { timeout: 10_000 },
+      );
+      const sendResponse = await page.evaluate(
+        async ({ browserApiBaseUrl, targetWorkspaceId, targetSessionId }) => {
+          const response = await fetch(
+            `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSessionId}/events`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                type: "user.message",
+                clientEventId: crypto.randomUUID(),
+                payload: { text: "Later output arrived while the chat stayed open" },
+              }),
+            },
+          );
+          return { status: response.status, body: await response.text() };
+        },
+        {
+          browserApiBaseUrl: apiBaseUrl,
+          targetWorkspaceId: workspaceId,
+          targetSessionId: target.id,
+        },
+      );
+      expect(sendResponse).toEqual({ status: 202, body: expect.any(String) });
+      const laterAcknowledgementResponse = await laterAcknowledgement;
+      expect(laterAcknowledgementResponse.status()).toBe(200);
+      expect(
+        Number(laterAcknowledgementResponse.request().postDataJSON().acknowledgedThroughSequence),
+      ).toBeGreaterThan(firstReadThrough);
+      await page
+        .locator(`a[data-session-row="${target.id}"]`)
+        .waitFor({ state: "visible", timeout: 10_000 });
+      expect(
+        await page.locator(`a[data-session-row="${target.id}"]`).getAttribute("aria-label"),
+      ).not.toContain("unread");
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("pins through UI, reconciles another device, and stays above newer paged/search rows", async () => {
     const deviceA = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -170,12 +263,27 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.keyboard.press("Enter");
     const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
     await pinMenuItem.waitFor();
-    await pinMenuItem.focus();
-    const initialPinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
-      timeout: 10_000,
-    });
-    await pageA.keyboard.press("Enter");
-    await initialPinMutation;
+    const initialPinMutation = pageA.waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+        return (
+          response.request().method() === "PUT" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions/${target.id}/pin`
+        );
+      },
+      {
+        timeout: 10_000,
+      },
+    );
+    // Press through the locator so the keyboard action remains bound to the
+    // menu item even if Radix completes its initial-focus microtask after the
+    // item first becomes visible.
+    await pinMenuItem.press("Enter");
+    const initialPinResponse = await initialPinMutation;
+    expect({
+      status: initialPinResponse.status(),
+      body: await initialPinResponse.text(),
+    }).toEqual({ status: 200, body: expect.any(String) });
     await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
     // Session navigation now starts the real capture-backed workbench while the
     // session record is still loading. Keep a bounded render budget that includes
@@ -559,60 +667,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(await visibleRows.count()).toBe(100);
       await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
-      // Delete the exact server-owned snapshot named by the live continuation.
-      // The API must type that response as 410; the client then creates one new
-      // snapshot and immediately continues from its page-two cursor.
-      const expiredCursor = secondPage.nextCursor!;
-      const expiredSnapshotId = decodeBrowserSessionCursor(expiredCursor).snapshotId;
-      const deleted = await shared.admin<{ id: string }[]>`
-        delete from session_list_snapshots where id = ${expiredSnapshotId} returning id`;
-      expect(deleted.map((row) => row.id)).toEqual([expiredSnapshotId]);
-
-      const expiredResponse = page.waitForResponse(
-        (response) =>
-          sessionPageResponse(response, workspaceId, { search: batch, cursor: expiredCursor }),
-        { timeout: 10_000 },
-      );
-      const freshFirstResponse = page.waitForResponse(
-        (response) =>
-          successfulSessionPageResponse(response, workspaceId, { search: batch, cursor: null }),
-        { timeout: 10_000 },
-      );
-      const rebasedSecondResponse = page.waitForResponse(
-        (response) => {
-          const cursor = new URL(response.url()).searchParams.get("cursor");
-          return (
-            cursor !== null &&
-            cursor !== expiredCursor &&
-            successfulSessionPageResponse(response, workspaceId, { search: batch, cursor })
-          );
-        },
-        { timeout: 10_000 },
-      );
-      await retryOlder.click();
-      expect((await expiredResponse).status()).toBe(410);
-      const freshFirst = (await (await freshFirstResponse).json()) as BrowserSessionPage;
-      const rebasedSecond = (await (await rebasedSecondResponse).json()) as BrowserSessionPage;
-      expect(freshFirst.nextCursor).toBeTruthy();
-      expect(decodeBrowserSessionCursor(freshFirst.nextCursor!).snapshotId).not.toBe(
-        expiredSnapshotId,
-      );
-      expect(rebasedSecond.sessions).toHaveLength(50);
-      expect(await visibleRows.count()).toBe(100);
-      await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
-
-      // The rebased page-two response exposes the last cursor. All 106 matching
-      // rows remain reachable exactly once, including the oldest sentinel.
-      expect(rebasedSecond.nextCursor).toBeTruthy();
+      // The stateless keyset remains retryable after an unrelated failure; no
+      // server snapshot expires or forces a page-one rebase. The exact cursor
+      // resumes at the final six rows and keeps all previously painted rows.
       const finalPageResponse = page.waitForResponse(
         (response) =>
           successfulSessionPageResponse(response, workspaceId, {
             search: batch,
-            cursor: rebasedSecond.nextCursor,
+            cursor: secondPage.nextCursor,
           }),
         { timeout: 10_000 },
       );
-      await page.getByRole("button", { name: "Load older sessions" }).click();
+      await retryOlder.click();
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
@@ -1210,7 +1276,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await setTheme(page, theme);
         await expectNoPageOverflow(page);
         const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
-        const inspector = page.getByRole("button", { name: /session panel$/ });
+        const inspector = page.getByRole("button", { name: /^(Open|Hide) workspace$/ });
         const hamburger = page.getByRole("button", { name: "Open navigation" });
         for (const control of [pin, inspector, hamburger]) {
           const box = await control.boundingBox();
@@ -1222,6 +1288,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         // merely the header behind a closed drawer.
         await page.getByRole("button", { name: "Open navigation" }).click();
         const navigation = page.getByRole("navigation", { name: "Primary" });
+        expect(await navigation.count()).toBe(1);
         await navigation.waitFor();
         expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe(
           "Session navigation",
@@ -1362,8 +1429,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // membership row must not revoke listing (that same over-reach 403'd
       // every workspace-scoped api_key principal in production). Membership
       // is personalization for non-user subjects, not authorization: removal
-      // cleans their pins, and any snapshot the post-removal listing writes is
-      // TTL-bounded, not an unbounded leak.
+      // cleans their pins, while the post-removal keyset creates no durable
+      // per-subject listing state.
       const response = await listingPromise;
       expect(response.status).toBe(200);
       const body = (await response.json()) as {
@@ -1573,16 +1640,6 @@ function successfulSessionPageResponse(
   filters: { search?: string; cursor?: string | null } = {},
 ): boolean {
   return response.ok() && sessionPageResponse(response, workspaceId, filters);
-}
-
-function decodeBrowserSessionCursor(cursor: string): { snapshotId: string } {
-  const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
-    snapshotId?: unknown;
-  };
-  if (typeof parsed.snapshotId !== "string") {
-    throw new Error("session cursor did not contain a snapshot id");
-  }
-  return { snapshotId: parsed.snapshotId };
 }
 
 const browserDiagnostics = new WeakMap<BrowserContext, string[]>();

@@ -386,6 +386,11 @@ const SettingsSchema = z.object({
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
+  slackCommand: z
+    .string()
+    .trim()
+    .regex(/^\/[a-z0-9_-]{1,31}$/u)
+    .default("/opengeni"),
   googleDriveClientId: z.string().optional(),
   googleDriveClientSecret: z.string().optional(),
   googleDriveSyncMaxItems: z.coerce.number().int().positive().max(10_000).default(500),
@@ -886,6 +891,39 @@ const SettingsSchema = z.object({
   vercelProjectId: z.string().optional(),
   vercelTeamId: z.string().optional(),
   vercelRuntime: z.string().optional(),
+  // --- OpenSandbox (optional Kubernetes-native provisioned sandbox) ---
+  openSandboxBaseUrl: z.string().url().optional(),
+  openSandboxApiKey: z.string().min(1).optional(),
+  // Release and preview profiles must provide an immutable OCI digest. The
+  // adapter refuses tag-only references when this backend is active.
+  openSandboxImage: z.string().min(1).optional(),
+  // Renewable provider TTL is a leak/backstop clock, not OpenGeni's idle
+  // policy. The pinned server accepts a one-minute minimum; ordinary
+  // deployments default to one hour.
+  openSandboxTtlSeconds: z.coerce.number().int().min(60).max(86_400).default(3_600),
+  openSandboxUseServerProxy: EnvBoolean.default(true),
+  // Channel B (browserd / noVNC / ttyd) uses OSEP-0011 signed URI-mode ingress.
+  // Exec/files stay on the private lifecycle server-proxy regardless of this flag.
+  openSandboxSignedEndpoints: EnvBoolean.default(false),
+  openSandboxSignedEndpointTtlSeconds: z.coerce.number().int().min(60).max(3_600).default(600),
+  openSandboxChannelBPublicBaseUrl: z.string().url().optional(),
+  // Emergency hatch only: force JPEG/RFB through the API frame-proxy even when
+  // signed endpoints are on (M2 subprotocol failure). Unset means OpenSandbox
+  // uses the frame-proxy unless signed endpoints are on.
+  openSandboxInteractionFrameProxy: EnvBoolean.optional(),
+  openSandboxPoolRef: z
+    .string()
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/)
+    .optional(),
+  // Optional same-cluster, read-only observability projection. The application
+  // chart sets this only on the control worker and mounts a dedicated projected
+  // service-account token; non-Kubernetes and remote-provider deployments omit it.
+  openSandboxKubernetesInventoryNamespace: z
+    .string()
+    .min(1)
+    .max(63)
+    .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
+    .optional(),
   // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
   // The keystone flag for the stateless resume-by-id model. When FALSE the
   // agent-turn path is BYTE-FOR-BYTE today's build-and-discard behavior (no
@@ -1070,6 +1108,21 @@ const SettingsSchema = z.object({
   // (a liveness/reaper cadence), this bounds how long one turn waits for capacity
   // or provider creation before surfacing a clear turn.failed error.
   sandboxWarmingTimeoutMs: z.coerce.number().int().positive().default(600_000),
+  // Request-scoped workspace control-prefix budget: how long one HTTP-originated
+  // session/workspace mutation (Send, Steer, Pause/Resume/Cancel, queue
+  // move/edit/delete, composer draft, settings narrowing, quiescent tree
+  // deletion) may wait to enter the fair `workspace_inference_controls` prefix
+  // before failing with the retryable 503 `WORKSPACE_CONTROL_BUSY`. Worker
+  // settlement and claims never use it. The API installs the validated value
+  // into @opengeni/db once at app construction; nothing reads the env per
+  // request. Env: OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS. Default 20 s.
+  workspaceControlLockTimeoutMs: z.coerce
+    .number({
+      message: "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)",
+    })
+    .int("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)")
+    .positive("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)")
+    .default(20_000),
   // Rig setup-script budget (M3): the wall-clock timeout the rig-setup lifecycle
   // hook runs its script under, distinct from the 120s per-command lifecycle
   // default (a rig may compile/install heavy tooling on first cold create).
@@ -1129,6 +1182,9 @@ const SettingsSchema = z.object({
   githubAppId: z.string().optional(),
   githubClientId: z.string().optional(),
   githubClientSecret: z.string().optional(),
+  githubPersonalOauthEnabled: EnvBoolean.default(false),
+  githubPersonalOauthClientId: z.string().optional(),
+  githubPersonalOauthClientSecret: z.string().optional(),
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
@@ -1231,6 +1287,12 @@ export function canonicalPublicOrigin(publicBaseUrl: string | undefined): string
 export function googleDriveOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
   const origin = canonicalPublicOrigin(publicBaseUrl);
   return origin ? `${origin}/v1/integrations/google-drive/callback` : null;
+}
+
+/** Exact callback registered on the environment-specific personal GitHub OAuth App. */
+export function personalGitHubOAuthCallbackUrl(publicBaseUrl: string | undefined): string | null {
+  const origin = canonicalPublicOrigin(publicBaseUrl);
+  return origin ? `${origin}/v1/integrations/github-personal/oauth/callback` : null;
 }
 
 /** Declarative voice-input transcription provider ids. */
@@ -1626,7 +1688,7 @@ export type ModelExecutionLimitsV1 = {
 };
 
 export type CredentialSourceV1 =
-  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" }
   | { kind: "workspace_connection"; mechanism: "api_key" };
 
@@ -1647,11 +1709,13 @@ export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
 
 /**
  * Registry provider kind. "api-key" providers carry their own static key/headers;
- * connected-subscription providers resolve a workspace account token at call
- * time and never carry a static key in the registry definition.
+ * "anonymous" providers intentionally send no credential and are externally
+ * metered; connected-subscription providers resolve a workspace account token
+ * at call time and never carry a static key in the registry definition.
  */
 export const RegistryProviderKind = z.enum([
   "api-key",
+  "anonymous",
   "codex-subscription",
   "xai-subscription",
   "vercel-gateway-managed",
@@ -1709,24 +1773,72 @@ const RegistryModelSchema = z
   });
 
 /** A non-built-in provider declared by the host via OPENGENI_MODEL_PROVIDERS_JSON. */
-const RegistryProviderSchema = z.object({
-  kind: RegistryProviderKind.default("api-key"),
-  id: z.string().min(1).regex(registryId), // stable provider id, e.g. "fireworks"
-  label: z.string().min(1).optional(),
-  api: ModelProviderApi.default("chat"),
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(), // inline key (pragmatic) ...
-  apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
-  defaultQuery: z.record(z.string(), z.string()).optional(),
-  defaultHeaders: z.record(z.string(), z.string()).optional(),
-  publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
-  publicDefaultHeaderNames: z.array(z.string().min(1)).optional(),
-  // V1 derives these from provider kind. Workspace BYOK is deliberately not a
-  // registry switch and requires a separately reviewed encrypted broker.
-  credentialSource: z.never().optional(),
-  billing: z.never().optional(),
-  models: z.array(RegistryModelSchema).min(1),
-});
+const RegistryProviderSchema = z
+  .object({
+    kind: RegistryProviderKind.default("api-key"),
+    id: z.string().min(1).regex(registryId), // stable provider id, e.g. "fireworks"
+    label: z.string().min(1).optional(),
+    api: ModelProviderApi.default("chat"),
+    baseUrl: z.string().url(),
+    apiKey: z.string().optional(), // inline key (pragmatic) ...
+    apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
+    defaultQuery: z.record(z.string(), z.string()).optional(),
+    defaultHeaders: z.record(z.string(), z.string()).optional(),
+    publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
+    publicDefaultHeaderNames: z.array(z.string().min(1)).optional(),
+    // V1 derives these from provider kind. Workspace BYOK is deliberately not a
+    // registry switch and requires a separately reviewed encrypted broker.
+    credentialSource: z.never().optional(),
+    billing: z.never().optional(),
+    models: z.array(RegistryModelSchema).min(1),
+  })
+  .superRefine((provider, ctx) => {
+    if (provider.kind !== "anonymous") {
+      return;
+    }
+    if (provider.apiKey !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["apiKey"],
+        message: "anonymous providers must not declare apiKey",
+      });
+    }
+    if (provider.apiKeyEnv !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["apiKeyEnv"],
+        message: "anonymous providers must not declare apiKeyEnv",
+      });
+    }
+    if (provider.defaultHeaders !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defaultHeaders"],
+        message: "anonymous providers must not declare defaultHeaders",
+      });
+    }
+    if (provider.defaultQuery !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["defaultQuery"],
+        message: "anonymous providers must not declare defaultQuery",
+      });
+    }
+    if (provider.publicDefaultHeaderNames !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["publicDefaultHeaderNames"],
+        message: "anonymous providers must not declare publicDefaultHeaderNames",
+      });
+    }
+    if (provider.publicDefaultQueryNames !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["publicDefaultQueryNames"],
+        message: "anonymous providers must not declare publicDefaultQueryNames",
+      });
+    }
+  });
 export type RegistryProvider = z.infer<typeof RegistryProviderSchema>;
 
 export const IntegrationOAuthClientConfigSchema = z.object({
@@ -1748,7 +1860,7 @@ export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClient
 export interface ResolvedModelProvider {
   id: string; // "openai" | "azure" | registry id
   label: string;
-  kind: RegistryProviderKind; // "api-key" (built-ins + most registry) | "codex-subscription"
+  kind: RegistryProviderKind; // "api-key" (built-ins + most registry) | "anonymous" | subscription
   api: ModelProviderApi;
   builtin: boolean;
   baseUrl?: string | undefined;
@@ -2020,6 +2132,11 @@ export const SANDBOX_REQUIRED_ENV: Record<
     { field: "vercelToken", env: "OPENGENI_VERCEL_TOKEN" },
     { field: "vercelProjectId", env: "OPENGENI_VERCEL_PROJECT_ID" },
   ],
+  opensandbox: [
+    { field: "openSandboxBaseUrl", env: "OPENGENI_OPENSANDBOX_BASE_URL" },
+    { field: "openSandboxApiKey", env: "OPENGENI_OPENSANDBOX_API_KEY" },
+    { field: "openSandboxImage", env: "OPENGENI_OPENSANDBOX_IMAGE" },
+  ],
   // selfhosted needs NO per-box credentials: it is the user's own machine reached
   // over the agent's own enrollment. The enrollment-signing + relay-token secrets
   // are deployment-level (a single runtime secret, not per-active-backend creds),
@@ -2030,6 +2147,34 @@ export const SANDBOX_REQUIRED_ENV: Record<
 /** The required OPENGENI_* env var names for a backend (for the deployment manifest). */
 export function requiredSandboxEnvForBackend(backend: z.infer<typeof SandboxBackend>): string[] {
   return (SANDBOX_REQUIRED_ENV[backend] ?? []).map((entry) => entry.env);
+}
+
+function objectStorageConfiguredForWorkspaceArchives(settings: Settings): boolean {
+  switch (settings.objectStorageBackend) {
+    case "azure-blob":
+      return Boolean(
+        settings.objectStorageAzureConnectionString ||
+        (settings.objectStorageAzureAccountName && settings.objectStorageAzureAccountKey),
+      );
+    case "gcs":
+      return Boolean(
+        settings.objectStorageGcsCredentialsJson ||
+        settings.objectStorageGcsKeyFilename ||
+        settings.objectStorageGcsProjectId,
+      );
+    case "aws-s3":
+      return true;
+    case "s3-compatible":
+      return Boolean(
+        settings.objectStorageEndpoint &&
+        settings.objectStorageAccessKeyId &&
+        settings.objectStorageSecretAccessKey,
+      );
+    default: {
+      const _exhaustive: never = settings.objectStorageBackend;
+      return _exhaustive;
+    }
+  }
 }
 
 function optional(name: string): string | undefined {
@@ -2116,6 +2261,7 @@ export function getSettings(): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    slackCommand: optional("OPENGENI_SLACK_COMMAND"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
     googleDriveSyncMaxItems: optional("OPENGENI_GOOGLE_DRIVE_SYNC_MAX_ITEMS"),
@@ -2308,6 +2454,21 @@ export function getSettings(): Settings {
     vercelProjectId: optional("OPENGENI_VERCEL_PROJECT_ID"),
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
     vercelRuntime: optional("OPENGENI_VERCEL_RUNTIME"),
+    openSandboxBaseUrl: optional("OPENGENI_OPENSANDBOX_BASE_URL"),
+    openSandboxApiKey: optional("OPENGENI_OPENSANDBOX_API_KEY"),
+    openSandboxImage: optional("OPENGENI_OPENSANDBOX_IMAGE"),
+    openSandboxTtlSeconds: optional("OPENGENI_OPENSANDBOX_TTL_SECONDS"),
+    openSandboxUseServerProxy: optional("OPENGENI_OPENSANDBOX_USE_SERVER_PROXY"),
+    openSandboxSignedEndpoints: optional("OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS"),
+    openSandboxSignedEndpointTtlSeconds: optional(
+      "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINT_TTL_SECONDS",
+    ),
+    openSandboxChannelBPublicBaseUrl: optional("OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL"),
+    openSandboxInteractionFrameProxy: optional("OPENGENI_OPENSANDBOX_INTERACTION_FRAME_PROXY"),
+    openSandboxPoolRef: optional("OPENGENI_OPENSANDBOX_POOL_REF"),
+    openSandboxKubernetesInventoryNamespace: optional(
+      "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE",
+    ),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     rigVerificationLeaseOwnershipEnabled: optional(
       "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
@@ -2339,6 +2500,7 @@ export function getSettings(): Settings {
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
+    workspaceControlLockTimeoutMs: optional("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS"),
     rigSetupTimeoutMs: optional("OPENGENI_RIG_SETUP_TIMEOUT_MS"),
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",
@@ -2385,6 +2547,9 @@ export function getSettings(): Settings {
     githubAppId: optional("OPENGENI_GITHUB_APP_ID"),
     githubClientId: optional("OPENGENI_GITHUB_CLIENT_ID"),
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
+    githubPersonalOauthEnabled: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED"),
+    githubPersonalOauthClientId: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID"),
+    githubPersonalOauthClientSecret: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET"),
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
@@ -2404,11 +2569,11 @@ export function getSettings(): Settings {
   const settings = {
     ...parsed,
     sandboxIdleGraceMs:
-      raw.sandboxIdleGraceMs === undefined
+      raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
         ? Math.min(900_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
-      raw.sandboxRotationLeadMs === undefined
+      raw.sandboxRotationLeadMs === undefined && parsed.sandboxBackend === "modal"
         ? Math.min(3_600_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
         : parsed.sandboxRotationLeadMs,
     mcpServers: ensureBuiltInMcpServers(parsed),
@@ -2479,6 +2644,45 @@ export function allowedFirstPartyMcpToolsForSession(
  */
 export function effectiveModalIdleTimeoutSeconds(settings: Settings): number {
   return settings.modalIdleTimeoutSeconds ?? settings.modalTimeoutSeconds;
+}
+
+export type EffectiveSandboxLifecycle = {
+  hardLifetimeMs: number | null;
+  renewableTtlSeconds: number | null;
+  providerIdleTimeoutMs: number | null;
+  rotationLeadMs: number | null;
+};
+
+/** Resolve provider lifecycle clocks without teaching generic callers Modal or
+ * OpenSandbox field names. Modal's returned values are exactly the pre-existing
+ * hard/idle/rotation values; OpenSandbox instead exposes a renewable TTL and no
+ * finite-deadline rotation. */
+export function effectiveSandboxLifecycle(
+  settings: Settings,
+  backend: z.infer<typeof SandboxBackend> = settings.sandboxBackend,
+): EffectiveSandboxLifecycle {
+  if (backend === "modal") {
+    return {
+      hardLifetimeMs: settings.modalTimeoutSeconds * 1000,
+      renewableTtlSeconds: null,
+      providerIdleTimeoutMs: effectiveModalIdleTimeoutSeconds(settings) * 1000,
+      rotationLeadMs: settings.sandboxRotationLeadMs,
+    };
+  }
+  if (backend === "opensandbox") {
+    return {
+      hardLifetimeMs: null,
+      renewableTtlSeconds: settings.openSandboxTtlSeconds,
+      providerIdleTimeoutMs: null,
+      rotationLeadMs: null,
+    };
+  }
+  return {
+    hardLifetimeMs: CAPABILITY_DESCRIPTORS[backend].lifetime.hardLifetimeMs ?? null,
+    renewableTtlSeconds: null,
+    providerIdleTimeoutMs: null,
+    rotationLeadMs: null,
+  };
 }
 
 /**
@@ -3145,6 +3349,9 @@ function assertLatencyModeRunnable(
 }
 
 function registryCredentialSource(provider: RegistryProvider): CredentialSourceV1 {
+  if (provider.kind === "anonymous") {
+    return { kind: "deployment", mechanism: "none" };
+  }
   if (provider.kind === "codex-subscription") {
     return { kind: "connected_subscription", provider: "codex" };
   }
@@ -3158,6 +3365,9 @@ function registryCredentialSource(provider: RegistryProvider): CredentialSourceV
 }
 
 function registryBilling(provider: RegistryProvider): BillingAttributionV1 {
+  if (provider.kind === "anonymous") {
+    return { upstreamPayer: "deployment", metering: "external" };
+  }
   if (provider.kind === "codex-subscription" || provider.kind === "xai-subscription") {
     return { upstreamPayer: "connected_subscription", metering: "external" };
   }
@@ -4949,6 +5159,16 @@ function firstPartyFilesMcpServerUrl(mcpUrl: string): string {
   return `${mcpUrl.replace(/\/+$/, "")}/files`;
 }
 
+const MODAL_DESKTOP_IMAGE_DIGEST_REF = /@sha256:[0-9a-f]{64}$/i;
+
+function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
+  if (settings.modalImageId) return true;
+  return (
+    typeof settings.modalImageRef === "string" &&
+    MODAL_DESKTOP_IMAGE_DIGEST_REF.test(settings.modalImageRef)
+  );
+}
+
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
   const allowedFirstPartyMcpTools = new Set(
@@ -5038,6 +5258,59 @@ function validateSettings(settings: Settings): void {
     throw new Error(
       "OPENGENI_GOOGLE_DRIVE_CLIENT_ID and OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET must be configured together",
     );
+  }
+  if (
+    Boolean(settings.githubPersonalOauthClientId) !==
+    Boolean(settings.githubPersonalOauthClientSecret)
+  ) {
+    throw new Error(
+      "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID and OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.githubPersonalOauthEnabled) {
+    if (!settings.integrationsEnabled) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_ENABLED=true is required when personal GitHub OAuth is enabled",
+      );
+    }
+    if (settings.productAccessMode !== "managed") {
+      throw new Error(
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
+      );
+    }
+    if (!settings.githubPersonalOauthClientId || !settings.githubPersonalOauthClientSecret) {
+      throw new Error(
+        "personal GitHub OAuth requires OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID and OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+      );
+    }
+    if (settings.githubPersonalOauthClientId === settings.githubClientId) {
+      throw new Error(
+        "personal GitHub OAuth must use a different OAuth App client from the OpenGeni GitHub App",
+      );
+    }
+    if (!personalGitHubOAuthCallbackUrl(settings.publicBaseUrl)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free origin without a path, query, or fragment when personal GitHub OAuth is enabled",
+      );
+    }
+    if (
+      !settings.publicBaseUrl?.startsWith("https://") &&
+      !["local", "test"].includes(settings.environment)
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when personal GitHub OAuth is enabled outside local/test",
+      );
+    }
+    if (!settings.integrationsStateSecret) {
+      throw new Error(
+        "OPENGENI_INTEGRATIONS_STATE_SECRET is required when personal GitHub OAuth is enabled",
+      );
+    }
+    if (!settings.environmentsEncryptionKey) {
+      throw new Error(
+        "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required when personal GitHub OAuth is enabled",
+      );
+    }
   }
   if (Boolean(settings.fikenClientId) !== Boolean(settings.fikenClientSecret)) {
     throw new Error(
@@ -5339,6 +5612,18 @@ function validateSettings(settings: Settings): void {
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).
   parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
+  if (settings.sandboxBackend === "opensandbox") {
+    if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
+      throw new Error(
+        "OPENGENI_OPENSANDBOX_IMAGE must be an immutable OCI reference ending in @sha256:<64 hex characters>",
+      );
+    }
+    if (!objectStorageConfiguredForWorkspaceArchives(settings)) {
+      throw new Error(
+        "OPENGENI_SANDBOX_BACKEND=opensandbox requires configured object storage for portable /workspace archives",
+      );
+    }
+  }
   const serverIds = new Set<string>();
   for (const server of settings.mcpServers) {
     if (serverIds.has(server.id)) {
@@ -5347,30 +5632,13 @@ function validateSettings(settings: Settings): void {
     serverIds.add(server.id);
   }
   // --- sandbox lease cadence invariant (fail fast at boot) ---
-  // reaperPeriod (30s) < viewerHolderTTL (90s), and reaperPeriod + idleGrace must
-  // be strictly less than the provider lifetime (modalTimeoutSeconds*1000):
-  //   - the reaper must run more often than the TTL it polices; and
-  //   - the reaper must terminate a genuinely-idle box (after the full drain grace,
-  //     observed on the NEXT sweep) BEFORE the provider's hard lifetime reclaims it
-  //     out from under us — the provider lifetime is the backstop, not the
-  //     warm-window controller. idleGrace counts from the user's last release;
-  //     the provider clock counts from the preceding resume, so we leave the
-  //     active-turn headroom in modalTimeoutSeconds (default 86400s).
+  // Holder TTLs are provider-neutral. Modal's finite hard/idle clocks and
+  // deadline rotation are validated only when Modal is active; renewable-TTL
+  // providers such as OpenSandbox do not enter that deadline model.
   {
     const reaperPeriod = settings.sandboxLeaseReaperPeriodMs;
     const viewerTtl = settings.sandboxViewerHolderTtlMs;
     const interactionTtl = settings.sandboxInteractionHolderTtlMs;
-    const idleGraceMs = settings.sandboxIdleGraceMs;
-    const providerLifetimeMs = settings.modalTimeoutSeconds * 1000;
-    const rotationLeadMs = settings.sandboxRotationLeadMs;
-    // The EFFECTIVE box lifetime when it sits idle between turns is the Modal IDLE
-    // timeout, NOT the hard lifetime (sandbox-file-persistence): a box with no
-    // active connection is idle-reaped at idleTimeout. effectiveModalIdleTimeout
-    // defaults to the hard lifetime (so the idle-reap never beats the OpenGeni
-    // reaper), but an operator can pin it shorter — the invariants below bind the
-    // reaper cadence + drain grace to the idle timeout (the REAL ceiling), so a
-    // drained box always survives long enough for the reaper to snapshot it.
-    const idleTimeoutMs = effectiveModalIdleTimeoutSeconds(settings) * 1000;
     if (!(reaperPeriod < viewerTtl)) {
       throw new Error(
         `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS (${reaperPeriod}) must be strictly less than ` +
@@ -5385,54 +5653,57 @@ function validateSettings(settings: Settings): void {
           `more often than the controller-heartbeat horizon.`,
       );
     }
-    if (!(idleTimeoutMs <= providerLifetimeMs)) {
-      throw new Error(
-        `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS*1000 (${idleTimeoutMs}) must not exceed the hard provider ` +
-          `lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): the idle timeout is a ` +
-          `floor under the hard lifetime, not above it.`,
-      );
-    }
-    if (!(rotationLeadMs < providerLifetimeMs)) {
-      throw new Error(
-        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must be strictly less than ` +
-          `OPENGENI_MODAL_TIMEOUT_SECONDS*1000 (${providerLifetimeMs}).`,
-      );
-    }
-    // This is provider-hard-deadline headroom, not a retry delay. Rotation is
-    // admitted immediately before the same sweep's drain inventory, so only the
-    // worst-case time until that sweep plus the complete durable capture window
-    // is required. No second schedule period belongs in the availability path.
-    const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
-    if (!(rotationLeadMs > captureTimeoutMs + reaperPeriod)) {
-      throw new Error(
-        `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the durable capture ` +
-          `timeout plus one reaper period (${captureTimeoutMs + reaperPeriod}).`,
-      );
-    }
-    if (!(viewerTtl < idleTimeoutMs)) {
-      throw new Error(
-        `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the effective box ` +
-          `idle timeout (${idleTimeoutMs}): a viewer holder must be reapable before the box idles out from ` +
-          `under it (the provider idle-timeout is the backstop).`,
-      );
-    }
-    if (!(interactionTtl < idleTimeoutMs)) {
-      throw new Error(
-        `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}) must be strictly less than ` +
-          `the effective box idle timeout (${idleTimeoutMs}): a dead browser controller must be ` +
-          `reapable before the provider reclaims its placement.`,
-      );
-    }
-    if (!(reaperPeriod + idleGraceMs < idleTimeoutMs)) {
-      throw new Error(
-        `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS + OPENGENI_SANDBOX_IDLE_GRACE_MS ` +
-          `(${reaperPeriod} + ${idleGraceMs} = ${reaperPeriod + idleGraceMs}) must be strictly less than the ` +
-          `effective box idle timeout (${idleTimeoutMs}): a drained box must SURVIVE its full warm window so ` +
-          `the reaper can resume + snapshot /workspace + terminate it on the sweep AFTER the drain grace ` +
-          `elapses — Modal's idle-reap must NOT fire first (or /workspace is lost). Raise ` +
-          `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS (defaults to OPENGENI_MODAL_TIMEOUT_SECONDS) or lower ` +
-          `OPENGENI_SANDBOX_IDLE_GRACE_MS.`,
-      );
+    if (settings.sandboxBackend === "modal") {
+      const idleGraceMs = settings.sandboxIdleGraceMs;
+      const lifecycle = effectiveSandboxLifecycle(settings, "modal");
+      const providerLifetimeMs = lifecycle.hardLifetimeMs!;
+      const rotationLeadMs = lifecycle.rotationLeadMs!;
+      const idleTimeoutMs = lifecycle.providerIdleTimeoutMs!;
+      if (!(idleTimeoutMs <= providerLifetimeMs)) {
+        throw new Error(
+          `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS*1000 (${idleTimeoutMs}) must not exceed the hard provider ` +
+            `lifetime (OPENGENI_MODAL_TIMEOUT_SECONDS*1000 = ${providerLifetimeMs}): the idle timeout is a ` +
+            `floor under the hard lifetime, not above it.`,
+        );
+      }
+      if (!(rotationLeadMs < providerLifetimeMs)) {
+        throw new Error(
+          `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must be strictly less than ` +
+            `OPENGENI_MODAL_TIMEOUT_SECONDS*1000 (${providerLifetimeMs}).`,
+        );
+      }
+      const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+      if (!(rotationLeadMs > captureTimeoutMs + reaperPeriod)) {
+        throw new Error(
+          `OPENGENI_SANDBOX_ROTATION_LEAD_MS (${rotationLeadMs}) must exceed the durable capture ` +
+            `timeout plus one reaper period (${captureTimeoutMs + reaperPeriod}).`,
+        );
+      }
+      if (!(viewerTtl < idleTimeoutMs)) {
+        throw new Error(
+          `OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS (${viewerTtl}) must be strictly less than the effective box ` +
+            `idle timeout (${idleTimeoutMs}): a viewer holder must be reapable before the box idles out from ` +
+            `under it (the provider idle-timeout is the backstop).`,
+        );
+      }
+      if (!(interactionTtl < idleTimeoutMs)) {
+        throw new Error(
+          `OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS (${interactionTtl}) must be strictly less than ` +
+            `the effective box idle timeout (${idleTimeoutMs}): a dead browser controller must be ` +
+            `reapable before the provider reclaims its placement.`,
+        );
+      }
+      if (!(reaperPeriod + idleGraceMs < idleTimeoutMs)) {
+        throw new Error(
+          `OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS + OPENGENI_SANDBOX_IDLE_GRACE_MS ` +
+            `(${reaperPeriod} + ${idleGraceMs} = ${reaperPeriod + idleGraceMs}) must be strictly less than the ` +
+            `effective box idle timeout (${idleTimeoutMs}): a drained box must SURVIVE its full warm window so ` +
+            `the reaper can resume + snapshot /workspace + terminate it on the sweep AFTER the drain grace ` +
+            `elapses — Modal's idle-reap must NOT fire first (or /workspace is lost). Raise ` +
+            `OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS (defaults to OPENGENI_MODAL_TIMEOUT_SECONDS) or lower ` +
+            `OPENGENI_SANDBOX_IDLE_GRACE_MS.`,
+        );
+      }
     }
   }
   // --- stream-token secret: required-when-desktop, but GRACEFULLY DEGRADE (stream-token availability contract) ---
@@ -5443,6 +5714,20 @@ function validateSettings(settings: Settings): void {
   // negotiateCapabilities degrades the desktop cell). This keeps a desktop-
   // configured deployment bootable (headless + Channel-A still work) instead of
   // crashing the whole API on a missing secret.
+  if (
+    settings.sandboxDesktopEnabled &&
+    settings.sandboxBackend === "modal" &&
+    !["local", "test"].includes(settings.environment)
+  ) {
+    if (!isDigestPinnedModalDesktopImage(settings)) {
+      throw new Error(
+        "OPENGENI_MODAL_IMAGE_REF must be digest-pinned (registry/name@sha256:…) when " +
+          "OPENGENI_SANDBOX_BACKEND=modal and OPENGENI_SANDBOX_DESKTOP_ENABLED=true. " +
+          "Computer/Browser need docker/desktop.Dockerfile, not the official headless " +
+          "opengeni-sandbox image. Helm desktop.imageRef writes this pin.",
+      );
+    }
+  }
   if (settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined) {
     console.warn(
       "[opengeni] OPENGENI_SANDBOX_DESKTOP_ENABLED=true but neither OPENGENI_STREAM_TOKEN_SECRET nor " +
@@ -5454,10 +5739,12 @@ function validateSettings(settings: Settings): void {
   // Model provider registry: parse it here so JSON/zod errors surface at boot,
   // reject a registry id colliding with the built-in provider id (it would
   // shadow the built-in in configuredProviders), reject duplicate registry
-  // ids, and require a resolvable API key for every registry provider (a
-  // provider with no usable key can never serve a turn). Registry models flow
-  // through configuredAllowedModels, so the managed-billing pricing check above
-  // already covers them.
+  // ids, and preserve the existing key requirement for every registry provider
+  // except connected Codex and the explicit anonymous opt-in. Anonymous
+  // providers are externally metered; a missing key on every other ordinary
+  // provider remains a boot error.
+  // Registry models flow through configuredAllowedModels, so the managed-billing
+  // pricing check above already covers the OpenGeni-credit providers.
   const registryProviders = parseModelProvidersJson(settings.modelProvidersJson);
   const builtinId = builtinProviderId(settings);
   const providerIds = new Set<string>();
@@ -5482,7 +5769,11 @@ function validateSettings(settings: Settings): void {
       );
     }
     providerIds.add(provider.id);
-    if (provider.kind !== "codex-subscription" && !resolveProviderApiKey(provider)) {
+    if (
+      provider.kind !== "codex-subscription" &&
+      provider.kind !== "anonymous" &&
+      !resolveProviderApiKey(provider)
+    ) {
       throw new Error(
         `OPENGENI_MODEL_PROVIDERS_JSON provider ${provider.id} requires a resolvable API key (set apiKey or apiKeyEnv)`,
       );

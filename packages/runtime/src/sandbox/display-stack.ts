@@ -301,7 +301,29 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
     `if [ "$frc" -eq 75 ]; then ds_stage outer_flock_timeout; echo "OPENGENI_DESKTOP_LOCK_TIMEOUT"; exit 15; fi; ` +
     `if [ "$frc" -ne 0 ]; then exit "$frc"; fi; ` +
     `fi`;
+  // A fresh /workspace HOME has no xfce4-desktop xfconf. xfdesktop then keeps a
+  // 10x10 manager window and never maps the 1280x800 Desktop child, so scrot
+  // stays ~21 KB (panel on black) and this gate fails forever. Seed the
+  // canonical xfce-blue.jpg backdrop (measured ~365 KB scrot) and start
+  // xfdesktop when the session autostart did not. $mon/$candidate/$WALL are
+  // shell — no ${} braces.
+  const paintSeed =
+    `ds_stage paint_backdrop_seed; ` +
+    `WALL=""; ` +
+    `for candidate in /usr/share/backgrounds/xfce/xfce-blue.jpg /usr/share/backgrounds/xfce/*.jpg /usr/share/backgrounds/xfce/*.png; do ` +
+    `[ -f "$candidate" ] && WALL="$candidate" && break; ` +
+    `done; ` +
+    `if [ -n "$WALL" ] && command -v xfconf-query >/dev/null 2>&1; then ` +
+    `for mon in monitor0 monitor1 monitorscreen monitorScreen monitorXvfb; do ` +
+    `xfconf-query -c xfce4-desktop -p /backdrop/screen0/$mon/workspace0/last-image --create -t string -s "$WALL" >/dev/null 2>&1 || true; ` +
+    `xfconf-query -c xfce4-desktop -p /backdrop/screen0/$mon/workspace0/image-style --create -t int -s 5 >/dev/null 2>&1 || true; ` +
+    `done; ` +
+    `fi; ` +
+    `if command -v xfdesktop >/dev/null 2>&1 && ! pgrep -x xfdesktop >/dev/null 2>&1; then ` +
+    `DISPLAY=:0 xfdesktop --disable-wm-check >/tmp/opengeni-desktop/xfdesktop.log 2>&1 & ` +
+    `fi; `;
   const paintProbe =
+    `${paintSeed}` +
     `ds_stage paint_probe_started; p=/tmp/opengeni-desktop/paint-probe.png; prev=0; ` +
     `for i in $(seq 1 ${PAINT_PROBE_ATTEMPTS}); do ` +
     // Capture, then measure the PNG byte-size. `wc -c < "$p"` yields a bare integer; a

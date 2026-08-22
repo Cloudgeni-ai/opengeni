@@ -67,6 +67,7 @@ export type SessionClientLike = Pick<
   | "listChannels"
   | "createChannel"
   | "updateChannel"
+  | "reorderChannels"
   | "deleteChannel"
   | "updateSessionChannel"
   // Rigs

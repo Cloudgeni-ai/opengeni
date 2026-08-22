@@ -10,6 +10,7 @@ import {
   toolDisplayName,
   type AgentMessageItem,
   type FleetDecisionItem,
+  type HumanInputItem,
   type MemoryItem,
   type SandboxItem,
   type StartupPhaseItem,
@@ -845,6 +846,94 @@ describe("buildTimeline", () => {
     const message = items[0] as UserMessageItem;
     expect(message.resources).toEqual([]);
     expect(message.tools).toEqual([]);
+  });
+
+  test("projects answered structured input as a persistent question-and-answer item", () => {
+    reset();
+    const items = buildTimeline([
+      event("session.humanInput.requested", {
+        request: {
+          id: "request-1",
+          questions: [
+            {
+              id: "repository",
+              kind: "text",
+              label: "Repository",
+              prompt: "Which repository?",
+              options: [],
+            },
+            {
+              id: "github_access",
+              kind: "single_select",
+              label: "GitHub access",
+              prompt: "How should access be provided?",
+              options: [{ id: "connect_workspace", label: "Connect the workspace integration" }],
+            },
+            {
+              id: "regions",
+              kind: "multi_select",
+              label: "Regions",
+              prompt: "Where should this run?",
+              options: [{ id: "eu_north", label: "EU North" }],
+              allowOther: true,
+            },
+          ],
+        },
+      }),
+      event("user.humanInputResponse", {
+        requestId: "request-1",
+        response: {
+          outcome: "answered",
+          answers: [
+            { questionId: "repository", values: ["https://github.com/acme/widget"] },
+            { questionId: "github_access", values: ["connect_workspace"] },
+            { questionId: "regions", values: ["eu_north"], other: "On-premises" },
+          ],
+        },
+      }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "human-input",
+      requestId: "request-1",
+      answers: [
+        {
+          questionId: "repository",
+          label: "Repository",
+          values: ["https://github.com/acme/widget"],
+        },
+        {
+          questionId: "github_access",
+          label: "GitHub access",
+          values: ["Connect the workspace integration"],
+        },
+        { questionId: "regions", label: "Regions", values: ["EU North", "On-premises"] },
+      ],
+    });
+    expect((items[0] as HumanInputItem).answers.flatMap((answer) => answer.values)).not.toContain(
+      "connect_workspace",
+    );
+  });
+
+  test("keeps structured answers visible when the request event is outside the loaded page", () => {
+    reset();
+    const items = buildTimeline([
+      event("user.humanInputResponse", {
+        requestId: "request-before-window",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "release_channel", values: ["canary"] }],
+        },
+      }),
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "human-input",
+      requestId: "request-before-window",
+      answers: [{ questionId: "release_channel", label: "Release Channel", values: ["canary"] }],
+    });
   });
 
   test("projects realtime voice text while retaining expandable execution context", () => {
@@ -2079,6 +2168,52 @@ describe("buildTimeline", () => {
       }),
     ]);
     expect(items[0]).toMatchObject({ kind: "goal", action: "paused" });
+  });
+
+  test("agent goal.held is suppressed like the other agent goal tool events", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-wait",
+          name: "opengeni__goal_wait",
+          arguments: { reason: "two children still running", untilSeconds: 900 },
+        }),
+        event("agent.toolCall.output", { id: "call-wait", output: "ok" }),
+        event("goal.held", {
+          goalId: "goal-1",
+          turnId: "turn-1",
+          untilAt: "2026-01-01T00:15:00.000Z",
+          reason: "two children still running",
+          actor: "agent",
+        }),
+      ]),
+    );
+    expect(groups.filter((group) => group.kind === "item")).toHaveLength(0);
+    const activities = collectActivityGroups(groups);
+    expect(activities).toHaveLength(1);
+    expect(
+      activities[0]!.items
+        .filter((item): item is ToolCallItem => item.kind === "tool-call")
+        .map((item) => item.name),
+    ).toEqual(["opengeni__goal_wait"]);
+  });
+
+  test("non-agent goal.held renders a held landmark with its reason", () => {
+    reset();
+    const items = buildTimeline([
+      event("goal.held", {
+        goalId: "goal-1",
+        turnId: "turn-1",
+        untilAt: "2026-01-01T00:15:00.000Z",
+        reason: "waiting for the nightly build",
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "goal",
+      action: "held",
+      text: "waiting for the nightly build",
+    });
   });
 
   test("goal.continuation still renders a landmark", () => {

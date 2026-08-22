@@ -26,7 +26,11 @@ import {
   temporalOverlapPolicy,
   temporalScheduleSpec,
 } from "../src/index";
-import { stripeCheckoutSessionCreateParams, stripeCustomerProvider } from "../src/routes/billing";
+import {
+  stripeBillingPortalSessionCreateParams,
+  stripeCheckoutSessionCreateParams,
+  stripeCustomerProvider,
+} from "../src/routes/billing";
 import {
   applyCapabilityEnablement,
   createCatalogItem,
@@ -547,6 +551,12 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/terminal/pty/resize`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/terminal/pty/:action",
     );
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/connections/connection-1/github/repositories`),
+    ).toBe("/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories");
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/connections/connection-1/github/repositories/verify`),
+    ).toBe("/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify");
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );
@@ -924,6 +934,17 @@ describe("API helpers", () => {
     expect(params.customer).toBe("cus_test");
     expect(params.customer_update).toEqual({ address: "auto", name: "auto" });
     expect(params.automatic_tax).toEqual({ enabled: true });
+    expect(params.invoice_creation).toEqual({
+      enabled: true,
+      invoice_data: {
+        metadata: {
+          opengeni_account_id: "00000000-0000-4000-8000-000000000001",
+          opengeni_credit_amount_usd: "25.50",
+          opengeni_credit_micros: "25500000",
+          opengeni_credit_idempotency_key: "checkout:test",
+        },
+      },
+    });
     expect(params.line_items?.[0]?.price_data?.unit_amount).toBe(2550);
     expect(params.line_items?.[0]?.price_data?.product).toBe("prod_opengeni_credits");
     expect(params.metadata?.opengeni_credit_amount_usd).toBe("25.50");
@@ -971,6 +992,26 @@ describe("API helpers", () => {
     expect(
       stripeCustomerProvider({ settings: { stripeSecretKey: "sk_test_example" } } as never),
     ).toBe("stripe:test");
+  });
+
+  test("returns Stripe billing portal sessions to the canonical billing page", () => {
+    expect(
+      stripeBillingPortalSessionCreateParams({
+        customerId: "cus_test",
+        publicBaseUrl: "https://app.opengeni.ai",
+        returnUrl: "https://app.opengeni.ai/organizations/test/billing?tab=credits",
+      }),
+    ).toEqual({
+      customer: "cus_test",
+      return_url: "https://app.opengeni.ai/organizations/test/billing?tab=credits",
+    });
+    expect(() =>
+      stripeBillingPortalSessionCreateParams({
+        customerId: "cus_test",
+        publicBaseUrl: "https://app.opengeni.ai",
+        returnUrl: "https://evil.example/billing",
+      }),
+    ).toThrow("returnUrl must use the OpenGeni public origin");
   });
 
   test("discovers public MCP registry servers with bounded latest-version search", async () => {

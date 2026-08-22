@@ -106,6 +106,7 @@ import {
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
   refreshCodemodeTokenFile,
+  refreshGitCredentialBindingTokenFiles,
   releaseMcpResultCustomDataFromSdkEvent,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
@@ -409,7 +410,7 @@ describe("structured human-input runtime boundary", () => {
               prompt: "Choose one",
               options: [{ id: "a", label: "A" }],
               required: true,
-              allowOther: false,
+              allowOther: true,
             },
           ],
           allowSkip: true,
@@ -607,7 +608,7 @@ describe("structured human-input runtime boundary", () => {
             {
               ...validQuestions[0],
               required: true,
-              allowOther: false,
+              allowOther: true,
             },
           ],
           allowSkip: false,
@@ -4035,6 +4036,14 @@ describe("runtime event normalization", () => {
     expect(command).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',
     );
+    // origin/HEAD is best-effort (branch refs only); a PR ref, tag, or SHA must not
+    // fail the clone because `remote set-head` rejects it.
+    expect(command).toContain(
+      'if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+    );
+    expect(command).toContain('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true');
+    expect(command).toContain('if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then');
+    expect(command).not.toContain('origin "$ref" && git -C "$tmp" remote set-head');
     expect(command).toContain('git -C "$target" rev-parse --is-inside-work-tree >/dev/null');
     expect(command).toContain("Repository resource ready at $target");
     expect(command).toContain("ensure_git");
@@ -4388,6 +4397,168 @@ describe("runtime event normalization", () => {
     expect(cmd).toContain("export OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED='azdo_liveToken456'");
     expect(cmd).not.toContain("GITLAB_TOKEN='glpat_liveToken123'");
     expect(cmd).not.toContain("AZURE_DEVOPS_EXT_PAT='azdo_liveToken456'");
+  });
+
+  test("smart-Git broker bearer uses private file ingress and never command text", async () => {
+    const commands: string[] = [];
+    const created: Array<{ path: string; diff: string }> = [];
+    const deleted: string[] = [];
+    await runRepositoryCloneHook(
+      {
+        createEditor: () => ({
+          createFile: async (operation: { path: string; diff: string }) => {
+            created.push(operation);
+          },
+          updateFile: async () => undefined,
+          deleteFile: async (operation: { path: string }) => {
+            deleted.push(operation.path);
+          },
+        }),
+        exec: async (args: { cmd: string }) => {
+          commands.push(args.cmd);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          provider: "github",
+          connectionType: "github_personal",
+          credentialBindingId: "personal-binding",
+          repositoryId: "9007199254740993123",
+          access: "read",
+        },
+      ],
+      {
+        environment: { HOME: "/workspace" },
+        gitCredentialBindings: [
+          {
+            credentialBindingId: "personal-binding",
+            provider: "github",
+            token: "oggh1.secret-broker-bearer",
+            transport: {
+              kind: "http_broker",
+              repositories: [
+                {
+                  repositoryUri: "https://github.com/acme/private.git",
+                  brokerUri: "https://broker.example.test/v1/git/personal/route",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    );
+
+    expect(created).toHaveLength(1);
+    expect(created[0]!.path).toStartWith("/workspace/.opengeni/git-broker-seeds/");
+    expect(created[0]!.diff).toBe("+oggh1.secret-broker-bearer");
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).not.toContain("oggh1.secret-broker-bearer");
+    expect(commands[0]).toContain(created[0]!.path);
+    expect(deleted).toEqual([created[0]!.path]);
+  });
+
+  test("smart-Git broker bearer attempts cleanup when the editor write outcome is unknown", async () => {
+    const created: string[] = [];
+    const deleted: string[] = [];
+
+    await expect(
+      runRepositoryCloneHook(
+        {
+          createEditor: () => ({
+            createFile: async (operation: { path: string }) => {
+              created.push(operation.path);
+              throw new Error("response lost after remote write");
+            },
+            updateFile: async () => undefined,
+            deleteFile: async (operation: { path: string }) => {
+              deleted.push(operation.path);
+            },
+          }),
+          exec: async () => {
+            throw new Error("clone command must not run after an unconfirmed seed write");
+          },
+        } as any,
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "personal-binding",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        {
+          environment: { HOME: "/workspace" },
+          gitCredentialBindings: [
+            {
+              credentialBindingId: "personal-binding",
+              provider: "github",
+              token: "oggh1.secret-broker-bearer",
+              transport: {
+                kind: "http_broker",
+                repositories: [
+                  {
+                    repositoryUri: "https://github.com/acme/private.git",
+                    brokerUri: "https://broker.example.test/v1/git/personal/route",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ),
+    ).rejects.toThrow("Sandbox could not receive the Git broker credential");
+
+    expect(created).toHaveLength(1);
+    expect(deleted).toEqual(created);
+  });
+
+  test("smart-Git broker renewal uses the same token-free command boundary", async () => {
+    const commands: string[] = [];
+    const created: Array<{ path: string; diff: string }> = [];
+    await refreshGitCredentialBindingTokenFiles(
+      {
+        createEditor: () => ({
+          createFile: async (operation: { path: string; diff: string }) => {
+            created.push(operation);
+          },
+          updateFile: async () => undefined,
+          deleteFile: async () => undefined,
+        }),
+        exec: async (args: { cmd: string }) => {
+          commands.push(args.cmd);
+          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+        },
+      } as any,
+      [
+        {
+          credentialBindingId: "personal-binding",
+          provider: "github",
+          token: "oggh1.renewed-secret-bearer",
+          transport: {
+            kind: "http_broker",
+            repositories: [
+              {
+                repositoryUri: "https://github.com/acme/private.git",
+                brokerUri: "https://broker.example.test/v1/git/personal/route",
+              },
+            ],
+          },
+        },
+      ],
+    );
+
+    expect(created[0]!.diff).toBe("+oggh1.renewed-secret-bearer");
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).not.toContain("oggh1.renewed-secret-bearer");
+    expect(commands[0]).toContain(created[0]!.path);
   });
 
   test("TOKEN-BROKER (B1): with NO seed the clone hook command is byte-for-byte the un-prefixed clone (no-op on selfhosted)", async () => {

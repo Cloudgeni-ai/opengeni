@@ -25,6 +25,67 @@ export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-ima
 
 export type ModelHistoryItem = Record<string, unknown>;
 
+type WithoutOutputOnlyProviderDataFields<T> = T extends ModelHistoryItem ? Omit<T, "status"> : T;
+
+type WithoutOutputOnlyProviderDataField<T extends ModelHistoryItem> = "providerData" extends keyof T
+  ? string extends keyof T
+    ? {
+        providerData?: WithoutOutputOnlyProviderDataFields<T["providerData"]>;
+      }
+    : object extends Pick<T, Extract<keyof T, "providerData">>
+      ? {
+          providerData?: WithoutOutputOnlyProviderDataFields<T["providerData"]>;
+        }
+      : {
+          providerData: WithoutOutputOnlyProviderDataFields<T["providerData"]>;
+        }
+  : object;
+
+type WithoutOutputOnlyHistoryItemFields<T extends ModelHistoryItem> = T extends unknown
+  ? Omit<T, "status" | "providerData"> & WithoutOutputOnlyProviderDataField<T>
+  : never;
+
+/**
+ * Responses output items carry `status` (`in_progress` / `completed` /
+ * `incomplete`). That field is not conversation meaning — pairing is `call_id`
+ * — and Codex's input schema 400s it (`Unknown parameter: 'input[N].status'`).
+ * SuperGrok accepts items with or without it. The SDK also nests `status` on
+ * `providerData` (reasoning items) and flattens it back onto the request.
+ * Canonical history therefore omits both at persist so portable sessions can
+ * cross Responses providers.
+ */
+export function omitOutputOnlyHistoryItemFields<T extends ModelHistoryItem>(
+  item: T,
+): WithoutOutputOnlyHistoryItemFields<T> {
+  if (!item || typeof item !== "object") {
+    return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
+  }
+  const providerData =
+    item.providerData && typeof item.providerData === "object"
+      ? (item.providerData as Record<string, unknown>)
+      : null;
+  const hasTopStatus = "status" in item;
+  const hasNestedStatus = Boolean(providerData && "status" in providerData);
+  if (!hasTopStatus && !hasNestedStatus) {
+    return item as unknown as WithoutOutputOnlyHistoryItemFields<T>;
+  }
+  const next = { ...item };
+  if (hasTopStatus) delete (next as Record<string, unknown>).status;
+  if (hasNestedStatus && providerData) {
+    const { status: _dropped, ...rest } = providerData;
+    (next as Record<string, unknown>).providerData = rest;
+  }
+  return next as unknown as WithoutOutputOnlyHistoryItemFields<T>;
+}
+
+/** Persist/replay boundary: drop output-only fields, then bound tool output. */
+export function canonicalizePersistedHistoryItem<T extends ModelHistoryItem>(
+  item: T,
+  policyTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): WithoutOutputOnlyHistoryItemFields<T> {
+  return boundModelToolOutputItem(omitOutputOnlyHistoryItemFields(item), policyTokens);
+}
+
 export const CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS = 10_000;
 export const CODEX_TOOL_OUTPUT_SERIALIZATION_ALLOWANCE = 1.2;
 export const DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS =

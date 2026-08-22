@@ -13,7 +13,15 @@ import {
 } from "@opengeni/react";
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
-import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon } from "lucide-react";
+import {
+  CalendarClockIcon,
+  LockIcon,
+  PanelRightCloseIcon,
+  PanelRightOpenIcon,
+  PauseIcon,
+  PencilIcon,
+  PinIcon,
+} from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
@@ -35,6 +43,7 @@ import type { LatencyMode, Session } from "@/types";
 export function SessionHeader({
   session,
   ancestors,
+  onOpenSchedule,
   lineageLoading,
   lineageError,
   connectionState,
@@ -47,6 +56,7 @@ export function SessionHeader({
   onPin,
   sandboxSlot,
   codexSlot,
+  accessSlot,
   leading,
   lastStartedModel,
   lastStartedReasoningEffort,
@@ -58,6 +68,11 @@ export function SessionHeader({
   session: Session;
   /** Root-to-direct-parent order. */
   ancestors: SessionSummary[];
+  /**
+   * Present only when a scheduled task started this session. Opens that task on
+   * the Schedules page so the reader can see or edit what put this here.
+   */
+  onOpenSchedule?: (() => void) | null;
   lineageLoading?: boolean;
   lineageError?: Error | null;
   connectionState: SessionEventsConnectionState;
@@ -75,6 +90,8 @@ export function SessionHeader({
    * clickable for account status/switch. Absent for host-credit sessions.
    */
   codexSlot?: ReactNode;
+  /** Compact session access state/menu, lazy-mounted by the route shell. */
+  accessSlot?: ReactNode;
   /** Leading control (the mobile hamburger); absent on desktop. */
   leading?: ReactNode;
   /**
@@ -128,8 +145,9 @@ export function SessionHeader({
     <header className="flex min-h-14 min-w-0 shrink-0 flex-wrap items-center gap-1 border-b border-border bg-surface/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-surface/65">
       {leading}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
-        {/* Child sessions link back to the manager that spawned them. */}
-        <div className="min-w-0">
+        {/* Child sessions link back to the manager that spawned them, and a
+            scheduled run links back to the schedule that started it. */}
+        <div className="flex min-w-0 items-center gap-1.5">
           <SessionAncestryBreadcrumb
             workspaceId={session.workspaceId}
             parentSessionId={session.parentSessionId}
@@ -137,8 +155,22 @@ export function SessionHeader({
             loading={lineageLoading}
             error={lineageError}
           />
+          {onOpenSchedule ? (
+            <button
+              type="button"
+              onClick={onOpenSchedule}
+              className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
+              title="Open the schedule that started this session"
+            >
+              <CalendarClockIcon aria-hidden className="size-3" />
+              Schedule
+            </button>
+          ) : null}
         </div>
-        <SessionTitleEditor session={session} onRename={onRename} />
+        <div className="flex min-w-0 items-center gap-1.5">
+          <SessionTitleEditor session={session} onRename={onRename} />
+          {accessSlot}
+        </div>
       </div>
       <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1.5 sm:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
@@ -203,10 +235,15 @@ export function SessionHeader({
           variant={inspectorOpen ? "secondary" : "ghost"}
           size="icon-sm"
           onClick={onToggleInspector}
-          aria-label={inspectorOpen ? "Hide session panel" : "Show session panel"}
+          aria-label={inspectorOpen ? "Hide workspace" : "Open workspace"}
+          title={inspectorOpen ? "Hide workspace" : "Open workspace"}
           className="pointer-coarse:size-11"
         >
-          <PanelRightIcon className="size-4" />
+          {inspectorOpen ? (
+            <PanelRightCloseIcon className="size-4" />
+          ) : (
+            <PanelRightOpenIcon className="size-4" />
+          )}
         </Button>
       </div>
     </header>

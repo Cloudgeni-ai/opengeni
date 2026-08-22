@@ -367,15 +367,15 @@ Before merging whichever PR will become the release source, retain its exact
 admitted head with `seal-release-head.yml`; trusted Version-PR CI performs this
 step automatically. The canonical `opengeni-release-head-<sha>` tag must exist
 before branch cleanup and is only a durable check-lookup anchor, never a
-replacement for review or acceptance.
+replacement for merge provenance or acceptance.
 
 1. Merge reviewed source to `main`.
 2. Wait for trusted Version-PR CI to finish against one unchanged head, then
-   submit a native approving review bound to that exact head **before** merging
-   the generated Version PR. Verify the review's commit SHA and submission time;
-   approval added after merge cannot establish release provenance. Merge only
-   after that evidence exists so the release source has exact package versions
-   and no pending changesets.
+   merge the generated Version PR so the release source has exact package
+   versions and no pending changesets. GitHub branch protection may still
+   require a review to merge; ordinary candidate/operator admission binds the
+   merged associated PR, not a later GitHub `APPROVE` or structured PASS body
+   on that head.
 3. Dispatch `release-candidate.yml` from the immutable retained tag for the
    Version PR's trusted base. Supply that exact base SHA as `controller_sha` and
    the exact current `main` SHA as `source_sha`. Build

@@ -63,13 +63,13 @@ import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 
 const LazyBrowserViewer = lazy(async () => {
-  const viewers = await import("./interactive-workbench-viewers");
-  return { default: viewers.BrowserViewer };
+  const { BrowserViewer } = await import("./browser-viewer");
+  return { default: BrowserViewer };
 });
 
 const LazyComputerViewer = lazy(async () => {
-  const viewers = await import("./interactive-workbench-viewers");
-  return { default: viewers.ComputerViewer };
+  const { ComputerViewer } = await import("./computer-viewer");
+  return { default: ComputerViewer };
 });
 
 /** A host-routed notification (replaces the app-only `sonner` toast coupling). */
@@ -123,17 +123,6 @@ function captureDegradedMessage(reason: string): string {
     default:
       return "Workspace capture is incomplete because repository discovery failed. Live files remain authoritative.";
   }
-}
-
-function WorkbenchTabLabel({ icon, children }: { icon: ReactNode; children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="[&>svg]:size-3.5" aria-hidden>
-        {icon}
-      </span>
-      <span>{children}</span>
-    </span>
-  );
 }
 
 function WorkbenchSurfaceLoading({ name }: { name: "Browser" | "Desktop" }) {
@@ -262,7 +251,7 @@ function workspaceTurnInFlight(events: SessionEvent[]): boolean {
 export type WorkspaceMachine = {
   /** Whether at least one built-in workbench surface is enabled. */
   enabled: boolean;
-  /** The derived live/waking/offline chip model. */
+  /** The derived live/waking/sleeping-or-offline chip model. */
   chip: MachineChip;
   /** The machine these surfaces are bound to (the Modal group box or a
    *  self-hosted machine), or null while the fleet is still resolving. */
@@ -305,6 +294,8 @@ export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
   /** Unique identity for `requestedFilePath`, including repeated requests for the
    *  same path. */
   requestedFileRequestId?: string | number | null | undefined;
+  /** 1-based line to reveal after `requestedFilePath` opens. */
+  requestedFileLine?: number | null | undefined;
   /** Route a guarded diff into the host's Files tab. */
   onOpenFile?: ((path: string) => void) | undefined;
   /** Restore and report navigation inside the built-in workbench surfaces. */
@@ -366,6 +357,7 @@ export function useSandboxWorkspaceTabs(
     browserExtensionSetupUrl,
     requestedFilePath,
     requestedFileRequestId,
+    requestedFileLine,
     onOpenFile,
     initialFilePath,
     onFilePathChange,
@@ -437,6 +429,9 @@ export function useSandboxWorkspaceTabs(
     },
     [sessionId],
   );
+  useEffect(() => {
+    if (requestedFilePath) requestWarmIntent("warmFiles");
+  }, [requestWarmIntent, requestedFilePath, requestedFileRequestId]);
 
   // The session's machine fleet + the active-sandbox pointer. Drives the header
   // chip (which machine + its connection state). Polls slowly — ambient context.
@@ -712,7 +707,8 @@ export function useSandboxWorkspaceTabs(
     if (changesEnabled)
       list.push({
         id: WORKBENCH_TAB_CHANGES,
-        label: <WorkbenchTabLabel icon={<GitCompareArrowsIcon />}>Changes</WorkbenchTabLabel>,
+        label: "Changes",
+        icon: <GitCompareArrowsIcon />,
         badge: dirtyCount > 0 ? <DirtyBadge count={dirtyCount} /> : undefined,
         content: (
           <ChangesTabBody
@@ -744,7 +740,8 @@ export function useSandboxWorkspaceTabs(
     if (filesEnabled)
       list.push({
         id: WORKBENCH_TAB_FILES,
-        label: <WorkbenchTabLabel icon={<FileCode2Icon />}>Files</WorkbenchTabLabel>,
+        label: "Files",
+        icon: <FileCode2Icon />,
         content: (
           <SandboxFiles
             key={sessionId}
@@ -771,6 +768,9 @@ export function useSandboxWorkspaceTabs(
                     ? { requestedPathRequestId: requestedFileRequestId }
                     : {}),
                   requestedPathReady: sandboxAcceptsLiveIo(liveness),
+                  ...(requestedFileLine != null && requestedFileLine > 0
+                    ? { requestedLine: requestedFileLine }
+                    : {}),
                 }
               : {})}
             // Ordinary capture browsing does not warm a box. The first edit — or an
@@ -787,7 +787,8 @@ export function useSandboxWorkspaceTabs(
     if (terminalOn) {
       list.push({
         id: WORKBENCH_TAB_TERMINAL,
-        label: <WorkbenchTabLabel icon={<SquareTerminalIcon />}>Terminal</WorkbenchTabLabel>,
+        label: "Terminal",
+        icon: <SquareTerminalIcon />,
         content: (
           <div className="h-full bg-og-bg p-1">
             <SandboxTerminal
@@ -812,7 +813,8 @@ export function useSandboxWorkspaceTabs(
     if (browserEnabled) {
       list.push({
         id: WORKBENCH_TAB_BROWSER,
-        label: <WorkbenchTabLabel icon={<Globe2Icon />}>Browser</WorkbenchTabLabel>,
+        label: "Browser",
+        icon: <Globe2Icon />,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Browser" />}>
             <LazyBrowserViewer
@@ -848,7 +850,8 @@ export function useSandboxWorkspaceTabs(
     if (desktopEnabled) {
       list.push({
         id: WORKBENCH_TAB_DESKTOP,
-        label: <WorkbenchTabLabel icon={<MonitorIcon />}>Desktop</WorkbenchTabLabel>,
+        label: "Desktop",
+        icon: <MonitorIcon />,
         content: (
           <Suspense fallback={<WorkbenchSurfaceLoading name="Desktop" />}>
             <LazyComputerViewer
@@ -888,6 +891,7 @@ export function useSandboxWorkspaceTabs(
     warmTerminal,
     requestedFilePath,
     requestedFileRequestId,
+    requestedFileLine,
     onOpenFile,
     initialFilePath,
     onFilePathChange,
@@ -956,6 +960,18 @@ export type SandboxWorkspaceProps = ClientOverride & {
   onActiveTabChange?: ((activeTab: string) => void) | undefined;
   initialFilePath?: string | null | undefined;
   onFilePathChange?: ((path: string | null) => void) | undefined;
+  /**
+   * Host request to open a workspace file (and optional line) in Files. A new
+   * `requestId` re-opens even the same path.
+   */
+  openFileRequest?:
+    | {
+        path: string;
+        line?: number | null;
+        requestId: number;
+      }
+    | null
+    | undefined;
   initialBrowserSessionId?: string | null | undefined;
   onBrowserSessionIdChange?: ((browserSessionId: string | null) => void) | undefined;
   initialComputerSessionId?: string | null | undefined;
@@ -1001,6 +1017,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     onActiveTabChange,
     initialFilePath,
     onFilePathChange,
+    openFileRequest,
     initialBrowserSessionId,
     onBrowserSessionIdChange,
     initialComputerSessionId,
@@ -1027,6 +1044,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const [requestedFile, setRequestedFile] = useState<{
     sessionId: string;
     path: string;
+    line: number | null;
     requestId: number;
   } | null>(null);
   const [requestedComputer, setRequestedComputer] = useState<{
@@ -1039,15 +1057,28 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const selectedTab = storedSelection?.sessionId === sessionId ? storedSelection.tab : null;
   const activeTabHint = selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
   const openFile = useCallback(
-    (path: string) => {
+    (path: string, line?: number | null) => {
       nextFileRequestId.current += 1;
-      setRequestedFile({ sessionId, path, requestId: nextFileRequestId.current });
+      setRequestedFile({
+        sessionId,
+        path,
+        line: line != null && line > 0 ? line : null,
+        requestId: nextFileRequestId.current,
+      });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
       onActiveTabChange?.(WORKBENCH_TAB_FILES);
       onFilePathChange?.(path);
+      onCollapsedChange?.(false);
     },
-    [onActiveTabChange, onFilePathChange, sessionId],
+    [onActiveTabChange, onCollapsedChange, onFilePathChange, sessionId],
   );
+  const handledOpenFileRequestId = useRef<number | null>(null);
+  useEffect(() => {
+    if (!openFileRequest) return;
+    if (handledOpenFileRequestId.current === openFileRequest.requestId) return;
+    handledOpenFileRequestId.current = openFileRequest.requestId;
+    openFile(openFileRequest.path, openFileRequest.line ?? null);
+  }, [openFile, openFileRequest]);
   const openComputer = useCallback(
     (computerSessionId: string) => {
       nextComputerRequestId.current += 1;
@@ -1088,6 +1119,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     onComputerSessionIdChange,
     requestedFilePath: requestedFile?.sessionId === sessionId ? requestedFile.path : null,
     requestedFileRequestId: requestedFile?.sessionId === sessionId ? requestedFile.requestId : null,
+    requestedFileLine: requestedFile?.sessionId === sessionId ? requestedFile.line : null,
     onOpenFile: openFile,
     onOpenComputerSession: openComputer,
     requestedComputerSessionId:
@@ -1162,7 +1194,7 @@ function chipDotClass(state: MachineChip["state"]): string {
 }
 
 /**
- * The dock-header machine status: one quiet, truthful live/waking/offline
+ * The dock-header machine status: one quiet, truthful live/waking/resting
  * indicator. It is intentionally not interactive; detailed machine controls do
  * not belong in a transient popover above the workspace tabs.
  */

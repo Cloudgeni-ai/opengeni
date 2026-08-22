@@ -33,6 +33,7 @@ import {
   CodemodePayloadTooLargeError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
+  configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
   getWorkspace,
   rlsContextForWorkspace,
@@ -41,12 +42,13 @@ import {
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
-import { ApiHttpError } from "./http/api-error";
+import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
@@ -94,11 +96,18 @@ import { registerBrowserIdentityRoutes } from "./routes/browser-identities";
 import { registerBrowserSessionRoutes } from "./routes/browser-sessions";
 import { registerComputerSessionRoutes } from "./routes/computer-sessions";
 import { registerGitHubRoutes } from "./routes/github";
+import { registerPersonalGitHubRoutes } from "./routes/personal-github";
+import {
+  isPersonalGitHubGitBrokerRequest,
+  registerPersonalGitHubGitBrokerRoutes,
+} from "./routes/personal-github-git-broker";
 import { registerInstallRoutes } from "./routes/install";
 import { registerApiIntegrationRoutes } from "./routes/api-integrations";
 import { registerIntegrationFacetRoutes } from "./routes/integration-facets";
 import { registerInteractionResourceRoutes } from "./routes/interaction-resources";
+import { registerPrReviewRoutes } from "./routes/pr-review";
 import { registerPackRoutes } from "./routes/packs";
+import { registerAutomationRoutes } from "./routes/automations";
 import { registerPluginRoutes } from "./routes/plugins";
 import { registerSkillRoutes } from "./routes/skills";
 import { registerChannelRoutes } from "./routes/channels";
@@ -174,6 +183,10 @@ export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
 } {
+  // The request-scoped workspace control-prefix budget is validated once by
+  // @opengeni/config at boot; install it for every request-scoped db command
+  // (Send/Steer/control/queue/settings/delete) built by this app.
+  configureWorkspaceControlRequestLockTimeoutMs(deps.settings.workspaceControlLockTimeoutMs);
   const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
@@ -335,14 +348,21 @@ export function createAppComposition(deps: AppDependencies): {
     return middleware(c, next);
   });
 
-  app.use(
-    "*",
-    bodyLimit({
-      maxSize: apiRequestBodyLimitBytes(deps.settings),
-      onError: (c) =>
-        c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
-    }),
-  );
+  const standardRequestBodyLimit = bodyLimit({
+    maxSize: apiRequestBodyLimitBytes(deps.settings),
+    onError: (c) =>
+      c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
+  });
+  app.use("*", async (c, next) => {
+    // Git packfiles must stay streaming and can legitimately exceed the JSON
+    // request ceiling. The exact closed broker routes apply their own method,
+    // content-type, authority, and idle-deadline checks.
+    if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+      await next();
+      return;
+    }
+    return await standardRequestBodyLimit(c, next);
+  });
 
   // Large catalog, capture, and session-list responses are on the browser's
   // critical path. Compress JSON at the API boundary while leaving SSE and
@@ -429,7 +449,17 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
-  app.use("*", requireAccessKey(deps.settings));
+  const accessKeyBoundary = requireAccessKey(deps.settings);
+  app.use("*", async (c, next) => {
+    // Git's credential helper supplies the exact encrypted broker bearer in
+    // Authorization. It cannot also supply the deployment access key, and the
+    // route performs its own attempt-bound authorization before every use.
+    if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+      await next();
+      return;
+    }
+    return await accessKeyBoundary(c, next);
+  });
 
   app.use("/v1/*", async (c, next) => {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
@@ -610,7 +640,9 @@ export function createAppComposition(deps: AppDependencies): {
         workspaceMemoryPromptMode,
       });
       await mcp.connect(transport);
-      return await transport.handleRequest(boundedRequest);
+      // Bind tool handlers' `extra.signal` to the HTTP client's connection: a
+      // worker that drops the call (Steer/Pause) aborts a blocking tool here.
+      return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
     });
   });
 
@@ -689,6 +721,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerWorkspaceArtifactRoutes(app, routeDeps);
   registerPreferenceRegistryRoutes(app, routeDeps);
   registerSocialRoutes(app, routeDeps);
+  registerPersonalGitHubRoutes(app, routeDeps);
+  registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
@@ -700,6 +734,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerChannelRoutes(app, routeDeps);
   registerRigRoutes(app, routeDeps);
   registerPackRoutes(app, routeDeps);
+  registerAutomationRoutes(app, routeDeps);
+  registerPrReviewRoutes(app, routeDeps);
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
@@ -732,7 +768,10 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
-  app.onError((error, c) => {
+  app.onError((rawError, c) => {
+    // One central mapping for every Send/Steer/control route: a bounded
+    // control-prefix wait that expired is a known, retryable, not-applied 503.
+    const error = workspaceControlBusyHttpError(rawError) ?? rawError;
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
@@ -987,6 +1026,9 @@ export function httpStatusForError(error: unknown): number {
   if (codexCompactionV2ProviderLockedError(error)) {
     return 422;
   }
+  if (workspaceControlBusyHttpError(error)) {
+    return 503;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }
@@ -1177,6 +1219,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/billing/entitlements",
   },
   { pattern: /^\/v1\/webhooks\/stripe$/, label: "/v1/webhooks/stripe" },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/(registrations|repositories)(?:\/[^/]+)?$/,
+    label: (match) => `/v1/workspaces/:workspaceId/pr-review/${match[1]}`,
+  },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp$/,
     label: "/v1/workspaces/:workspaceId/mcp",
@@ -1377,6 +1423,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/events\/stream$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/(visibility|forks)$/,
+    label: (match) => `/v1/workspaces/:workspaceId/sessions/:id/${match[1]}`,
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/lineage$/,
@@ -1717,6 +1767,26 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/connections/oauth/start",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/github$/,
+    label: "/v1/workspaces/:workspaceId/connections/github",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/github\/oauth\/start$/,
+    label: "/v1/workspaces/:workspaceId/connections/github/oauth/start",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+\/github\/reconnect$/,
+    label: "/v1/workspaces/:workspaceId/connections/:connectionId/github/reconnect",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+\/github\/repositories\/verify$/,
+    label: "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+\/github\/repositories$/,
+    label: "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/integrations\/oauth\/start$/,
     label: "/v1/workspaces/:workspaceId/integrations/oauth/start",
   },
@@ -1740,6 +1810,18 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/workspaces\/[^/]+\/connections\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/connections/:connectionId",
   },
+  {
+    pattern: /^\/v1\/git\/personal\/[^/]+\/info\/refs$/,
+    label: "/v1/git/personal/:routeId/info/refs",
+  },
+  {
+    pattern: /^\/v1\/git\/personal\/[^/]+\/git-upload-pack$/,
+    label: "/v1/git/personal/:routeId/git-upload-pack",
+  },
+  {
+    pattern: /^\/v1\/git\/personal\/[^/]+\/git-receive-pack$/,
+    label: "/v1/git/personal/:routeId/git-receive-pack",
+  },
   { pattern: /^\/v1\/catalog-assets\/.+$/, label: "/v1/catalog-assets/*" },
   {
     pattern: /^\/v1\/integrations\/oauth\/callback$/,
@@ -1748,6 +1830,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/integrations\/provider-oauth\/callback$/,
     label: "/v1/integrations/provider-oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/integrations\/github-personal\/oauth\/callback$/,
+    label: "/v1/integrations/github-personal/oauth/callback",
   },
   {
     pattern: /^\/v1\/integrations\/google-drive\/callback$/,
@@ -1842,6 +1928,7 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname.startsWith("/v1/auth/") ||
     pathname.startsWith("/v1/webhooks/") ||
     pathname.startsWith("/v1/integrations/oauth/") ||
+    isPersonalGitHubGitBrokerRequest(method, pathname) ||
     pathname === "/v1/integrations/slack/events" ||
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||

@@ -29,7 +29,16 @@ WORKDIR /src/agent
 ARG TARGETPLATFORM
 RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
-RUN set -eux; \
+# Cache mounts keep the crates.io registry and the per-target build directory
+# between builds so an edit under agent/ recompiles only the changed crates.
+# Cargo locks its own package cache, so the registry/git mounts are shared and
+# parallel target platforms do not serialize; the build directory is per target.
+# The verified binary is installed to /out inside the same step, so the image
+# layer never depends on the mounts; --locked still pins every dependency.
+RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,id=opengeni-sandbox-cargo-git,target=/usr/local/cargo/git,sharing=shared \
+    --mount=type=cache,id=opengeni-sandbox-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
+    set -eux; \
     rust_target="$(xx-cargo --print-target-triple)"; \
     xx-cargo build --locked --release --target-dir /src/agent/target -p opengeni-computer-native; \
     mkdir -p /out; \
@@ -43,7 +52,8 @@ FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS anydoc-runtime-builder
 ARG TARGETARCH
 WORKDIR /src
 COPY docker/anydoc/package.json docker/anydoc/bun.lock ./
-RUN set -eux; \
+RUN --mount=type=cache,id=opengeni-sandbox-bun-anydoc,target=/root/.bun/install/cache,sharing=locked \
+    set -eux; \
     case "$TARGETARCH" in \
       amd64) node_arch=x64 ;; \
       arm64) node_arch=arm64 ;; \
@@ -60,8 +70,50 @@ RUN set -eux; \
 FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
 
 WORKDIR /src
+# Stage only the lock-resolving manifests first so the frozen install layer is
+# reused across source edits; every workspace manifest below is checked against
+# the repository workspace list by scripts/release-image-workflow-contract.test.ts.
+COPY package.json bun.lock tsconfig.base.json ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/browser-extension/package.json apps/browser-extension/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY packages/agent-proto/package.json packages/agent-proto/package.json
+COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
+COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
+COPY packages/artifact-kernel-wasm-spreadsheet/package.json packages/artifact-kernel-wasm-spreadsheet/package.json
+COPY packages/artifact-tool/package.json packages/artifact-tool/package.json
+COPY packages/browserd/package.json packages/browserd/package.json
+COPY packages/capabilities/package.json packages/capabilities/package.json
+COPY packages/codemode/package.json packages/codemode/package.json
+COPY packages/codex/package.json packages/codex/package.json
+COPY packages/config/package.json packages/config/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/core/package.json packages/core/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/deployment/package.json packages/deployment/package.json
+COPY packages/documents/package.json packages/documents/package.json
+COPY packages/events/package.json packages/events/package.json
+COPY packages/github/package.json packages/github/package.json
+COPY packages/interaction/package.json packages/interaction/package.json
+COPY packages/network/package.json packages/network/package.json
+COPY packages/observability/package.json packages/observability/package.json
+COPY packages/ogtool/package.json packages/ogtool/package.json
+COPY packages/react/package.json packages/react/package.json
+COPY packages/runtime/package.json packages/runtime/package.json
+COPY packages/sdk/package.json packages/sdk/package.json
+COPY packages/storage/package.json packages/storage/package.json
+COPY packages/testing/package.json packages/testing/package.json
+COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
+COPY patches patches
+# The cache mount only holds Bun's download cache; the exact lock-resolved
+# node_modules tree still lands in the layer and is byte-identical without it.
+# Each stage owns its own cache id so concurrently building stages never share
+# one writer.
+RUN --mount=type=cache,id=opengeni-sandbox-bun-source,target=/root/.bun/install/cache,sharing=locked \
+    bun install --frozen-lockfile
 COPY . .
-RUN bun install --frozen-lockfile
 
 # Install the exact lock-resolved Codemode package closure for ordinary Bun
 # programs. The CLI and imported module therefore share source, catalog rules,
@@ -157,7 +209,8 @@ ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 WORKDIR /src
 COPY . .
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
-RUN set -eux; \
+RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
+    set -eux; \
     case "$TARGETARCH" in \
       amd64) expected_target=linux-x64-gnu ;; \
       arm64) expected_target=linux-arm64-gnu ;; \
@@ -185,6 +238,8 @@ RUN set -eux; \
 FROM python:3.12-slim
 
 ARG TERRAFORM_VERSION=1.13.3
+ARG GLAB_VERSION=1.109.0
+ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
@@ -283,6 +338,12 @@ RUN set -eux; \
     curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb | bash; \
     az version
 
+ENV AZURE_EXTENSION_DIR=/opt/az/extensions
+RUN set -eux; \
+    install -d -m 0755 "$AZURE_EXTENSION_DIR"; \
+    az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"; \
+    az repos --help >/dev/null
+
 RUN set -eux; \
     mkdir -p -m 755 /etc/apt/keyrings; \
     wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -301,6 +362,23 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends gh; \
     rm -rf /var/lib/apt/lists/*; \
     gh --version
+
+RUN set -eux; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    case "${arch}" in \
+      amd64) glab_arch="amd64"; expected="67b4a8557727a058f44e0839babdcf214ea6f6f829062cf0bae02f7b25814e5d" ;; \
+      arm64|aarch64) glab_arch="arm64"; expected="288155229b7a0824aaca5fbdc36000d0c41fe5d8b4a4c3cbe9908e75f4e4ec2e" ;; \
+      *) echo "unsupported architecture=${arch}" >&2; exit 1 ;; \
+    esac; \
+    archive="/tmp/glab_${GLAB_VERSION}_linux_${glab_arch}.tar.gz"; \
+    curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL \
+      "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${glab_arch}.tar.gz" \
+      -o "$archive"; \
+    echo "$expected  $archive" | sha256sum -c -; \
+    tar -xzf "$archive" -C /tmp bin/glab; \
+    install -m 0755 /tmp/bin/glab /usr/local/bin/glab; \
+    rm -rf "$archive" /tmp/bin; \
+    glab --version
 
 # ttyd static binary (REAL PTY-over-websocket; Channel-B terminal on headless boxes).
 # Pinned static build from the upstream release; the PTY port (7681) is exposed over

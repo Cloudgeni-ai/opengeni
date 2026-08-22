@@ -2,6 +2,7 @@ export * from "./auth";
 export * from "./graphql";
 export * from "./http";
 export * from "./mcp-manifest";
+export * from "./mcp-bridge";
 export * from "./openapi";
 export * from "./integration-definitions";
 export * from "./integration-presentations";

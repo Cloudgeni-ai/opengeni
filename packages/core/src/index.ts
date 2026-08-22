@@ -60,6 +60,8 @@ export * from "./domain/skill-imports";
 export * from "./domain/environments";
 export * from "./rigs";
 export * from "./domain/packs";
+export * from "./domain/automations";
+export * from "./domain/pr-review";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
 export * from "./domain/session-tool-policy";
@@ -84,6 +86,8 @@ export * from "./domain/video-generation-capabilities";
 export * from "./domain/organization-membership-lifecycle";
 export * from "./application/new-session-drafts";
 export * from "./application/session-commands";
+export * from "./application/session-tenancy";
+export * from "./application/user-resource-grants";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
 export * from "./editable-artifact-live";

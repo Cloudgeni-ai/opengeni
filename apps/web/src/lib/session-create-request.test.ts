@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { ResourceRefConflictError, type ResourceRef } from "@opengeni/contracts";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   buildCreateSessionRequest,
+  classifyCreateSessionFailure,
   emptySessionDraft,
   newSessionDraftOptionsFromSessionDraft,
   prepareCreateSessionAttempt,
+  rememberedMachineFolder,
+  rememberedProjectCompute,
+  retainCreateSessionAttemptAfterFailure,
   sessionDraftFromNewSessionDraftOptions,
+  submissionFromSessionDraft,
 } from "./session-create";
 
 const fileA = "00000000-0000-4000-8000-0000000000a1";
@@ -105,6 +111,7 @@ describe("buildCreateSessionRequest", () => {
       selectedTools: tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
+      channelId: "00000000-0000-4000-8000-0000000000d4",
       expectedNewSessionDraftRevision: 7,
     });
 
@@ -116,6 +123,7 @@ describe("buildCreateSessionRequest", () => {
       tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
+      channelId: "00000000-0000-4000-8000-0000000000d4",
       expectedNewSessionDraftRevision: 7,
     });
     expect(result.resources).not.toBe(currentResources);
@@ -130,14 +138,52 @@ describe("buildCreateSessionRequest", () => {
     ).toBe("fast");
   });
 
+  test("threads the selected session visibility and defaults to workspace access", () => {
+    expect(build([], []).visibility).toBe("workspace");
+    expect(build([], [], { visibility: "private" }).visibility).toBe("private");
+  });
+
+  test("threads one atomic personal-resource command into create identity", () => {
+    const personalResourceAttachment = {
+      mode: "once" as const,
+      workspaceSharedAcknowledged: true,
+      sharedOutputWarningVersion: 1 as const,
+    };
+    const request = build([], [], {
+      submission: { text: "start", resources: [], personalResourceAttachment },
+    });
+    expect(request.personalResourceAttachment).toEqual(personalResourceAttachment);
+
+    const first = prepareCreateSessionAttempt({
+      pending: null,
+      client: {},
+      workspaceId: "workspace-a",
+      request,
+      freshIdempotencyKey: "first",
+    });
+    const changedMode = prepareCreateSessionAttempt({
+      pending: first.pending,
+      client: first.pending.client,
+      workspaceId: "workspace-a",
+      request: {
+        ...request,
+        personalResourceAttachment: { ...personalResourceAttachment, mode: "session" },
+      },
+      freshIdempotencyKey: "second",
+    });
+    expect(changedMode.request.idempotencyKey).toBe("second");
+  });
+
   test("creates a realtime-first session without an initial user message", () => {
     const request = build([], [], {
       submission: { text: "", resources: [] },
       startMode: "realtime",
+      expectedNewSessionDraftRevision: 7,
     });
 
     expect(request.startMode).toBe("realtime");
     expect(request).not.toHaveProperty("initialMessage");
+    expect(request.expectedNewSessionDraftRevision).toBe(7);
   });
 
   test("omits tools only when the ready catalog selection equals workspace defaults", () => {
@@ -185,6 +231,36 @@ describe("buildCreateSessionRequest", () => {
     expect(build([repository], [attachment], { omitWorkspaceResources: true }).resources).toEqual([
       attachment,
     ]);
+  });
+
+  test("a connected-machine route request strips fixed managed resources and personal intent", () => {
+    const personalResourceAttachment = {
+      mode: "session" as const,
+      workspaceSharedAcknowledged: true,
+      sharedOutputWarningVersion: 1 as const,
+    };
+    const draft = {
+      ...emptySessionDraft(),
+      compute: {
+        kind: "machine" as const,
+        sandboxId: "00000000-0000-4000-8000-0000000000c3",
+        folder: { kind: "root" as const },
+      },
+      variableSetId: "00000000-0000-4000-8000-000000000011",
+      rigId: "00000000-0000-4000-8000-000000000012",
+    };
+    const submission = submissionFromSessionDraft(draft, undefined, personalResourceAttachment);
+    const request = build([], [], {
+      submission: { text: "run on my machine", ...submission.extras },
+      targetSandboxId: submission.options.targetSandboxId,
+      workingDir: submission.options.workingDir,
+      omitWorkspaceResources: submission.omitWorkspaceResources,
+    });
+
+    expect(request.targetSandboxId).toBe(draft.compute.sandboxId);
+    expect(request).not.toHaveProperty("variableSetId");
+    expect(request).not.toHaveProperty("rigId");
+    expect(request).not.toHaveProperty("personalResourceAttachment");
   });
 
   test("reuses create keys only for the same client, workspace, and logical request", () => {
@@ -243,6 +319,100 @@ describe("buildCreateSessionRequest", () => {
       expect(next.request.idempotencyKey).toBe("fresh-changed");
     }
   });
+
+  test("retains an exact create key only while the mutation outcome is unknown", () => {
+    const client = {};
+    const request = build([], [], {
+      clientEventId: "event-first",
+      idempotencyKey: "fresh-first",
+    });
+    const first = prepareCreateSessionAttempt({
+      pending: null,
+      client,
+      workspaceId: "workspace-a",
+      request,
+      freshIdempotencyKey: "fresh-first",
+    });
+
+    const uncertain = new OpenGeniApiError(503, "gateway unavailable", {
+      mutation: true,
+      outcomeUnknown: true,
+    });
+    expect(classifyCreateSessionFailure(uncertain)).toMatchObject({
+      error: uncertain,
+      outcomeUnknown: true,
+    });
+    const retained = retainCreateSessionAttemptAfterFailure({
+      current: first.pending,
+      attempted: first.pending,
+      outcomeUnknown: uncertain.outcomeUnknown,
+    });
+    const exactRetry = prepareCreateSessionAttempt({
+      pending: retained,
+      client,
+      workspaceId: "workspace-a",
+      request: { ...request, clientEventId: "event-retry" },
+      freshIdempotencyKey: "fresh-retry",
+    });
+    expect(exactRetry.request.idempotencyKey).toBe("fresh-first");
+
+    const definitive = new OpenGeniApiError(409, "personal authority changed", {
+      mutation: true,
+    });
+    expect(classifyCreateSessionFailure(definitive)).toMatchObject({
+      error: definitive,
+      outcomeUnknown: false,
+    });
+    const cleared = retainCreateSessionAttemptAfterFailure({
+      current: exactRetry.pending,
+      attempted: exactRetry.pending,
+      outcomeUnknown: definitive.outcomeUnknown,
+    });
+    const reconfirmed = prepareCreateSessionAttempt({
+      pending: cleared,
+      client,
+      workspaceId: "workspace-a",
+      request: { ...request, clientEventId: "event-reconfirmed" },
+      freshIdempotencyKey: "fresh-reconfirmed",
+    });
+    expect(reconfirmed.request.idempotencyKey).toBe("fresh-reconfirmed");
+  });
+});
+
+describe("successful-create selection history", () => {
+  const project = "00000000-0000-4000-8000-000000000031";
+  const machineA = "00000000-0000-4000-8000-000000000041";
+  const machineB = "00000000-0000-4000-8000-000000000042";
+  const history = {
+    projects: [
+      {
+        channelId: project,
+        targetSandboxId: machineA,
+        machines: [
+          { sandboxId: machineA, workingDir: "/workspace/opengeni" },
+          { sandboxId: machineB, workingDir: "repos/cloudgeni" },
+        ],
+      },
+      { channelId: null, targetSandboxId: null, machines: [] },
+    ],
+  };
+
+  test("restores the last compute target for each project", () => {
+    expect(rememberedProjectCompute(history, project)).toEqual({
+      kind: "machine",
+      sandboxId: machineA,
+      folder: { kind: "path", path: "/workspace/opengeni" },
+    });
+    expect(rememberedProjectCompute(history, null)).toEqual({ kind: "sandbox", backend: "" });
+  });
+
+  test("restores paths only within the exact project and machine pair", () => {
+    expect(rememberedMachineFolder(history, project, machineB)).toEqual({
+      kind: "path",
+      path: "repos/cloudgeni",
+    });
+    expect(rememberedMachineFolder(history, null, machineB)).toEqual({ kind: "root" });
+  });
 });
 
 describe("new-session draft option mapping", () => {
@@ -261,6 +431,7 @@ describe("new-session draft option mapping", () => {
 
     const options = newSessionDraftOptionsFromSessionDraft(draft);
     expect(options).toEqual({
+      visibility: "workspace",
       sandboxBackend: "modal",
       variableSetId: "00000000-0000-4000-8000-000000000011",
       rigId: "00000000-0000-4000-8000-000000000012",
@@ -294,6 +465,7 @@ describe("new-session draft option mapping", () => {
       },
     });
     expect(options).toEqual({
+      visibility: "workspace",
       targetSandboxId: "00000000-0000-4000-8000-000000000021",
       workingDir: "/srv/opengeni",
     });

@@ -466,6 +466,7 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
       return json({ items: [], installations: [] });
     }

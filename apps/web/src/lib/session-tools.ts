@@ -333,7 +333,12 @@ export function sameRepositoryUri(resource: ResourceRef, uri: string): boolean {
 export function rehydrateRepositoryResources(
   resources: ResourceRef[],
   repositories: GitHubRepository[],
+  options?: { catalogReady?: boolean },
 ): ResourceRef[] {
+  // An unreadied catalog is unknown, not empty. Dropping GitHub-identity rows
+  // here would autosave that loss and brick the create composer while the
+  // first status/list request is still in flight or has failed.
+  if (options?.catalogReady === false) return resources;
   return resources.flatMap<ResourceRef>((resource) => {
     if (resource.kind !== "repository") return [resource];
     const hasGitHubIdentity =

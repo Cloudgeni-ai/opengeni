@@ -12,6 +12,7 @@ import {
   RUNTIME_READ_UPDATE_TABLES,
   RUNTIME_TABLE_PRIVILEGES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
@@ -139,10 +140,12 @@ function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
 
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
+    "organization_invitation_binding_events",
     "organization_membership_invitations",
     "organization_membership_lifecycle_events",
     "organization_membership_operation_receipts",
     "organization_memberships",
+    "organization_profile_events",
     "organization_user_resource_authorities",
     "organization_user_resource_grants",
     "organization_user_retention_deletion_events",
@@ -223,6 +226,7 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     ownedSchemas: [],
     ownedRelations: [],
+    sessionTenancyProductActivationPresent: false,
     tables: [
       {
         name: "tenant_rows",
@@ -274,15 +278,24 @@ function safePosture(): RuntimeDatabasePosture {
         delete: false,
       },
     ],
-    targetRoutines: RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
-      name,
-      owner: "opengeni_migrator",
-      execute: true,
-      publicExecute: false,
-      securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+    targetRoutines: [
+      ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
         name,
-      ),
-    })),
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
+          name,
+        ),
+      })),
+      ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+      })),
+    ],
     privateRoutines: [
       {
         name: "workspace_rls_visible(uuid, uuid)",
@@ -333,6 +346,9 @@ describe("runtime database posture evaluator", () => {
       const personalResourceProtectedTableCount = [
         "connection_use_once_consumption_receipts",
         "personal_resource_once_consumption_receipts",
+        "personal_github_repository_selection_heads",
+        "personal_github_repository_selection_operations",
+        "personal_github_repository_selections",
         "scheduled_task_personal_resource_authorities",
         "scheduled_task_personal_resource_snapshots",
         "scheduled_task_run_personal_resource_admissions",
@@ -345,6 +361,9 @@ describe("runtime database posture evaluator", () => {
         "session_attempt_personal_resource_admissions",
         "session_attempt_personal_resource_snapshots",
         "session_attempt_connected_machine_authorizations",
+        "turn_personal_resource_attachment_receipts",
+        "turn_personal_resource_once_receipts",
+        "turn_personal_resource_snapshots",
       ].filter(
         (table) =>
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
@@ -352,25 +371,25 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 263],
-            [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 135],
-            [RUNTIME_READ_ONLY_TABLES, 18],
+            [FORCE_RLS_TABLES, 276],
+            [NON_RLS_RUNTIME_TABLES, 12],
+            [RUNTIME_FULL_DML_TABLES, 144],
+            [RUNTIME_READ_ONLY_TABLES, 19],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
-            [RUNTIME_READ_INSERT_UPDATE_TABLES, 31],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 44],
-            [RUNTIME_DML_TABLES, 230],
+            [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 47],
+            [RUNTIME_DML_TABLES, 241],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 192],
+            [FORCE_RLS_TABLES, 193],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 112],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 25],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 26],
             [RUNTIME_DML_TABLES, 178],
           ] as const);
       for (const [tables, length] of contracts) {
@@ -384,7 +403,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 274 : 203;
+      const tableCount = hasCurrentMainActivityLedger ? 288 : 204;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -549,6 +568,7 @@ describe("runtime database posture evaluator", () => {
     for (const routine of posture.targetRoutines) {
       if (
         routine.name.includes("personal_document") ||
+        routine.name.includes("personal_github_repository") ||
         routine.name === "resolve_document_original_file(uuid, uuid, text, uuid)" ||
         routine.name.includes("scoped_variable_set") ||
         (routine.name.includes("scoped_rig") && !routine.name.startsWith("scheduled_")) ||
@@ -661,6 +681,36 @@ describe("runtime database posture evaluator", () => {
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
     }
+  });
+
+  test("classifies logical-turn personal-resource ledgers as FORCE-RLS with no direct DML", () => {
+    for (const table of [
+      "turn_personal_resource_attachment_receipts",
+      "turn_personal_resource_once_receipts",
+      "turn_personal_resource_snapshots",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+  });
+
+  test("classifies personal GitHub repository selections as lifecycle-only owner authority", () => {
+    for (const table of [
+      "personal_github_repository_selection_heads",
+      "personal_github_repository_selection_operations",
+      "personal_github_repository_selections",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "get_self_personal_github_repository_selection(uuid, uuid, text, uuid)",
+        "mutate_self_personal_github_repository_selection(uuid, uuid, text, uuid, bigint, bigint, text, jsonb, boolean)",
+      ]),
+    );
   });
 
   test("classifies the Company Brain preference receipt as FORCE-RLS capability-only state", () => {
@@ -928,6 +978,16 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("requires the session-list visibility capability on the runtime role", () => {
+    const posture = safePosture();
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => routine.name !== "session_visibility_lifecycle_capability_held()",
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "target-schema runtime capability session_visibility_lifecycle_capability_held() is missing or ambiguous",
+    );
+  });
+
   test("requires a same-owner SECURITY DEFINER artifact outbox dispatcher path", () => {
     const posture = safePosture();
     posture.tables.push({
@@ -1088,5 +1148,34 @@ describe("runtime database posture evaluator", () => {
         targetSchema: "embedded",
       }),
     ).toEqual([]);
+  });
+
+  test("fails closed when durable session-tenancy activation outlives the deployment switch", () => {
+    const posture = safePosture();
+    posture.sessionTenancyProductActivationPresent = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(posture, {
+        ...options,
+        organizationTenancyCanonicalActivationEnabled: true,
+      }),
+    ).toEqual([]);
+  });
+
+  test("rejects runtime or PUBLIC execution of the owner-internal quiescence helper", () => {
+    const posture = safePosture();
+    const helper = posture.targetRoutines.find(
+      (routine) => routine.name === RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES[0],
+    )!;
+    helper.execute = true;
+    helper.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("runtime role has forbidden owner-internal helper"),
+        expect.stringContaining("PUBLIC has forbidden owner-internal helper"),
+      ]),
+    );
   });
 });

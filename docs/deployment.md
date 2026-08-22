@@ -2,6 +2,20 @@
 
 OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
+## Personal GitHub OAuth
+
+Personal GitHub is disabled by default. Managed staging and production must use
+different GitHub OAuth Apps and configure the exact API-origin callback
+`/v1/integrations/github-personal/oauth/callback`. Keep device flow disabled and
+store each client secret only in that environment's secret manager. Runtime
+artifacts pass through `OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED`,
+`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID`, and
+`OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET`; enabling the feature also
+requires integrations state signing and environment encryption. See
+[`personal-github.md`](personal-github.md) for the authority and rollout
+contract. Repository delivery does not create the external OAuth Apps or write
+their secrets.
+
 ## Profiles
 
 List supported profiles:
@@ -378,6 +392,27 @@ cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
 whole migration. After commit, never restart a pre-0197 image or attempt a
 mixed-version rolling rollback—remain in maintenance and fix forward.
 
+### Pre-registration invitation cutover (0314)
+
+`0314_unregistered_organization_invitations.sql` is a drained application
+protocol cutover. Old API binaries can accept an invitation without its initial
+workspace grants and old authentication hooks can provision a fallback
+organization before verified-email binding. Before applying 0313:
+
+1. stop every API, control worker, and turn worker using the target database;
+2. supply the exact old/new runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
+   `applicationDatabaseRoles` for a programmatic migration);
+3. prove those roles have zero other sessions in `pg_stat_activity`;
+4. apply 0314 from the exact new image and require it in `schema_migrations`;
+5. start only that same image generation and complete readiness checks before
+   reopening admission.
+
+The migration checks the explicit role list before and after exclusive locks
+on the invitation and organization membership writer tables. A live listed
+session rejects the cutover with SQLSTATE `55000`. After commit, never restart
+a pre-0314 image; remain in maintenance and fix forward.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one
@@ -393,21 +428,39 @@ deployment keeps the legacy workspace-owned lane and an image rollback stays an
 ordinary deployment decision. Every rolling tenancy migration still applies
 normally with the switch off.
 
-Be precise about what that switch is today: **no runtime path reads it.**
-Canonical activation is unshipped, so the setting reserves the name, pins the
-safe default in the chart and `.env.example`, and gives every future activation
-slice one gate to consult. It is an operator declaration, not an enforced
-interlock - `false` does not by itself prevent an activation migration from
-being applied, and step 3 below is therefore a procedural gate rather than a
-runtime one. `docs/organization-tenancy.md` owns the switch's full contract.
+Migration 0303 is intentionally rolling and applies while the switch remains
+`false`; applying the ordinary migration chain does not activate an
+organization. The switch is enforced by the separately invoked session-tenancy
+activation command and by API/worker startup posture after the first durable
+activation receipt exists. It is not a reversible feature flag: once any
+organization is activated, every subsequently started API and worker must keep
+the switch `true`, and a pre-0303 image or a new image with the switch disabled
+fails closed.
 
-Two tenancy cutovers have already run this maintenance path, and a pre-0264 or
-pre-0275 image must never be started again:
+Consequently, a normal local stack can show Workspace session creation while
+Only me is disabled with “not enabled for this organization yet.” That is the
+expected pre-activation posture, not a missing browser feature. Testing Only me
+requires the same explicit version-1 activation receipt and enabled deployment
+switch described below; do not seed the receipt through direct table DML.
+
+The migration deliberately drops the legacy eight-argument visibility/fork
+routines and exposes only nine-argument, activation-versioned routines with no
+defaults. This is a drained protocol cutover, not an overload-compatible API:
+an old caller fails with undefined-function, and operators must not add a
+wrapper that supplies an activation version on its behalf.
+
+Three tenancy cutovers have now used this maintenance shape, and a pre-0264,
+pre-0275, or pre-0303 image must never be started again after its corresponding
+activation:
 
 - `0264_connection_authority_runtime_activation.sql` activated canonical
   Connection authority; and
 - `0275_scheduled_connection_authority.sql` froze common-user Connection
-  authority on scheduled-task revisions.
+  authority on scheduled-task revisions; and
+- `0303_session_tenancy_product_activation.sql` installed the per-organization
+  session-tenancy receipt plus hardened visibility/fork contract. Unlike the
+  first two, applying 0303 is inert; the drained operator command performs the
+  forward-only per-organization activation.
 
 Both declare `-- deployment-mode: maintenance`, both reject a live application
 with SQLSTATE `55000` from the same `pg_stat_activity` drain guard before taking
@@ -423,16 +476,36 @@ neither has a down-migration. For each subsequent activation:
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
 3. set `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true` for the
-   new image generation only - this records the operator's acceptance of the
-   one-way boundary and is not yet enforced by any runtime path. Never flip it
-   on a running pre-activation generation as a way to "test" activation;
+   new image generation only. Never flip it on a running pre-activation
+   generation as a way to "test" activation;
 4. stop the API plus every control and turn worker while preserving the
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require the activation migration to
-   appear in `schema_migrations`;
-7. start only that same digest's API and workers, and require the startup and
+6. run the new digest's migration Job and require 0303 plus every prerequisite
+   migration to appear in `schema_migrations`;
+7. with the application still drained, run:
+
+   ```bash
+   OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED=true \
+   OPENGENI_MIGRATIONS_DATABASE_URL='<migration-owner-url>' \
+   OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES='opengeni_app' \
+   bun run db:activate-session-tenancy -- \
+     --organization-id <organization-uuid> \
+     --activated-by '<bounded-operator-identity>'
+   ```
+
+   The command reruns the canonical inventory and parity reports, retains and
+   hashes the inventory snapshot, and requires every parity invariant plus each
+   exact drainable/bounded activation lane to be zero. It deliberately does not
+   gate on total ownerless sessions or all-time immutable legacy writer rows;
+   migration 0298 supplies their truthful attributable and observation-window
+   refinements. It durably records the exact evidence, checks the supplied exact
+   application-role inventory twice around write-blocking locks, and is
+   idempotent only for the same evidence digests.
+   A live application session rejects activation with SQLSTATE `55000`; changed
+   evidence against an existing receipt is a conflict.
+8. start only that same digest's API and workers, and require the startup and
    readiness posture checks to pass before reopening admission.
 
 After the activation migration commits, rollback to an earlier application image
@@ -715,40 +788,28 @@ live `main` stay mergeable). Drop `Current-base source admission` from the
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
-Release approval is bound to GitHub's native PR author, reviewer, merge actor,
-review state, reviewed head, and submission time:
 
-- a `github-actions[bot]`-authored Version PR requires a native pre-merge
-  `APPROVED` review from a configured human release maintainer;
-- the structured `COMMENTED` admin-PASS form is valid only for a
-  single-maintainer PR whose author, exact-head reviewer, and merge actor are
-  the same configured human; it is never a substitute for approving a
-  bot-authored Version PR;
-- a candidate-head update invalidates a head-bound verdict. For the structured
-  admin-PASS form, changing the explicitly selected `reviewedBaseSha` also
-  requires replacement evidence on the same candidate head. Ordinary protected
-  `main` movement is not itself a candidate update and must not trigger a source
-  merge/rebase; and
-- a review submitted after merge is not release evidence.
+Ordinary candidate and operator admission bind the **merged associated PR**, not
+a later GitHub `APPROVE` or structured PASS body on the exact head:
 
-Candidate or operator admission must fail closed when those provider identities
-do not match; do not weaken the provenance check or recreate approval from a
-comment, commit message, or local record.
+- the source SHA must be that PR's `merge_commit_sha`;
+- reviewed base/head are the provider-retained `pull.base.sha` / `pull.head.sha`;
+- trees, merge provenance, `opengeni-release-head-<head>` retention, and the
+  required main CI jobs remain fail-closed;
+- GitHub branch protection may still require a review to merge into `main`;
+  that is a merge-time GitHub rule, not a second operator PASS check.
 
-GitHub account identity is authoritative by the provider's positive numeric
-account ID plus account type (`User` or `Bot`). The provider login is still
-required as a non-empty audit snapshot, but login spelling, case normalization,
-or an account rename does not replace that stable identity. A changed numeric
-ID, changed account type, or missing identity field fails closed. The legacy v3
-structured admin-PASS `reviewerLogin` field is likewise an informational login
-snapshot: the native provider review actor's configured numeric ID and account
-type provide reviewer authority, while every other v3 field and the canonical
-body continue to bind the exact base/head verdict.
+Do not recreate admission from a live review list, a review comment, a commit
+message, or a local record. The ordinary operator still records identity fields
+(`reviewed_base_sha`, `reviewed_head_sha`, PR URL, digest, reviewer login) on
+the ledger; those are identity/digest, not a re-fetched GitHub PASS.
 
-For a single-maintainer source PR, generate the exact structured review body
-before merging. Submit the result as a native `COMMENTED` pull-request review;
-the formatter can also print the canonical SHA-256 needed by an external
-operator to bind the same artifact. Use the exact provider-retained PR base SHA
+GitHub account identity remains authoritative by the provider's positive numeric
+account ID plus account type (`User` or `Bot`) wherever merge provenance names
+an actor. The provider login is an audit snapshot only; login spelling, case
+normalization, or an account rename does not replace that stable identity.
+
+Compute the ledger identity digest with the exact provider-retained PR base SHA
 from the pull-request detail (`pull.base.sha`) as `--base`; this is the
 reviewed-base identity that the release verifier reconstructs, not the latest
 SHA currently at the tip of protected `main`:
@@ -766,15 +827,15 @@ bun scripts/release-review.ts \
   --digest
 ```
 
-Regenerate the body and verdict when the candidate head or its provider-retained
+Regenerate the digest when the candidate head or its provider-retained
 `pull.base.sha` (the verifier's exact accepted reviewed-base identity) changes.
-An ordinary protected-`main` advance does not itself change that base-bound
-review artifact. Separately, let the merge authority refresh latest-current-main
+Ordinary protected
+`main` movement is not itself a candidate update and must not trigger a source
+merge/rebase. Separately, let the merge authority refresh latest-current-main
 mergeability and material-compatibility evidence on the same candidate head;
-that evidence is not `reviewedBaseSha` and does not require replacing the review
-or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
-evidence, and do not edit a submitted review after merge to manufacture
-evidence retroactively.
+that evidence is not `reviewedBaseSha` and does not require replacing the
+identity digest or mutating the candidate. Do not merge or rebase `main` into the source branch solely to refresh
+evidence.
 
 GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
 after its source branch is deleted or rewritten even though the check itself
@@ -881,8 +942,8 @@ fails closed.
 Trusted Version-PR admission publishes the same check. This gives downstream
 release operators a provider-owned proof of immutable source retention without
 requiring a credential that crosses repository boundaries. A tag and immutable
-prerelease are retention evidence, not approval: the native pre-merge review
-and every later source/acceptance gate remain mandatory. A missing, moved,
+prerelease are retention evidence, not a GitHub review PASS. Later source,
+candidate, and acceptance gates remain mandatory. A missing, moved,
 indirect, mutable, non-provider-authored, or post-hoc substitute outside the
 fenced merged-source recovery above fails release provenance. Retained-head
 prereleases and their tags intentionally accumulate for the lifetime of their
@@ -923,25 +984,16 @@ does not require the event base to equal continuously moving `main`. The
 base-owned workflow/helper SHA must remain in protected `production` ancestry
 for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
-and terminal head identity remain fail-closed. Exact-head review stays bound to
-the candidate. The merge authority separately performs the fresh latest-main
+and terminal head identity remain fail-closed. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
 identity/manifest, security, and evidence checks immediately before merge.
 
-Do not enable or leave auto-merge armed on a generated Version PR before the
-exact-head release review is submitted. Release admission compares GitHub's
-provider-recorded review and merge timestamps and requires the decisive review
-to precede the merge. A review added after auto-merge is intentionally not
-release evidence and cannot rehabilitate that source commit; stop that train
-and use a fresh, normally reviewed release-source PR instead of retrying or
-weakening admission.
-
-Immediately before merge, re-read `baseRefOid`, `headRefOid`, `state`, and
-`autoMergeRequest` from the PR and the exact-head review from the provider API.
-Require the PR to remain open, auto-merge to remain null, and the canonical
-review to bind the unchanged head with a strictly earlier provider timestamp;
-equal review and merge timestamps are not ordering evidence. Then merge with an
-exact head-SHA fence. Never rely on an earlier UI observation for this boundary.
+Do not enable or leave auto-merge armed on a generated Version PR until trusted
+CI on that exact head is green. Immediately before merge, re-read `baseRefOid`,
+`headRefOid`, `state`, and `autoMergeRequest` from the PR. Require the PR to
+remain open and auto-merge to remain null, then merge with an exact head-SHA
+fence. Never rely on an earlier UI observation for this boundary. Ordinary
+candidate/operator admission does not re-read GitHub reviews after merge.
 
 The exact source must separately have one successful GitHub Actions result for
 each required candidate check:
@@ -961,7 +1013,7 @@ workflow from that retained controller tag and pass the release source only as
 data. The complete job graph, reusable admission gate, and local publication
 actions therefore come from reviewed controller bytes. Every job that checks
 out or executes candidate source depends on the read-only gate, which
-reconstructs the provider-owned merge, exact-head review, retention, and
+reconstructs the provider-owned merge, merged-source identity, retention, and
 required-check evidence. A merge composed against a different base fails before
 candidate source runs or candidate bytes exist. Acceptance, embedded
 distribution, and final publication all require that same controller SHA and
@@ -971,7 +1023,14 @@ It derives every unpublished publishable workspace package directly from the
 exact checkout and npm registry, so a caller-maintained list cannot omit a
 package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
-the API manifest.
+the API manifest. The official BOM does **not** include `opengeni-desktop`.
+Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
+published by `.github/workflows/publish-desktop-image.yml`. Set Helm
+`desktop.imageRef` to that digest (`registry/opengeni-desktop@sha256:…`). The
+chart fails closed when `OPENGENI_SANDBOX_BACKEND=modal` and
+`OPENGENI_SANDBOX_DESKTOP_ENABLED=true` without a digest pin. Do not point Modal
+at official `opengeni-sandbox`. A pin change applies to **new** sandbox creates;
+rotate or reap the warm lease before an existing session can use the new box.
 Protected main CI uses the separate `canary-sha-<source>` namespace for its
 SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
@@ -1324,6 +1383,14 @@ Print the ordered install plan with:
 bun run deployment:observability -- --profile single-node
 ```
 
+On a cluster that explicitly selects `sandbox.backend=opensandbox`, use
+`--opensandbox`. The additional values overlay enables kube-state-metrics for
+the pinned `Pool` CRD plus a `ServiceMonitor` for the controller metrics
+Service. The OpenGeni control worker separately projects BatchSandbox and
+workload-Pod state into fixed-label aggregate gauges through namespace-scoped,
+list-only Kubernetes RBAC. The base wrapper leaves this optional integration
+off, so clusters without OpenSandbox CRDs retain the prior monitoring behavior.
+
 The wrapper plan installs only the monitoring platform; it never reconciles
 OpenGeni workloads and never runs application hooks. After it is ready, include
 `deploy/observability/opengeni.values.example.yaml` in the next ordinary
@@ -1433,6 +1500,7 @@ Use this boundary when building a production cluster:
 | Secrets       | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery                       | `externalSecret.enabled=true` or `secret.existingSecret`                                                   |
 | TLS           | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack                                                  | `ingress.tls` and SSE-safe ingress annotations                                                             |
 | Observability | `deploy/observability` pinned Prometheus/Grafana wrapper, an existing compatible platform, or a managed OTLP/Prometheus backend   | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule`, canonical dashboard labels                       |
+| OpenSandbox (optional) | Exact upstream source/chart pin recorded in `deploy/stacks/opensandbox-source.lock` | Select `sandbox.backend=opensandbox`; the stack wrapper installs a private API-key-authenticated lifecycle service outside the OpenGeni app chart |
 
 The runtime secret must provide values such as:
 
@@ -1444,6 +1512,7 @@ The runtime secret must provide values such as:
 - optional `OPENGENI_TEMPORAL_TLS_SERVER_NAME`, `OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64`, and the paired `OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64` / `OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64` for custom SNI, CA roots, or mTLS; any of these TLS materials also enables TLS
 - `OPENGENI_NATS_URL` when not using in-cluster NATS
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
+- optional `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` (positive integer milliseconds, default `20000`): how long one HTTP-originated session/workspace mutation may wait to enter the workspace control prefix before the API answers the retryable 503 `WORKSPACE_CONTROL_BUSY`; the API validates it at boot and worker settlement never uses it. `generateRuntimeArtifacts` carries it into `runtime.env` only when set
 - `OPENGENI_OPENAI_API_KEY` or Azure OpenAI equivalents
 - `OPENGENI_OBJECT_STORAGE_BACKEND=s3-compatible` plus endpoint/access-key settings for local/self-contained modes
 - `OPENGENI_OBJECT_STORAGE_BACKEND=azure-blob` plus Azure Blob connection string/account-key settings
@@ -1458,6 +1527,128 @@ The runtime secret must provide values such as:
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+### Optional OpenSandbox Kubernetes provider
+
+OpenSandbox is an additive provisioned backend; production Modal behavior and
+defaults are unchanged. It is installed only when a Kubernetes deployment
+contract explicitly selects `sandbox.backend=opensandbox`. The stack wrapper:
+
+- downloads exact upstream source commit
+  `88004c989e334ffd7811acbe193cddcd9014f14e` and verifies the source, CRD,
+  deterministic chart, and image digests from
+  `deploy/stacks/opensandbox-source.lock`;
+- installs the official upstream controller/server chart into
+  `opensandbox-system`, with sandbox CRs and Pods in `opensandbox`;
+- enables the controller's native metrics endpoint and installs a private
+  `opensandbox-controller-metrics` ClusterIP Service;
+- keeps the lifecycle service `ClusterIP`-only and loads its API key from the
+  `opensandbox-api-key` Secret;
+- enables the ClusterIP ingress gateway in URI mode with OSEP-0011 signed
+  endpoints for Channel B (browserd, noVNC, ttyd). Exec and files stay on the
+  private lifecycle server-proxy. Put a TLS terminator in front of that ClusterIP
+  in production; do not fork the upstream Service to LoadBalancer;
+- stores signing keys in the `opensandbox-secure-access` Secret (`keys` +
+  `active-key`), never in git or the server ConfigMap. Official server
+  `v0.2.2` ignores `OPENSANDBOX_SECURE_ACCESS_*`; the image post-renderer
+  adds an initContainer that materializes `[ingress.secure_access]` into a
+  writable runtime TOML from that Secret;
+- Helm 3 can `helm upgrade --post-renderer scripts/operator/opensandbox-image-post-renderer.sh`.
+  Helm 4 treats `--post-renderer` as a plugin name, so render with
+  `helm template ... | scripts/operator/opensandbox-image-post-renderer.sh | kubectl apply -f -`;
+- mounts a generic BatchSandbox template, or the Azure-specific variant that
+  selects/tolerates the dedicated sandbox node pool.
+
+Required runtime values are:
+
+```bash
+OPENGENI_SANDBOX_BACKEND=opensandbox
+OPENGENI_OPENSANDBOX_API_KEY=...
+OPENGENI_OPENSANDBOX_IMAGE=ghcr.io/your-org/opengeni-sandbox@sha256:...
+```
+
+The platform plan supplies
+`OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local`.
+`OPENGENI_OPENSANDBOX_TTL_SECONDS` defaults to 3,600 seconds and is renewed only
+while the matching authoritative OpenGeni lease remains warm. OpenGeni idle
+reaping is primary; provider expiry is a leak backstop.
+
+OpenSandbox v1 uses exact ID-addressed attach and OpenGeni portable
+`/workspace` tar capture/hydration. Tar bytes live in object storage; the lease
+keeps the SHA-256 descriptor plus an object ref. Object storage is required when
+this backend is active: missing storage fails closed at boot and on capture rather
+than writing tar bytes into `resume_state`. Native OpenSandbox pause/resume,
+snapshots, and immutable rig-image builds are deliberately not used. A desktop-class box
+image (ttyd, browserd, Xvfb/XFCE/noVNC) reports PTY, desktop, and recording;
+interactive keystrokes go through ttyd on 7681, not SDK `write_stdin`. Channel B
+JSON and streams use signed URI-mode ingress when
+`OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS=true`. That flag defaults off so ClusterIP-only
+operators keep the lifecycle `/proxy/` path, in-box curl, and API frame-proxy.
+Signed mode never falls back to those compensations. Prove Channel B signed HTTP
+Bearer passthrough and WebSocket subprotocol preservation with
+`bun run deployment:opensandbox-signed-endpoint-proof` against the preview ClusterIP
+lifecycle + ingress port-forwards. The script writes a redacted JSON artifact and
+must not log signatures or browserd tokens. The
+Agents SDK still does not expose `write_stdin` because OpenSandbox command TTY
+is unsupported; OpenGeni's internal finalizer can still poll and Ctrl-C an
+exact retained provider command. `runAs` remains unavailable.
+
+Prepare/render the pinned upstream chart without cluster mutation. Helm 3
+accepts `--post-renderer <script>`. Helm 4 treats that flag as a plugin name,
+so pipe the template through the script:
+
+```bash
+scripts/operator/prepare-opensandbox-chart.sh .agent/generated/opensandbox
+kubectl -n opensandbox-system create configmap opensandbox-secure-access-runtime-config \
+  --from-file=materialize-secure-access-config.py=scripts/operator/opensandbox-materialize-secure-access-config.py \
+  --dry-run=client -o yaml | kubectl apply -f -
+helm template opensandbox .agent/generated/opensandbox/opensandbox-0.2.0.tgz \
+  --namespace opensandbox-system \
+  --values deploy/stacks/official-opensandbox.values.yaml \
+  | scripts/operator/opensandbox-image-post-renderer.sh
+```
+
+When the optional observability wrapper is used, install it after the
+OpenSandbox CRDs and metrics Service:
+
+```bash
+kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml
+bun run deployment:observability -- --profile single-node --opensandbox
+```
+
+The OpenGeni `PrometheusRule` then adds backend-fenced alerts for create and
+warming failures, Pool depletion, Pending and unschedulable workload Pods,
+immutable-image pull failures, controller reconcile/readiness/restarts,
+provider and controller Kubernetes-API 429s, TTL-renewal failures, stuck
+deletion finalizers, and BatchSandboxes surviving their provider expiry.
+Per-workload thresholds use fresh fixed-label aggregates from the control
+worker. Raw BatchSandbox, workload-Pod, and container series in the
+`opensandbox` namespace are dropped before TSDB ingestion; opaque lifecycle IDs
+stay in correlated worker logs and are not metric labels.
+
+For the custom-Kubernetes portability path, `deploy/stacks/k3s-source.lock`
+pins the installer, checksum manifests, and amd64/arm64 binaries for k3s
+`v1.36.1+k3s1`. On a fresh Linux VM, copy the repository checkout and run:
+
+```bash
+sudo scripts/operator/bootstrap-opensandbox-k3s.sh
+```
+
+The script verifies every downloaded byte before installation, disables only
+the bundled Traefik component, waits for Kubernetes readiness, and writes a
+root-only kubeconfig. `scripts/operator/destroy-opensandbox-k3s.sh` removes the
+k3s installation; isolated preview automation should still delete the entire
+VM resource group afterward.
+
+The Azure reference module exposes `sandbox_node_pool`, disabled by default. An
+enabled pool uses label `opengeni.ai/sandbox-pool=opensandbox`, taint
+`opengeni.ai/sandbox=true:NoSchedule`, and explicit autoscaling bounds including
+scale-to-zero. Size 5/50/500 profiles from CPU, memory, pod/IP density, daemon
+overhead, utilization, disruption margin, quota, and cost; a 500 lightweight
+profile is not evidence for 500 desktop rigs. An Azure deployment that selects
+OpenSandbox must enable this pool because its Azure BatchSandbox template pins
+workloads to that scheduling contract. Generic Kubernetes and k3s use the
+unconstrained template instead.
 
 Keep `OPENGENI_MIGRATIONS_DATABASE_URL` and
 `OPENGENI_APP_DATABASE_PASSWORD` out of the runtime Secret. Put them in a

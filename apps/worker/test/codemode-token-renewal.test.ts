@@ -10,7 +10,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const agentTurnSource = readFileSync(
-  resolvePath(here, "..", "src", "activities", "agent-turn.ts"),
+  resolvePath(here, "..", "src", "activities", "agent-turn", "run-credentials.ts"),
   "utf8",
 );
 

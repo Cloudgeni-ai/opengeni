@@ -36,6 +36,8 @@ export const MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
 
 /** Static, client-safe definition projection. No provider secret is reachable. */
 export function projectClientModel(model: ConfiguredModel): ClientModel {
+  const anonymousProvider =
+    model.credentialSource.kind === "deployment" && model.credentialSource.mechanism === "none";
   const source =
     model.credentialSource.kind === "connected_subscription"
       ? model.credentialSource.provider === "xai"
@@ -43,9 +45,12 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
         : "codex"
       : model.credentialSource.kind === "workspace_connection"
         ? "workspace_gateway"
-        : "opengeni";
-  const publicProvider =
-    source === "codex"
+        : anonymousProvider
+          ? undefined
+          : "opengeni";
+  const publicProvider = anonymousProvider
+    ? { provider: model.providerId, providerLabel: model.providerLabel }
+    : source === "codex"
       ? { provider: "codex", providerLabel: "Codex" }
       : source === "supergrok"
         ? { provider: "supergrok", providerLabel: "SuperGrok" }
@@ -57,7 +62,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     label: model.label,
     ...(model.shortLabel ? { shortLabel: model.shortLabel } : {}),
     ...publicProvider,
-    source,
+    ...(source === undefined ? {} : { source }),
     api: model.api,
     ...(model.contextWindowTokens === undefined
       ? {}
@@ -164,6 +169,9 @@ function credentialReadinessFor(input: {
           basis: "connection",
           checkedAt: null,
         };
+  }
+  if (source.kind === "deployment" && source.mechanism === "none") {
+    return { status: "ready", reason: null, basis: "configuration", checkedAt: null };
   }
   if (source.kind === "deployment" && source.mechanism === "api_key") {
     return input.provider?.apiKey

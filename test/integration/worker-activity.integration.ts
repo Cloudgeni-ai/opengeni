@@ -42,8 +42,11 @@ import {
   listUsageEvents,
   listSessionEvents,
   listScheduledTaskRuns,
+  listTurnOpenSuffixToolCalls,
+  recordPendingSessionToolCallResult,
   recordUsageEvent,
   registerPendingSessionToolCall,
+  requestSessionTurnRecovery,
   requireScheduledTask,
   saveRunState,
   mutateWorkspaceControlInTransaction,
@@ -803,9 +806,7 @@ describe("worker activities integration", () => {
     expect(request).not.toContain("data:image/png");
     expect(request).toContain("look at this");
     expect(request).toContain("Attached files are available in the sandbox");
-    expect(request).toContain(
-      `diagram.png (image/png, 4 bytes): /workspace/files/${fileId}/diagram.png`,
-    );
+    expect(request).toContain(`diagram.png (image/png, 4 bytes): files/${fileId}/diagram.png`);
   });
 
   test("does not require object storage reads for attached file path context", async () => {
@@ -864,7 +865,7 @@ describe("worker activities integration", () => {
     const request = JSON.stringify(model.requests[0]?.input ?? {});
     expect(request).not.toContain("input_image");
     expect(request).not.toContain("direct model vision context");
-    expect(request).toContain(`/workspace/files/${fileId}/large.png`);
+    expect(request).toContain(`files/${fileId}/large.png`);
   });
 
   test("fails the turn plainly when two enabled packs declare sandbox images", async () => {
@@ -1748,7 +1749,7 @@ describe("worker activities integration", () => {
     expect(eventTypes).not.toContain("turn.failed");
   });
 
-  test("marks approval reruns running before resuming the agent", async () => {
+  test("resumes an already-consumed approval after recoverable worker loss", async () => {
     const workflowId = "workflow-approval-rerun";
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
@@ -1831,6 +1832,48 @@ describe("worker activities integration", () => {
         payload: { approvalId: "approval-1", decision: "approve" },
       },
     ]);
+    const consumedAttemptId = crypto.randomUUID();
+    const consumedClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: consumedAttemptId,
+      dispatchId: `approval-consumed-${crypto.randomUUID()}`,
+      trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
+    });
+    if (consumedClaim.action !== "claimed") {
+      throw new Error(`consumed approval fixture was not claimed: ${consumedClaim.reason}`);
+    }
+    expect(
+      await recordPendingSessionToolCallResult(dbClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        turnId: turn.id,
+        executionGeneration: consumedClaim.turn.executionGeneration,
+        attemptId: consumedAttemptId,
+        callId: "approval-1",
+        resultItem: {
+          type: "function_call_result",
+          name: "needs_approval",
+          callId: "approval-1",
+          status: "completed",
+          output: { type: "text", text: "approved before shutdown" },
+        },
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await requestSessionTurnRecovery(dbClient.db, grant.workspaceId, {
+        sessionId: session.id,
+        turnId: turn.id,
+        triggerEventId: approvalTrigger!.id,
+        attemptId: consumedAttemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    expect(
+      await listTurnOpenSuffixToolCalls(dbClient.db, grant.workspaceId, session.id, turn.id),
+    ).toHaveLength(1);
     let observedDuringRun: {
       status?: string;
       activeTurnId?: string | null;
@@ -1880,7 +1923,7 @@ describe("worker activities integration", () => {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
+        trigger: { kind: "next" },
         workflowId,
         workflowRunId: crypto.randomUUID(),
       }),
@@ -3025,12 +3068,26 @@ describe("worker activities integration", () => {
       scheduledTaskId: task.id,
       source: "test",
     });
+    expect(session).toMatchObject({
+      title: "scheduled-new-session",
+      titleSource: "agent",
+    });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
     // session.created carries the public "queued" status directly, so no
-    // separate session.status.changed event is emitted before the wake.
-    expect(events.map((event) => event.type)).toEqual(["session.created", "system.update.pending"]);
+    // separate session.status.changed event is emitted before the wake. The
+    // scheduler then exposes its generated title through the same event used by
+    // human and agent renames before it appends the scheduled occurrence.
+    expect(events.map((event) => event.type)).toEqual([
+      "session.created",
+      "session.title_set",
+      "system.update.pending",
+    ]);
     expect(events[0]?.payload).toMatchObject({ status: "queued" });
+    expect(events[1]?.payload).toMatchObject({
+      title: "scheduled-new-session",
+      source: "agent",
+    });
     const pendingUpdates = await listOutstandingSessionSystemUpdates(
       dbClient.db,
       grant.workspaceId,

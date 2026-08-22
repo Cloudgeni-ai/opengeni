@@ -11,8 +11,14 @@ import {
   listSessionsForSubject,
   SESSION_LIST_SNAPSHOT_REDACTED_SESSION_ID,
   transitionSessionVisibility,
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   type DbClient,
 } from "../src";
+
+const provisionRolesPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../src/provision-roles.ts",
+);
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -60,6 +66,11 @@ async function twoMemberWorkspace(label: string): Promise<Fixture> {
     name: "Session owner",
   });
   const grant = access.workspaceGrants[0]!;
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
   const otherSubjectId = `user:${label}-other-${suffix}`;
   const otherPersonalWorkspaceId = crypto.randomUUID();
   await shared.admin`
@@ -134,6 +145,7 @@ async function makePrivate(fixture: Fixture, sessionId: string, epoch: number): 
 describe("migration 0301 session list snapshot and pin visibility", () => {
   test("declares a rolling deployment mode and the bounded stripping contract", async () => {
     const migration = await readFile(migrationPath, "utf8");
+    const provisionRoles = await readFile(provisionRolesPath, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(migration).toContain("session_visibility_lifecycle_capability_held");
     expect(migration).toContain("pg_current_xact_id_if_assigned()");
@@ -152,6 +164,15 @@ describe("migration 0301 session list snapshot and pin visibility", () => {
     const pinCheck = pinPolicy.slice(pinPolicy.indexOf("WITH CHECK"));
     expect(pinUsing).toContain("subject_id = opengeni_private.current_subject_id()");
     expect(pinCheck).not.toContain("subject_id = opengeni_private.current_subject_id()");
+    // Fresh installs migrate before creating the restricted runtime role. The
+    // provisioner must therefore reconcile this target-schema ACL, and the
+    // startup posture must reject a deployment where it is absent.
+    expect(provisionRoles).toContain(
+      "GRANT EXECUTE ON FUNCTION %I.session_visibility_lifecycle_capability_held() TO %I",
+    );
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
+      "session_visibility_lifecycle_capability_held()",
+    );
   });
 
   test("installs the capability policy, strip trigger, and pin escape", async () => {

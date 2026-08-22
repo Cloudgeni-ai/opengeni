@@ -3,9 +3,22 @@ import {
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
   RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY,
+  variableSetScopeAllowedForRig,
 } from "../src/rigs";
 
 describe("rig default variable-set environment", () => {
+  test("never lets a wider rig depend on a narrower Variable Set", () => {
+    expect(variableSetScopeAllowedForRig("organization", "organization")).toBe(true);
+    expect(variableSetScopeAllowedForRig("organization", "workspace")).toBe(false);
+    expect(variableSetScopeAllowedForRig("organization", "user")).toBe(false);
+    expect(variableSetScopeAllowedForRig("workspace", "organization")).toBe(true);
+    expect(variableSetScopeAllowedForRig("workspace", "workspace")).toBe(true);
+    expect(variableSetScopeAllowedForRig("workspace", "user")).toBe(false);
+    expect(variableSetScopeAllowedForRig("user", "organization")).toBe(true);
+    expect(variableSetScopeAllowedForRig("user", "workspace")).toBe(true);
+    expect(variableSetScopeAllowedForRig("user", "user")).toBe(true);
+  });
+
   test("loads at a bounded width while preserving listed-order precedence", async () => {
     let active = 0;
     let peak = 0;

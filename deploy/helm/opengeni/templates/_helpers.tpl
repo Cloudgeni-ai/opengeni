@@ -113,6 +113,26 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "opengeni.desktopImageRef" -}}
+{{- $fromDesktop := index ((.Values.desktop) | default dict) "imageRef" | default "" -}}
+{{- if $fromDesktop -}}
+{{- $fromDesktop -}}
+{{- else -}}
+{{- index .Values.config "OPENGENI_MODAL_IMAGE_REF" | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "opengeni.assertDesktopModalImagePin" -}}
+{{- $backend := index .Values.config "OPENGENI_SANDBOX_BACKEND" | default "" -}}
+{{- $desktop := index .Values.config "OPENGENI_SANDBOX_DESKTOP_ENABLED" | default "false" | toString -}}
+{{- if and (eq $backend "modal") (or (eq $desktop "true") (eq $desktop "True") (eq $desktop "1")) -}}
+{{- $pin := include "opengeni.desktopImageRef" . -}}
+{{- if not (regexMatch "@sha256:[0-9a-f]{64}$" $pin) -}}
+{{- fail "desktop.imageRef (or config.OPENGENI_MODAL_IMAGE_REF) must be a digest-pinned docker/desktop.Dockerfile image when OPENGENI_SANDBOX_BACKEND=modal and OPENGENI_SANDBOX_DESKTOP_ENABLED=true. Do not point Modal Computer/Browser at the official headless opengeni-sandbox image." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "opengeni.postgresHost" -}}
 {{- printf "%s-postgres" (include "opengeni.fullname" .) -}}
 {{- end -}}

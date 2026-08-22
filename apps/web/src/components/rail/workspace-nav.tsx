@@ -49,38 +49,42 @@ export function WorkspaceNav() {
 
   if (rail.isMobile) {
     return (
-      <nav aria-label="Workspace" className="grid gap-2 px-2">
-        {groups.map((group) => (
-          <div key={group.id} className="grid gap-0.5">
-            <p className="px-2 pb-0.5 pt-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-              {group.label}
-            </p>
-            {group.items.map((item) => (
-              <WorkspaceConfigLink
-                key={item.to}
-                item={item}
-                workspaceId={rail.workspaceId}
-                variant="rail"
-                collapsed={false}
-                active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
-              />
-            ))}
-          </div>
-        ))}
-      </nav>
+      <div className="grid gap-2">
+        <nav aria-label="Workspace" className="grid gap-2 px-2">
+          {groups.map((group) => (
+            <div key={group.id} className="grid gap-0.5">
+              <p className="px-2 pb-0.5 pt-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                {group.label}
+              </p>
+              {group.items.map((item) => (
+                <WorkspaceConfigLink
+                  key={item.to}
+                  item={item}
+                  workspaceId={rail.workspaceId}
+                  variant="rail"
+                  collapsed={false}
+                  active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+                />
+              ))}
+            </div>
+          ))}
+        </nav>
+      </div>
     );
   }
 
   return (
-    <nav aria-label="Workspace" className="grid gap-0.5 px-2">
-      <WorkspaceSettingsMenu
-        workspaceId={rail.workspaceId}
-        groups={groups}
-        pathname={pathname}
-        collapsed={rail.collapsed}
-        active={settingsActive}
-      />
-    </nav>
+    <div className="grid gap-0.5">
+      <nav aria-label="Workspace" className="grid gap-0.5 px-2">
+        <WorkspaceSettingsMenu
+          workspaceId={rail.workspaceId}
+          groups={groups}
+          pathname={pathname}
+          collapsed={rail.collapsed}
+          active={settingsActive}
+        />
+      </nav>
+    </div>
   );
 }
 

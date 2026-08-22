@@ -122,6 +122,8 @@ export type SharedActivityServices = {
   // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
   // mapping bug returning tenant B's creds for a tenant-A run is caught here.
   connectionCredentials?: ConnectionCredentialsPort | null;
+  /** Standalone, default-off personal GitHub smart-HTTP broker consumer. */
+  personalGitHubCredentials?: ConnectionCredentialsPort["gitCredentials"] | null;
 };
 
 /** Control workers own short database and maintenance activities. Document
@@ -343,7 +345,11 @@ export type MaybeContinueGoalInput = {
 };
 
 export type MaybeContinueGoalResult = {
-  action: "none" | "queue" | "continue" | "paused";
+  // `held`: an agent-declared `goal_wait` hold is current. No continuation was
+  // materialized and the goal obligation stays armed; the workflow closes like
+  // `none` and the wake outbox (deadline) or any producer's signalWithStart
+  // restarts it.
+  action: "none" | "queue" | "continue" | "paused" | "held";
 };
 
 export type DispatchScheduledTaskRunInput = {
@@ -413,6 +419,18 @@ export type RunKnowledgeSourceSyncBatchInput = {
   sourceId: string;
   overlapPolicy: "skip" | "buffer_one";
 };
+
+export type DispatchAutomationRunInput = {
+  accountId: string;
+  workspaceId: string;
+  runId: string;
+};
+
+export type DispatchAutomationRunResult =
+  | { action: "started"; sessionId: string }
+  | { action: "already_dispatched"; sessionId: string }
+  | { action: "skipped"; reason: string }
+  | { action: "not_found" };
 
 export type RunKnowledgeSourceSyncBatchResult =
   | { action: "continue" }

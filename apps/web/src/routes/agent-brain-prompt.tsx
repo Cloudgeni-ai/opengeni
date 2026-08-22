@@ -1,8 +1,10 @@
 import { useNavigate } from "@tanstack/react-router";
+import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { SparklesIcon } from "lucide-react";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAppContext } from "@/context";
+import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
 
 type AgentBrainPromptKind = "company_profile" | "preference" | "workspace_instructions";
 
@@ -22,7 +24,7 @@ function promptCopy(kind: AgentBrainPromptKind): {
       openingMessage: (request) =>
         `Help me create or update our organization-wide company profile and goals.\n\nWhat I want agents to know:\n${request}`,
       instructions:
-        "Help the user create concise organization-wide company context covering only useful identity, mission, products, customers, goals, and critical constraints. Ask only essential follow-up questions. Show the proposed profile before applying it. After explicit confirmation, use the canonical durable-learning company-profile authority tool if available. Do not save this as ordinary Memory, Documents, workspace policy, or a preference. If the write tool is unavailable, say so briefly and leave the final proposal ready for the manual editor.",
+        "Help the user create concise organization-wide company context covering only useful identity, mission, products, customers, goals, and critical constraints. Ask only essential follow-up questions. Show the proposed profile before applying it. After explicit confirmation, call the company_profile_propose tool once with the full profile; it records an inactive proposal that an organization owner or admin activates in Company Brain. Do not save this as ordinary Memory, Documents, workspace policy, or a preference.",
     };
   }
   if (kind === "workspace_instructions") {
@@ -49,6 +51,66 @@ function promptCopy(kind: AgentBrainPromptKind): {
   };
 }
 
+type CatalogState = {
+  workspaceId: string;
+  models: WorkspaceModelCatalogModel[];
+  loading: boolean;
+  error: string | null;
+};
+
+/**
+ * Workspace model catalog for the prompt. This deliberately calls the SDK
+ * client directly instead of reusing the shared `useWorkspaceModelCatalog`
+ * hook: that hook imports the model-policy picker helpers, and a new edge to
+ * them from this lazy route re-buckets rolldown's entry-aware session chunks
+ * and drags the composer stack into the startup graph.
+ */
+function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & {
+  refresh: () => Promise<void>;
+} {
+  const client = useAppContext().client;
+  const [state, setState] = useState<CatalogState>({
+    workspaceId,
+    models: [],
+    loading: true,
+    error: null,
+  });
+  const [refreshToken, setRefreshToken] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ workspaceId, models: [], loading: true, error: null });
+    void (async () => {
+      try {
+        const response = await client.getWorkspaceModelCatalog(workspaceId);
+        if (!cancelled) {
+          setState({ workspaceId, models: response.models, loading: false, error: null });
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setState({
+            workspaceId,
+            models: [],
+            loading: false,
+            error: caught instanceof Error ? caught.message : String(caught),
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, workspaceId, refreshToken]);
+
+  const refresh = useCallback(async () => {
+    setRefreshToken((token) => token + 1);
+  }, []);
+
+  return state.workspaceId === workspaceId
+    ? { ...state, refresh }
+    : { workspaceId, models: [], loading: true, error: null, refresh };
+}
+
 export function AgentBrainPrompt({
   kind,
   workspaceId,
@@ -61,16 +123,48 @@ export function AgentBrainPrompt({
   const copy = promptCopy(kind);
   const [request, setRequest] = useState("");
   const [starting, setStarting] = useState(false);
+  const modelCatalog = useAgentBrainPromptCatalog(workspaceId);
+  const modelSelection = useMemo(
+    () =>
+      modelCatalog.loading || modelCatalog.error
+        ? null
+        : resolveAgentBrainPromptModel(modelCatalog.models, {
+            model: context.model,
+            reasoningEffort: context.reasoningEffort,
+            latencyMode: context.latencyMode,
+          }),
+    [
+      modelCatalog.loading,
+      modelCatalog.error,
+      modelCatalog.models,
+      context.model,
+      context.reasoningEffort,
+      context.latencyMode,
+    ],
+  );
+  const noModelAvailable =
+    !modelCatalog.loading && modelCatalog.error === null && modelSelection === null;
+  const canSubmit =
+    Boolean(request.trim()) &&
+    !starting &&
+    !context.busy &&
+    !modelCatalog.loading &&
+    modelSelection !== null;
 
   const start = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const trimmed = request.trim();
-    if (!trimmed || starting || context.busy) return;
+    if (!trimmed || starting || context.busy || modelCatalog.loading || !modelSelection) return;
     setStarting(true);
     try {
       const created = await context.startSession(
         workspaceId,
-        { text: copy.openingMessage(trimmed) },
+        {
+          text: copy.openingMessage(trimmed),
+          model: modelSelection.model,
+          reasoningEffort: modelSelection.reasoningEffort,
+          latencyMode: modelSelection.latencyMode,
+        },
         { instructions: copy.instructions },
       );
       if (created) {
@@ -104,11 +198,39 @@ export function AgentBrainPrompt({
       <p className="text-xs leading-5 text-fg-subtle">
         OpenGeni will ask questions if needed and show you the result before saving it.
       </p>
+      {modelSelection ? (
+        <p className="text-xs leading-5 text-fg-subtle" role="status">
+          Model: <span className="font-medium text-fg">{modelSelection.label}</span>
+          {" · "}
+          {modelSelection.paymentSource}
+        </p>
+      ) : null}
+      {noModelAvailable ? (
+        <p className="text-xs leading-5 text-status-error" role="status">
+          No model is available for this workspace. Check the workspace model policy and provider
+          credentials.
+        </p>
+      ) : null}
+      {modelCatalog.error ? (
+        <p className="flex flex-wrap items-center gap-2 text-xs leading-5 text-fg-subtle">
+          <span>
+            Could not resolve an allowed workspace model: {modelCatalog.error}. Retry before
+            creating with OpenGeni.
+          </span>
+          <button
+            type="button"
+            className="rounded-md border border-border px-2 py-0.5 text-xs font-medium text-fg hover:bg-surface-muted"
+            onClick={() => void modelCatalog.refresh()}
+          >
+            Retry
+          </button>
+        </p>
+      ) : null}
       <div>
         <button
           type="submit"
           className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
-          disabled={!request.trim() || starting || context.busy}
+          disabled={!canSubmit}
         >
           {starting ? "Starting…" : copy.button}
         </button>

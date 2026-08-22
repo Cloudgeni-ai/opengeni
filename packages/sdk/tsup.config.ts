@@ -13,6 +13,8 @@ export default defineConfig({
     "src/core.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
+    "src/automations.ts",
+    "src/pr-review.ts",
     "src/realtime.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifacts-worker.ts",

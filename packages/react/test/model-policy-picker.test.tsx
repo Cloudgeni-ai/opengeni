@@ -212,6 +212,29 @@ describe("ModelPolicyPicker", () => {
     ).toBeTruthy();
   });
 
+  test("can hide latency controls on policy surfaces that do not persist latency", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model="codex/gpt-5.6-sol"
+        effort="low"
+        latencyMode="standard"
+        allowLatencyMode={false}
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="model-picker-choice-codex/gpt-5.6-sol"]')
+        ?.click();
+    });
+
+    expect(container.querySelector('[data-testid="model-picker-fast"]')).toBeNull();
+  });
+
   test("never exposes stale model rows while the catalog is loading", async () => {
     const container = await mount(
       <ModelPolicyPicker
@@ -301,5 +324,29 @@ describe("ModelPolicyPicker", () => {
     expect(
       container.querySelector('[data-testid="billing-class-icon-codex_subscription"]'),
     ).toBeTruthy();
+  });
+
+  test("renders the External rail mark for an anonymous provider", async () => {
+    const external: ClientModel = {
+      id: "opencode/x-preview-f-free",
+      label: "OpenCode Ox Alpha",
+      provider: "opencode-zen",
+      providerLabel: "OpenCode Zen",
+      api: "chat",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    };
+    const container = await mount(
+      <ModelPolicyPicker
+        models={[external]}
+        model={external.id}
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
   });
 });

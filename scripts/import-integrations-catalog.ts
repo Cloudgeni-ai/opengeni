@@ -40,7 +40,7 @@ const MIT_ATTRIBUTION =
 
 // Bump deliberately whenever normalization or import semantics can change
 // persisted output without changing the reviewed snapshot bytes.
-export const CATALOG_IMPORT_SEMANTIC_VERSION = 2;
+export const CATALOG_IMPORT_SEMANTIC_VERSION = 3;
 
 export const deadDemoDomains = new Set([
   "auto-calculator.onrender.com",
@@ -95,6 +95,8 @@ export type CatalogIntegrationRow = {
   domain: string;
   name: string;
   description?: string;
+  /** The row is present in the reviewed curated overlay. Presentation only. */
+  curated?: boolean;
   /** Curated grouping; absent means the registry-wide default. */
   category?: string;
   /** Curated: promoted to the featured strip. Not a security review. */
@@ -345,6 +347,7 @@ export function normalizeCatalogSnapshot(
       domain,
       name: official?.name ?? stringValue(candidate.name) ?? domain,
       ...optionalString("description", official?.description ?? stringValue(candidate.description)),
+      ...(official ? { curated: true } : {}),
       ...optionalString("category", official?.category),
       ...(official?.featured ? { featured: true } : {}),
       ...(official?.official ? { official: true } : {}),
@@ -646,9 +649,10 @@ export function catalogRowToDbInput(
     metadata: {
       logoSource: input.logoSource ?? (row.logoSourceUrl ? "integrations.sh" : "generic_monogram"),
       originalLogoUrl: row.logoSourceUrl,
-      ...(row.featured || row.official
+      ...(row.curated || row.featured || row.official
         ? {
             curation: {
+              ...(row.curated ? { curated: true } : {}),
               ...(row.featured ? { featured: true } : {}),
               ...(row.official ? { official: true } : {}),
             },

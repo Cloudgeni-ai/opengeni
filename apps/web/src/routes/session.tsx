@@ -20,8 +20,9 @@ import {
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { useNavigate } from "@tanstack/react-router";
 import {
+  BugIcon,
   CheckIcon,
   Loader2Icon,
   MenuIcon,
@@ -35,7 +36,8 @@ import { toast } from "sonner";
 import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
-import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { PersonalResourceAttachmentControl } from "@/components/personal-resource-attachment-control";
+import { LoadingPanel } from "@/components/common";
 import {
   FollowUpRepositoryMenuBody,
   FollowUpRepositoryPicker,
@@ -69,6 +71,7 @@ import {
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
   projectSessionTimeline,
@@ -86,6 +89,20 @@ import {
   runnableLatencyModesForModel,
 } from "@/lib/model-policy";
 import { sessionTimelineEmptyStateCopy } from "@/lib/session-empty-state";
+import {
+  consumeSessionComposerFocusIntent,
+  FOCUS_SESSION_COMPOSER_EVENT,
+  sessionComposerFocusIntentIsEligible,
+  shouldFocusSessionComposer,
+  type SessionComposerFocusIntent,
+} from "@/lib/session-focus";
+import {
+  applySessionAttentionProjection,
+  updateLocalSessionDeliveryAttention,
+  notifySessionAttentionChanged,
+  sessionReadProjectionKey,
+  shouldAcknowledgeActiveSession,
+} from "@/lib/session-attention";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { downloadSandboxFileArtifact } from "@/lib/sandbox-artifact-download";
@@ -103,6 +120,7 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
+import { usePersonalResourceAttachment } from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -125,6 +143,10 @@ const LazyCodexRealtimeControl = lazy(() =>
   import("@opengeni/react/realtime").then(({ SessionRealtimeControl }) => ({
     default: SessionRealtimeControl,
   })),
+);
+
+const LazySessionRouteAuxiliary = lazy(
+  () => import("@/components/session/session-tenancy-control"),
 );
 
 export function SessionRoute({
@@ -165,10 +187,17 @@ export function SessionRoute({
     loadNewer,
     loadingOldest,
     loadOldest,
+    loadingLatest,
+    lastSequence: renderedThroughSequence,
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
-  const { session: fetchedSession, loading, error: loadError } = useSession(sessionId, { events });
+  const {
+    session: fetchedSession,
+    loading,
+    error: loadError,
+    refresh: refreshSession,
+  } = useSession(sessionId, { events });
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
@@ -243,13 +272,127 @@ export function SessionRoute({
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
   const {
+    client,
+    captureWorkspaceInvocation,
+    ownsWorkspaceInvocation,
     setSession: setContextSession,
     setConnectionState: setContextConnectionState,
     sessionEventFeedStore,
   } = context;
+  const acknowledgedProjectionRef = useRef<string | null>(null);
+  const retriedProjectionRef = useRef<string | null>(null);
+  const [foreground, setForeground] = useState(() => ({
+    documentVisible: document.visibilityState === "visible",
+    windowFocused: document.hasFocus(),
+  }));
+  const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
   useEffect(() => {
     setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
+  useEffect(() => {
+    const reconcileForeground = () => {
+      setForeground({
+        documentVisible: document.visibilityState === "visible",
+        windowFocused: document.hasFocus(),
+      });
+    };
+    window.addEventListener("focus", reconcileForeground);
+    window.addEventListener("blur", reconcileForeground);
+    document.addEventListener("visibilitychange", reconcileForeground);
+    return () => {
+      window.removeEventListener("focus", reconcileForeground);
+      window.removeEventListener("blur", reconcileForeground);
+      document.removeEventListener("visibilitychange", reconcileForeground);
+    };
+  }, []);
+  useEffect(() => {
+    const projectionKey = session
+      ? sessionReadProjectionKey(session.id, renderedThroughSequence)
+      : null;
+    const unreadProjection = session
+      ? {
+          ...session,
+          unread:
+            (session.unread || renderedThroughSequence > session.lastSequence) &&
+            projectionKey !== acknowledgedProjectionRef.current,
+        }
+      : null;
+    const liveTipLoaded =
+      !initialLoading && !hasNewer && !loadingNewer && !loadingOldest && !loadingLatest;
+    if (
+      !session ||
+      !projectionKey ||
+      !shouldAcknowledgeActiveSession({
+        activeSessionId: sessionId,
+        workspaceId,
+        session: unreadProjection,
+        liveTipLoaded,
+        ...foreground,
+      })
+    ) {
+      return;
+    }
+    const targetSession = session;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
+      const acceptedTransition = captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) return;
+      acknowledgedProjectionRef.current = projectionKey;
+      void client
+        .updateSessionAttention(workspaceId, targetSession.id, {
+          unread: false,
+          acknowledgedThroughSequence: renderedThroughSequence,
+        })
+        .then((updated) => {
+          if (cancelled || !ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
+          // The rail owns separately polled page objects. Keep this exact
+          // frontier result there so a stale list poll cannot resurrect or
+          // prematurely clear the unread dot.
+          notifySessionAttentionChanged(updated);
+          setContextSession((current) =>
+            current?.id === updated.id
+              ? applySessionAttentionProjection(current, updated)
+              : current,
+          );
+        })
+        .catch(() => {
+          // Retry one transient failure for this exact frontier. Keeping the
+          // receipt after the second failure prevents a permanent 4xx/5xx from
+          // becoming an unbounded request and log loop.
+          if (
+            !cancelled &&
+            ownsWorkspaceInvocation(workspaceId, acceptedTransition) &&
+            acknowledgedProjectionRef.current === projectionKey &&
+            retriedProjectionRef.current !== projectionKey
+          ) {
+            retriedProjectionRef.current = projectionKey;
+            acknowledgedProjectionRef.current = null;
+            setAttentionRetryRevision((revision) => revision + 1);
+          }
+        });
+    }, 750);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    attentionRetryRevision,
+    captureWorkspaceInvocation,
+    client,
+    foreground,
+    hasNewer,
+    initialLoading,
+    loadingLatest,
+    loadingNewer,
+    loadingOldest,
+    ownsWorkspaceInvocation,
+    renderedThroughSequence,
+    session,
+    sessionId,
+    setContextSession,
+    workspaceId,
+  ]);
   useEffect(() => {
     setContextConnectionState(connectionState);
   }, [connectionState, setContextConnectionState]);
@@ -278,7 +421,6 @@ export function SessionRoute({
       toast.error("Failed to load session", { description: String(loadError) });
     }
   }, [loadError]);
-
   // A reconnect OAuth round-trip lands back here (the reconnect card set
   // returnPath to this session). The connection is refreshed server-side, but
   // the original tool call was settled as an error and is never replayed. Strip
@@ -362,7 +504,9 @@ export function SessionRoute({
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
         if (item.capability.id === "api:github-app") {
-          const status = await context.client.getGitHubApp(workspaceId, { returnPath });
+          const status = await context.client.getGitHubApp(workspaceId, {
+            returnPath,
+          });
           if (status.status === "bound") {
             toast.success("GitHub is already connected");
             return;
@@ -475,33 +619,39 @@ export function SessionRoute({
     pollIntervalMs: 30_000,
   });
   const agentNodes = lineage.lineage?.children ?? [];
+  const sandboxFileRequestSeq = useRef(0);
+  const [sandboxFileRequest, setSandboxFileRequest] = useState<{
+    path: string;
+    line: number;
+    requestId: number;
+  } | null>(null);
+  useEffect(() => {
+    setSandboxFileRequest(null);
+  }, [sessionId]);
+  const setInspectorOpen = context.setInspectorOpen;
+  const openSandboxFileAtLine = useCallback(
+    (path: string, line: number) => {
+      sandboxFileRequestSeq.current += 1;
+      setSandboxFileRequest({
+        path,
+        line,
+        requestId: sandboxFileRequestSeq.current,
+      });
+      setInspectorOpen(true);
+    },
+    [setInspectorOpen],
+  );
 
   if (!session) {
     if (loadError) {
-      return isApiErrorStatus(loadError, 404) ? (
-        <ProblemPanel
-          title="Session not found in this workspace"
-          description="The session ID is not available under the workspace in the URL."
-          action={
-            <Button asChild type="button" variant="secondary">
-              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
-                Back to sessions
-              </Link>
-            </Button>
-          }
-        />
-      ) : (
-        <ProblemPanel
-          title="Unable to open session"
-          description={loadError instanceof Error ? loadError.message : String(loadError)}
-          action={
-            <Button asChild type="button" variant="secondary">
-              <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId }}>
-                Back to sessions
-              </Link>
-            </Button>
-          }
-        />
+      return (
+        <Suspense fallback={<LoadingPanel label="Looking for this session" />}>
+          <LazySessionRouteAuxiliary
+            workspaceId={workspaceId}
+            sessionId={sessionId}
+            loadError={loadError}
+          />
+        </Suspense>
       );
     }
     return (
@@ -515,6 +665,7 @@ export function SessionRoute({
           primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+          openFileRequest={sandboxFileRequest}
           onOpenNavigation={() => {
             context.setInspectorOpen(false);
             rail.setDrawerOpen(true);
@@ -574,6 +725,8 @@ export function SessionRoute({
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
+      onReloadSession={refreshSession}
+      onOpenSandboxFile={openSandboxFileAtLine}
     />
   );
 
@@ -588,6 +741,7 @@ export function SessionRoute({
         primary={chatPane}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+        openFileRequest={sandboxFileRequest}
         onOpenNavigation={() => {
           context.setInspectorOpen(false);
           rail.setDrawerOpen(true);
@@ -626,6 +780,11 @@ function SessionDock(props: {
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
   onOpenNavigation: () => void;
+  openFileRequest?: {
+    path: string;
+    line?: number | null;
+    requestId: number;
+  } | null;
 }) {
   const context = useAppContext();
   const dockLayoutStorageId = sessionDockLayoutStorageId(
@@ -667,12 +826,8 @@ function SessionDock(props: {
   const trailingTabs: WorkspaceTab[] = [
     {
       id: "artifacts",
-      label: (
-        <span className="inline-flex items-center gap-1.5">
-          <PanelsTopLeftIcon className="size-3.5" aria-hidden />
-          <span>Artifacts</span>
-        </span>
-      ),
+      label: "Artifacts",
+      icon: <PanelsTopLeftIcon />,
       ...(artifactSummaries.length > 0
         ? {
             badge: (
@@ -701,6 +856,7 @@ function SessionDock(props: {
     trailingTabs.push({
       id: "debug",
       label: "Debug",
+      icon: <BugIcon />,
       content: (
         <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
           <LazySessionInspector
@@ -723,6 +879,7 @@ function SessionDock(props: {
       trailingTabs={trailingTabs}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
+      {...(props.openFileRequest ? { openFileRequest: props.openFileRequest } : {})}
       mobileLeadingControl={
         <Button
           type="button"
@@ -783,7 +940,11 @@ function useSessionEditableArtifactSummaries(input: {
           },
         );
         if (current) {
-          setLoaded({ key: authorityKey, status: "ready", artifacts: result.artifacts });
+          setLoaded({
+            key: authorityKey,
+            status: "ready",
+            artifacts: result.artifacts,
+          });
         }
       })
       .catch(() => {
@@ -842,10 +1003,15 @@ function SessionChatPane(props: {
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
+  onReloadSession: () => Promise<void>;
+  onOpenSandboxFile: (path: string, line: number) => void;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
-  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 5000 });
+  const fleet = useMachines({
+    sessionId: props.session.id,
+    pollIntervalMs: 5000,
+  });
   const computeLabel =
     fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
   const loadRetainedScreenshot = useMemo(
@@ -876,7 +1042,76 @@ function SessionChatPane(props: {
     },
     [context.client, props.session.id, props.session.workspaceId],
   );
+  const onOpenSandboxFile = props.onOpenSandboxFile;
+  const handleSandboxFile = useCallback(
+    async (path: string, line?: number) => {
+      if (line != null && line > 0) {
+        onOpenSandboxFile(path, line);
+        return;
+      }
+      await downloadSandboxFile(path);
+    },
+    [downloadSandboxFile, onOpenSandboxFile],
+  );
   const terminal = isTerminalSessionStatus(props.session.status);
+  const composerRegionRef = useRef<HTMLDivElement | null>(null);
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  useEffect(() => {
+    const onFocusRequest = (event: Event) => {
+      const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
+      if (
+        detail?.workspaceId === props.session.workspaceId &&
+        detail.sessionId === props.session.id
+      ) {
+        setComposerFocusSignal(detail.nonce);
+      }
+    };
+    globalThis.addEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+    return () => globalThis.removeEventListener(FOCUS_SESSION_COMPOSER_EVENT, onFocusRequest);
+  }, [props.session.id, props.session.workspaceId]);
+  useEffect(() => {
+    const intent = consumeSessionComposerFocusIntent(props.session.workspaceId, props.session.id);
+    if (!intent) return;
+    if (
+      !sessionComposerFocusIntentIsEligible({
+        viewportWidth: globalThis.innerWidth,
+        coarsePointer: globalThis.matchMedia?.("(pointer: coarse)").matches ?? false,
+        terminal,
+        requiresAction: props.session.status === "requires_action",
+        pendingHumanInput: props.humanInput.requests.length > 0,
+        pendingApproval: props.approvals.length > 0,
+      })
+    ) {
+      return;
+    }
+    const frame = globalThis.requestAnimationFrame(() => {
+      const textarea = composerRegionRef.current?.querySelector("textarea");
+      if (!textarea || textarea.disabled) return;
+      const dialogOpen = Boolean(
+        document.querySelector('[aria-modal="true"], [role="dialog"][data-state="open"]'),
+      );
+      if (
+        !shouldFocusSessionComposer(
+          document.activeElement instanceof HTMLElement ? document.activeElement : null,
+          props.session.id,
+          document.body,
+          dialogOpen,
+        )
+      ) {
+        return;
+      }
+      textarea.focus();
+    });
+    return () => globalThis.cancelAnimationFrame(frame);
+  }, [
+    composerFocusSignal,
+    props.approvals.length,
+    props.humanInput.requests.length,
+    props.session.id,
+    props.session.status,
+    props.session.workspaceId,
+    terminal,
+  ]);
   const agentsSignal = useMemo(() => {
     const agents = props.agentNodes;
     if (agents.length === 0) return undefined;
@@ -1085,13 +1320,39 @@ function SessionChatPane(props: {
     ],
   );
   const composerPolicyValidRef = useRef(false);
+  const workspace =
+    context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const personalAttachment = usePersonalResourceAttachment({
+    client: context.client,
+    authMode: context.clientConfig.auth.mode,
+    authSession: context.authSession,
+    accessSubjectId: context.accessContext.subjectId,
+    managedSelfContext: context.managedSelfContext,
+    workspace,
+    session: props.session,
+    enabled: props.session.sandboxBackend !== "selfhosted",
+    fixed: {
+      variableSetId: props.session.variableSetId,
+      rigId: props.session.rigId,
+    },
+    personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
+    onReloadSession: props.onReloadSession,
+  });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
       resources: [...attachments.readyResources, ...repositories.pendingResources],
+      ...(personalAttachment.intent
+        ? { personalResourceAttachment: personalAttachment.intent }
+        : {}),
     }),
     sendBlocked: () =>
-      attachments.hasUnresolved || repositories.error !== null || !composerPolicyValidRef.current,
+      attachments.hasUnresolved ||
+      repositories.error !== null ||
+      !composerPolicyValidRef.current ||
+      personalAttachment.requiresDecision ||
+      personalAttachment.loading ||
+      personalAttachment.refreshing,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
@@ -1104,6 +1365,8 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
+    onSent: (_text, input) => personalAttachment.onAccepted(input),
+    onDeliveryError: personalAttachment.onDeliveryError,
   });
   const composerPolicy = composer.policy;
   const composerDraftLoading = composer.draftLoading;
@@ -1155,7 +1418,10 @@ function SessionChatPane(props: {
     if (launchLatency) setComposerLatencyMode(launchLatency);
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
-      params: { workspaceId: props.session.workspaceId, sessionId: props.session.id },
+      params: {
+        workspaceId: props.session.workspaceId,
+        sessionId: props.session.id,
+      },
       search: composerLaunchSearchAfterPolicyApply({
         model: launchModel,
         effort: launchEffort,
@@ -1179,17 +1445,32 @@ function SessionChatPane(props: {
     setComposerModel,
     setComposerReasoningEffort,
   ]);
+  const acceptedClientEventIds = useMemo(
+    () =>
+      new Set(
+        props.events
+          .filter((event) => event.type === "user.message" && event.clientEventId)
+          .map((event) => event.clientEventId as string),
+      ),
+    [props.events],
+  );
+  const failedOptimisticMessageCount = (composer.optimisticMessages ?? []).filter(
+    (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
+  ).length;
+  useEffect(() => {
+    updateLocalSessionDeliveryAttention({
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+      failedMessageCount: failedOptimisticMessageCount,
+    });
+  }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
-    const acceptedClientEventIds = new Set(
-      props.events
-        .filter((event) => event.type === "user.message" && event.clientEventId)
-        .map((event) => event.clientEventId as string),
-    );
     const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
       .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
       .map((message) => ({
         kind: "user-message",
         id: `optimistic:${message.clientEventId}`,
+        reconciliationKey: `user-message:${message.clientEventId}`,
         text: message.text,
         annotations: message.annotations.map((annotation, ordinal) => ({
           ...annotation,
@@ -1210,7 +1491,7 @@ function SessionChatPane(props: {
         },
       }));
     return [...props.timeline, ...optimisticItems];
-  }, [composer, props.events, props.timeline]);
+  }, [acceptedClientEventIds, composer, props.timeline]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
@@ -1251,15 +1532,11 @@ function SessionChatPane(props: {
       }
       return (
         <div data-testid="assistant-markdown">
-          <MarkdownText
-            text={text}
-            streaming={item.streaming}
-            onSandboxFile={downloadSandboxFile}
-          />
+          <MarkdownText text={text} streaming={item.streaming} onSandboxFile={handleSandboxFile} />
         </div>
       );
     },
-    [downloadSandboxFile, props.session.workspaceId],
+    [handleSandboxFile, props.session.workspaceId],
   );
 
   return (
@@ -1312,6 +1589,21 @@ function SessionChatPane(props: {
               loadingOldest={props.loadingOldest}
               onJumpToStart={() => void props.onJumpToStart()}
               onJumpToLatest={() => void props.onJumpToLatest()}
+              trailingState={
+                props.humanInput.requests.length > 0 &&
+                props.session.status === "requires_action" ? (
+                  <div className="pb-1" data-human-input-timeline-surface="">
+                    <HumanInputSurface
+                      requests={props.humanInput.requests}
+                      respondingRequestId={props.humanInput.respondingRequestId}
+                      error={props.humanInput.mutationError?.message}
+                      onSubmit={(requestId, response) =>
+                        props.humanInput.respond(requestId, response).then(() => undefined)
+                      }
+                    />
+                  </div>
+                ) : undefined
+              }
               emptyState={
                 props.queue.stoppingPreviousAttempt ? (
                   <EmptyState
@@ -1407,23 +1699,6 @@ function SessionChatPane(props: {
         </div>
       ) : null}
 
-      {/* Structured questions are tool output, not approvals: answer/skip
-          resumes the exact frozen call. The authoritative hook reads pending
-          rows and uses this shared event feed only as a refresh trigger.
-          Parallel requests step one-at-a-time inside HumanInputSurface. */}
-      {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6 pb-2">
-          <HumanInputSurface
-            requests={props.humanInput.requests}
-            respondingRequestId={props.humanInput.respondingRequestId}
-            error={props.humanInput.mutationError?.message}
-            onSubmit={(requestId, response) =>
-              props.humanInput.respond(requestId, response).then(() => undefined)
-            }
-          />
-        </div>
-      ) : null}
-
       {/* Compact session chrome above the composer — incoming, queue, goal,
           and agents as one dock. Hides entirely when there are no signals. */}
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
@@ -1443,8 +1718,13 @@ function SessionChatPane(props: {
         </div>
       </div>
 
-      <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
+      <div ref={composerRegionRef} className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
+          <PersonalResourceAttachmentControl
+            controller={personalAttachment}
+            disabled={terminal || composer.sending}
+            compact
+          />
           <ConsoleComposer
             workspaceId={props.session.workspaceId}
             composer={composer}

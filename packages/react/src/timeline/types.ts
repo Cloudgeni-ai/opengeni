@@ -1,4 +1,6 @@
 import type {
+  HumanInputQuestion,
+  HumanInputResponse,
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
@@ -27,6 +29,13 @@ export type TimelineAnnotationSourceDescriptor = Omit<
 export type UserMessageItem = {
   kind: "user-message";
   id: string;
+  /**
+   * Renderer-only identity shared by a locally acknowledged message and the
+   * durable event that replaces it. The canonical event id remains `id`; this
+   * key only prevents the optimistic-to-durable handoff from remounting and
+   * replaying the row entrance animation.
+   */
+  reconciliationKey?: string | undefined;
   text: string;
   annotations?: TimelineAnnotation[] | undefined;
   annotationSource?: TimelineAnnotationSourceDescriptor | undefined;
@@ -49,6 +58,29 @@ export type UserMessageItem = {
         onRemove?: (() => void) | undefined;
       }
     | undefined;
+};
+
+export type HumanInputAnswerSummary = {
+  questionId: string;
+  label: string;
+  prompt: string;
+  values: string[];
+};
+
+/**
+ * One resolved structured question in the conversation. The live pending form
+ * is rendered at the timeline tip by the host; after settlement this item keeps
+ * both the agent's question and the human's answer visible as chat history.
+ */
+export type HumanInputItem = {
+  kind: "human-input";
+  id: string;
+  turnId: string | null;
+  requestId: string;
+  questions: HumanInputQuestion[];
+  response: HumanInputResponse;
+  answers: HumanInputAnswerSummary[];
+  occurredAt: string;
 };
 
 export type AgentMessageItem = {
@@ -290,7 +322,15 @@ export type SessionStatusItem = {
 export type GoalItem = {
   kind: "goal";
   id: string;
-  action: "set" | "updated" | "completed" | "paused" | "resumed" | "cleared" | "continuation";
+  action:
+    | "set"
+    | "updated"
+    | "completed"
+    | "paused"
+    | "resumed"
+    | "cleared"
+    | "held"
+    | "continuation";
   text: string | null;
   occurredAt: string;
 };
@@ -400,6 +440,7 @@ export type TurnEndItem = {
 
 export type TimelineItem =
   | UserMessageItem
+  | HumanInputItem
   | AgentMessageItem
   | ReasoningItem
   | ToolCallItem

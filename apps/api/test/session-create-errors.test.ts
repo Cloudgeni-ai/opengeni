@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { SessionTenancyManagedHumanRequiredError } from "@opengeni/core";
+import { SessionTenancyNotActivatedError } from "@opengeni/db";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -114,5 +116,28 @@ describe("session create error envelope", () => {
     const forbidden = await app.request("http://x/forbidden");
     expect(forbidden.status).toBe(403);
     expect(await forbidden.text()).toBe("still forbidden");
+  });
+
+  test("returns actionable private-create authority and activation errors", async () => {
+    const app = new Hono();
+    app.get("/managed-required", (c) =>
+      sessionCreateErrorResponse(c, new SessionTenancyManagedHumanRequiredError()),
+    );
+    app.get("/not-activated", (c) =>
+      sessionCreateErrorResponse(c, new SessionTenancyNotActivatedError()),
+    );
+
+    const managedRequired = await app.request("http://x/managed-required");
+    expect(managedRequired.status).toBe(403);
+    expect(await managedRequired.json()).toEqual({
+      code: "SESSION_CREATE_FORBIDDEN",
+      message: "Only managed-account users can create an Only-me session.",
+    });
+    const notActivated = await app.request("http://x/not-activated");
+    expect(notActivated.status).toBe(409);
+    expect(await notActivated.json()).toEqual({
+      code: "SESSION_TENANCY_NOT_ACTIVATED",
+      message: "Private sessions are not enabled for this organization.",
+    });
   });
 });

@@ -2196,7 +2196,7 @@ describe("RoutingSandboxSession — native-desktop surface (machine-primary comp
   });
 });
 
-describe("defaultIsHome — a machine-pinned turn's clear-to-null fails typed (issue #341, deferred sliver)", () => {
+describe("defaultIsHome — a machine-pinned attempt's clear-to-null emits the home handoff signal", () => {
   const machineSandbox: RoutableSandbox = {
     id: "sbx-self",
     kind: "selfhosted",
@@ -2206,9 +2206,9 @@ describe("defaultIsHome — a machine-pinned turn's clear-to-null fails typed (i
 
   test("defaultIsHome:false — a clear-to-null on a machine-pinned turn throws typed home_unavailable_this_turn, never routes to the machine", async () => {
     // A Modal-HOME session pinned to a machine never established its group box this
-    // turn. A mid-turn clear-to-null must fail typed-and-specific — the detach is
-    // accepted (its pointer commit stands, effective next turn) and this turn has no
-    // home box — rather than silently keep serving the pinned machine.
+    // attempt. A mid-turn clear-to-null must fail typed-and-specific — the detach is
+    // accepted (its pointer commit stands for the recovery attempt) and this attempt
+    // has no home box — rather than silently keep serving the pinned machine.
     const machine = new FakeBackend("pinned-machine");
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,

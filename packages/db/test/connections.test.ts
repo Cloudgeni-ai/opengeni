@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import type { McpCredentialsRequest } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
@@ -24,6 +24,8 @@ import {
   disconnectConnectionIdempotently,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  grantWorkspaceAccess,
+  ensureManagedAccessForUser,
   isPrivateAddress,
   loadIntegrationOAuthClient,
   listConnectionsMetadata,
@@ -31,6 +33,7 @@ import {
   recordConnectionTokenRefresh,
   recordConnectionUsed,
   refreshOAuthConnectionCredential,
+  persistProviderOAuthConnection,
   replaceIntegrationOAuthClientIfCurrent,
   revokeConnection,
   setConnectionStatus,
@@ -240,6 +243,64 @@ afterAll(async () => {
 }, 180_000);
 
 describe("connections table and helpers", () => {
+  test("provider OAuth persistence locks effective connections:write authority", async () => {
+    if (!available) return;
+    const userId = `oauth-owner-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "OAuth owner",
+    });
+    const adminGrant = access.workspaceGrants.find(
+      (grant) => grant.workspaceId === access.defaultWorkspaceId,
+    )!;
+    const adminWorkspace = {
+      accountId: adminGrant.accountId,
+      workspaceId: adminGrant.workspaceId,
+    };
+    await grantWorkspaceAccess(db, {
+      ...adminWorkspace,
+      subjectId,
+      permissions: ["workspace:admin"],
+    });
+    const baseInput = {
+      accountId: adminWorkspace.accountId,
+      workspaceId: adminWorkspace.workspaceId,
+      subjectId,
+      visibleToSubjectId: subjectId,
+      providerDomain: "oauth.example.test",
+      kind: "oauth2" as const,
+      status: "active" as const,
+      credentialEncrypted: enc({ access_token: "AC" }),
+      grantedScopes: ["repo"],
+      expiresAt: null,
+      metadata: {
+        credentialRole: "test_oauth",
+        providerFamily: "test",
+        providerPrincipalId: "principal-1",
+      },
+      credentialRole: "test_oauth",
+      providerFamily: "test",
+      providerPrincipalId: "principal-1",
+      createdBySubjectId: subjectId,
+      requireLiveUserAuthority: true,
+      requiredLiveUserPermission: "connections:write" as const,
+      allowCanonicalPersonalWorkspaceOwner: false,
+    };
+    const created = await persistProviderOAuthConnection(db, baseInput);
+    expect(created?.authorityId).toEqual(expect.any(String));
+
+    await grantWorkspaceAccess(db, {
+      ...adminWorkspace,
+      subjectId,
+      permissions: ["connections:read"],
+    });
+    await expect(persistProviderOAuthConnection(db, baseInput)).rejects.toThrow(
+      "required workspace permission",
+    );
+  });
+
   test("metadata reads omit credential material and filter subject-owned rows", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -2101,6 +2162,169 @@ describe("buildConnectionTokenResolver", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("personal GitHub refresh is endpoint-bound and preserves the exact repo scope", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody: URLSearchParams | null = null;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedBody = new URLSearchParams(String(init?.body));
+      return Response.json({
+        access_token: "AC2",
+        refresh_token: "RF2",
+        token_type: "Bearer",
+        expires_in: 3600,
+        refresh_token_expires_in: 7200,
+        scope: "repo",
+      });
+    }) as typeof fetch;
+    try {
+      const refreshed = await refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_endpoint: "https://github.com/login/oauth/access_token",
+            client_id: "github-client-id",
+            token_endpoint_auth_method: "client_secret_post",
+            scope_parameter_supported: false,
+          },
+          providerDomain: "github.com",
+          metadata: {
+            credentialRole: "opengeni_github_personal",
+            providerFamily: "github",
+            providerPrincipalId: "123456",
+            githubUserId: "123456",
+            githubLogin: "octocat",
+            oauthEnvironment: settings.environment,
+            oauthClientMarker: createHash("sha256")
+              .update("github-client-id")
+              .digest("hex")
+              .slice(0, 32),
+            credentialBindingId: "6acc52e1-2952-4da4-9e0e-f45872f661b2",
+            connectedAt: "2026-08-21T00:00:00.000Z",
+            lastVerifiedAt: "2026-08-21T00:00:00.000Z",
+          },
+        }),
+        {
+          providerDomain: "github.com",
+          kind: "oauth2",
+          scopes: ["repo"],
+        },
+        {
+          ...settings,
+          githubPersonalOauthEnabled: true,
+          githubPersonalOauthClientId: "github-client-id",
+          githubPersonalOauthClientSecret: "github-client-secret",
+        },
+        {
+          fetchImpl: globalThis.fetch,
+          dnsLookup: async () => [{ address: "140.82.121.3", family: 4 }],
+        },
+      );
+
+      expect(capturedBody!.get("scope")).toBeNull();
+      expect(capturedBody!.get("client_id")).toBe("github-client-id");
+      expect(capturedBody!.get("client_secret")).toBe("github-client-secret");
+      expect(refreshed.grantedScopes).toEqual(["repo"]);
+      expect(refreshed.credential).toMatchObject({
+        access_token: "AC2",
+        refresh_token: "RF2",
+        scope_parameter_supported: false,
+      });
+      expect(refreshed.credential.client_secret).toBeUndefined();
+      expect(refreshed.credential.refresh_token_expires_at).toEqual(expect.any(String));
+      expect(refreshed.metadata).toMatchObject({
+        refreshTokenExpiresAt: expect.any(String),
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("personal GitHub refresh rejects hostile endpoints and widened scopes", async () => {
+    let requests = 0;
+    const personalMetadata = {
+      credentialRole: "opengeni_github_personal",
+      providerFamily: "github",
+      providerPrincipalId: "123456",
+      githubUserId: "123456",
+      githubLogin: "octocat",
+      oauthEnvironment: settings.environment,
+      oauthClientMarker: createHash("sha256").update("github-client-id").digest("hex").slice(0, 32),
+      credentialBindingId: "6acc52e1-2952-4da4-9e0e-f45872f661b2",
+      connectedAt: "2026-08-21T00:00:00.000Z",
+      lastVerifiedAt: "2026-08-21T00:00:00.000Z",
+    };
+    const personalSettings = {
+      ...settings,
+      githubPersonalOauthEnabled: true,
+      githubPersonalOauthClientId: "github-client-id",
+      githubPersonalOauthClientSecret: "github-client-secret",
+    };
+    const input = {
+      providerDomain: "github.com",
+      kind: "oauth2" as const,
+      scopes: ["repo"],
+    };
+    const transport = {
+      fetchImpl: (async () => {
+        requests += 1;
+        return Response.json({
+          access_token: "AC2",
+          refresh_token: "RF2",
+          token_type: "Bearer",
+          expires_in: 3600,
+          scope: "repo,read:user",
+        });
+      }) as unknown as typeof fetch,
+      dnsLookup: async () => [{ address: "140.82.121.3", family: 4 as const }],
+    };
+
+    await expect(
+      refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          providerDomain: "github.com",
+          metadata: personalMetadata,
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_endpoint: "https://attacker.example/token",
+            client_id: "github-client-id",
+            token_endpoint_auth_method: "client_secret_post",
+            scope_parameter_supported: false,
+          },
+        }),
+        input,
+        personalSettings,
+        transport,
+      ),
+    ).rejects.toBeInstanceOf(ConnectionRefreshHttpError);
+    expect(requests).toBe(0);
+
+    await expect(
+      refreshOAuthConnectionCredential(
+        brokerCredential({
+          kind: "oauth2",
+          providerDomain: "github.com",
+          metadata: personalMetadata,
+          credential: {
+            access_token: "AC",
+            refresh_token: "RF",
+            token_endpoint: "https://github.com/login/oauth/access_token",
+            client_id: "github-client-id",
+            token_endpoint_auth_method: "client_secret_post",
+            scope_parameter_supported: false,
+          },
+        }),
+        input,
+        personalSettings,
+        transport,
+      ),
+    ).rejects.toBeInstanceOf(ConnectionRefreshHttpError);
+    expect(requests).toBe(1);
   });
 
   test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {

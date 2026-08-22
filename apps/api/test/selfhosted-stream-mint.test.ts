@@ -73,6 +73,16 @@ mock.module("@opengeni/db", () => ({
     input: { accountId: string; workspaceId: string; sessionId: string },
   ) => {
     if (input.workspaceId === WS) return 1;
+    // KNOWN BUG, pre-existing and not fixed here: this fallback is
+    // SELF-RECURSIVE. `mock.module` replaces the live `@opengeni/db` namespace,
+    // and `realDb` is that same namespace object — so unlike `realGetSandbox`
+    // above (captured BEFORE the mock, which is the correct pattern), this
+    // resolves to the mock and recurses for any workspace other than WS. It is a
+    // cause of failures in the shared-process sandbox/desktop suites. Those
+    // failures are NOT a personal-workspace authority defect: the 0281 mint
+    // already handles the personal-workspace pointer (see
+    // `sandbox-desktop-stream.test.ts`). Fix by capturing the real function into
+    // a local before `mock.module`, as `realGetSandbox` does.
     return realDb.getSessionAuthorityEpoch(db, input);
   },
 }));

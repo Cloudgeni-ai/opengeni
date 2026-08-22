@@ -226,7 +226,7 @@ export type SessionStatus =
   | "failed"
   | "cancelled";
 
-// Mirror of `@opengeni/contracts` SandboxBackend (11 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
 // additive at the end). 3-way enum parity is pinned by
 // `test/contract-parity.test.ts`.
 export type SandboxBackend =
@@ -240,7 +240,8 @@ export type SandboxBackend =
   | "blaxel"
   | "cloudflare"
   | "vercel"
-  | "selfhosted";
+  | "selfhosted"
+  | "opensandbox";
 
 // Mirror of `@opengeni/contracts` SandboxOs. Only "linux" is reachable in v1.
 export type SandboxOs = "linux" | "macos" | "windows";
@@ -453,6 +454,8 @@ export type RepositoryResourceRef = {
   kind: "repository";
   uri: string;
   ref: string;
+  /** Exact immutable commit that repository materialization must produce. */
+  expectedCommitSha?: string | undefined;
   /**
    * Optional workspace-relative override. When omitted, OpenGeni persists
    * `repos/<encoded-host>/<owner>/<repo>` so equal names on different Git
@@ -462,6 +465,7 @@ export type RepositoryResourceRef = {
   mountPath?: string | undefined;
   subpath?: string | undefined;
   provider?: GitCredentialProvider | undefined;
+  connectionType?: "github_personal" | undefined;
   credentialBindingId?: GitCredentialBindingId | undefined;
   access?: GitRepositoryAccess | undefined;
   repositoryId?: number | string | undefined;
@@ -664,6 +668,114 @@ export type CreateConnectionRequest = {
   grantedScopes?: string[] | undefined;
   expiresAt?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
+};
+
+export type PersonalGitHubConnectionMetadata = {
+  credentialRole: "opengeni_github_personal";
+  providerFamily: "github";
+  providerPrincipalId: string;
+  githubUserId: string;
+  githubLogin: string;
+  oauthEnvironment: string;
+  oauthClientMarker: string;
+  credentialBindingId: string;
+  connectedAt: string;
+  lastVerifiedAt: string;
+  refreshTokenExpiresAt?: string | null | undefined;
+  disconnectedAt?: string | null | undefined;
+  [key: string]: unknown;
+};
+
+export type PersonalGitHubOAuthStartRequest = {
+  connectionId?: string | undefined;
+  returnPath?: string | undefined;
+};
+
+export type PersonalGitHubOAuthStartResponse = {
+  authorizationUrl: string;
+  expiresAt: string;
+};
+
+export type PersonalGitHubConnectionStatusResponse = {
+  enabled: boolean;
+  connection: ConnectionMetadata | null;
+  reviewUrl: string | null;
+};
+
+export type PersonalGitHubDisconnectRequest = {
+  expectedVersion: number;
+  idempotencyKey: string;
+};
+
+export type PersonalGitHubRepositoryAccess = "read" | "write";
+
+export type PersonalGitHubRepositoryPermissions = {
+  pull: boolean;
+  push: boolean;
+  admin: boolean;
+  maintain: boolean;
+  triage: boolean;
+};
+
+export type PersonalGitHubRepository = {
+  repositoryId: string;
+  fullName: string;
+  canonicalUrl: string;
+  defaultBranch: string;
+  visibility: "public" | "private" | "internal";
+  private: boolean;
+  archived: boolean;
+  disabled: boolean;
+  permissions: PersonalGitHubRepositoryPermissions;
+};
+
+export type PersonalGitHubSelectedRepository = PersonalGitHubRepository & {
+  selectedAccess: PersonalGitHubRepositoryAccess;
+  selectionGeneration: number;
+  selectedAt: string;
+  lastVerifiedAt: string;
+};
+
+export type PersonalGitHubRepositorySelectionState = {
+  connectionAuthorityGeneration: number;
+  credentialBindingId: string;
+  providerPrincipalId: string;
+  selectionGeneration: number;
+  repositories: PersonalGitHubSelectedRepository[];
+};
+
+export type PersonalGitHubRepositoryCatalogItem = PersonalGitHubRepository & {
+  selectedAccess: PersonalGitHubRepositoryAccess | null;
+};
+
+export type ListPersonalGitHubRepositoriesOptions = {
+  cursor?: number | undefined;
+  limit?: number | undefined;
+};
+
+export type ListPersonalGitHubRepositoriesResponse = {
+  repositories: PersonalGitHubRepositoryCatalogItem[];
+  nextCursor: number | null;
+  selection: PersonalGitHubRepositorySelectionState;
+};
+
+export type PersonalGitHubRepositorySelectionInput = {
+  repositoryId: string;
+  fullName: string;
+  access: PersonalGitHubRepositoryAccess;
+};
+
+export type ReplacePersonalGitHubRepositorySelectionsRequest = {
+  expectedConnectionAuthorityGeneration: number;
+  expectedSelectionGeneration: number;
+  idempotencyKey: string;
+  repositories: PersonalGitHubRepositorySelectionInput[];
+};
+
+export type VerifyPersonalGitHubRepositorySelectionsRequest = {
+  expectedConnectionAuthorityGeneration: number;
+  expectedSelectionGeneration: number;
+  idempotencyKey: string;
 };
 
 export type OpenGeniSlackBotInstallRequest = {
@@ -1054,6 +1166,58 @@ export type IntegrationClientMetadata = {
   response_types: ["code"];
 };
 
+export type SessionVisibility = "private" | "workspace";
+
+export type SessionTenancyCreateCapabilities = {
+  activated: boolean;
+  canCreatePrivate: boolean;
+  reason: "available" | "not_activated" | "managed_session_required" | "unavailable";
+};
+
+export type SessionTenancyPublicProjection = {
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  ownedByCurrentUser: boolean;
+  fork: {
+    sourceVisibility: SessionVisibility;
+    sourceAuthorityEpoch: number;
+    forkedAt: string;
+  } | null;
+};
+
+export type UpdateSessionVisibilityRequest = {
+  visibility: SessionVisibility;
+  expectedAuthorityEpoch: number;
+  idempotencyKey: string;
+};
+
+export type UpdateSessionVisibilityResponse = {
+  operationId: string;
+  eventId: string | null;
+  eventSequence: number | null;
+  visibility: SessionVisibility;
+  authorityEpoch: number;
+  changed: boolean;
+  replay: boolean;
+  revokedGrantCount: number;
+};
+
+export type ForkSessionRequest = {
+  idempotencyKey: string;
+};
+
+export type ForkSessionResponse = {
+  operationId: string;
+  eventId: string;
+  eventSequence: number;
+  sessionId: string;
+  workspaceId: string;
+  visibility: "private";
+  authorityEpoch: 1;
+  copiedHistoryItemCount: number;
+  replay: boolean;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
@@ -1074,6 +1238,8 @@ export type Session = {
   toolPolicyVersion: number;
   effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
+  /** Present only when session-tenancy product activation is enabled for the organization. */
+  tenancy?: SessionTenancyPublicProjection | undefined;
   /** Frozen creator fact; later turns carry their own independent initiator. */
   createdBy: TurnInitiator;
   createdByContext: Record<string, unknown>;
@@ -1130,6 +1296,17 @@ export type Session = {
   pinnedAt?: string | null;
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion?: number;
+  /** Personal explicit acknowledgment state. */
+  unread?: boolean;
+  /** Personal actively-working label. */
+  activelyWorking?: boolean;
+  /** Optimistic unread/actively-working revision. */
+  attentionVersion?: number;
+  /** Personal archive state. */
+  archived?: boolean;
+  archivedAt?: string | null;
+  /** Optimistic archive-state revision. */
+  archiveVersion?: number;
   /** Server-authoritative descendant counts populated by session-list reads. */
   treeStats?:
     | {
@@ -1140,6 +1317,8 @@ export type Session = {
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
+        unreadDescendants?: number | undefined;
+        activelyWorkingDescendants?: number | undefined;
         /** Counts are lower bounds rather than exact totals when true. */
         truncated: boolean;
       }
@@ -1214,6 +1393,18 @@ export type UpdateSessionPinRequest = {
   expectedVersion?: number;
 };
 
+export type UpdateSessionAttentionRequest = {
+  unread?: boolean;
+  acknowledgedThroughSequence?: number;
+  activelyWorking?: boolean;
+  expectedVersion?: number;
+};
+
+export type UpdateSessionArchiveRequest = {
+  archived: boolean;
+  expectedVersion?: number;
+};
+
 export type LineageNode = {
   session: SessionSummary;
   children: LineageNode[];
@@ -1278,6 +1469,25 @@ export type TimelineAnnotation = DraftTimelineAnnotation & {
   ordinal: number;
 };
 
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
+  "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
+
+export type PersonalResourceAttachmentIntent = {
+  mode: "once" | "session" | "always";
+  expectedAuthorityEpoch?: number | undefined;
+  workspaceSharedAcknowledged?: boolean | undefined;
+  sharedOutputWarningVersion: 1;
+};
+
+export type PersonalResourceAttachmentSummary = {
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  resourceCount: number;
+  resourceKinds: Array<"variable_set" | "rig">;
+  sharedOutputWarningVersion: 1;
+};
+
 export type SessionTurn = {
   id: string;
   workspaceId: string;
@@ -1305,6 +1515,7 @@ export type SessionTurn = {
   initiator: TurnInitiator;
   initiatorContext: Record<string, unknown>;
   personalConnections?: McpPersonalConnectionSummary[] | undefined;
+  personalResources?: PersonalResourceAttachmentSummary | null | undefined;
   cancelledBy?: string | null;
   cancelReason?: string | null;
   startedAt: string | null;
@@ -1429,6 +1640,7 @@ export const SESSION_EVENT_TYPES = [
   "goal.paused",
   "goal.resumed",
   "goal.cleared",
+  "goal.held",
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
@@ -1465,6 +1677,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.exited",
   "session.title_set",
   "session.visibility.changed",
+  "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
@@ -2372,6 +2585,7 @@ export type CreateSessionRequest = {
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
+  visibility?: SessionVisibility | undefined;
   initialMessage?: string | undefined;
   /** Create an idle session shell so realtime voice can be the first interaction. */
   startMode?: "realtime" | undefined;
@@ -2418,6 +2632,8 @@ export type CreateSessionRequest = {
   firstPartyMcpPermissions?: string[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
+  /** Atomically attach the server-derived personal Variable Set/Rig closure to the initial turn. */
+  personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
   // addendum 05 §D.1). Three-way union; OMITTED ⇒ the context-dependent server default
   // (from inside a session → "shared" with the creator's box, top-level → "new").
@@ -2496,6 +2712,7 @@ export type FirstPartyMcpToolName =
   | "goal_set"
   | "goal_update"
   | "goal_progress"
+  | "goal_wait"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -2516,6 +2733,7 @@ export type FirstPartyMcpToolName =
   | "preference_propose"
   | "remember"
   | "remember_confirm"
+  | "company_profile_propose"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -2530,6 +2748,7 @@ export type FirstPartyMcpToolName =
   | "sessions_list"
   | "session_get"
   | "session_events"
+  | "session_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
@@ -3329,11 +3548,90 @@ export type ListManagedOrganizationMembershipsResponse = {
   memberships: ManagedOrganizationMembership[];
 };
 
+export type UserResourceKind =
+  | "connection"
+  | "document"
+  | "variable_set"
+  | "rig"
+  | "connected_machine";
+export type UserResourceGrantAction =
+  | "connection.use"
+  | "document.read"
+  | "variable_set.use"
+  | "rig.use"
+  | "connected_machine.use";
+export type UserResourceAuthorityGrant = {
+  grantId: string;
+  targetWorkspaceId: string;
+  targetSessionId: string | null;
+  action: UserResourceGrantAction;
+  mode: "once" | "session" | "always";
+  context: "user_private" | "workspace_shared";
+  authorityEpoch: number | null;
+  generation: number;
+  status: "active" | "consumed" | "revoked" | "expired";
+  expiresAt: string | null;
+  delegation: UserResourceDelegation;
+};
+export type UserResourceAuthoritySummary = {
+  authorityId: string;
+  resourceKind: UserResourceKind;
+  resourceId: string;
+  originWorkspaceId: string | null;
+  generation: number;
+  status: "active" | "retained" | "revoked";
+  grants: UserResourceAuthorityGrant[];
+};
+export type ListUserResourceAuthoritiesOptions = {
+  resourceKind: UserResourceKind;
+  cursor?: string | undefined;
+  limit?: number | undefined;
+};
+export type ListUserResourceAuthoritiesResponse = {
+  scope: "user";
+  authorities: UserResourceAuthoritySummary[];
+  nextCursor: string | null;
+};
+export type IssueUserResourceGrantRequest =
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "session";
+      context: "user_private" | "workspace_shared";
+      sessionId: string;
+      expectedAuthorityEpoch: number;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    }
+  | {
+      scope: "user";
+      resourceKind: UserResourceKind;
+      mode: "always";
+      context: "user_private" | "workspace_shared";
+      sessionId?: null | undefined;
+      expectedAuthorityEpoch?: null | undefined;
+      workspaceSharedAcknowledged?: boolean | undefined;
+    };
+export type UserResourceGrantMutationResponse = {
+  scope: "user";
+  grant: UserResourceAuthorityGrant;
+};
+export type RevokeUserResourceGrantResponse = {
+  scope: "user";
+  grant: {
+    grantId: string;
+    generation: number;
+    status: "revoked";
+    revokedAt: string;
+  };
+};
+
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
 export type OrganizationInvitation = {
   id: string;
   organizationId: string;
   targetEmail: string;
+  targetName: string | null;
+  initialWorkspaceIds: string[];
   role: OrganizationMembershipRole;
   status: "pending" | "accepted" | "revoked" | "expired";
   revision: number;
@@ -3355,6 +3653,38 @@ export type OrganizationMember = {
   createdAt: string;
   updatedAt: string;
 };
+export type OrganizationSummary = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationWorkspaceAccessMember = {
+  membershipId: string;
+  subjectId: string;
+  subjectLabel: string | null;
+  principalKind: "human" | "service";
+  role: string;
+  permissions: string[];
+  createdAt: string;
+};
+export type OrganizationWorkspaceAccess = {
+  id: string;
+  name: string;
+  slug: string | null;
+  createdAt: string;
+  updatedAt: string;
+  members: OrganizationWorkspaceAccessMember[];
+};
+export type OrganizationAdministrationOverview = {
+  organization: OrganizationSummary;
+  workspaces: OrganizationWorkspaceAccess[];
+};
+export type UpdateOrganizationNameRequest = {
+  name: string;
+  expectedUpdatedAt: string;
+  operationId: string;
+};
 export type OrganizationRetentionPolicy = {
   organizationId: string;
   mode: "retain" | "delete_after";
@@ -3364,6 +3694,8 @@ export type OrganizationRetentionPolicy = {
 };
 export type CreateOrganizationInvitationRequest = {
   email: string;
+  name?: string;
+  initialWorkspaceIds?: string[];
   role?: OrganizationMembershipRole;
   expiresAt: string;
   operationId: string;
@@ -3421,6 +3753,8 @@ export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
   /** Reversible Memory V1 prompt composition rollout. */
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
+  /** Model policy inherited by new chats and scheduled tasks. */
+  sessionDefaults?: WorkspaceSessionDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3430,6 +3764,11 @@ export type WorkspaceSettings = {
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   [key: string]: unknown;
+};
+
+export type WorkspaceSessionDefaults = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -3456,6 +3795,7 @@ export type WorkspaceVoiceInputSettings = {
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
+  sessionDefaults?: WorkspaceSessionDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3668,6 +4008,7 @@ export type SessionGoalContinuationReason =
   | "provider_backpressure"
   | "session_cancelled"
   | "system_work_pending"
+  | "held_for_input"
   | "missing_obligation";
 
 export type SessionGoalContinuation = {
@@ -3797,6 +4138,7 @@ export type ComposerDraft = {
 };
 
 export type NewSessionDraftOptions = {
+  visibility?: SessionVisibility | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
   workingDir?: string | undefined;
@@ -3805,6 +4147,17 @@ export type NewSessionDraftOptions = {
   goal?: GoalSpec | undefined;
   firstPartyMcpPermissions?: Permission[] | undefined;
   firstPartyMcpTools?: FirstPartyMcpToolName[] | undefined;
+};
+
+export type NewSessionSelectionHistory = {
+  /** Most-recently used project first. Null channelId is the Default project. */
+  projects: Array<{
+    channelId: string | null;
+    /** Null means the managed sandbox was used most recently in this project. */
+    targetSandboxId: string | null;
+    /** Most-recently used machine in this project first. */
+    machines: Array<{ sandboxId: string; workingDir: string | null }>;
+  }>;
 };
 
 export type NewSessionDraft = {
@@ -3818,6 +4171,7 @@ export type NewSessionDraft = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
   options: NewSessionDraftOptions;
+  selectionHistory: NewSessionSelectionHistory;
   updatedAt: string | null;
 };
 
@@ -3974,6 +4328,7 @@ export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expecte
   modelContext?: string;
   mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
   connectionAuthorities?: McpConnectionAuthoritySelection[];
+  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
 
 export type SubmitComposerDraftResponse = {
@@ -3984,7 +4339,10 @@ export type SubmitComposerDraftResponse = {
   replay: boolean;
 };
 
-export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
+export type SaveNewSessionDraftRequest = Omit<
+  NewSessionDraft,
+  "revision" | "selectionHistory" | "updatedAt"
+> & {
   expectedRevision: number;
 };
 
@@ -4261,6 +4619,8 @@ export type Channel = {
   workspaceId: string;
   name: string;
   description: string | null;
+  pinned: boolean;
+  sortOrder: number;
   createdBy: string | null;
   createdAt: string;
   updatedAt: string;
@@ -4274,6 +4634,12 @@ export type CreateChannelRequest = {
 export type UpdateChannelRequest = {
   name?: string;
   description?: string | null;
+  pinned?: boolean;
+};
+
+/** Complete workspace project order. It is replaced atomically after a drag. */
+export type ReorderChannelsRequest = {
+  channelIds: string[];
 };
 
 /** Re-files one session; null moves it back to the unfiled inbox. */
@@ -4955,6 +5321,30 @@ export type CapabilityPackScheduledTaskTemplate = {
   prompt?: string | undefined;
 };
 
+export type CapabilityPackAutomationTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  adapterId: string;
+  eventTypes: string[];
+  sessionTemplate: {
+    prompt: string;
+    instructions: string | null;
+    resources: ResourceRef[];
+    skills: CapabilityPackSkill[];
+    tools: ToolRef[];
+    firstPartyMcpTools: string[];
+    firstPartyMcpPermissions: Permission[];
+    model: string | null;
+    reasoningEffort: ReasoningEffort | null;
+    sandboxBackend: SandboxBackend | null;
+    policyRole: string | null;
+    metadata: Record<string, unknown>;
+  };
+  configuration: Record<string, unknown>;
+  connectionRequirement: string | null;
+};
+
 export type CapabilityPackSkillFile = {
   path: string;
   content: string;
@@ -5037,6 +5427,7 @@ export type CapabilityPack = {
   connectors: CapabilityPackConnector[];
   knowledge: CapabilityPackKnowledge[];
   scheduledTaskTemplates: CapabilityPackScheduledTaskTemplate[];
+  automationTemplates?: CapabilityPackAutomationTemplate[] | undefined;
   variableSet?: CapabilityPackVariableSetSpec | undefined;
   metadata: Record<string, unknown>;
 };
@@ -5141,6 +5532,31 @@ export type RegisterCapabilityPackRequest = {
         prompt?: string | undefined;
       }[]
     | undefined;
+  automationTemplates?:
+    | {
+        id: string;
+        name: string;
+        description: string;
+        adapterId: string;
+        eventTypes: string[];
+        sessionTemplate: {
+          prompt: string;
+          instructions?: string | null | undefined;
+          resources?: ResourceRef[] | undefined;
+          skills?: CapabilityPackSkill[] | undefined;
+          tools?: ToolRef[] | undefined;
+          firstPartyMcpTools?: string[] | undefined;
+          firstPartyMcpPermissions?: Permission[] | undefined;
+          model?: string | null | undefined;
+          reasoningEffort?: ReasoningEffort | null | undefined;
+          sandboxBackend?: SandboxBackend | null | undefined;
+          policyRole?: string | null | undefined;
+          metadata?: Record<string, unknown> | undefined;
+        };
+        configuration?: Record<string, unknown> | undefined;
+        connectionRequirement?: string | null | undefined;
+      }[]
+    | undefined;
   variableSet?:
     | {
         description: string;
@@ -5175,6 +5591,100 @@ export type PackInstallation = {
   metadata: Record<string, unknown>;
   enabledAt: string;
   updatedAt: string;
+};
+
+// --- OpenGeni Review Bot ------------------------------------------------------------
+
+export type PrReviewProvider = GitCredentialProvider;
+export type PrReviewCredentialKind = "github_app" | "provider_token";
+export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
+
+export type CreatePrReviewAppRegistrationRequest = {
+  name: string;
+  provider: PrReviewProvider;
+  providerBaseUrl?: string | undefined;
+  appId?: string | undefined;
+  credentialKind: PrReviewCredentialKind;
+  privateKey?: string | undefined;
+  accessToken?: string | undefined;
+  accessTokenExpiresAt?: string | null | undefined;
+  webhookSecret: string;
+  webhookUsername?: string | undefined;
+};
+
+export type UpdatePrReviewAppRegistrationRequest = {
+  name?: string | undefined;
+  privateKey?: string | undefined;
+  accessToken?: string | undefined;
+  accessTokenExpiresAt?: string | null | undefined;
+  webhookSecret?: string | undefined;
+  webhookUsername?: string | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type PrReviewAppRegistration = {
+  id: string;
+  sourceId: string;
+  accountId: string;
+  workspaceId: string;
+  name: string;
+  provider: PrReviewProvider;
+  providerBaseUrl: string;
+  appId: string | null;
+  credentialKind: PrReviewCredentialKind;
+  hasCredential: boolean;
+  accessTokenExpiresAt: string | null;
+  webhookAuthKind: PrReviewWebhookAuthKind;
+  hasWebhookSecret: boolean;
+  webhookUsername: string | null;
+  webhookPath: string;
+  status: "active" | "disabled";
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreatePrReviewRepositoryBindingRequest = {
+  registrationId: string;
+  repositoryUri: string;
+  repositoryFullName: string;
+  providerRepositoryId: string | number;
+  installationId?: string | number | undefined;
+  projectId?: string | number | undefined;
+  model?: string | null | undefined;
+  additionalInstructions?: string | null | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type UpdatePrReviewRepositoryBindingRequest = {
+  model?: string | null | undefined;
+  additionalInstructions?: string | null | undefined;
+  status?: "active" | "disabled" | undefined;
+};
+
+export type PrReviewRepositoryBinding = {
+  id: string;
+  triggerId: string;
+  accountId: string;
+  workspaceId: string;
+  registrationId: string;
+  provider: PrReviewProvider;
+  repositoryUri: string;
+  repositoryFullName: string;
+  providerRepositoryId: string;
+  installationId: string | null;
+  projectId: string | null;
+  model: string | null;
+  additionalInstructions: string | null;
+  status: "active" | "disabled";
+  createdBySubjectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ListPrReviewConfigurationResponse = {
+  registrations: PrReviewAppRegistration[];
+  repositories: PrReviewRepositoryBinding[];
 };
 
 export type EnablePackRequest = {
@@ -6308,6 +6818,16 @@ export type CreateCheckoutResponse = {
   url: string;
 };
 
+export type CreateBillingPortalRequest = {
+  accountId?: string | undefined;
+  returnUrl?: string | undefined;
+};
+
+export type CreateBillingPortalResponse = {
+  portalSessionId: string;
+  url: string;
+};
+
 export type UserMessageEventInput = {
   type: "user.message";
   clientEventId?: string | undefined;
@@ -6320,6 +6840,7 @@ export type UserMessageEventInput = {
     reasoningEffort?: ReasoningEffort | undefined;
     latencyMode?: LatencyMode | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+    personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };
 
@@ -6381,7 +6902,7 @@ export type MachineState =
   | "display_unavailable"
   | "enrolling";
 
-export type MachineKind = "modal" | "selfhosted";
+export type MachineKind = "modal" | "selfhosted" | "opensandbox";
 
 export type MachineConnectionAuthority = {
   state: "not_applicable" | "unclaimed" | "active" | "expired";

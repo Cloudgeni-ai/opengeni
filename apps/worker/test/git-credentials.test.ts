@@ -28,6 +28,137 @@ const authority = {
 const provisionedSettings = () => testSettings({ sandboxBackend: "docker" });
 
 describe("sandbox git credentials", () => {
+  test("routes personal GitHub only through the dedicated broker consumer", async () => {
+    let genericBrokerCalled = false;
+    let personalBrokerCalled = false;
+    const minted = await mintRunGitCredentials(
+      provisionedSettings(),
+      [
+        {
+          kind: "repository",
+          uri: "https://github.com/octocat/private-repository",
+          ref: "main",
+          provider: "github",
+          connectionType: "github_personal",
+          credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          repositoryId: "9007199254740993123",
+          access: "read",
+        },
+      ],
+      {
+        scope,
+        authority,
+        gitCredentials: async (input) => {
+          genericBrokerCalled = true;
+          return { token: "must-not-be-minted", workspaceId: input.workspaceId };
+        },
+        personalGitHubCredentials: async (input) => {
+          personalBrokerCalled = true;
+          return {
+            token: "opaque-broker-bearer",
+            workspaceId: input.workspaceId,
+            credentialBindingId: input.credentialBindingId,
+            provider: "github",
+            providerHost: "github.com",
+            transport: {
+              kind: "http_broker",
+              repositories: [
+                {
+                  repositoryUri: "https://github.com/octocat/private-repository",
+                  brokerUri: "https://app.opengeni.ai/v1/git/personal/opaque-route",
+                },
+              ],
+            },
+          };
+        },
+      },
+    );
+    expect(minted?.bindings).toHaveLength(1);
+    expect(minted?.bindings[0]?.transport?.kind).toBe("http_broker");
+    expect(genericBrokerCalled).toBe(false);
+    expect(personalBrokerCalled).toBe(true);
+  });
+
+  test("fails closed when an admitted personal repository has no dedicated consumer", async () => {
+    await expect(
+      mintRunGitCredentials(
+        provisionedSettings(),
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/octocat/private-repository",
+            ref: "main",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        { scope, authority },
+      ),
+    ).rejects.toThrow("personal GitHub Git broker is unavailable");
+  });
+
+  test("fails closed when personal and App repositories require different commit identities", async () => {
+    const personal = {
+      kind: "repository" as const,
+      uri: "https://github.com/octocat/private-repository",
+      ref: "main",
+      provider: "github" as const,
+      connectionType: "github_personal" as const,
+      credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      repositoryId: "9007199254740993123",
+      access: "write" as const,
+    };
+    const app = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app-repository",
+      ref: "main",
+      provider: "github" as const,
+      credentialBindingId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      githubInstallationId: 42,
+      githubRepositoryId: 43,
+    };
+    for (const resources of [
+      [personal, app],
+      [app, personal],
+    ]) {
+      await expect(
+        mintRunGitCredentials(provisionedSettings(), resources, {
+          scope,
+          authority,
+          authorizeGitHubTokenMint: async () => undefined,
+          personalGitHubCredentials: async (input) => ({
+            token: "personal-broker",
+            workspaceId: input.workspaceId,
+            credentialBindingId: input.credentialBindingId,
+            provider: "github",
+            providerHost: "github.com",
+            identity: { name: "octocat", email: "1+octocat@users.noreply.github.com" },
+            transport: {
+              kind: "http_broker",
+              repositories: [
+                {
+                  repositoryUri: personal.uri,
+                  brokerUri: "https://app.opengeni.ai/v1/git/personal/personal-route",
+                },
+              ],
+            },
+          }),
+          gitCredentials: async (input) => ({
+            token: "app-token",
+            workspaceId: input.workspaceId,
+            credentialBindingId: input.credentialBindingId,
+            provider: "github",
+            providerHost: "github.com",
+            identity: { name: "opengeni[bot]", email: "42+opengeni[bot]@users.noreply.github.com" },
+          }),
+        }),
+      ).rejects.toThrow("different Git commit identities");
+    }
+  });
+
   test("derives child-session and root-session lineage from the admitted turn", () => {
     const derived = gitCredentialAuthorityForTurn({
       sessionId: authority.sessionId,

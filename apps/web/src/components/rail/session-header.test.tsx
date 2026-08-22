@@ -73,4 +73,40 @@ describe("SessionHeader mobile touch targets", () => {
       container.remove();
     }
   });
+
+  test("renders access beside the title actions and names workspace open/hide state", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = (inspectorOpen: boolean) => (
+      <SessionHeader
+        session={session}
+        ancestors={[]}
+        connectionState="live"
+        status="idle"
+        keyAuthRequired={false}
+        onForgetAccessKey={() => undefined}
+        inspectorOpen={inspectorOpen}
+        onToggleInspector={() => undefined}
+        onRename={async () => null}
+        onPin={async () => null}
+        accessSlot={<span data-testid="session-access-slot">Private</span>}
+      />
+    );
+
+    try {
+      await act(async () => root.render(render(false)));
+      const access = container.querySelector('[data-testid="session-access-slot"]');
+      const title = container.querySelector('button[title$="· click to rename"]');
+      expect(access).not.toBeNull();
+      expect(title).not.toBeNull();
+      expect(access?.parentElement?.contains(title ?? null)).toBe(true);
+      expect(container.querySelector('[aria-label="Open workspace"]')).not.toBeNull();
+      await act(async () => root.render(render(true)));
+      expect(container.querySelector('[aria-label="Hide workspace"]')).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });

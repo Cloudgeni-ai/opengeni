@@ -22,6 +22,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import {
   acquireLease,
   advanceWorkspaceGeneration,
@@ -51,6 +52,8 @@ import {
   establishSandboxSessionFromEnvelope,
   SandboxResumeStateUnavailableError,
 } from "@opengeni/runtime";
+import { WorkspaceArchiveIntegrityError } from "@opengeni/runtime/sandbox";
+import type { ObjectStorage } from "@opengeni/storage";
 import {
   resumeBoxForTurn,
   sandboxLeaseHolderIdForAttempt,
@@ -1128,6 +1131,296 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     }
   }, 60_000);
 
+  test("object-storage archive refs fail closed when storage is not configured", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const capturedAtMs = 1_900_000_000_000;
+    const capturedAt = new Date(capturedAtMs).toISOString();
+    const sha256 = "a".repeat(64);
+    const revision = `wa1:${String(capturedAtMs).padStart(13, "0")}:${sha256}`;
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        revision,
+      }),
+      sha256,
+      bytes: 12,
+      backend: "s3-compatible",
+    };
+    const archiveEnvelopeJson = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        workspaceArchiveRef: ref,
+        workspaceArchiveMeta: {
+          version: 1,
+          revision,
+          archiveSha256: sha256,
+          archiveBytes: 12,
+          capturedAt,
+          workspace: {
+            algorithm: "sha256",
+            sha256,
+            entryCount: 1,
+            fileCount: 1,
+            totalFileBytes: 12,
+          },
+        },
+      },
+    });
+    await admin.unsafe(
+      `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        workspace_generation, archive_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 3, 0, 0, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+      [accountId, workspaceId, groupId, archiveEnvelopeJson],
+    );
+
+    let recoveryError: unknown;
+    try {
+      await resumeBoxForTurn(
+        { db, settings },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-object-ref-no-storage"),
+      );
+    } catch (error) {
+      recoveryError = error;
+    }
+    expect(recoveryError).toBeInstanceOf(WorkspaceArchiveIntegrityError);
+    expect(recoveryError).toMatchObject({
+      message: "workspace archive object storage is not configured",
+    });
+  }, 60_000);
+
+  test("object-storage archive refs fail closed when the object is missing", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const capturedAtMs = 1_900_000_000_001;
+    const capturedAt = new Date(capturedAtMs).toISOString();
+    const sha256 = "b".repeat(64);
+    const revision = `wa1:${String(capturedAtMs).padStart(13, "0")}:${sha256}`;
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        revision,
+      }),
+      sha256,
+      bytes: 12,
+      backend: "s3-compatible",
+    };
+    const archiveEnvelopeJson = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        workspaceArchiveRef: ref,
+        workspaceArchiveMeta: {
+          version: 1,
+          revision,
+          archiveSha256: sha256,
+          archiveBytes: 12,
+          capturedAt,
+          workspace: {
+            algorithm: "sha256",
+            sha256,
+            entryCount: 1,
+            fileCount: 1,
+            totalFileBytes: 12,
+          },
+        },
+      },
+    });
+    await admin.unsafe(
+      `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        workspace_generation, archive_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 4, 0, 0, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+      [accountId, workspaceId, groupId, archiveEnvelopeJson],
+    );
+    const objectStorage = {
+      backend: "s3-compatible",
+      async putObject() {
+        return;
+      },
+      async getObjectBytes() {
+        return null;
+      },
+      async deleteObject() {
+        return;
+      },
+    } as unknown as ObjectStorage;
+
+    let recoveryError: unknown;
+    try {
+      await resumeBoxForTurn(
+        { db, settings, objectStorage },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-object-ref-missing"),
+      );
+    } catch (error) {
+      recoveryError = error;
+    }
+    expect(recoveryError).toBeInstanceOf(WorkspaceArchiveIntegrityError);
+    expect(String(recoveryError)).toContain("is missing");
+  }, 60_000);
+
+  test.skipIf(process.platform !== "linux")(
+    "object-storage archive refs rematerialize without inline base64",
+    async () => {
+      if (!available) return;
+      const settings = settingsFor(true);
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+
+      const seed = await establishSandboxSessionFromEnvelope(settings, null, {
+        sessionId: groupId,
+        recovery: "create-or-restore",
+        backendOverride: "local",
+      });
+      let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>>;
+      try {
+        const write = await (
+          seed.session as {
+            exec: (args: { cmd: string }) => Promise<{ exitCode: number }>;
+          }
+        ).exec({
+          cmd: "printf 'object-storage-rematerialize-ok' > /workspace/object-ref-proof.txt",
+        });
+        expect(write.exitCode).toBe(0);
+        verifiedArchive = await captureVerifiedWorkspaceArchive(seed.session);
+      } finally {
+        await dropSession(seed);
+      }
+
+      const ref = {
+        schema: "sandbox_archive_object_v1" as const,
+        key: workspaceArchiveObjectKey({
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          revision: verifiedArchive.descriptor.revision,
+        }),
+        sha256: verifiedArchive.descriptor.archiveSha256,
+        bytes: verifiedArchive.descriptor.archiveBytes,
+        backend: "s3-compatible",
+      };
+      const objects = new Map<string, Uint8Array>([[ref.key, verifiedArchive.bytes]]);
+      const objectStorage = {
+        backend: "s3-compatible",
+        async putObject() {
+          return;
+        },
+        async getObjectBytes(key: string) {
+          const bytes = objects.get(key);
+          return bytes ? { bytes } : null;
+        },
+        async deleteObject() {
+          return;
+        },
+      } as unknown as ObjectStorage;
+      const archiveEnvelopeJson = JSON.stringify({
+        backendId: "unix_local",
+        sessionState: {
+          workspaceArchiveRef: ref,
+          workspaceArchiveMeta: verifiedArchive.descriptor,
+        },
+      });
+      await admin.unsafe(
+        `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        workspace_generation, archive_generation,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 9, 0, 0, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+        [accountId, workspaceId, groupId, archiveEnvelopeJson],
+      );
+
+      const resumed = await resumeBoxForTurn(
+        { db, settings, objectStorage },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: "local",
+          os: "linux",
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt("activity-object-ref-restore"),
+      );
+      try {
+        expect(resumed.established.origin).toBe("restored");
+        const read = await (
+          resumed.established.session as {
+            exec: (args: { cmd: string }) => Promise<{ stdout: string; exitCode: number }>;
+          }
+        ).exec({ cmd: "cat /workspace/object-ref-proof.txt" });
+        expect(read).toMatchObject({
+          exitCode: 0,
+          stdout: "object-storage-rematerialize-ok",
+        });
+        expect(JSON.stringify(resumed.established)).not.toContain(verifiedArchive.base64);
+        const lease = await readLease(db, workspaceId, groupId);
+        const sessionState =
+          lease?.resumeState &&
+          typeof lease.resumeState === "object" &&
+          lease.resumeState !== null &&
+          "sessionState" in lease.resumeState
+            ? (lease.resumeState as { sessionState?: Record<string, unknown> }).sessionState
+            : undefined;
+        expect(sessionState?.workspaceArchive).toBeUndefined();
+        expect(sessionState?.workspaceArchiveRef).toEqual(ref);
+        expect(JSON.stringify(lease?.resumeState ?? {})).not.toContain(verifiedArchive.base64);
+      } finally {
+        await resumed.release();
+        await dropSession(resumed.established);
+      }
+    },
+    60_000,
+  );
+
   test("(4) FLAG-OFF: the gate condition is false -> resumeBoxForTurn is NEVER invoked, so NO lease row is materialized", async () => {
     if (!available) return;
     const offSettings = settingsFor(false);
@@ -1225,6 +1518,242 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     } finally {
       await keeper.release();
       await dropSession(keeper.established);
+    }
+  }, 60_000);
+
+  // The holder-liveness loop (private to resumeBoxForTurn) keeps the durable
+  // holder alive from registration until release. Its only license to release
+  // is holder death; a rotation-fenced lease heartbeat must NOT make it drop a
+  // live holder (the staging ~61-minute box-age failure: release -> draining ->
+  // reaper terminates the box under the running turn).
+  async function holderHeartbeatAt(
+    workspaceId: string,
+    groupId: string,
+    holderId: string,
+  ): Promise<number | null> {
+    const [r] = await admin<{ t: Date }[]>`
+      select h.last_heartbeat_at as t from sandbox_lease_holders h
+      join sandbox_leases l on l.id = h.lease_id
+      where l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId}
+        and h.holder_id = ${holderId}`;
+    return r ? new Date(r.t).getTime() : null;
+  }
+
+  async function expectLoopKeepsRotationFencedHolder(
+    handles: Array<{ release: () => Promise<void>; established: unknown }>,
+    ids: { workspaceId: string; groupId: string },
+    holderId: string,
+  ): Promise<void> {
+    const { workspaceId, groupId } = ids;
+    // Rotation requested on the warm lease: every lease heartbeat now reports
+    // holderAlive=true / leaseExtended=false. Age the holder to prove the loop
+    // keeps touching it.
+    await admin`
+      update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'provider_deadline'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    await admin`
+      update sandbox_lease_holders h set last_heartbeat_at = now() - interval '1 hour'
+      from sandbox_leases l
+      where l.id = h.lease_id and l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId} and h.holder_id = ${holderId}`;
+    const aged = await holderHeartbeatAt(workspaceId, groupId, holderId);
+    expect(aged).not.toBeNull();
+    // Several loop ticks (50 ms cadence) under the rotation fence.
+    await Bun.sleep(400);
+    expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+    const touched = await holderHeartbeatAt(workspaceId, groupId, holderId);
+    expect(touched).toBeGreaterThan(aged!);
+    const row = await readRow(workspaceId, groupId);
+    expect(row?.liveness).toBe("warm");
+    expect(row?.turn_holders).toBeGreaterThanOrEqual(1);
+
+    // Holder death is still honored: once the holder row is gone the loop
+    // releases (idempotently), recomputes the counts, and flips the lease.
+    for (const other of handles.slice(1)) await other.release();
+    await admin`
+      delete from sandbox_lease_holders h using sandbox_leases l
+      where l.id = h.lease_id and l.workspace_id = ${workspaceId}
+        and l.sandbox_group_id = ${groupId} and h.holder_id = ${holderId}`;
+    let drained: string | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      drained = (await readRow(workspaceId, groupId))?.liveness;
+      if (drained === "draining") break;
+      await Bun.sleep(20);
+    }
+    expect(drained).toBe("draining");
+  }
+
+  test("(2e) attached turn: a rotation-fenced heartbeat keeps the live holder; only holder death releases", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const ids = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sessionId: groupId,
+      backend: "local" as const,
+    };
+    const spawner = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      ids,
+      "turn",
+      sandboxLeaseHolderIdForAttempt("rotation-spawner"),
+    );
+    const attachedHolderId = sandboxLeaseHolderIdForAttempt("rotation-attached");
+    const attached = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      ids,
+      "turn",
+      attachedHolderId,
+    );
+    try {
+      expect(attached.leaseEpoch).toBe(spawner.leaseEpoch);
+      await expectLoopKeepsRotationFencedHolder(
+        [attached, spawner],
+        { workspaceId, groupId },
+        attachedHolderId,
+      );
+    } finally {
+      await attached.release();
+      await spawner.release();
+      await dropSession(spawner.established);
+      await dropSession(attached.established);
+    }
+  }, 60_000);
+
+  test("(2f) spawner after warm commit: a rotation-fenced heartbeat keeps the live holder; only holder death releases", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const holderId = sandboxLeaseHolderIdForAttempt("rotation-solo-spawner");
+    const spawner = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
+      "turn",
+      holderId,
+    );
+    try {
+      expect((await readRow(workspaceId, groupId))?.liveness).toBe("warm");
+      await expectLoopKeepsRotationFencedHolder([spawner], { workspaceId, groupId }, holderId);
+    } finally {
+      await spawner.release();
+      await dropSession(spawner.established);
+    }
+  }, 60_000);
+
+  async function waitForHolderGone(
+    workspaceId: string,
+    groupId: string,
+    holderId: string,
+  ): Promise<number> {
+    let count = -1;
+    for (let attempt = 0; attempt < 150; attempt += 1) {
+      count = await holderCount(workspaceId, groupId, holderId);
+      if (count === 0) break;
+      await Bun.sleep(20);
+    }
+    return count;
+  }
+
+  test("(2g) an epoch fence (box definitively superseded) still releases the stale holder promptly", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const holderId = sandboxLeaseHolderIdForAttempt("epoch-fenced-holder");
+    const spawner = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
+      "turn",
+      holderId,
+    );
+    try {
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      // The lease epoch never regresses: a bumped epoch means the instance
+      // this holder registered against was replaced (lost/re-established).
+      await admin`
+        update sandbox_leases set lease_epoch = lease_epoch + 1
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      expect(await waitForHolderGone(workspaceId, groupId, holderId)).toBe(0);
+    } finally {
+      await spawner.release();
+      await dropSession(spawner.established);
+    }
+  }, 60_000);
+
+  test("(2h) a canonical attempt holder whose attempt is closed/superseded is released by the loop", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "exercise canonical holder release",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(db, {
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `canonical-release-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claim.action !== "claimed") {
+      throw new Error(`Canonical release fixture did not claim its turn: ${claim.reason}`);
+    }
+    const holderId = sandboxLeaseHolderIdForAttempt(attemptId);
+    const groupId = session.sandboxGroupId;
+    const resumed = await resumeBoxForTurn(
+      { db, settings, holderLivenessIntervalMs: 50 },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: session.id,
+        backend: "local",
+        os: "linux",
+      },
+      "turn",
+      holderId,
+    );
+    try {
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      // Still the live active writer: several ticks keep the holder.
+      await Bun.sleep(200);
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      // The attempt closes and the turn no longer points at it (recovering
+      // toward a successor attempt): the canonical holder predicate fails,
+      // heartbeat reports holder_gone, and the loop releases the stale row.
+      await admin.begin(async (tx) => {
+        await tx`
+          update session_turn_attempts set
+            state = 'closed', outcome = 'interrupted_recoverable',
+            closed_at = now(), quiesced_at = now(), updated_at = now()
+          where id = ${attemptId}`;
+        await tx`
+          update session_turns set status = 'recovering', active_attempt_id = null, updated_at = now()
+          where workspace_id = ${workspaceId} and id = ${claim.turn.id}`;
+      });
+      expect(await waitForHolderGone(workspaceId, groupId, holderId)).toBe(0);
+      expect((await readRow(workspaceId, groupId))?.liveness).toBe("draining");
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
     }
   }, 60_000);
 });

@@ -4,6 +4,7 @@ import type { FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import {
+  browserNeedsStandaloneDisplayStack,
   browserFileAuthoritySubjectId,
   interactionActorForGrant,
   requireAuthorizedBrowserUploadFiles,
@@ -101,7 +102,10 @@ describe("BrowserSession route discipline", () => {
     );
     expect(attachment).toContain("requestOrigin(context, deps.settings)");
     expect(attachment).toContain("client.addAllowedOrigins([origin])");
-    expect(attachment).toContain('placement.lease?.backend === "docker"');
+    expect(attachment).toContain("placementUsesInteractionFrameProxy(placement.lease?.backend, {");
+    expect(attachment).toContain(
+      "openSandboxSignedEndpoints: deps.settings.openSandboxSignedEndpoints",
+    );
     expect(attachment).toContain("createInteractionFrameProxyAttachment");
     expect(attachment).toContain("publicBaseUrl: deps.settings.publicBaseUrl");
     expect(attachment).toContain('context.req.header("x-forwarded-proto")');
@@ -328,6 +332,24 @@ describe("BrowserSession route discipline", () => {
       binding.indexOf("await client.createComputerSession"),
     );
     expect(binding).toContain("isMissingLinkedComputerControllerSession(error)");
+  });
+
+  test("uses a linked ComputerSession display without bootstrapping a standalone desktop", async () => {
+    expect(browserNeedsStandaloneDisplayStack({ headless: false, linkedComputer: true })).toBe(
+      false,
+    );
+    expect(browserNeedsStandaloneDisplayStack({ headless: false, linkedComputer: false })).toBe(
+      true,
+    );
+    expect(browserNeedsStandaloneDisplayStack({ headless: true, linkedComputer: false })).toBe(
+      false,
+    );
+
+    const source = await readFile(routeUrl, "utf8");
+    expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(3);
+    expect(source).toContain(
+      "if (!browserNeedsStandaloneDisplayStack({ headless, linkedComputer })) return;",
+    );
   });
 
   test("publishes encrypted profile state only after durable dispatch", async () => {

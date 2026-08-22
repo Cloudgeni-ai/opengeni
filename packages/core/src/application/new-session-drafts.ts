@@ -12,6 +12,7 @@ import {
   getVariableSet,
   NewSessionDraftAccessError,
   newSessionDraftToolsProvided,
+  newSessionSelectionHistory,
   publicNewSessionDraftOptions,
   requireFileForSubject,
   saveNewSessionDraftInTransaction,
@@ -50,6 +51,7 @@ function mapNewSessionDraft(
     reasoningEffort: row.reasoningEffort,
     latencyMode: row.latencyMode,
     options: publicNewSessionDraftOptions(row),
+    selectionHistory: newSessionSelectionHistory(row),
     updatedAt: row.updatedAt.toISOString(),
   });
 }
@@ -183,6 +185,7 @@ export async function getActorNewSessionDraft(
       reasoningEffort: deps.settings.openaiReasoningEffort,
       latencyMode: "standard",
       options: {},
+      selectionHistory: { projects: [] },
       updatedAt: null,
     }
   );
@@ -200,6 +203,13 @@ export async function saveActorNewSessionDraft(
   grant: AccessGrant,
   workspaceId: string,
   rawInput: unknown,
+  /**
+   * `AccessGrantAuthorization.canonicalManagedHumanSession` — did this request
+   * authenticate as the canonical managed cookie that owns `grant.subjectId`?
+   * Defaults to false so every caller that has not proven it fails closed onto
+   * the historical bare-membership fence.
+   */
+  canonicalManagedHumanSession = false,
 ): Promise<NewSessionDraftValue> {
   const input = SaveNewSessionDraftRequest.parse(rawInput);
   // The pre-marker client contract required `tools` and had no
@@ -217,7 +227,9 @@ export async function saveActorNewSessionDraft(
   const tools = toolsProvided ? validateToolRefs(input.tools, runtimeSettings) : [];
   await validateGitHubRepositorySelection(deps.db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !deps.objectStorage) {
-    throw new HTTPException(503, { message: "object storage is not configured" });
+    throw new HTTPException(503, {
+      message: "object storage is not configured",
+    });
   }
   await validateFileResources(deps.db, grant.accountId, workspaceId, grant.subjectId, resources);
   assertConfiguredModel(deps.settings, input.model);
@@ -244,6 +256,11 @@ export async function saveActorNewSessionDraft(
           // worker MCP principal) legitimately have no workspace_memberships
           // row, so they must not be rejected by the human-removal fence.
           requireWorkspaceMembership: grant.subjectId.startsWith("user:"),
+          // A managed human's own personal workspace has no membership row at
+          // all, so the human-removal fence above must fall back to the
+          // organization-membership pointer for them — and only for the
+          // canonical managed-cookie session that owns it.
+          personalWorkspaceOwnerException: canonicalManagedHumanSession,
         }),
       ),
     );

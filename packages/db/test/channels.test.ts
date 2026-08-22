@@ -78,7 +78,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("channels (real PostgreSQL + FORCE RLS)", () => {
-  test("creates, lists name-ordered, updates, and deletes workspace channels", async () => {
+  test("creates, lists project-ordered, updates, and deletes workspace channels", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const security = await createChannel(db, {
@@ -91,7 +91,10 @@ describe("channels (real PostgreSQL + FORCE RLS)", () => {
     const knowledge = await createChannel(db, { ...workspace, name: "knowledge" });
 
     const listed = await listChannels(db, workspace.workspaceId);
-    expect(listed.map((channel) => channel.name)).toEqual(["knowledge", "security"]);
+    expect(listed.map((channel) => [channel.name, channel.sortOrder])).toEqual([
+      ["security", 0],
+      ["knowledge", 1],
+    ]);
 
     const renamed = await updateChannel(db, workspace.workspaceId, knowledge.id, {
       name: "knowledge-base",

@@ -150,7 +150,6 @@ function memberResult(input: {
   callId: string;
   name: string;
   output: unknown;
-  status?: "completed" | "incomplete";
   resultItem?: Record<string, unknown>;
 }): { resultItem: Record<string, unknown>; eventOutput: unknown } {
   return {
@@ -160,7 +159,6 @@ function memberResult(input: {
         callId: input.callId,
         name: input.name,
         output: input.output,
-        ...(input.status !== undefined ? { status: input.status } : {}),
       }),
     eventOutput: input.output,
   };
@@ -193,7 +191,6 @@ async function resultItemForOpenSuffixMember(input: {
       callId: input.row.callId,
       name,
       output: message,
-      status: "incomplete",
       ...(interrupted ? { resultItem: interrupted } : {}),
     });
   };
@@ -233,7 +230,6 @@ async function resultItemForOpenSuffixMember(input: {
       callId: input.row.callId,
       name,
       output: message,
-      status: "incomplete",
     });
   }
 }

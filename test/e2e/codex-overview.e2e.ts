@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { AccessContext } from "@opengeni/contracts";
 import {
   claimCodexResetRedemption,
@@ -219,6 +219,44 @@ async function expectNoWcagAxeViolations(page: Page, include: string): Promise<v
       nodes: violation.nodes.map((node) => node.target),
     })),
   ).toEqual([]);
+}
+
+async function holdFirstAccountList(context: BrowserContext): Promise<() => void> {
+  let pending = true;
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await context.route("**/v1/workspaces/*/codex/accounts", async (route) => {
+    if (pending && route.request().method() === "GET") {
+      pending = false;
+      // Keep the settings shell ahead of the account rows. This reproduces the
+      // slow-runner ordering where a snapshot-style visibility check skipped
+      // expansion before the toggle existed.
+      await released;
+    }
+    await route.continue();
+  });
+  return release;
+}
+
+async function expandAccountDetails(
+  page: Page,
+  name: string,
+  activation: "click" | "tap" = "click",
+) {
+  const card = page.getByRole("article", { name: `${name} Codex subscription` });
+  const show = card.getByRole("button", { name: `Show details for ${name}` });
+  const hide = card.getByRole("button", { name: `Hide details for ${name}` });
+  // The section heading renders before the async account list. Wait for an
+  // actual toggle before deciding whether this controlled row is open.
+  await show.or(hide).first().waitFor();
+  if (await show.isVisible()) {
+    if (activation === "tap") await show.tap();
+    else await show.click();
+  }
+  await hide.waitFor();
+  return card;
 }
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
@@ -461,6 +499,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
     });
+    const releaseInitialAccountList = await holdFirstAccountList(context);
     await context.addCookies([
       {
         name: "better-auth.session_token",
@@ -476,21 +515,14 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const subscriptionsHeading = page.locator("#codex-subscriptions-heading");
     await subscriptionsHeading.waitFor({ timeout: 20_000 });
     await subscriptionsHeading.scrollIntoViewIfNeeded();
+    const initialAccountCount = await page
+      .getByRole("article", { name: "Detailed account Codex subscription" })
+      .count();
+    releaseInitialAccountList();
+    expect(initialAccountCount).toBe(0);
     const accountCard = (name: string) =>
       page.getByRole("article", { name: `${name} Codex subscription` });
-    const expandAccount = async (name: string) => {
-      const card = accountCard(name);
-      const show = card.getByRole("button", { name: `Show details for ${name}` });
-      const hide = card.getByRole("button", { name: `Hide details for ${name}` });
-      // Wait for either toggle to render before deciding; an early
-      // `isVisible()` snapshot on a slow runner skipped the click and then
-      // waited forever for the collapsed card to expand itself.
-      await show.or(hide).first().waitFor();
-      if (await show.isVisible()) {
-        await show.click();
-      }
-      await hide.waitFor();
-    };
+    const expandAccount = async (name: string) => await expandAccountDetails(page, name);
     await expandAccount("Detailed account");
     await accountCard("Detailed account")
       .getByText("Provider detail is complete.")
@@ -562,6 +594,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       hasTouch: true,
       isMobile: true,
     });
+    const releaseMobileAccountList = await holdFirstAccountList(mobileContext);
     await mobileContext.addCookies([
       {
         name: "better-auth.session_token",
@@ -577,15 +610,12 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const mobileSubscriptionsHeading = mobile.locator("#codex-subscriptions-heading");
     await mobileSubscriptionsHeading.waitFor({ timeout: 20_000 });
     await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
-    const mobileDetailed = mobile.getByRole("article", {
-      name: "Detailed account Codex subscription",
-    });
-    const mobileShow = mobileDetailed.getByRole("button", {
-      name: "Show details for Detailed account",
-    });
-    if (await mobileShow.isVisible()) {
-      await mobileShow.tap();
-    }
+    const initialMobileAccountCount = await mobile
+      .getByRole("article", { name: "Detailed account Codex subscription" })
+      .count();
+    releaseMobileAccountList();
+    expect(initialMobileAccountCount).toBe(0);
+    const mobileDetailed = await expandAccountDetails(mobile, "Detailed account", "tap");
     await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).waitFor();
     expect(
       (await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).boundingBox())
@@ -677,6 +707,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const recoveryContext = await browser.newContext({
       viewport: { width: 1280, height: 900 },
     });
+    const releaseRecoveryAccountList = await holdFirstAccountList(recoveryContext);
     await recoveryContext.addCookies([
       {
         name: "better-auth.session_token",
@@ -692,6 +723,11 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const recoverySubscriptionsHeading = recoveryPage.locator("#codex-subscriptions-heading");
     await recoverySubscriptionsHeading.waitFor({ timeout: 20_000 });
     await recoverySubscriptionsHeading.scrollIntoViewIfNeeded();
+    const initialRecoveryAccountCount = await recoveryPage
+      .getByRole("article", { name: "Detailed account Codex subscription" })
+      .count();
+    releaseRecoveryAccountList();
+    expect(initialRecoveryAccountCount).toBe(0);
     // Usage/count caches are still fresh, but detailed rows are never cached as
     // authority. A remount must therefore issue one live overview and restore the
     // durable same-attempt resume affordance rather than rendering no inventory.
@@ -706,15 +742,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     // The provider has removed the credit after the ambiguous first call. The
     // browser exposes only the durable same-attempt resume path. With no stale
     // local provider title, the fallback label remains deliberately generic.
-    const recoveryDetailed = recoveryPage.getByRole("article", {
-      name: "Detailed account Codex subscription",
-    });
-    const recoveryShow = recoveryDetailed.getByRole("button", {
-      name: "Show details for Detailed account",
-    });
-    if (await recoveryShow.isVisible()) {
-      await recoveryShow.click();
-    }
+    await expandAccountDetails(recoveryPage, "Detailed account");
     await recoveryPage
       .getByRole("button", {
         name: "Resume uncertain redemption of usage limit reset",
@@ -754,6 +782,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       hasTouch: true,
       isMobile: true,
     });
+    const releaseCompletedAccountList = await holdFirstAccountList(completedContext);
     await completedContext.addCookies([
       {
         name: "better-auth.session_token",
@@ -769,16 +798,13 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     const completedSubscriptionsHeading = completedPage.locator("#codex-subscriptions-heading");
     await completedSubscriptionsHeading.waitFor({ timeout: 20_000 });
     await completedSubscriptionsHeading.scrollIntoViewIfNeeded();
+    const initialCompletedAccountCount = await completedPage
+      .getByRole("article", { name: "Detailed account Codex subscription" })
+      .count();
+    releaseCompletedAccountList();
+    expect(initialCompletedAccountCount).toBe(0);
     // Dense rows keep reset outcomes inside collapsed details.
-    const completedDetailed = completedPage.getByRole("article", {
-      name: "Detailed account Codex subscription",
-    });
-    const completedShow = completedDetailed.getByRole("button", {
-      name: "Show details for Detailed account",
-    });
-    if (await completedShow.isVisible()) {
-      await completedShow.click();
-    }
+    const completedDetailed = await expandAccountDetails(completedPage, "Detailed account");
     await completedDetailed
       .getByText("The earlier redemption succeeded; usage was refreshed.")
       .waitFor({ timeout: 20_000 });

@@ -15,7 +15,7 @@ over this summary. Canonical sources:
 
 - `apps/worker/src/workflows/session.ts` — the session workflow loop +
   continueAsNew.
-- `apps/worker/src/activities/agent-turn.ts` — the turn activity, the
+- `apps/worker/src/activities/agent-turn/` — the turn activity, the
   conversation-truth reconcile, `historyRowsToAppend`, `modelUsageSourceKey`.
 - `packages/db/src/index.ts` — `orphanedResultRowIndicesForRepair`,
   `claimNextSessionExecution`, the reusable-session locked update.
@@ -133,7 +133,7 @@ persisted **alone**. That is the orphan. Worse, it **self-perpetuates** on
 legacy-orphan sessions: an existing orphan inflates the raw count, producing the
 next one.
 
-**The fix** (`apps/worker/src/activities/agent-turn.ts`). Seed
+**The fix** (`apps/worker/src/activities/agent-turn/history.ts`). Seed
 `persistedHistoryCount` from the **sanitized** active-row length — count what was
 actually kept, exactly what `prepareRunInput` builds `state.history` from:
 
@@ -277,7 +277,7 @@ retry), dispatch B's first call reused dispatch A's `"response-1"` key — and i
 charge was **silently deduped away** (undercharge).
 
 **The fix** (`modelUsageSourceKey` in
-`apps/worker/src/activities/agent-turn.ts`). A provider `responseId` is globally
+`apps/worker/src/activities/agent-turn/model-usage.ts`). A provider `responseId` is globally
 stable + unique, so reuse it verbatim — a true activity retry that re-emits the
 same `responseId` correctly **dedupes** (one charge) while two distinct calls get
 distinct ids. When there is **no** `responseId`, qualify the positional fallback

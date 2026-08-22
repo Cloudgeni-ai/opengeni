@@ -1,11 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
-import { McpServerConnectionRef as ContractMcpServerConnectionRef } from "@opengeni/contracts";
+import {
+  McpServerConnectionRef as ContractMcpServerConnectionRef,
+  SandboxBackend,
+} from "@opengeni/contracts";
 import {
   collectGitIdentityEnvironment,
   configuredEntitlements,
   collectSandboxEnvironment,
+  effectiveSandboxLifecycle,
   effectiveModalIdleTimeoutSeconds,
   configuredStaticUsageLimits,
   configuredAllowedModels,
@@ -334,6 +338,80 @@ describe("Google Drive integration settings", () => {
   });
 });
 
+describe("personal GitHub OAuth settings", () => {
+  const enabled = {
+    OPENGENI_ENVIRONMENT: "test",
+    OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+    OPENGENI_PUBLIC_BASE_URL: "https://api.staging.example.test",
+    OPENGENI_BETTER_AUTH_SECRET: "better-auth-secret",
+    OPENGENI_DELEGATION_SECRET: "delegation-secret",
+    OPENGENI_INTEGRATIONS_ENABLED: "true",
+    OPENGENI_INTEGRATIONS_STATE_SECRET: "oauth-state-secret",
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+    OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
+    OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "personal-client-staging",
+    OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "personal-client-secret",
+  };
+
+  test("is disabled by default and loads a separate managed client when enabled", () => {
+    expect(withEnv({}, () => getSettings()).githubPersonalOauthEnabled).toBe(false);
+    expect(withEnv(enabled, () => getSettings())).toMatchObject({
+      githubPersonalOauthEnabled: true,
+      githubPersonalOauthClientId: "personal-client-staging",
+      githubPersonalOauthClientSecret: "personal-client-secret",
+    });
+  });
+
+  test("requires the personal client id and secret together", () => {
+    expect(() =>
+      withEnv({ OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "personal-client" }, () => getSettings()),
+    ).toThrow(/must be configured together/);
+  });
+
+  test("requires managed integrations, state signing, encryption, and a distinct client", () => {
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_PRODUCT_ACCESS_MODE: "local" }, () => getSettings()),
+    ).toThrow(/requires OPENGENI_PRODUCT_ACCESS_MODE=managed/);
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_INTEGRATIONS_ENABLED: "false" }, () => getSettings()),
+    ).toThrow(/OPENGENI_INTEGRATIONS_ENABLED=true/);
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_INTEGRATIONS_STATE_SECRET: "" }, () => getSettings()),
+    ).toThrow(/OPENGENI_INTEGRATIONS_STATE_SECRET/);
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: "" }, () => getSettings()),
+    ).toThrow(/OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY/);
+    expect(() =>
+      withEnv(
+        {
+          ...enabled,
+          OPENGENI_GITHUB_CLIENT_ID: "personal-client-staging",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/different OAuth App client/);
+  });
+
+  test("rejects non-origin and insecure production callback bases", () => {
+    expect(() =>
+      withEnv({ ...enabled, OPENGENI_PUBLIC_BASE_URL: "https://api.example.test/path" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/credential-free origin/);
+    expect(() =>
+      withEnv(
+        {
+          ...enabled,
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PUBLIC_BASE_URL: "http://api.example.test",
+          OPENGENI_RESEND_API_KEY: "re_test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/must use https/);
+  });
+});
+
 describe("OpenGeni Slack interaction settings", () => {
   const slackEnv = {
     OPENGENI_ENVIRONMENT: "local",
@@ -341,6 +419,7 @@ describe("OpenGeni Slack interaction settings", () => {
     OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
     OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
     OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
+    OPENGENI_SLACK_COMMAND: "/opengeni-staging",
   };
 
   test("allows hosted Slack OAuth without enabling signed Slack interactions", () => {
@@ -348,6 +427,7 @@ describe("OpenGeni Slack interaction settings", () => {
     expect(settings.slackClientId).toBe("slack-client-id");
     expect(settings.slackClientSecret).toBe("slack-client-secret");
     expect(settings.slackSigningSecret).toBeUndefined();
+    expect(settings.slackCommand).toBe("/opengeni-staging");
   });
 
   test("loads the signing secret without projecting it into any public contract", () => {
@@ -356,6 +436,11 @@ describe("OpenGeni Slack interaction settings", () => {
       () => getSettings(),
     );
     expect(settings.slackSigningSecret).toBe("slack-signing-secret");
+  });
+
+  test("defaults and validates the signed Slack slash command", () => {
+    expect(withEnv({}, () => getSettings()).slackCommand).toBe("/opengeni");
+    expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings())).toThrow();
   });
 });
 
@@ -1632,6 +1717,47 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
+  test("production modal+desktop requires a digest-pinned image ref", () => {
+    const digestRef = `example.azurecr.io/opengeni-desktop@sha256:${"a".repeat(64)}`;
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_MODAL_TOKEN_ID: "ak-test",
+          OPENGENI_MODAL_TOKEN_SECRET: "as-test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("digest-pinned");
+    expect(
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_MODAL_IMAGE_REF: digestRef,
+          OPENGENI_MODAL_TOKEN_ID: "ak-test",
+          OPENGENI_MODAL_TOKEN_SECRET: "as-test",
+        },
+        () => getSettings(),
+      ).modalImageRef,
+    ).toBe(digestRef);
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "local",
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_SANDBOX_DESKTOP_ENABLED: "true",
+          OPENGENI_MODAL_TOKEN_ID: "ak-test",
+          OPENGENI_MODAL_TOKEN_SECRET: "as-test",
+        },
+        () => getSettings(),
+      ),
+    ).not.toThrow();
+  });
+
   test("parses and validates an immutable Modal image ID", () => {
     const imageId = "im-1234567890123456789012";
     expect(
@@ -1733,6 +1859,76 @@ describe("backend-gated sandbox required-credential validation", () => {
     }
   });
 
+  test("opensandbox requires private API connection data, an immutable image, and object storage when active", () => {
+    expect(() => withEnv({ OPENGENI_SANDBOX_BACKEND: "opensandbox" }, () => getSettings())).toThrow(
+      "OPENGENI_OPENSANDBOX_BASE_URL is required",
+    );
+    const active = {
+      OPENGENI_SANDBOX_BACKEND: "opensandbox",
+      OPENGENI_OPENSANDBOX_BASE_URL: "http://opensandbox-server.opensandbox.svc:8080",
+      OPENGENI_OPENSANDBOX_API_KEY: "test-key",
+      OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"a".repeat(64)}`,
+      OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+      OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minio",
+      OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+    };
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "opensandbox",
+          OPENGENI_OPENSANDBOX_BASE_URL: "http://opensandbox-server.opensandbox.svc:8080",
+          OPENGENI_OPENSANDBOX_API_KEY: "test-key",
+          OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"a".repeat(64)}`,
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/requires configured object storage/);
+    expect(() => withEnv(active, () => getSettings())).not.toThrow();
+    expect(withEnv(active, () => getSettings()).openSandboxUseServerProxy).toBe(true);
+    expect(withEnv(active, () => getSettings()).openSandboxSignedEndpoints).toBe(false);
+    expect(
+      withEnv(
+        {
+          ...active,
+          OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS: "true",
+          OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL: "http://127.0.0.1:28888",
+        },
+        () => getSettings(),
+      ),
+    ).toMatchObject({
+      openSandboxSignedEndpoints: true,
+      openSandboxChannelBPublicBaseUrl: "http://127.0.0.1:28888",
+      openSandboxSignedEndpointTtlSeconds: 600,
+    });
+    expect(
+      withEnv(
+        {
+          ...active,
+          OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE: "opensandbox",
+        },
+        () => getSettings(),
+      ).openSandboxKubernetesInventoryNamespace,
+    ).toBe("opensandbox");
+    expect(() =>
+      withEnv(
+        {
+          ...active,
+          OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE: "../opensandbox",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow();
+    expect(() =>
+      withEnv(
+        { ...active, OPENGENI_OPENSANDBOX_IMAGE: "registry.example.com/opengeni:latest" },
+        () => getSettings(),
+      ),
+    ).toThrow(/immutable OCI reference/i);
+    expect(() =>
+      withEnv({ OPENGENI_OPENSANDBOX_API_KEY: "unused" }, () => getSettings()),
+    ).not.toThrow();
+  });
+
   test("the modal token stays a both-or-neither pair regardless of the active backend", () => {
     // Half-configured Modal token while backend=docker: still a misconfig.
     expect(() =>
@@ -1753,6 +1949,11 @@ describe("backend-gated sandbox required-credential validation", () => {
       "OPENGENI_MODAL_APP_NAME",
       "OPENGENI_MODAL_TOKEN_ID",
       "OPENGENI_MODAL_TOKEN_SECRET",
+    ]);
+    expect(requiredSandboxEnvForBackend("opensandbox")).toEqual([
+      "OPENGENI_OPENSANDBOX_BASE_URL",
+      "OPENGENI_OPENSANDBOX_API_KEY",
+      "OPENGENI_OPENSANDBOX_IMAGE",
     ]);
     expect(requiredSandboxEnvForBackend("docker")).toEqual([]);
     // every backend in the table maps to a (possibly empty) env list.
@@ -1822,7 +2023,15 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   });
 
   test("rotation lead derives from a short provider lifetime when not explicitly pinned", () => {
-    const settings = withEnv({ OPENGENI_MODAL_TIMEOUT_SECONDS: "300" }, () => getSettings());
+    const settings = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
+        OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
+      },
+      () => getSettings(),
+    );
     expect(settings.sandboxRotationLeadMs).toBe(150_000);
     expect(settings.sandboxIdleGraceMs).toBe(150_000);
   });
@@ -1830,6 +2039,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
   test("an explicit rotation lead overrides the provider-relative default", () => {
     const settings = withEnv(
       {
+        OPENGENI_SANDBOX_BACKEND: "modal",
+        OPENGENI_MODAL_TOKEN_ID: "ak",
+        OPENGENI_MODAL_TOKEN_SECRET: "as",
         OPENGENI_MODAL_TIMEOUT_SECONDS: "900",
         OPENGENI_SANDBOX_ROTATION_LEAD_MS: "300000",
       },
@@ -1848,6 +2060,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(() =>
       withEnv(
         {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
           OPENGENI_MODAL_TIMEOUT_SECONDS: "3600",
           OPENGENI_SANDBOX_ROTATION_LEAD_MS: "3600000",
         },
@@ -1858,11 +2073,26 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
 
   test("boot reserves the full capture window plus one reaper tick before rotation", () => {
     expect(() =>
-      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100000" }, () => getSettings()),
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100000",
+        },
+        () => getSettings(),
+      ),
     ).toThrow(/must exceed the durable capture timeout/i);
     expect(
-      withEnv({ OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100001" }, () => getSettings())
-        .sandboxRotationLeadMs,
+      withEnv(
+        {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
+          OPENGENI_SANDBOX_ROTATION_LEAD_MS: "100001",
+        },
+        () => getSettings(),
+      ).sandboxRotationLeadMs,
     ).toBe(100_001);
   });
 
@@ -1883,6 +2113,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(() =>
       withEnv(
         {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
           OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "120",
           OPENGENI_SANDBOX_IDLE_GRACE_MS: "900000",
         },
@@ -1895,6 +2128,9 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
     expect(() =>
       withEnv(
         {
+          OPENGENI_SANDBOX_BACKEND: "modal",
+          OPENGENI_MODAL_TOKEN_ID: "ak",
+          OPENGENI_MODAL_TOKEN_SECRET: "as",
           OPENGENI_MODAL_TIMEOUT_SECONDS: "300",
           OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS: "600",
           OPENGENI_SANDBOX_ROTATION_LEAD_MS: "180000",
@@ -1902,6 +2138,55 @@ describe("sandbox lease cadence vs box idle timeout (sandbox-file-persistence)",
         () => getSettings(),
       ),
     ).toThrow(/must not exceed the hard provider/i);
+  });
+
+  test("opensandbox exposes renewable TTL without Modal rotation semantics", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_SANDBOX_BACKEND: "opensandbox",
+        OPENGENI_OPENSANDBOX_BASE_URL: "http://opensandbox-server.opensandbox.svc:8080",
+        OPENGENI_OPENSANDBOX_API_KEY: "test-key",
+        OPENGENI_OPENSANDBOX_IMAGE: `registry.example.com/opengeni@sha256:${"b".repeat(64)}`,
+        OPENGENI_OPENSANDBOX_TTL_SECONDS: "60",
+        OPENGENI_OBJECT_STORAGE_ENDPOINT: "http://127.0.0.1:9000",
+        OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "minio",
+        OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "minioadmin",
+      },
+      () => getSettings(),
+    );
+    expect(effectiveSandboxLifecycle(settings)).toEqual({
+      hardLifetimeMs: null,
+      renewableTtlSeconds: 60,
+      providerIdleTimeoutMs: null,
+      rotationLeadMs: null,
+    });
+    expect(settings.sandboxIdleGraceMs).toBe(900_000);
+    expect(settings.sandboxRotationLeadMs).toBe(3_600_000);
+  });
+
+  test("every canonical sandbox backend resolves a lifecycle policy", () => {
+    const settings = withEnv({ OPENGENI_SANDBOX_BACKEND: "local" }, () => getSettings());
+    for (const backend of SandboxBackend.options) {
+      expect(() => effectiveSandboxLifecycle(settings, backend)).not.toThrow();
+    }
+  });
+});
+
+describe("workspace control lock timeout", () => {
+  test("defaults to 20 s and honors a positive integer override", () => {
+    expect(withEnv({}, () => getSettings()).workspaceControlLockTimeoutMs).toBe(20_000);
+    expect(
+      withEnv({ OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS: "45000" }, () => getSettings())
+        .workspaceControlLockTimeoutMs,
+    ).toBe(45_000);
+  });
+
+  test("rejects non-positive and non-integer values at boot with a clear message", () => {
+    for (const value of ["0", "-5", "1.5", "abc", "20s"]) {
+      expect(() =>
+        withEnv({ OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS: value }, () => getSettings()),
+      ).toThrow(/OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer/);
+    }
   });
 });
 

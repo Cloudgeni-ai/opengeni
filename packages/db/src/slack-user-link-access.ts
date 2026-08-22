@@ -11,6 +11,7 @@ import { and, asc, eq, gt, inArray, ne } from "drizzle-orm";
 import { type Database, withWorkspaceRls } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
 
 type RequestRow = typeof schema.slackUserLinkAccessRequests.$inferSelect;
 type OperationKind = "request" | "cancel" | "approve" | "deny";
@@ -563,7 +564,11 @@ async function membershipAllowsSlackLink(database: Database, row: RequestRow) {
       ),
     )
     .limit(1);
-  const permissions = membership?.permissions ?? [];
+  return workspaceMembershipPermissionsAllowSlackLink(membership?.permissions);
+}
+
+export function workspaceMembershipPermissionsAllowSlackLink(value: unknown): boolean {
+  const permissions = normalizeWorkspaceMembershipPermissions(value);
   return permissions.includes("sessions:create") || permissions.includes("workspace:admin");
 }
 

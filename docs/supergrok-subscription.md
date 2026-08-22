@@ -12,7 +12,7 @@ Canonical implementation sources:
   `packages/db/src/index.ts`, `packages/db/src/schema.ts`, and migration
   `0234_xai_subscription_authority.sql`;
 - runtime: `apps/worker/src/activities/xai-auth.ts` and
-  `apps/worker/src/activities/agent-turn.ts`;
+  `apps/worker/src/activities/agent-turn/xai-capacity.ts`;
 - workflow capacity orchestration: `apps/worker/src/activities/codex-capacity.ts`
   and `apps/worker/src/workflows/session.ts`;
 - clients: the SuperGrok methods/types in `@opengeni/sdk`,
@@ -20,7 +20,10 @@ Canonical implementation sources:
 
 ## Enablement and connection
 
-`OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true` enables the rail. OAuth material
+`OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true` enables the rail. The config
+library stays fail-closed (`false` when unset); `bun run dev` enables the rail
+for local development when the variable is absent, matching Codex. Production
+and Helm still require an explicit true. OAuth material
 is authenticated-encrypted at rest, so a stable
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` is required before connection or runtime
 materialization can succeed.

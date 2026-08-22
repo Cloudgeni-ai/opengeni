@@ -86,13 +86,18 @@ async function provisionSelf(userId: string) {
 }
 
 async function provisionOrganizationMember(label: string) {
-  if (!client) throw new Error("test database unavailable");
+  if (!client || !shared) throw new Error("test database unavailable");
   const ownerId = `${label}-owner-${crypto.randomUUID()}`;
   const targetId = `${label}-target-${crypto.randomUUID()}`;
   const ownerSubject = `user:${ownerId}`;
   const targetSubject = `user:${targetId}`;
   await provisionSelf(ownerId);
   const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${owner!.organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
   const invitation = await createOrganizationInvitation(client.db, {
     organizationId: owner!.organizationId,
     actorSubjectId: ownerSubject,
@@ -669,6 +674,11 @@ describe("migration 0263 organization membership lifecycle", () => {
     const foreignSubject = `user:${foreignId}`;
     await provisionSelf(ownerId);
     const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${owner!.organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
     const expectedIds: string[] = [];
     for (let index = 0; index < 5; index += 1) {
       const invitationId = crypto.randomUUID();
@@ -733,6 +743,11 @@ describe("migration 0263 organization membership lifecycle", () => {
     const targetSubject = `user:${targetId}`;
     const ownerAccess = await provisionSelf(ownerId);
     const [owner] = await listSelfOrganizationMemberships(client.db, ownerSubject);
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${owner!.organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
     const invitation = await createOrganizationInvitation(client.db, {
       organizationId: owner!.organizationId,
       actorSubjectId: ownerSubject,
@@ -1488,6 +1503,7 @@ describe("migration 0263 organization membership lifecycle", () => {
         pendingToolCalls: number;
         humanInputStatus: string;
         interruptedHistoryItems: number;
+        interruptedHistoryItemsWithOutputStatus: number;
         toolOutputEvents: number;
         humanInputEvents: number;
         systemUpdateEvents: number;
@@ -1508,8 +1524,17 @@ describe("migration 0263 organization membership lifecycle", () => {
             and history.session_id = ${recoveringSession.id}
             and history.turn_id = ${requiresActionTurnId}
             and history.item ->> 'type' = 'function_call_result'
+            and history.item ->> 'callId' = ${pendingToolCallId}) as "interruptedHistoryItems",
+        (select count(*)::int from session_history_items history
+          where history.workspace_id = ${sharedWorkspaceId}
+            and history.session_id = ${recoveringSession.id}
+            and history.turn_id = ${requiresActionTurnId}
+            and history.item ->> 'type' = 'function_call_result'
             and history.item ->> 'callId' = ${pendingToolCallId}
-            and history.item ->> 'status' = 'incomplete') as "interruptedHistoryItems",
+            and (
+              history.item ? 'status'
+              or (history.item -> 'providerData') ? 'status'
+            )) as "interruptedHistoryItemsWithOutputStatus",
         (select count(*)::int from session_events event_row
           where event_row.workspace_id = ${sharedWorkspaceId}
             and event_row.session_id = ${recoveringSession.id}
@@ -1539,6 +1564,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       pendingToolCalls: 0,
       humanInputStatus: "cancelled",
       interruptedHistoryItems: 1,
+      interruptedHistoryItemsWithOutputStatus: 0,
       toolOutputEvents: 1,
       humanInputEvents: 1,
       systemUpdateEvents: 1,
@@ -1601,6 +1627,7 @@ describe("migration 0263 organization membership lifecycle", () => {
       Array<{
         pendingToolCalls: number;
         interruptedHistoryItems: number;
+        interruptedHistoryItemsWithOutputStatus: number;
         lifecycleProtocolEvents: number;
         lastSequence: number;
       }>
@@ -1614,8 +1641,17 @@ describe("migration 0263 organization membership lifecycle", () => {
             and history.session_id = ${recoveringSession.id}
             and history.turn_id = ${requiresActionTurnId}
             and history.item ->> 'type' = 'function_call_result'
+            and history.item ->> 'callId' = ${pendingToolCallId}) as "interruptedHistoryItems",
+        (select count(*)::int from session_history_items history
+          where history.workspace_id = ${sharedWorkspaceId}
+            and history.session_id = ${recoveringSession.id}
+            and history.turn_id = ${requiresActionTurnId}
+            and history.item ->> 'type' = 'function_call_result'
             and history.item ->> 'callId' = ${pendingToolCallId}
-            and history.item ->> 'status' = 'incomplete') as "interruptedHistoryItems",
+            and (
+              history.item ? 'status'
+              or (history.item -> 'providerData') ? 'status'
+            )) as "interruptedHistoryItemsWithOutputStatus",
         (select count(*)::int from session_events event_row
           where event_row.workspace_id = ${sharedWorkspaceId}
             and event_row.session_id = ${recoveringSession.id}
@@ -1629,6 +1665,7 @@ describe("migration 0263 organization membership lifecycle", () => {
     expect(replayEvidence).toEqual({
       pendingToolCalls: 0,
       interruptedHistoryItems: 1,
+      interruptedHistoryItemsWithOutputStatus: 0,
       lifecycleProtocolEvents: 4,
       lastSequence: protocolSettlement!.lastSequence,
     });

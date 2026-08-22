@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { workspaceArchiveObjectKey } from "@opengeni/contracts";
 import {
   requirePersistableReplacementSandboxEnvelope,
   sandboxProviderInstanceIdFromEnvelope,
@@ -222,6 +223,131 @@ describe("replacement sandbox envelope publication", () => {
       sessionState: { workspaceArchive: "mixed-archive" },
     });
     expect(sandboxProviderInstanceIdFromEnvelope(mixed)).toBeNull();
+  });
+
+  test("object-storage restore inlines are not published onto the replacement lease", async () => {
+    const sha256 = "a".repeat(64);
+    const revision = `wa1:1787245890348:${sha256}`;
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+        revision,
+      }),
+      sha256,
+      bytes: 12,
+      backend: "s3-compatible",
+    };
+    const envelope = await serializeReplacementSandboxEnvelope(
+      replacement({ backendId: "modal" } as never, { sandboxId: "sb-replacement" }),
+      {
+        backendId: "opensandbox",
+        sessionState: {
+          providerState: { sandboxId: "sb-dead-provider" },
+          workspaceArchive: "dGVtcG9yYXJ5LWlubGluZQ==",
+          workspaceArchiveRef: ref,
+          workspaceArchiveMeta: { revision: "wa1:verified" },
+          workspaceArchiveAt: "2030-01-02T03:04:05.000Z",
+        },
+      },
+    );
+
+    expect(envelope).toEqual({
+      backendId: "modal",
+      sessionState: {
+        workspaceArchiveRef: ref,
+        workspaceArchiveMeta: { revision: "wa1:verified" },
+        workspaceArchiveAt: "2030-01-02T03:04:05.000Z",
+      },
+    });
+    expect(JSON.stringify(envelope)).not.toContain("dGVtcG9yYXJ5LWlubGluZQ==");
+    expect(JSON.stringify(envelope)).not.toContain("sb-dead-provider");
+  });
+
+  test("serialized replacement state cannot reintroduce an inlined tar beside a durable ref", async () => {
+    const sha256 = "c".repeat(64);
+    const revision = `wa1:1787245890350:${sha256}`;
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+        revision,
+      }),
+      sha256,
+      bytes: 12,
+      backend: "s3-compatible",
+    };
+    const envelope = await serializeReplacementSandboxEnvelope(
+      replacement(
+        {
+          backendId: "modal",
+          async serializeSessionState() {
+            return {
+              sandboxId: "sb-replacement",
+              appName: "replacement-app",
+            };
+          },
+        } as never,
+        { sandboxId: "sb-replacement" },
+      ),
+      {
+        backendId: "opensandbox",
+        sessionState: {
+          workspaceArchive: "dGVtcG9yYXJ5LWlubGluZQ==",
+          workspaceArchiveRef: ref,
+          workspaceArchiveMeta: { revision: "wa1:verified" },
+        },
+      },
+    );
+
+    expect(envelope).toMatchObject({
+      backendId: "modal",
+      opengeniProviderInstanceId: "sb-replacement",
+      sessionState: {
+        providerState: { sandboxId: "sb-replacement", appName: "replacement-app" },
+        workspaceArchiveRef: ref,
+        workspaceArchiveMeta: { revision: "wa1:verified" },
+      },
+    });
+    expect(envelope?.sessionState).not.toHaveProperty("workspaceArchive");
+    expect(JSON.stringify(envelope)).not.toContain("dGVtcG9yYXJ5LWlubGluZQ==");
+  });
+
+  test("object-storage refs remain durable without an inline tar", async () => {
+    const sha256 = "b".repeat(64);
+    const revision = `wa1:1787245890349:${sha256}`;
+    const ref = {
+      schema: "sandbox_archive_object_v1" as const,
+      key: workspaceArchiveObjectKey({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+        revision,
+      }),
+      sha256,
+      bytes: 24,
+      backend: "s3-compatible",
+    };
+    const envelope = await serializeReplacementSandboxEnvelope(
+      replacement({ backendId: "modal" } as never, { sandboxId: "sb-replacement" }),
+      {
+        backendId: "opensandbox",
+        sessionState: {
+          workspaceArchiveRef: ref,
+          workspaceArchiveMeta: { revision: "wa1:verified" },
+        },
+      },
+    );
+
+    expect(envelope?.sessionState).toEqual({
+      workspaceArchiveRef: ref,
+      workspaceArchiveMeta: { revision: "wa1:verified" },
+    });
+    expect(envelope?.sessionState).not.toHaveProperty("workspaceArchive");
   });
 
   test("failed serialization without an archive publishes null", async () => {

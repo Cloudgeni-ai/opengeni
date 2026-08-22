@@ -12,6 +12,8 @@ const connectionAuthorityMigrationName = "0256_connection_authority_delegation.s
 const connectionAuthorityActivationMigrationName =
   "0264_connection_authority_runtime_activation.sql";
 const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
+const personalGitHubRepositorySelectionMigrationName =
+  "0315_personal_github_repository_selection.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -166,7 +168,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${commonAuthorityMigrationName}),
           (${connectionAuthorityMigrationName}),
           (${connectionAuthorityActivationMigrationName}),
-          (${scheduledConnectionAuthorityMigrationName})
+          (${scheduledConnectionAuthorityMigrationName}),
+          (${personalGitHubRepositorySelectionMigrationName})
       `;
       await migrate(databaseUrl);
       await sql`
@@ -176,7 +179,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${commonAuthorityMigrationName},
           ${connectionAuthorityMigrationName},
           ${connectionAuthorityActivationMigrationName},
-          ${scheduledConnectionAuthorityMigrationName}
+          ${scheduledConnectionAuthorityMigrationName},
+          ${personalGitHubRepositorySelectionMigrationName}
         )
       `;
 
@@ -184,6 +188,22 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         target: "personal",
         workspaceMembership: false,
       });
+      const legacySignatures = [
+        "list_self_user_resource_authorities(uuid)",
+        "issue_self_user_resource_grant(uuid,uuid,uuid,text,text,text,uuid,boolean)",
+        "revoke_self_user_resource_grant(uuid,uuid)",
+        "list_self_connection_authorities(uuid)",
+        "issue_self_connection_use_grant(uuid,uuid,uuid,text,text,uuid,boolean)",
+        "revoke_self_connection_use_grant(uuid,uuid)",
+      ];
+      const legacyFunctions = await sql<Array<{ signature: string; procedure: string | null }>>`
+        select signature,
+          to_regprocedure(format('%I.%s', current_schema(), signature))::text as procedure
+        from unnest(${sql.array(legacySignatures)}::text[]) as signature
+        order by signature`;
+      expect(Array.from(legacyFunctions)).toEqual(
+        [...legacySignatures].sort().map((signature) => ({ signature, procedure: null })),
+      );
       await expect(insertAttempt(sql, ids, ids.attemptId)).rejects.toThrow(
         "initiating human lacks target-workspace membership",
       );
@@ -197,7 +217,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${commonAuthorityMigrationName},
           ${connectionAuthorityMigrationName},
           ${connectionAuthorityActivationMigrationName},
-          ${scheduledConnectionAuthorityMigrationName}
+          ${scheduledConnectionAuthorityMigrationName},
+          ${personalGitHubRepositorySelectionMigrationName}
         )
         order by name
       `;
@@ -207,6 +228,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         connectionAuthorityMigrationName,
         connectionAuthorityActivationMigrationName,
         scheduledConnectionAuthorityMigrationName,
+        personalGitHubRepositorySelectionMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

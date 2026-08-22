@@ -25,6 +25,7 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
+export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 
@@ -122,15 +123,21 @@ export {
 export {
   NATIVE_SNAPSHOT_PREFIXES,
   WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION,
+  WORKSPACE_ARCHIVE_OBJECT_REF_SCHEMA,
   backendForNativeSnapshotProvider,
   decodeNativeSnapshotRef,
   encodeNativeSnapshotRef,
+  omitInlineWorkspaceArchiveWhenObjectRefPresent,
   parseWorkspaceArchiveDescriptor,
+  parseWorkspaceArchiveObjectRef,
+  workspaceArchiveObjectKey,
+  workspaceArchivePayloadPresent,
   type NativeSnapshotDescriptor,
   type NativeSnapshotProvider,
   type NativeSnapshotRef,
   type TarWorkspaceArchiveDescriptor,
   type WorkspaceArchiveDescriptor,
+  type WorkspaceArchiveObjectRef,
   type WorkspaceTreeFingerprint,
 } from "./sandbox-snapshots";
 
@@ -151,11 +158,12 @@ export const SessionStatus = z.enum([
 ]);
 export type SessionStatus = z.infer<typeof SessionStatus>;
 
-// 11 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
+// 12 backends; 3-way enum parity (contracts / sdk / deployment) is pinned by
 // `packages/sdk/test/contract-parity.test.ts`. Every member is ADDITIVE AT THE
 // END (the parity test pins positions): the original four, then the six cloud
 // backends, then `selfhosted` (bring-your-own-compute — a user's own machine
-// enrolled as a first-class sandbox).
+// enrolled as a first-class sandbox), then `opensandbox` (an optional
+// Kubernetes-native provisioned sandbox provider).
 export const SandboxBackend = z.enum([
   "docker",
   "modal",
@@ -168,6 +176,7 @@ export const SandboxBackend = z.enum([
   "cloudflare",
   "vercel",
   "selfhosted",
+  "opensandbox",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -193,6 +202,7 @@ export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   cloudflare: ["sandboxId"],
   vercel: ["sandboxId"],
   selfhosted: ["agentId"],
+  opensandbox: ["sandboxId"],
 } as const satisfies Record<SandboxBackend, readonly string[]>;
 export const LEGACY_SANDBOX_PROVIDER_INSTANCE_ID_FIELDS = [
   "sandboxId",
@@ -597,6 +607,36 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     persistable: false,
     supportsRunAs: false,
   },
+  // Optional Kubernetes-native provisioned sandbox through OpenSandbox.
+  // Desktop-class when the box image includes ttyd/browserd/Xvfb: PTY over ttyd,
+  // noVNC and browserd over signed URI-mode ingress. OpenGeni owns persistence
+  // through its portable tar checkpoint path in object storage; native
+  // OpenSandbox pause/resume and snapshots are deliberately not used.
+  opensandbox: {
+    backend: "opensandbox",
+    backendId: "opensandbox",
+    tier: "desktop",
+    os: { supported: ["linux"], default: "linux" },
+    capabilities: {
+      FileSystem: { available: true, readOnly: false },
+      Terminal: { available: true, transport: "sse-events", pty: true },
+      Git: { available: true },
+      DesktopStream: { available: true, transport: "vnc-ws" },
+      Recording: { available: true },
+    },
+    lifetime: {
+      requiresSnapshotRollover: false,
+      hasIdleKiller: false,
+      supportsSuspendResume: false,
+      resumeIsLockFree: true,
+    },
+    snapshot: { kind: "tar-only", hasTarFallback: true },
+    portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
+    workspaceRoot: "/workspace",
+    nativeBucketMount: false,
+    persistable: true,
+    supportsRunAs: false,
+  },
 };
 
 export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -810,6 +850,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_set",
   "goal_update",
   "goal_progress",
+  "goal_wait",
   "goal_complete",
   "goal_pause",
   "memory_search",
@@ -830,6 +871,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "preference_propose",
   "remember",
   "remember_confirm",
+  "company_profile_propose",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -844,6 +886,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sessions_list",
   "session_get",
   "session_events",
+  "session_wait",
   "session_create",
   "session_send_message",
   "session_pause",
@@ -1087,39 +1130,124 @@ export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceReten
 export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
 
 export const UserResourceAuthorityScope = z.literal("user");
+export const UserResourceKind = z.enum([
+  "connection",
+  "document",
+  "variable_set",
+  "rig",
+  "connected_machine",
+]);
+export type UserResourceKind = z.infer<typeof UserResourceKind>;
+
+export const USER_RESOURCE_ACTION_BY_KIND = {
+  connection: "connection.use",
+  document: "document.read",
+  variable_set: "variable_set.use",
+  rig: "rig.use",
+  connected_machine: "connected_machine.use",
+} as const satisfies Record<UserResourceKind, string>;
+
 export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
+export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
+  "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
+
+/**
+ * Owner-authored issuance intent for the fixed personal Variable Set/Rig
+ * closure selected by one session. The server derives every resource,
+ * authority and action from the locked session; callers never nominate grants.
+ */
+export const PersonalResourceAttachmentIntent = z
+  .object({
+    mode: UserResourceLifecycleGrantMode,
+    expectedAuthorityEpoch: z.number().int().positive().optional(),
+    workspaceSharedAcknowledged: z.boolean().default(false),
+    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+  })
+  .strict();
+export type PersonalResourceAttachmentIntent = z.infer<typeof PersonalResourceAttachmentIntent>;
+
+function requireEstablishedPersonalResourceEpoch(
+  value: {
+    personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
+  },
+  context: z.RefinementCtx,
+): void {
+  if (
+    value.personalResourceAttachment !== undefined &&
+    value.personalResourceAttachment.expectedAuthorityEpoch === undefined
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
+      message: "established-session attachment requires expectedAuthorityEpoch",
+    });
+  }
+}
+
+/** Credential-free accepted-work projection. Resource ids remain private. */
+export const PersonalResourceAttachmentSummary = z
+  .object({
+    mode: UserResourceLifecycleGrantMode,
+    context: SessionTenancyVisibility,
+    resourceCount: z.number().int().positive(),
+    resourceKinds: z
+      .array(z.enum(["variable_set", "rig"]))
+      .min(1)
+      .max(2),
+    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+  })
+  .strict();
+export type PersonalResourceAttachmentSummary = z.infer<typeof PersonalResourceAttachmentSummary>;
+/** Public owner-management deliberately excludes race-prone standalone `once`. */
+export const ManagedUserResourceGrantMode = z.enum(["session", "always"]);
 export const UserResourceAuthorityGrant = z.object({
   grantId: z.string().uuid(),
   targetWorkspaceId: z.string().uuid(),
   targetSessionId: z.string().uuid().nullable(),
-  action: z.string().min(1).max(64),
+  action: z.enum([
+    "connection.use",
+    "document.read",
+    "variable_set.use",
+    "rig.use",
+    "connected_machine.use",
+  ]),
   mode: UserResourceLifecycleGrantMode,
   context: SessionTenancyVisibility,
+  authorityEpoch: z.number().int().positive().nullable(),
   generation: z.number().int().positive(),
   status: z.enum(["active", "consumed", "revoked", "expired"]),
   expiresAt: z.string().datetime().nullable(),
+  delegation: z.lazy(() => UserResourceDelegation),
 });
 export const UserResourceAuthoritySummary = z.object({
   authorityId: z.string().uuid(),
-  resourceKind: z.string().min(1).max(64),
+  resourceKind: UserResourceKind,
+  resourceId: z.string().uuid(),
+  originWorkspaceId: z.string().uuid().nullable(),
   generation: z.number().int().positive(),
   status: z.enum(["active", "retained", "revoked"]),
   grants: z.array(UserResourceAuthorityGrant),
 });
 export const ListUserResourceAuthoritiesQuery = z.object({
   scope: UserResourceAuthorityScope,
+  resourceKind: UserResourceKind,
+  cursor: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 export const ListUserResourceAuthoritiesResponse = z.object({
   scope: UserResourceAuthorityScope,
   authorities: z.array(UserResourceAuthoritySummary),
+  nextCursor: z.string().uuid().nullable(),
 });
 export const IssueUserResourceGrantRequest = z
   .object({
     scope: UserResourceAuthorityScope,
-    action: z.string().min(1).max(64),
-    mode: UserResourceLifecycleGrantMode,
+    resourceKind: UserResourceKind,
+    mode: ManagedUserResourceGrantMode,
     context: SessionTenancyVisibility,
     sessionId: z.string().uuid().nullable().optional(),
+    expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
     workspaceSharedAcknowledged: z.boolean().default(false),
   })
   .superRefine((value, context) => {
@@ -1130,18 +1258,18 @@ export const IssueUserResourceGrantRequest = z
         message: "workspace_shared requires durable shared-output acknowledgement",
       });
     }
-    if (value.mode === "always" && value.sessionId) {
+    if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "always is unbound",
+        message: "always is unbound from session authority",
       });
     }
-    if (value.mode !== "always" && !value.sessionId) {
+    if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "once/session require a target session",
+        message: "session grants require a target session and expectedAuthorityEpoch",
       });
     }
   });
@@ -1149,9 +1277,29 @@ export const UserResourceGrantMutationResponse = z.object({
   scope: UserResourceAuthorityScope,
   grant: UserResourceAuthorityGrant,
 });
+export const UserResourceGrantRevocationResponse = z.object({
+  scope: UserResourceAuthorityScope,
+  grant: z.object({
+    grantId: z.string().uuid(),
+    generation: z.number().int().positive(),
+    status: z.literal("revoked"),
+    revokedAt: z.string().datetime(),
+  }),
+});
 export const RevokeUserResourceGrantQuery = z.object({
   scope: UserResourceAuthorityScope,
 });
+export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
+export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
+export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
+export type ListUserResourceAuthoritiesResponse = z.infer<
+  typeof ListUserResourceAuthoritiesResponse
+>;
+export type IssueUserResourceGrantRequest = z.infer<typeof IssueUserResourceGrantRequest>;
+export type UserResourceGrantMutationResponse = z.infer<typeof UserResourceGrantMutationResponse>;
+export type UserResourceGrantRevocationResponse = z.infer<
+  typeof UserResourceGrantRevocationResponse
+>;
 export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 
 /** Public/session API vocabulary. Persistence keeps the explicit tenancy names. */
@@ -1372,6 +1520,89 @@ export const SessionTenancyPublicProjection = z.object({
     .nullable(),
 });
 export type SessionTenancyPublicProjection = z.infer<typeof SessionTenancyPublicProjection>;
+
+export const SessionTenancyBlocker = z.enum([
+  "nonterminal_turn",
+  "nonterminal_attempt",
+  "unsettled_interruption",
+  "pending_system_update",
+  "pending_human_input",
+  "pending_tool_receipt",
+  "run_state",
+  "active_goal",
+  "capacity_waiter",
+  "active_realtime",
+  "active_scheduled_task",
+  "workspace_mutation_admission",
+  "retained_process",
+  "active_sandbox_access",
+  "shared_sandbox_group",
+]);
+export type SessionTenancyBlocker = z.infer<typeof SessionTenancyBlocker>;
+
+export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
+const SessionTenancyIdempotencyKey = z.string().trim().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+
+export const UpdateSessionVisibilityRequest = z
+  .object({
+    visibility: SessionVisibility,
+    expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    idempotencyKey: SessionTenancyIdempotencyKey,
+  })
+  .strict();
+export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
+
+export const UpdateSessionVisibilityResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    eventId: z.string().uuid().nullable(),
+    eventSequence: z.number().int().positive().nullable(),
+    visibility: SessionVisibility,
+    authorityEpoch: z.number().int().positive(),
+    changed: z.boolean(),
+    replay: z.boolean(),
+    revokedGrantCount: z.number().int().nonnegative(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.changed !== (value.eventId !== null && value.eventSequence !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["changed"],
+        message: "changed must match the presence of the durable event receipt",
+      });
+    }
+    if ((value.eventId === null) !== (value.eventSequence === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["eventId"],
+        message: "eventId and eventSequence must be present or absent together",
+      });
+    }
+  });
+export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibilityResponse>;
+
+export const ForkSessionRequest = z
+  .object({
+    idempotencyKey: SessionTenancyIdempotencyKey,
+  })
+  .strict();
+export type ForkSessionRequest = z.infer<typeof ForkSessionRequest>;
+
+export const ForkSessionResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    eventId: z.string().uuid(),
+    eventSequence: z.number().int().positive(),
+    sessionId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    visibility: z.literal("private"),
+    authorityEpoch: z.literal(1),
+    copiedHistoryItemCount: z.number().int().nonnegative(),
+    replay: z.boolean(),
+  })
+  .strict();
+export type ForkSessionResponse = z.infer<typeof ForkSessionResponse>;
 
 export const ManagedAccount = z.object({
   id: z.string().uuid(),
@@ -1720,6 +1951,15 @@ export const WorkspaceVoiceInputSettings = z
   .strict();
 export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
 
+/** Model policy inherited by newly created chats and scheduled tasks. */
+export const WorkspaceSessionDefaults = z
+  .object({
+    model: z.string().trim().min(1).max(256),
+    reasoningEffort: ReasoningEffort,
+  })
+  .strict();
+export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
   .object({
@@ -1842,6 +2082,7 @@ export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+    sessionDefaults: WorkspaceSessionDefaults.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -1869,6 +2110,14 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.memoryEnabled === true : false;
+}
+
+/** Explicit defaults for new chats/schedules, or null for deployment defaults. */
+export function resolveWorkspaceSessionDefaults(
+  settings: unknown,
+): WorkspaceSessionDefaults | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.sessionDefaults ?? null) : null;
 }
 
 /**
@@ -1953,6 +2202,7 @@ export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
+    sessionDefaults: WorkspaceSessionDefaults.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -3181,6 +3431,11 @@ export const GitCredentialRepositoryRef = z.object({
   access: GitRepositoryAccess.optional(),
   uri: z.string().min(1),
   ref: z.string().min(1),
+  /** Immutable commit the caller expects `ref` to materialize. */
+  expectedCommitSha: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .optional(),
   repositoryId: GitProviderRepositoryId.optional(),
   installationId: GitProviderRepositoryId.optional(),
   projectId: GitProviderRepositoryId.optional(),
@@ -3517,13 +3772,42 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    connectionType: z.enum(["mcp", "social", "atlassian"]).optional(),
+    connectionType: z.enum(["mcp", "social", "atlassian", "github_personal"]).optional(),
     /**
      * Explicit common-authority grant selected by the owning human. Omission is
      * retained only for legacy_user connections that cannot yet participate in
      * the organization-user authority lifecycle.
      */
     userDelegation: UserResourceDelegation.optional(),
+    /**
+     * Personal GitHub only: the exact repository authority frozen when this
+     * accepted work was admitted. The credential binding is evidence, not an
+     * authorization; physical provider use must revalidate every mutable
+     * connection/grant/selection fence against this snapshot.
+     */
+    personalGitHubRepositorySelection: z
+      .object({
+        credentialBindingId: z.string().uuid(),
+        connectionAuthorityGeneration: z.number().int().positive(),
+        selectionGeneration: z.number().int().positive(),
+        repositories: z
+          .array(
+            z
+              .object({
+                repositoryId: z.string().regex(/^[1-9]\d*$/u),
+                fullName: z.string().min(3).max(140),
+                canonicalUrl: z.string().url().max(512),
+                ref: z.string().min(1).max(255),
+                access: GitRepositoryAccess,
+                selectionGeneration: z.number().int().positive(),
+              })
+              .strict(),
+          )
+          .min(1)
+          .max(100),
+      })
+      .strict()
+      .optional(),
     /**
      * Google Drive publication only: the exact output destination frozen when
      * this delegation was accepted, so a later connection-settings change can
@@ -3543,7 +3827,62 @@ export const McpPersonalConnectionDelegation = z
       .strict()
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((delegation, context) => {
+    const personalGitHub = delegation.connectionType === "github_personal";
+    if (personalGitHub !== (delegation.personalGitHubRepositorySelection !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["personalGitHubRepositorySelection"],
+        message: "personal GitHub delegation requires one repository authority snapshot",
+      });
+    }
+    if (!personalGitHub) return;
+    if (
+      delegation.serverId !== "github:personal" ||
+      delegation.providerDomain !== "github.com" ||
+      delegation.kind !== "oauth2" ||
+      !delegation.originWorkspaceId ||
+      !delegation.userDelegation
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "personal GitHub delegation requires exact user-owned connection authority",
+      });
+    }
+    const repositories = delegation.personalGitHubRepositorySelection?.repositories ?? [];
+    const repositoryIds = new Set<string>();
+    const canonicalUrls = new Set<string>();
+    repositories.forEach((repository, index) => {
+      const canonicalUrl = repository.canonicalUrl.toLowerCase();
+      if (
+        !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(repository.fullName) ||
+        repository.canonicalUrl !== `https://github.com/${repository.fullName}`
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
+          message: "personal GitHub repository identity must be canonical",
+        });
+      }
+      if (repositoryIds.has(repository.repositoryId)) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories", index, "repositoryId"],
+          message: "personal GitHub repositories must be unique by provider id",
+        });
+      }
+      if (canonicalUrls.has(canonicalUrl)) {
+        context.addIssue({
+          code: "custom",
+          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
+          message: "personal GitHub repositories must be unique by canonical URL",
+        });
+      }
+      repositoryIds.add(repository.repositoryId);
+      canonicalUrls.add(canonicalUrl);
+    });
+  });
 export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
 
 /**
@@ -3568,10 +3907,12 @@ export const McpPersonalConnectionDelegations = z
     }
   });
 
-export const McpPersonalConnectionSummary = McpPersonalConnectionDelegation.pick({
-  serverId: true,
-  providerDomain: true,
-});
+export const McpPersonalConnectionSummary = z
+  .object({
+    serverId: z.string().min(1).max(256),
+    providerDomain: z.string().min(1).max(2048),
+  })
+  .strict();
 export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
 
 /**
@@ -3836,13 +4177,35 @@ export const CreateCheckoutResponse = z.object({
 });
 export type CreateCheckoutResponse = z.infer<typeof CreateCheckoutResponse>;
 
+export const CreateBillingPortalRequest = z.object({
+  accountId: z.string().uuid().optional(),
+  returnUrl: z.string().url().optional(),
+});
+export type CreateBillingPortalRequest = z.infer<typeof CreateBillingPortalRequest>;
+
+export const CreateBillingPortalResponse = z.object({
+  portalSessionId: z.string(),
+  url: z.string().url(),
+});
+export type CreateBillingPortalResponse = z.infer<typeof CreateBillingPortalResponse>;
+
 export const RepositoryResourceRef = z.object({
   kind: z.literal("repository"),
   uri: z.string().min(1),
   ref: z.string().min(1),
+  /**
+   * Optional immutable Git object fence. Repository materialization must fail
+   * when the checked-out HEAD is not this exact commit. Event-driven sessions
+   * use it to prevent a mutable PR branch from changing underneath a review.
+   */
+  expectedCommitSha: z
+    .string()
+    .regex(/^[0-9a-f]{40}$/)
+    .optional(),
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
   provider: GitCredentialProvider.optional(),
+  connectionType: z.literal("github_personal").optional(),
   credentialBindingId: GitCredentialBindingId.optional(),
   access: GitRepositoryAccess.optional(),
   repositoryId: GitProviderRepositoryId.optional(),
@@ -4101,6 +4464,25 @@ export function defaultRepositoryMountPath(
   return normalizeResourceMountPath(
     `repos/${encodeURIComponent(url.host.toLowerCase())}/${segments.join("/")}`,
   );
+}
+
+/** Virtual SDK/UI workspace root. Provisioned boxes mount this path; Connected Machines do not. */
+export const VIRTUAL_WORKSPACE_ROOT = "/workspace" as const;
+
+/**
+ * Cwd-relative path for shell/exec prompts. Durable receipts and `sandbox:` UI
+ * links keep the virtual `/workspace/...` form. Every backend already starts the
+ * shell in that frame (provisioned boxes at `/workspace`, Connected Machines at
+ * `sessions.working_dir`), so advertising the absolute virtual root ENOENTs on a
+ * machine and is redundant on a box.
+ */
+export function sandboxShellPath(virtualPath: string): string {
+  if (virtualPath === VIRTUAL_WORKSPACE_ROOT) return ".";
+  if (virtualPath.startsWith(`${VIRTUAL_WORKSPACE_ROOT}/`)) {
+    const relative = virtualPath.slice(VIRTUAL_WORKSPACE_ROOT.length + 1);
+    return relative.length > 0 ? relative : ".";
+  }
+  return virtualPath;
 }
 
 /** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
@@ -5110,6 +5492,7 @@ export const SessionGoalContinuationReason = z.enum([
   "provider_backpressure",
   "session_cancelled",
   "system_work_pending",
+  "held_for_input",
   "missing_obligation",
 ]);
 export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
@@ -5216,6 +5599,40 @@ export const UpdateSessionPinRequest = z.object({
   expectedVersion: z.number().int().nonnegative().optional(),
 });
 export type UpdateSessionPinRequest = z.infer<typeof UpdateSessionPinRequest>;
+
+/**
+ * A member's durable follow-up state for one session. Reading the session does
+ * not acknowledge it: `unread` changes only through this explicit mutation.
+ * A foreground reader may provide `acknowledgedThroughSequence` with
+ * `unread: false` so later server events remain unread instead of being
+ * consumed by a delayed acknowledgement request.
+ * `activelyWorking` is an independent personal label that survives read state.
+ */
+export const UpdateSessionAttentionRequest = z
+  .object({
+    unread: z.boolean().optional(),
+    acknowledgedThroughSequence: z.number().int().nonnegative().optional(),
+    activelyWorking: z.boolean().optional(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .refine((value) => value.unread !== undefined || value.activelyWorking !== undefined, {
+    message: "unread or activelyWorking is required",
+  })
+  .refine((value) => value.acknowledgedThroughSequence === undefined || value.unread === false, {
+    message: "acknowledgedThroughSequence requires unread false",
+    path: ["acknowledgedThroughSequence"],
+  });
+export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
+
+/** A member's personal archive state for a root chat. */
+export const UpdateSessionArchiveRequest = z
+  .object({
+    archived: z.boolean(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveRequest>;
 
 // Operator context controls (slash-command palette: /clear, /compact). These
 // are session/operator actions, NOT a structured way to talk to the agent —
@@ -5653,6 +6070,9 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.attention.write",
+  "session.archive.write",
+  "session.delete",
   "session.codex_account.write",
   "session.realtime.start",
   "session.realtime.control",
@@ -5669,6 +6089,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.child.create",
   "session.visibility.write",
   "session.fork.create",
+  "session.personal_resource.grant",
 ]);
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
 
@@ -6035,10 +6456,20 @@ export function renderUserMessageContentForModel(
   if (!context && !goalContext) return visibleContent;
   return [
     ...(goalContext
-      ? [{ type: "input_text" as const, text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}` }]
+      ? [
+          {
+            type: "input_text" as const,
+            text: `${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`,
+          },
+        ]
       : []),
     ...(context
-      ? [{ type: "input_text" as const, text: `${MODEL_CONTEXT_LABEL}\n${context}` }]
+      ? [
+          {
+            type: "input_text" as const,
+            text: `${MODEL_CONTEXT_LABEL}\n${context}`,
+          },
+        ]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -6077,6 +6508,8 @@ export const SessionTurn = z
     initiatorContext: TurnInitiatorContext,
     /** Secret-safe projection of the exact personal authority frozen on this turn. */
     personalConnections: z.array(McpPersonalConnectionSummary).default([]),
+    /** Safe summary only; opaque resource/grant identity remains private. */
+    personalResources: PersonalResourceAttachmentSummary.nullable().default(null),
     cancelledBy: z.string().nullable(),
     cancelReason: z.string().nullable(),
     startedAt: z.string().nullable(),
@@ -6141,7 +6574,6 @@ export const EffectiveSessionControl = z.object({
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
-export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
 const SessionOperationKey = z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
 
 export const SessionCommandReceipt = z.object({
@@ -6223,15 +6655,18 @@ export const SubmitComposerDraftRequest = ComposerDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
-}).extend({
-  expectedDraftRevision: z.number().int().positive(),
-  clientEventId: SessionOperationKey,
-  delivery: z.enum(["send", "steer"]),
-  controlEtag: z.string().min(1).optional(),
-  modelContext: z.string().trim().min(1).max(32768).optional(),
-  mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
-  connectionAuthorities: McpConnectionAuthoritySelections.default([]),
-});
+})
+  .extend({
+    expectedDraftRevision: z.number().int().positive(),
+    clientEventId: SessionOperationKey,
+    delivery: z.enum(["send", "steer"]),
+    controlEtag: z.string().min(1).optional(),
+    modelContext: z.string().trim().min(1).max(32768).optional(),
+    mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
+    connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+  })
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
 
 /**
@@ -6240,6 +6675,7 @@ export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftReque
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
  */
 export const NewSessionDraftOptions = z.object({
+  visibility: SessionVisibility.optional(),
   sandboxBackend: SandboxBackend.optional(),
   targetSandboxId: z.string().uuid().optional(),
   workingDir: z.string().min(1).optional(),
@@ -6250,6 +6686,31 @@ export const NewSessionDraftOptions = z.object({
   firstPartyMcpTools: z.array(FirstPartyMcpToolName).optional(),
 });
 export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
+
+/**
+ * Actor-private successful-create history for the new-session composer. Project
+ * entries and their machine entries are MRU ordered. A null target means the
+ * managed sandbox; a null working directory means the machine's launch root.
+ */
+export const NewSessionSelectionHistory = z.object({
+  projects: z
+    .array(
+      z.object({
+        channelId: z.string().uuid().nullable(),
+        targetSandboxId: z.string().uuid().nullable(),
+        machines: z
+          .array(
+            z.object({
+              sandboxId: z.string().uuid(),
+              workingDir: z.string().min(1).max(4096).nullable(),
+            }),
+          )
+          .max(20),
+      }),
+    )
+    .max(50),
+});
+export type NewSessionSelectionHistory = z.infer<typeof NewSessionSelectionHistory>;
 
 /** Actor-private, server-authoritative composer state before a session exists. */
 export const NewSessionDraft = z.object({
@@ -6263,6 +6724,7 @@ export const NewSessionDraft = z.object({
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
   options: NewSessionDraftOptions,
+  selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
   updatedAt: z.string().nullable(),
 });
 export type NewSessionDraft = z.infer<typeof NewSessionDraft>;
@@ -7033,6 +7495,8 @@ export const Channel = z.object({
   workspaceId: z.string().uuid(),
   name: z.string(),
   description: z.string().nullable(),
+  pinned: z.boolean(),
+  sortOrder: z.number().int().nonnegative(),
   createdBy: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -7048,8 +7512,15 @@ export type CreateChannelRequest = z.infer<typeof CreateChannelRequest>;
 export const UpdateChannelRequest = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   description: z.string().max(2000).nullable().optional(),
+  pinned: z.boolean().optional(),
 });
 export type UpdateChannelRequest = z.infer<typeof UpdateChannelRequest>;
+
+/** Complete workspace project order. It is replaced atomically after a drag. */
+export const ReorderChannelsRequest = z
+  .object({ channelIds: z.array(z.string().uuid()).min(1).max(200) })
+  .strict();
+export type ReorderChannelsRequest = z.infer<typeof ReorderChannelsRequest>;
 
 // Re-files one session (rail organization only). null moves it back to the
 // unfiled inbox.
@@ -7403,7 +7874,10 @@ export function scheduledOccurrencePayloadUtf8Bytes(agentConfig: {
 function scheduledTaskBoundedJsonObject(maxBytes: number, label: string) {
   return z.record(z.string(), z.unknown()).superRefine((value, context) => {
     if (scheduledTaskJsonUtf8Bytes(value) > maxBytes) {
-      context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+      context.addIssue({
+        code: "custom",
+        message: `${label} exceeds ${maxBytes} UTF-8 bytes`,
+      });
     }
   });
 }
@@ -7414,7 +7888,10 @@ function scheduledTaskBoundedString(maxBytes: number, label: string) {
     .min(1)
     .superRefine((value, context) => {
       if (scheduledTaskUtf8Bytes(value) > maxBytes) {
-        context.addIssue({ code: "custom", message: `${label} exceeds ${maxBytes} UTF-8 bytes` });
+        context.addIssue({
+          code: "custom",
+          message: `${label} exceeds ${maxBytes} UTF-8 bytes`,
+        });
       }
     });
 }
@@ -7570,7 +8047,10 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     resolvedFirstPartyMcpTools: z.array(FirstPartyMcpToolName),
     resolvedFirstPartyMcpPermissions: z.array(Permission),
     resolvedVariableSet: z
-      .object({ id: z.string().uuid(), generation: z.number().int().positive() })
+      .object({
+        id: z.string().uuid(),
+        generation: z.number().int().positive(),
+      })
       .strict()
       .nullable(),
     resolvedRig: z
@@ -7579,7 +8059,12 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
         versionId: z.string().uuid(),
         defaultVariableSets: z
           .array(
-            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+            z
+              .object({
+                id: z.string().uuid(),
+                generation: z.number().int().positive(),
+              })
+              .strict(),
           )
           .max(25),
       })
@@ -7635,7 +8120,12 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
         rigVersionId: z.string().uuid().nullable(),
         rigDefaultVariableSets: z
           .array(
-            z.object({ id: z.string().uuid(), generation: z.number().int().positive() }).strict(),
+            z
+              .object({
+                id: z.string().uuid(),
+                generation: z.number().int().positive(),
+              })
+              .strict(),
           )
           .max(25),
         maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
@@ -7831,49 +8321,48 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
 ]);
 export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
 
-export const UpdateScheduledTaskRequest =
-  /* @__PURE__ */ withVariableSetIdAlias({
-    name: ScheduledTaskNameInput.optional(),
-    schedule: ScheduledTaskScheduleSpec.optional(),
-    runMode: ScheduledTaskRunMode.optional(),
-    overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
-    action: ScheduledTaskAction.optional(),
-    targetSessionId: z.string().uuid().nullable().optional(),
-    connectionAuthorities: McpConnectionAuthoritySelections.optional(),
-    agentConfig: ScheduledTaskAgentConfigInput.optional(),
-    status: ScheduledTaskStatus.optional(),
-    variableSetId: z.string().uuid().nullable().optional(),
-    environmentId: z.string().uuid().nullable().optional(),
-    // The rig each run binds to (M3); null clears it. Its active version is
-    // resolved per fire, so an update takes effect on the next dispatch.
-    rigId: z.string().uuid().nullable().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-  }).superRefine((value, context) => {
-    if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
-      context.addIssue({
-        code: "custom",
-        path: ["targetSessionId"],
-        message: "targetSessionId requires runMode=existing_session",
-      });
-    }
-    if (value.runMode === "existing_session" && value.targetSessionId === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["targetSessionId"],
-        message: "targetSessionId cannot be null when runMode=existing_session",
-      });
-    }
-    if (
-      value.agentConfig?.goal &&
-      (value.runMode === "existing_session" || Boolean(value.targetSessionId))
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["agentConfig", "goal"],
-        message: "agentConfig.goal cannot be used with an existing-session target",
-      });
-    }
-  });
+export const UpdateScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
+  name: ScheduledTaskNameInput.optional(),
+  schedule: ScheduledTaskScheduleSpec.optional(),
+  runMode: ScheduledTaskRunMode.optional(),
+  overlapPolicy: ScheduledTaskOverlapPolicy.optional(),
+  action: ScheduledTaskAction.optional(),
+  targetSessionId: z.string().uuid().nullable().optional(),
+  connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+  agentConfig: ScheduledTaskAgentConfigInput.optional(),
+  status: ScheduledTaskStatus.optional(),
+  variableSetId: z.string().uuid().nullable().optional(),
+  environmentId: z.string().uuid().nullable().optional(),
+  // The rig each run binds to (M3); null clears it. Its active version is
+  // resolved per fire, so an update takes effect on the next dispatch.
+  rigId: z.string().uuid().nullable().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+}).superRefine((value, context) => {
+  if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId requires runMode=existing_session",
+    });
+  }
+  if (value.runMode === "existing_session" && value.targetSessionId === null) {
+    context.addIssue({
+      code: "custom",
+      path: ["targetSessionId"],
+      message: "targetSessionId cannot be null when runMode=existing_session",
+    });
+  }
+  if (
+    value.agentConfig?.goal &&
+    (value.runMode === "existing_session" || Boolean(value.targetSessionId))
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["agentConfig", "goal"],
+      message: "agentConfig.goal cannot be used with an existing-session target",
+    });
+  }
+});
 export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
 
 /**
@@ -7885,6 +8374,340 @@ export const TriggerScheduledTaskRequest = z.object({
   triggerId: z.string().min(1).max(128).optional(),
 });
 export type TriggerScheduledTaskRequest = z.infer<typeof TriggerScheduledTaskRequest>;
+
+// ============ Event-triggered automations ============
+
+export const AUTOMATION_WEBHOOK_MAX_BYTES = 2 * 1024 * 1024;
+export const AUTOMATION_EVENT_PAYLOAD_MAX_BYTES = 256 * 1024;
+export const AUTOMATION_SESSION_TEMPLATE_MAX_BYTES = 512 * 1024;
+export const AUTOMATION_MAX_MATCHED_TRIGGERS = 32;
+
+const AutomationBoundedJson = z.record(z.string(), z.unknown()).superRefine((value, context) => {
+  let bytes = Number.POSITIVE_INFINITY;
+  try {
+    bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+  } catch {
+    // The shared JSON/protocol boundary reports the exact runtime path later;
+    // this public ingress still fails closed on an unserializable value.
+  }
+  if (bytes > AUTOMATION_EVENT_PAYLOAD_MAX_BYTES) {
+    context.addIssue({
+      code: "custom",
+      message: `automation JSON exceeds ${AUTOMATION_EVENT_PAYLOAD_MAX_BYTES} UTF-8 bytes`,
+    });
+  }
+});
+
+export const AutomationAdapterId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9._/-]*[a-z0-9])?$/);
+export type AutomationAdapterId = z.infer<typeof AutomationAdapterId>;
+
+export const AutomationSourceStatus = z.enum(["active", "disabled"]);
+export type AutomationSourceStatus = z.infer<typeof AutomationSourceStatus>;
+
+export const AutomationTriggerStatus = z.enum(["active", "paused", "disabled"]);
+export type AutomationTriggerStatus = z.infer<typeof AutomationTriggerStatus>;
+
+export const AutomationRunStatus = z.enum([
+  "queued",
+  "dispatching",
+  "dispatched",
+  "skipped",
+  "failed",
+]);
+export type AutomationRunStatus = z.infer<typeof AutomationRunStatus>;
+
+export const AutomationEventStatus = z.enum(["accepted", "ignored", "failed"]);
+export type AutomationEventStatus = z.infer<typeof AutomationEventStatus>;
+
+export const SignedJsonAutomationEnvelope = z
+  .object({
+    id: z.string().trim().min(1).max(1024).optional(),
+    type: z.string().trim().min(1).max(256),
+    occurrenceKey: z.string().trim().min(1).max(1024).optional(),
+    occurredAt: z.string().datetime({ offset: true }).nullable().optional(),
+    subject: z.string().trim().min(1).max(512).nullable().optional(),
+    resource: z.string().trim().min(1).max(1024).nullable().optional(),
+    data: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+export type SignedJsonAutomationEnvelope = z.infer<typeof SignedJsonAutomationEnvelope>;
+
+const AutomationSessionSkill = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    description: z.string().min(1).max(2048).optional(),
+    files: z
+      .array(
+        z.object({
+          path: z
+            .string()
+            .min(1)
+            .max(512)
+            .refine(
+              (path) =>
+                !path.startsWith("/") &&
+                !path.includes("\\") &&
+                path
+                  .split("/")
+                  .every((segment) => segment.length > 0 && segment !== "." && segment !== ".."),
+              "automation skill file path must be a safe relative POSIX path",
+            ),
+          content: z.string().max(256 * 1024),
+        }),
+      )
+      .min(1)
+      .max(64),
+  })
+  .superRefine((skill, context) => {
+    if (!skill.files.some((file) => file.path === "SKILL.md")) {
+      context.addIssue({
+        code: "custom",
+        path: ["files"],
+        message: "automation skill must include a top-level SKILL.md file",
+      });
+    }
+  });
+
+export const AutomationSessionTemplate = z
+  .object({
+    prompt: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64 * 1024),
+    instructions: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64 * 1024)
+      .nullable()
+      .default(null),
+    resources: z.array(ResourceRef).max(100).default([]),
+    skills: z.array(AutomationSessionSkill).max(32).default([]),
+    tools: z.array(ToolRef).max(128).default([]),
+    firstPartyMcpTools: z.array(FirstPartyMcpToolName).max(128).default([]),
+    firstPartyMcpPermissions: z.array(Permission).max(128).default([]),
+    model: z.string().trim().min(1).max(512).nullable().default(null),
+    reasoningEffort: ReasoningEffort.nullable().default(null),
+    sandboxBackend: SandboxBackend.nullable().default(null),
+    policyRole: z.string().trim().min(1).max(128).nullable().default(null),
+    metadata: AutomationBoundedJson.default({}),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    let bytes = Number.POSITIVE_INFINITY;
+    try {
+      bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    } catch {
+      // Fail through the size issue below.
+    }
+    if (bytes > AUTOMATION_SESSION_TEMPLATE_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `automation session template exceeds ${AUTOMATION_SESSION_TEMPLATE_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
+export type AutomationSessionTemplate = z.infer<typeof AutomationSessionTemplate>;
+
+export const AutomationNormalizedEvent = z
+  .object({
+    adapterId: AutomationAdapterId,
+    eventType: z.string().trim().min(1).max(256),
+    occurrenceKey: z.string().trim().min(1).max(1024),
+    occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
+    subject: z.string().trim().min(1).max(512).nullable().default(null),
+    resource: z.string().trim().min(1).max(1024).nullable().default(null),
+    payload: AutomationBoundedJson,
+  })
+  .strict();
+export type AutomationNormalizedEvent = z.infer<typeof AutomationNormalizedEvent>;
+
+export const AutomationAcceptedExecution = z
+  .object({
+    version: z.literal(1),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sourceId: z.string().uuid(),
+    sourceVersion: z.number().int().positive(),
+    triggerId: z.string().uuid(),
+    triggerRevision: z.number().int().positive(),
+    eventId: z.string().uuid(),
+    adapterId: AutomationAdapterId,
+    occurrenceKey: z.string().min(1).max(1024),
+    initialMessage: z
+      .string()
+      .min(1)
+      .max(256 * 1024),
+    sessionTemplate: AutomationSessionTemplate,
+    serviceSubjectId: z.string().min(1).max(512),
+    serviceLabel: z.string().min(1).max(200),
+    provenance: AutomationBoundedJson,
+  })
+  .strict();
+export type AutomationAcceptedExecution = z.infer<typeof AutomationAcceptedExecution>;
+
+export const CreateAutomationSourceRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    adapterId: AutomationAdapterId.default("signed-json.v1"),
+    webhookSecret: z.string().min(16).max(65_536),
+    configuration: AutomationBoundedJson.default({}),
+  })
+  .strict();
+export type CreateAutomationSourceRequest = z.infer<typeof CreateAutomationSourceRequest>;
+
+export const UpdateAutomationSourceRequest = z
+  .object({
+    name: z.string().trim().min(1).max(200).optional(),
+    webhookSecret: z.string().min(16).max(65_536).optional(),
+    configuration: AutomationBoundedJson.optional(),
+    status: AutomationSourceStatus.optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, "automation source update is empty");
+export type UpdateAutomationSourceRequest = z.infer<typeof UpdateAutomationSourceRequest>;
+
+export const AutomationSource = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  name: z.string(),
+  adapterId: AutomationAdapterId,
+  configuration: z.record(z.string(), z.unknown()),
+  status: AutomationSourceStatus,
+  version: z.number().int().positive(),
+  packInstallationId: z.string().uuid().nullable(),
+  packConnectorId: z.string().min(1).max(128).nullable(),
+  hasWebhookSecret: z.boolean(),
+  webhookPath: z.string().min(1),
+  createdBySubjectId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AutomationSource = z.infer<typeof AutomationSource>;
+
+export const CreateAutomationTriggerRequest = z
+  .object({
+    sourceId: z.string().uuid(),
+    name: z.string().trim().min(1).max(200),
+    eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64),
+    configuration: AutomationBoundedJson.default({}),
+    parameters: AutomationBoundedJson.default({}),
+    sessionTemplate: AutomationSessionTemplate,
+    status: AutomationTriggerStatus.default("active"),
+    packInstallationId: z.string().uuid().nullable().default(null),
+    packTemplateId: z.string().trim().min(1).max(128).nullable().default(null),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.packInstallationId === null) !== (value.packTemplateId === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["packTemplateId"],
+        message: "packInstallationId and packTemplateId must be supplied together",
+      });
+    }
+  });
+export type CreateAutomationTriggerRequest = z.infer<typeof CreateAutomationTriggerRequest>;
+
+export const UpdateAutomationTriggerRequest = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    name: z.string().trim().min(1).max(200).optional(),
+    eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
+    configuration: AutomationBoundedJson.optional(),
+    parameters: AutomationBoundedJson.optional(),
+    sessionTemplate: AutomationSessionTemplate.optional(),
+    status: AutomationTriggerStatus.optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).some((key) => key !== "expectedRevision"), {
+    message: "automation trigger update is empty",
+  });
+export type UpdateAutomationTriggerRequest = z.infer<typeof UpdateAutomationTriggerRequest>;
+
+export const AutomationTrigger = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sourceId: z.string().uuid(),
+  name: z.string(),
+  adapterId: AutomationAdapterId,
+  eventTypes: z.array(z.string()),
+  configuration: z.record(z.string(), z.unknown()),
+  parameters: z.record(z.string(), z.unknown()),
+  sessionTemplate: AutomationSessionTemplate,
+  status: AutomationTriggerStatus,
+  revision: z.number().int().positive(),
+  packInstallationId: z.string().uuid().nullable(),
+  packTemplateId: z.string().nullable(),
+  createdBySubjectId: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AutomationTrigger = z.infer<typeof AutomationTrigger>;
+
+export const AutomationRun = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sourceId: z.string().uuid(),
+  triggerId: z.string().uuid(),
+  triggerRevision: z.number().int().positive(),
+  eventId: z.string().uuid(),
+  occurrenceKey: z.string(),
+  status: AutomationRunStatus,
+  sessionId: z.string().uuid().nullable(),
+  errorCode: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type AutomationRun = z.infer<typeof AutomationRun>;
+
+export const AutomationWebhookResult = z.object({
+  accepted: z.boolean(),
+  duplicate: z.boolean(),
+  ignoredReason: z.string().nullable(),
+  eventId: z.string().uuid().nullable(),
+  runIds: z.array(z.string().uuid()),
+});
+export type AutomationWebhookResult = z.infer<typeof AutomationWebhookResult>;
+
+export const TriggerAutomationManuallyRequest = z
+  .object({
+    deliveryId: z.string().trim().min(1).max(512).optional(),
+    eventType: z.string().trim().min(1).max(256),
+    occurrenceKey: z.string().trim().min(1).max(1024),
+    payload: AutomationBoundedJson.default({}),
+    occurredAt: z.string().datetime({ offset: true }).nullable().default(null),
+    subject: z.string().trim().min(1).max(512).nullable().default(null),
+    resource: z.string().trim().min(1).max(1024).nullable().default(null),
+  })
+  .strict();
+export type TriggerAutomationManuallyRequest = z.infer<typeof TriggerAutomationManuallyRequest>;
+
+export const CapabilityPackAutomationTemplate = z
+  .object({
+    id: z.string().min(1).max(128),
+    name: z.string().min(1).max(200),
+    description: z.string().min(1).max(4096),
+    adapterId: AutomationAdapterId,
+    eventTypes: z.array(z.string().min(1).max(256)).min(1).max(64),
+    sessionTemplate: AutomationSessionTemplate,
+    configuration: AutomationBoundedJson.default({}),
+    connectionRequirement: z.string().min(1).max(128).nullable().default(null),
+  })
+  .strict();
+export type CapabilityPackAutomationTemplate = z.infer<typeof CapabilityPackAutomationTemplate>;
 
 export const CapabilityPackConnectorAuthModel = z.enum([
   "oauth2_authorization_code_pkce",
@@ -8191,6 +9014,7 @@ export const CapabilityPack = z.preprocess(
       connectors: z.array(CapabilityPackConnector).default([]),
       knowledge: z.array(CapabilityPackKnowledge).default([]),
       scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
+      automationTemplates: z.array(CapabilityPackAutomationTemplate).max(64).optional(),
       variableSet: CapabilityPackVariableSet.optional(),
       metadata: z.record(z.string(), z.unknown()).default({}),
     })
@@ -8216,6 +9040,17 @@ export const CapabilityPack = z.preprocess(
           });
         }
         componentKeys.add(key);
+      });
+      const automationTemplateIds = new Set<string>();
+      pack.automationTemplates?.forEach((template, index) => {
+        if (automationTemplateIds.has(template.id)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `duplicate Pack automation template id: ${template.id}`,
+            path: ["automationTemplates", index, "id"],
+          });
+        }
+        automationTemplateIds.add(template.id);
       });
       if (!pack.sandboxProviderImages?.modal) {
         return;
@@ -8281,6 +9116,204 @@ export const PackInstallation = z.object({
   updatedAt: z.string(),
 });
 export type PackInstallation = z.infer<typeof PackInstallation>;
+
+// ============ OpenGeni Review Bot — provider-neutral pull-request review automation ============
+
+export const OPENGENI_PR_REVIEW_PACK_ID = "pr-review" as const;
+export const OPENGENI_PR_REVIEW_SESSION_ROLE = "pull_request_review" as const;
+
+export const PrReviewProvider = GitCredentialProvider;
+export type PrReviewProvider = z.infer<typeof PrReviewProvider>;
+
+export const PrReviewCredentialKind = /* @__PURE__ */ z.enum(["github_app", "provider_token"]);
+export type PrReviewCredentialKind = z.infer<typeof PrReviewCredentialKind>;
+
+export const PrReviewWebhookAuthKind = /* @__PURE__ */ z.enum([
+  "hmac_sha256",
+  "shared_token",
+  "basic",
+]);
+export type PrReviewWebhookAuthKind = z.infer<typeof PrReviewWebhookAuthKind>;
+
+const PrReviewSecretInput = /* @__PURE__ */ (() => z.string().min(16).max(65_536))();
+
+export const CreatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200),
+      provider: PrReviewProvider,
+      providerBaseUrl: z.string().url().max(2048).optional(),
+      appId: z.string().trim().min(1).max(512).optional(),
+      credentialKind: PrReviewCredentialKind,
+      privateKey: PrReviewSecretInput.optional(),
+      accessToken: PrReviewSecretInput.optional(),
+      accessTokenExpiresAt: z.string().datetime().nullable().optional(),
+      webhookSecret: PrReviewSecretInput,
+      webhookUsername: z.string().min(1).max(512).optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      if (value.provider === "github" && value.credentialKind !== "github_app") {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialKind"],
+          message: "GitHub PR Review registrations require a dedicated GitHub App",
+        });
+      }
+      if (value.provider === "github" && (!value.appId || !value.privateKey)) {
+        context.addIssue({
+          code: "custom",
+          path: [!value.appId ? "appId" : "privateKey"],
+          message: "GitHub PR Review registrations require the dedicated App ID and private key",
+        });
+      }
+      if (value.provider !== "github" && value.credentialKind !== "provider_token") {
+        context.addIssue({
+          code: "custom",
+          path: ["credentialKind"],
+          message: "GitLab and Azure DevOps PR Review registrations require a provider token",
+        });
+      }
+      if (value.credentialKind === "provider_token" && !value.accessToken) {
+        context.addIssue({
+          code: "custom",
+          path: ["accessToken"],
+          message: "provider_token credentials require accessToken",
+        });
+      }
+      if (
+        value.credentialKind === "github_app" &&
+        (value.accessToken !== undefined || value.privateKey === undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: [value.accessToken !== undefined ? "accessToken" : "privateKey"],
+          message: "GitHub App credentials require privateKey and cannot include accessToken",
+        });
+      }
+      if (value.credentialKind === "provider_token" && value.privateKey !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["privateKey"],
+          message: "provider_token credentials cannot include a GitHub privateKey",
+        });
+      }
+      if (value.provider === "github" && value.accessTokenExpiresAt !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["accessTokenExpiresAt"],
+          message: "GitHub App registrations do not use accessTokenExpiresAt",
+        });
+      }
+      if (value.provider === "azure_devops" && !value.webhookUsername) {
+        context.addIssue({
+          code: "custom",
+          path: ["webhookUsername"],
+          message: "Azure DevOps service hooks require a Basic authentication username",
+        });
+      }
+    }))();
+export type CreatePrReviewAppRegistrationRequest = z.infer<
+  typeof CreatePrReviewAppRegistrationRequest
+>;
+
+export const UpdatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      name: z.string().trim().min(1).max(200).optional(),
+      accessToken: PrReviewSecretInput.optional(),
+      privateKey: PrReviewSecretInput.optional(),
+      accessTokenExpiresAt: z.string().datetime().nullable().optional(),
+      webhookSecret: PrReviewSecretInput.optional(),
+      webhookUsername: z.string().min(1).max(512).optional(),
+      status: z.enum(["active", "disabled"]).optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "PR Review registration update must change at least one field",
+    }))();
+export type UpdatePrReviewAppRegistrationRequest = z.infer<
+  typeof UpdatePrReviewAppRegistrationRequest
+>;
+
+export const PrReviewAppRegistration = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    sourceId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    name: z.string(),
+    provider: PrReviewProvider,
+    providerBaseUrl: z.string().url(),
+    appId: z.string().nullable(),
+    credentialKind: PrReviewCredentialKind,
+    hasCredential: z.boolean(),
+    accessTokenExpiresAt: z.string().nullable(),
+    webhookAuthKind: PrReviewWebhookAuthKind,
+    hasWebhookSecret: z.boolean(),
+    webhookUsername: z.string().nullable(),
+    webhookPath: z.string(),
+    status: z.enum(["active", "disabled"]),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
+export type PrReviewAppRegistration = z.infer<typeof PrReviewAppRegistration>;
+
+export const CreatePrReviewRepositoryBindingRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      registrationId: z.string().uuid(),
+      repositoryUri: z.string().url().max(2048),
+      repositoryFullName: z.string().trim().min(1).max(1024),
+      providerRepositoryId: z.union([z.string().min(1).max(512), z.number().int().positive()]),
+      installationId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
+      projectId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
+      model: z.string().min(1).max(512).nullable().optional(),
+      additionalInstructions: z.string().max(16_384).nullable().optional(),
+      status: z.enum(["active", "disabled"]).default("active"),
+    })
+    .strict())();
+export type CreatePrReviewRepositoryBindingRequest = z.infer<
+  typeof CreatePrReviewRepositoryBindingRequest
+>;
+
+export const UpdatePrReviewRepositoryBindingRequest = /* @__PURE__ */ (() =>
+  z
+    .object({
+      model: z.string().min(1).max(512).nullable().optional(),
+      additionalInstructions: z.string().max(16_384).nullable().optional(),
+      status: z.enum(["active", "disabled"]).optional(),
+    })
+    .strict()
+    .refine((value) => Object.keys(value).length > 0, {
+      message: "PR Review repository update must change at least one field",
+    }))();
+export type UpdatePrReviewRepositoryBindingRequest = z.infer<
+  typeof UpdatePrReviewRepositoryBindingRequest
+>;
+
+export const PrReviewRepositoryBinding = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    triggerId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    registrationId: z.string().uuid(),
+    provider: PrReviewProvider,
+    repositoryUri: z.string(),
+    repositoryFullName: z.string(),
+    providerRepositoryId: z.string(),
+    installationId: z.string().nullable(),
+    projectId: z.string().nullable(),
+    model: z.string().nullable(),
+    additionalInstructions: z.string().nullable(),
+    status: z.enum(["active", "disabled"]),
+    createdBySubjectId: z.string(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
+export type PrReviewRepositoryBinding = z.infer<typeof PrReviewRepositoryBinding>;
 
 export const EnablePackRequest = withVariableSetIdAlias({
   variableSetId: z.string().uuid().optional(),
@@ -9929,6 +10962,17 @@ export const Session = z.object({
   pinnedAt: z.string().nullable().default(null),
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion: z.number().int().nonnegative().default(0),
+  /** Personal explicit acknowledgment state; opening the session never clears it. */
+  unread: z.boolean().default(false),
+  /** Personal power-user label for work the member intends to continue. */
+  activelyWorking: z.boolean().default(false),
+  /** Optimistic revision for unread/actively-working state. */
+  attentionVersion: z.number().int().nonnegative().default(0),
+  /** Personal archive state. Archived roots and their descendants leave the ordinary list. */
+  archived: z.boolean().default(false),
+  archivedAt: z.string().nullable().default(null),
+  /** Optimistic archive-state revision; zero represents an absent personal relation. */
+  archiveVersion: z.number().int().nonnegative().default(0),
   /**
    * Server-authoritative hierarchy summary populated on session-list reads.
    * Detail reads may omit it. The rail uses this instead of guessing a tree
@@ -9943,6 +10987,8 @@ export const Session = z.object({
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
       failedDescendants: z.number().int().nonnegative(),
+      unreadDescendants: z.number().int().nonnegative().optional(),
+      activelyWorkingDescendants: z.number().int().nonnegative().optional(),
       /** Counts are lower bounds rather than exact totals when true. */
       truncated: z.boolean().default(false),
     })
@@ -10055,6 +11101,7 @@ export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
   "session.created",
+  "session.personal_resources.attached",
   "session.visibility.changed",
   // Defensive read/transport projection for a malformed or historically
   // oversized retained event envelope. The original row stays durable; this
@@ -10120,6 +11167,7 @@ export const SessionEventType = z.enum([
   "goal.paused",
   "goal.resumed",
   "goal.cleared",
+  "goal.held",
   "goal.continuation",
   "system.update.pending",
   "system.update.delivered",
@@ -10326,6 +11374,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "goal.paused",
     "goal.resumed",
     "goal.cleared",
+    "goal.held",
     "goal.continuation",
     "system.update.pending",
     "system.update.delivered",
@@ -12239,6 +13288,12 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * identity or authorization from the UUID.
      */
     requestedSessionId: z.string().uuid().optional(),
+    /** Top-level omission is workspace-visible. Agent-child omission inherits
+     * the exact parent visibility; cross-visibility child creation is rejected.
+     * Top-level private creation is an activated managed-cookie owning-human
+     * capability, while a private child uses an exact live-parent-attempt
+     * database capability. Both commit atomically. */
+    visibility: SessionVisibility.default("workspace"),
     initialMessage: z.string().min(1).optional(),
     // Creates the durable session shell without fabricating a user message or
     // starting an underlying agent turn. Realtime can then become the first
@@ -12313,9 +13368,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // is an independent create).
     idempotencyKey: z.string().min(1).max(200).optional(),
     // The exact actor-private pre-session draft revision represented by this
-    // create. The durable initializer consumes only this revision. A newer draft
-    // written by a sibling tab survives, while every failed pre-initialization
-    // create leaves the submitted draft intact.
+    // create. An ordinary create consumes only this revision. A realtime create
+    // preserves the editable draft and atomically updates only successful-create
+    // selection history. A newer sibling draft survives, while every failed
+    // pre-initialization create leaves the submitted draft intact.
     expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
     // A child may lower its inherited limit freely; an increase requires
     // workspace:admin and is checked again at the DB transaction boundary.
@@ -12341,6 +13397,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
     /** Explicit personal-connection grants for the initial accepted turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    /** Atomic owner issuance for the selected personal Variable Set/Rig closure. */
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
     // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
     // today's behavior (a context-dependent default resolved server-side: from
     // inside a session → "shared" with the creator's box, top-level → "new"),
@@ -12396,8 +13454,30 @@ export const CreateSessionRequest = withVariableSetIdAlias(
         "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
     });
   }
+  if (value.startMode === "realtime" && value.personalResourceAttachment !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment"],
+      message:
+        "personalResourceAttachment requires an accepted initial turn and is not supported by realtime session staging",
+    });
+  }
+  if (value.personalResourceAttachment?.expectedAuthorityEpoch !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
+      message: "new-session attachment authority epoch is derived by the server",
+    });
+  }
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
+
+export const SessionTenancyCreateCapabilities = z.object({
+  activated: z.boolean(),
+  canCreatePrivate: z.boolean(),
+  reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
+});
+export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;
 
 // Generic, host-neutral structured human input. One model tool call creates one
 // request containing one or more questions; the durable response resumes that
@@ -12422,6 +13502,9 @@ export const HumanInputQuestion = z
     helpText: z.string().max(2048).nullable().optional(),
     options: z.array(HumanInputOption).max(20).default([]),
     required: z.boolean().default(true),
+    // Retained on the wire for older hosts. OpenGeni's stock runtime and
+    // surfaces always expose Other for choice questions, including requests
+    // that were persisted before that became the default behavior.
     allowOther: z.boolean().default(false),
     // Selection bounds only — agents invent useless text char mins/maxes.
     // Answer strings stay platform-capped on HumanInputAnswer (~8192).
@@ -12596,9 +13679,11 @@ export const SessionUserMessagePayload = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact logical turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
-  .superRefine(requireMessageTextOrAnnotations);
+  .superRefine(requireMessageTextOrAnnotations)
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SessionUserMessagePayload = z.infer<typeof SessionUserMessagePayload>;
 
 export const ClientSessionEvent = z.discriminatedUnion("type", [
@@ -12643,9 +13728,11 @@ export const SteerSessionMessageRequest = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact steered turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
-  .superRefine(requireMessageTextOrAnnotations);
+  .superRefine(requireMessageTextOrAnnotations)
+  .superRefine(requireEstablishedPersonalResourceEpoch);
 export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
 
 export const SteerSessionMessageResponse = z.object({
@@ -13290,7 +14377,7 @@ export const MachineState = z.enum([
 ]);
 export type MachineState = z.infer<typeof MachineState>;
 
-export const MachineKind = z.enum(["modal", "selfhosted"]);
+export const MachineKind = z.enum(["modal", "selfhosted", "opensandbox"]);
 export type MachineKind = z.infer<typeof MachineKind>;
 
 /** Diagnostic projection of the single live Connected-Machine runner authority.
@@ -13534,8 +14621,9 @@ function defineModelContractSchema<Schema>(factory: () => Schema): Schema {
   return factory();
 }
 
-export const ModelCapabilitySupportV1 =
-  /* @__PURE__ */ defineModelContractSchema(() => z.enum(["supported", "unsupported", "unknown"]));
+export const ModelCapabilitySupportV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["supported", "unsupported", "unknown"]),
+);
 export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
 
 export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -13583,60 +14671,65 @@ export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
 
-export const ModelCredentialSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.union([
-      z
-        .object({
-          kind: z.literal("deployment"),
-          mechanism: z.enum(["api_key", "azure_ad_bearer"]),
-        })
-        .strict(),
-      z
-        .object({
-          kind: z.literal("connected_subscription"),
-          provider: z.enum(["codex", "xai"]),
-        })
-        .strict(),
-      z
-        .object({
-          kind: z.literal("workspace_connection"),
-          mechanism: z.literal("api_key"),
-        })
-        .strict(),
-    ]),
-  );
-export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
-
-export const ModelBillingAttributionV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
+export const ModelCredentialSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.union([
     z
       .object({
-        upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
-        metering: z.enum(["opengeni_credits", "external"]),
+        kind: z.literal("deployment"),
+        mechanism: z.enum(["api_key", "azure_ad_bearer"]),
       })
       .strict(),
-  );
+    z
+      .object({
+        kind: z.literal("connected_subscription"),
+        provider: z.enum(["codex", "xai"]),
+      })
+      .strict(),
+    z
+      .object({
+        kind: z.literal("workspace_connection"),
+        mechanism: z.literal("api_key"),
+      })
+      .strict(),
+  ]),
+);
+export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
+
+const TurnExecutionCredentialSourceV1 = z.union([
+  ModelCredentialSourceV1,
+  z
+    .object({
+      kind: z.literal("deployment"),
+      mechanism: z.literal("none"),
+    })
+    .strict(),
+]);
+
+export const ModelBillingAttributionV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+      metering: z.enum(["opengeni_credits", "external"]),
+    })
+    .strict(),
+);
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
 export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
 
-export const TurnExecutionModelSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.enum(["explicit", "session", "deployment", "continuation"]),
-  );
+export const TurnExecutionModelSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
 export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
 
-export const TurnExecutionReasoningSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.enum(["explicit", "session", "deployment", "continuation"]),
-  );
+export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
 export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
 
-export const TurnExecutionLatencyModeSourceV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.enum(["explicit", "session", "deployment", "continuation"]),
-  );
+export const TurnExecutionLatencyModeSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
 export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
 
 /**
@@ -13664,7 +14757,7 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
       wireApi: z.enum(["responses", "chat"]),
-      credentialSource: ModelCredentialSourceV1,
+      credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
     })
@@ -13838,60 +14931,59 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
 );
 export type ClientModel = z.infer<typeof ClientModel>;
 
-export const ModelCredentialReadinessV1 =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z
-      .object({
-        status: z.enum(["ready", "not_ready", "error"]),
-        reason: z
-          .enum([
-            "missing_credential",
-            "needs_reauth",
-            "prerequisites_missing",
-            "resolver_error",
-            "observation_stale",
-          ])
-          .nullable(),
-        basis: z.enum(["configuration", "connection", "resolver"]),
-        checkedAt: z.string().datetime().nullable(),
-      })
-      .strict()
-      .superRefine((readiness, context) => {
-        if ((readiness.status === "ready") !== (readiness.reason === null)) {
-          context.addIssue({
-            code: "custom",
-            path: ["reason"],
-            message: "ready credential state requires no reason; non-ready state requires a reason",
-          });
-        }
-        if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
-          context.addIssue({
-            code: "custom",
-            path: ["reason"],
-            message:
-              "credential errors require resolver_error and resolver_error requires error status",
-          });
-        }
-        if (
-          readiness.basis === "resolver" &&
-          readiness.status === "ready" &&
-          readiness.checkedAt === null
-        ) {
-          context.addIssue({
-            code: "custom",
-            path: ["checkedAt"],
-            message: "resolver readiness requires an observation timestamp",
-          });
-        }
-        if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
-          context.addIssue({
-            code: "custom",
-            path: ["checkedAt"],
-            message: "a stale observation requires its observation timestamp",
-          });
-        }
-      }),
-  );
+export const ModelCredentialReadinessV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      status: z.enum(["ready", "not_ready", "error"]),
+      reason: z
+        .enum([
+          "missing_credential",
+          "needs_reauth",
+          "prerequisites_missing",
+          "resolver_error",
+          "observation_stale",
+        ])
+        .nullable(),
+      basis: z.enum(["configuration", "connection", "resolver"]),
+      checkedAt: z.string().datetime().nullable(),
+    })
+    .strict()
+    .superRefine((readiness, context) => {
+      if ((readiness.status === "ready") !== (readiness.reason === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message: "ready credential state requires no reason; non-ready state requires a reason",
+        });
+      }
+      if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message:
+            "credential errors require resolver_error and resolver_error requires error status",
+        });
+      }
+      if (
+        readiness.basis === "resolver" &&
+        readiness.status === "ready" &&
+        readiness.checkedAt === null
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "resolver readiness requires an observation timestamp",
+        });
+      }
+      if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "a stale observation requires its observation timestamp",
+        });
+      }
+    }),
+);
 export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
 
 export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() =>
@@ -13914,23 +15006,21 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
-export const WorkspaceModelCatalogModel =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    ClientModel.extend({
-      credentialReadiness: ModelCredentialReadinessV1,
-      /** Exact workspace-policy verdict without exposing provider identity. */
-      policyAllowed: z.boolean().optional(),
-      availability: ModelAvailabilityV1,
-    }),
-  );
+export const WorkspaceModelCatalogModel = /* @__PURE__ */ defineModelContractSchema(() =>
+  ClientModel.extend({
+    credentialReadiness: ModelCredentialReadinessV1,
+    /** Exact workspace-policy verdict without exposing provider identity. */
+    policyAllowed: z.boolean().optional(),
+    availability: ModelAvailabilityV1,
+  }),
+);
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
-export const WorkspaceModelCatalogResponse =
-  /* @__PURE__ */ defineModelContractSchema(() =>
-    z.object({
-      models: z.array(WorkspaceModelCatalogModel),
-    }),
-  );
+export const WorkspaceModelCatalogResponse = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    models: z.array(WorkspaceModelCatalogModel),
+  }),
+);
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
 
 /**

@@ -2553,11 +2553,14 @@ const DirectInteractionFrameStreamAttachment = z
   })
   .strict();
 
+/** Native tunnels offer `binary` + RFB + bearer (3). Docker and OpenSandbox
+ * hide those on the API interaction frame-proxy, so the viewer sees `binary` +
+ * the proxy grant (2). */
 const DirectComputerRfbAttachment = z
   .object({
     kind: z.literal("direct_rfb"),
     url: boundedUrl,
-    protocols: z.array(z.string().min(1).max(2_048)).length(3),
+    protocols: z.array(z.string().min(1).max(2_048)).min(2).max(3),
   })
   .strict();
 

@@ -3572,6 +3572,16 @@ describe("workflow contracts", () => {
 
     const source = ci.jobs["source-contracts"];
     expect(source.needs).toEqual(["automation-admission", "plan"]);
+    const sourceInstallIndex = source.steps.findIndex(
+      (step: any) => step.name === "Install dependencies",
+    );
+    const sourceInstall = source.steps[sourceInstallIndex];
+    expect(sourceInstall.run.trim().split("\n")).toEqual([
+      "bun install --frozen-lockfile --ignore-scripts",
+      "bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'",
+    ]);
+    expect(source.steps.slice(0, sourceInstallIndex).filter((step: any) => step.run)).toEqual([]);
+    expect(source.steps.filter((step: any) => step.run)[0]?.name).toBe("Install dependencies");
     for (const stepName of [
       "Validate changeset release plan",
       "Profile impacted TypeScript 7 projects",
@@ -3651,8 +3661,7 @@ describe("workflow contracts", () => {
       ],
       "browser-acceptance": [
         "Stabilize Ubuntu package downloads",
-        "Install pinned Chromium runtime",
-        "Install pinned cross-browser runtimes",
+        "Install pinned lane browser runtimes",
         "Editable artifact browser acceptance",
         "Install pinned artifact native toolchain",
         "Editable artifact full-stack browser acceptance",
@@ -3779,16 +3788,12 @@ describe("workflow contracts", () => {
     );
     expect(browserInstalls).toEqual([
       {
-        name: "Install pinned Chromium runtime",
-        if: "${{ matrix.lane != 'workbench' }}",
+        name: "Install pinned lane browser runtimes",
         uses: "./.github/actions/playwright-browsers",
-        with: { browsers: "chromium" },
-      },
-      {
-        name: "Install pinned cross-browser runtimes",
-        if: "${{ matrix.lane == 'workbench' }}",
-        uses: "./.github/actions/playwright-browsers",
-        with: { browsers: "chromium firefox webkit" },
+        "timeout-minutes": 17,
+        with: {
+          browsers: "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}",
+        },
       },
     ]);
     expect(

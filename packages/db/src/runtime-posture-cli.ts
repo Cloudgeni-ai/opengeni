@@ -25,6 +25,8 @@ try {
     rlsStrategy: settings.rlsStrategy,
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
+    organizationTenancyCanonicalActivationEnabled:
+      settings.organizationTenancyCanonicalActivationEnabled,
   });
   // Structural evidence only: never print a connection string, secret, GUC, or
   // tenant row. The command is intended for release Jobs and audit artifacts.

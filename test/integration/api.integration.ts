@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
+import { sql } from "drizzle-orm";
 import {
   allAccountPermissions,
   allWorkspacePermissions,
@@ -344,14 +345,26 @@ describe("API component integration", () => {
     ).toBe(400);
     const decodedCursor = decodeSessionListCursor(firstPage.nextCursor!);
     expect(decodedCursor).not.toBeNull();
+    const cursorEnvelope = JSON.parse(
+      Buffer.from(firstPage.nextCursor!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    const outOfRangeTimestampCursor = Buffer.from(
+      JSON.stringify({ ...cursorEnvelope, sortAt: "0000-01-01T00:00:00.000000Z" }),
+    ).toString("base64url");
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&cursor=${encodeURIComponent(outOfRangeTimestampCursor)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
     for (const invalidCursor of [
       encodeSessionListCursor({
         ...decodedCursor!,
         search: "different-filter",
-      }),
-      encodeSessionListCursor({
-        ...decodedCursor!,
-        offset: Number.MAX_SAFE_INTEGER,
       }),
     ]) {
       expect(
@@ -365,11 +378,6 @@ describe("API component integration", () => {
         ).status,
       ).toBe(400);
     }
-    await dbClient.db.execute(dbSql`
-      update session_list_snapshots
-      set expires_at = now() - interval '1 second'
-      where id = ${decodedCursor!.snapshotId}
-    `);
     expect(
       (
         await app.request(
@@ -379,7 +387,7 @@ describe("API component integration", () => {
           ),
         )
       ).status,
-    ).toBe(410);
+    ).toBe(200);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);
@@ -965,6 +973,43 @@ describe("API component integration", () => {
     });
     expect(progress.operationId).toBeTruthy();
 
+    // goal_wait: self-only, exact-attempt fenced, bounded deadline, and
+    // idempotent per (turn, exact arguments) without a caller key.
+    const waitArgs = {
+      reason: "two child sessions are still implementing their slices",
+      untilSeconds: 900,
+    };
+    const held = await callMcpTool<{
+      status: string;
+      goalId: string;
+      untilAt: string;
+      operationId: string;
+      replay: boolean;
+      nextAction: string;
+    }>(mcp, "goal_wait", waitArgs);
+    expect(held).toMatchObject({ status: "held", replay: false });
+    expect(held.goalId).toBeTruthy();
+    expect(new Date(held.untilAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
+    expect(held.nextAction).toContain("End your turn now");
+    const heldReplay = await callMcpTool<{ replay: boolean; untilAt: string }>(
+      mcp,
+      "goal_wait",
+      waitArgs,
+    );
+    expect(heldReplay).toMatchObject({ replay: true, untilAt: held.untilAt });
+    await expect(
+      callMcpTool(mcp, "goal_wait", { reason: "too short", untilSeconds: 5 }),
+    ).rejects.toThrow();
+    const [heldGoalRow] = await dbClient.db.execute<{
+      continuation_hold_turn_id: string | null;
+      continuation_hold_until: string | Date | null;
+    }>(sql`
+      select continuation_hold_turn_id, continuation_hold_until
+      from session_goals
+      where workspace_id = ${grant.workspaceId} and session_id = ${session.id}`);
+    expect(heldGoalRow?.continuation_hold_turn_id).toBe(claimed.turn.id);
+    expect(new Date(heldGoalRow!.continuation_hold_until!).toISOString()).toBe(held.untilAt);
+
     const pausedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_pause", {
       rationale: "waiting on upstream fix",
     });
@@ -1028,6 +1073,7 @@ describe("API component integration", () => {
       "goal.set",
       "goal.updated",
       "goal.progress",
+      "goal.held",
       "goal.paused",
       "goal.updated",
       "goal.completed",
@@ -1045,8 +1091,10 @@ describe("API component integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         productAccessMode: "managed",
+        billingMode: "stripe",
         betterAuthSecret: "test-better-auth-secret-32-bytes",
         publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
         environmentsEncryptionKey: environmentsTestKey,
       }),
       db: dbClient.db,
@@ -1122,6 +1170,15 @@ describe("API component integration", () => {
       headers: { authorization: `Bearer ${billingKeyBody.token}` },
     });
     expect(billing.status).toBe(200);
+    const deniedBillingPortal = await app.request("/v1/billing/portal", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${billingKeyBody.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ accountId: context.defaultAccountId }),
+    });
+    expect(deniedBillingPortal.status).toBe(403);
 
     const workspaceOnlyKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
@@ -1139,6 +1196,15 @@ describe("API component integration", () => {
       headers: { authorization: `Bearer ${workspaceOnlyKeyBody.token}` },
     });
     expect(deniedBilling.status).toBe(403);
+    const deniedWorkspaceBillingPortal = await app.request("/v1/billing/portal", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${workspaceOnlyKeyBody.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ accountId: context.defaultAccountId }),
+    });
+    expect(deniedWorkspaceBillingPortal.status).toBe(403);
 
     const exactSecret =
       `ordinary source: const fakeToken = "ghp_not_a_credential";\n` +
@@ -5503,7 +5569,7 @@ describe("API component integration", () => {
     const refreshedContext = await defaultAccessContext(app);
 
     const authorityCheckedAt = new Date();
-    const authorityExpiresAt = new Date(Date.now() + 10 * 60_000);
+    const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
     // One GitHub installation can be deliberately delegated into two OpenGeni
     // workspaces, but each workspace owns an independent exact allowlist and
     // an independent consumed owner-authority proof.

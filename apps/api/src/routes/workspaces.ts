@@ -16,6 +16,7 @@ import {
   workspaceControlUtf8Bytes,
   type AccessContext,
   type Permission,
+  type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
@@ -25,6 +26,7 @@ import {
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listWorkspaceMembers,
+  normalizeWorkspaceMembershipPermissions,
   listWorkspaceControlEvents,
   listWorkspacesForSubject,
   removeWorkspaceMember,
@@ -35,6 +37,7 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
   workspaceCodexSubscriptionActive,
+  workspaceControlRequestLockTimeoutMs,
   workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
 } from "@opengeni/db";
@@ -74,6 +77,24 @@ export function canonicalWorkspacePolicyModelIds(
     return null;
   }
   return [...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId)))];
+}
+
+type WorkspaceMemberProjectionInput = Omit<WorkspaceMemberValue, "permissions"> & {
+  permissions: unknown;
+};
+
+/**
+ * Keep the roster readable across stored-permission contract changes. Unknown
+ * values are never re-authorized: they are omitted from the public projection,
+ * while every currently recognized permission is preserved in stored order.
+ */
+export function workspaceMembersResponse(members: readonly WorkspaceMemberProjectionInput[]) {
+  return ListWorkspaceMembersResponse.parse({
+    members: members.map((member) => ({
+      ...member,
+      permissions: normalizeWorkspaceMembershipPermissions(member.permissions),
+    })),
+  });
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -162,7 +183,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid workspace settings patch" });
     }
-    const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data);
+    // Request-scoped: bound the exclusive control-prefix wait so a busy
+    // workspace yields the retryable 503 instead of parking this request.
+    const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data, {
+      controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+    });
     return c.json(Workspace.parse(workspace));
   });
 
@@ -409,7 +434,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     const members = await listWorkspaceMembers(deps.db, workspaceId);
-    return c.json(ListWorkspaceMembersResponse.parse({ members }));
+    return c.json(workspaceMembersResponse(members));
   });
 
   app.post("/v1/workspaces/:workspaceId/members", async (c) => {

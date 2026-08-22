@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 
 import {
   CapabilityPack,
+  OPENGENI_PR_REVIEW_PACK_ID,
+  OPENGENI_PR_REVIEW_SESSION_ROLE,
   stableJson,
   type CapabilityPackSkill,
   type PackComponentResolution,
@@ -23,6 +25,12 @@ import {
 } from "@opengeni/db";
 import { buildPortableSkillArtifact } from "@opengeni/runtime/skill-library";
 import { HTTPException } from "hono/http-exception";
+import {
+  OPENGENI_PR_REVIEW_AGENT_INSTRUCTIONS,
+  OPENGENI_PR_REVIEW_SKILL,
+  PR_REVIEW_AUTOMATION_ADAPTER_ID,
+  PR_REVIEW_AUTOMATION_TEMPLATE_ID,
+} from "./pr-review";
 
 export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
 
@@ -39,6 +47,7 @@ const marketingSocialPack: CapabilityPack = {
   // (see apps/worker/src/activities/packs.ts), and a test enforces this.
   skills: [],
   components: [],
+  automationTemplates: [],
   tools: [
     { kind: "mcp", id: "opengeni" },
     { kind: "mcp", id: "docs" },
@@ -176,7 +185,99 @@ const marketingSocialPack: CapabilityPack = {
   },
 };
 
-const packs = [marketingSocialPack] satisfies CapabilityPack[];
+const openGeniPrReviewPack: CapabilityPack = {
+  id: OPENGENI_PR_REVIEW_PACK_ID,
+  name: "OpenGeni Review Bot",
+  description:
+    "Run provider-neutral, exact-head pull-request reviews from GitHub, GitLab, or Azure DevOps webhooks.",
+  role: "software-engineering",
+  category: "code-review",
+  version: "0.2.0",
+  skills: [OPENGENI_PR_REVIEW_SKILL],
+  components: [],
+  tools: [],
+  connectors: [
+    {
+      id: "github",
+      name: "GitHub App",
+      category: "source-control",
+      authModel: "credential_ref",
+      providers: ["github"],
+      scopes: ["metadata:read", "contents:read", "pull_requests:write"],
+      required: false,
+      metadata: {
+        oneOf: "source-control-provider",
+        setupPath: "/pr-review/registrations",
+        webhookEvents: ["pull_request"],
+        credentialMode: "short_lived_installation_token",
+      },
+    },
+    {
+      id: "gitlab",
+      name: "GitLab project token",
+      category: "source-control",
+      authModel: "credential_ref",
+      providers: ["gitlab"],
+      scopes: ["api", "read_repository"],
+      required: false,
+      metadata: {
+        oneOf: "source-control-provider",
+        setupPath: "/pr-review/registrations",
+        webhookEvents: ["Merge Request Hook"],
+        credentialMode: "provider_token",
+      },
+    },
+    {
+      id: "azure-devops",
+      name: "Azure DevOps identity token",
+      category: "source-control",
+      authModel: "credential_ref",
+      providers: ["azure_devops"],
+      scopes: ["vso.code", "vso.threads_full"],
+      required: false,
+      metadata: {
+        oneOf: "source-control-provider",
+        setupPath: "/pr-review/registrations",
+        webhookEvents: ["git.pullrequest.created", "git.pullrequest.updated"],
+        credentialMode: "provider_token",
+      },
+    },
+  ],
+  knowledge: [],
+  scheduledTaskTemplates: [],
+  automationTemplates: [
+    {
+      id: PR_REVIEW_AUTOMATION_TEMPLATE_ID,
+      name: "Review pull requests",
+      description: "Start one exact-head review session for each accepted pull-request revision.",
+      adapterId: PR_REVIEW_AUTOMATION_ADAPTER_ID,
+      eventTypes: ["pull_request.review_requested"],
+      configuration: {},
+      connectionRequirement: "source-control-provider",
+      sessionTemplate: {
+        prompt: "Review the accepted pull-request revision and publish actionable findings.",
+        instructions: OPENGENI_PR_REVIEW_AGENT_INSTRUCTIONS,
+        resources: [],
+        skills: [OPENGENI_PR_REVIEW_SKILL],
+        tools: [],
+        firstPartyMcpTools: [],
+        firstPartyMcpPermissions: [],
+        model: null,
+        reasoningEffort: null,
+        sandboxBackend: null,
+        policyRole: OPENGENI_PR_REVIEW_SESSION_ROLE,
+        metadata: { role: OPENGENI_PR_REVIEW_SESSION_ROLE },
+      },
+    },
+  ],
+  metadata: {
+    automation: "pull_request_review",
+    providers: ["github", "gitlab", "azure_devops"],
+    sessionRole: "pull_request_review",
+  },
+};
+
+const packs = [marketingSocialPack, openGeniPrReviewPack] satisfies CapabilityPack[];
 
 export function listCapabilityPacks(): CapabilityPack[] {
   return packs;
@@ -237,6 +338,7 @@ export function capabilityPackRequiresInstallationPlan(pack: CapabilityPack): bo
   return (
     pack.components.length > 0 ||
     pack.skills.length > 0 ||
+    (pack.automationTemplates?.length ?? 0) > 0 ||
     pack.rig !== undefined ||
     pack.sandboxImage !== undefined ||
     pack.sandboxProviderImages !== undefined

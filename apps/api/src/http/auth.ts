@@ -40,6 +40,9 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path === "/v1/webhooks/stripe") {
     return true;
   }
+  if (c.req.method === "POST" && path.startsWith("/v1/webhooks/automations/")) {
+    return true;
+  }
   if (
     path === "/v1/github/setup" ||
     path === "/v1/github/install/callback" ||
@@ -51,6 +54,7 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (
     path === "/v1/integrations/oauth/callback" ||
     path === "/v1/integrations/provider-oauth/callback" ||
+    path === "/v1/integrations/github-personal/oauth/callback" ||
     path === "/v1/integrations/google-drive/callback" ||
     path === "/v1/integrations/oauth/client-metadata.json" ||
     path === "/v1/integrations/slack/callback" ||

@@ -35,6 +35,7 @@ import {
   serializeEffectiveSessionControl,
   steerAgentSessionInTransaction,
   steerQueuedTurnInTransaction,
+  workspaceControlRequestLockTimeoutMs,
   withWorkspaceRls,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
@@ -308,6 +309,7 @@ export async function sendAgentSessionMessage(
           actor: agentActor(context),
           operationKey: input.idempotencyKey,
           text: input.text,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -354,6 +356,7 @@ export async function steerAgentSession(
           actor: agentActor(context),
           operationKey: input.idempotencyKey,
           instruction: input.instruction,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -408,6 +411,7 @@ export async function controlAgentSessionWorkstream(
           operationKey: input.idempotencyKey,
           action: input.action,
           reason: input.reason ?? null,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -495,6 +499,7 @@ export async function moveHumanQueuePrompt(
           expectedQueueVersion: input.expectedQueueVersion,
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -536,6 +541,7 @@ export async function deleteHumanQueuePrompt(
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
           reason: input.reason ?? null,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -578,6 +584,7 @@ export async function editHumanQueuePrompt(
           replaceDraft: input.replaceDraft,
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -620,6 +627,7 @@ export async function steerHumanQueuePrompt(
           controlEtag: input.controlEtag ?? null,
           actor: { type: "human", subjectId: context.subjectId },
           operationKey: input.clientEventId,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -666,6 +674,7 @@ export async function controlHumanSessionWorkstreamWithOutcome(
           action: input.action,
           reason: input.reason ?? null,
           expectedControlEtag: input.expectedControlEtag ?? null,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
     },
   );
@@ -717,6 +726,7 @@ export async function controlHumanWorkspace(
         action: input.action,
         reason: input.reason ?? null,
         expectedRevision: input.expectedRevision ?? null,
+        controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
       }),
     ),
   );
@@ -790,6 +800,7 @@ export async function saveHumanComposerDraft(
           annotations,
           resources: normalizeResources(input.resources),
           subjectId: context.subjectId,
+          controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         }),
       ),
   );

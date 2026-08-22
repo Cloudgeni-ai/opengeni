@@ -107,7 +107,9 @@ eligible decision for a **preference** is handed to the migration 0269
 activation controller, which revalidates current authority and applies the
 change only through the preference lifecycle; the receipt then reports
 `decision: "activated"` with the activation receipt id, destination revision,
-and effective boundary, and the change is undoable from Learning & autonomy.
+and effective boundary, and the change is undoable through the `/learning`
+API/SDK undo operation (the Learning & autonomy web view exposes only the
+learning mode).
 Mandatory instruction policy keeps a human activation boundary even under
 `automatic` (`activation.boundary = "human_activation_required"`): its decision
 receipt is recorded and its inactive draft waits for a human. Knowledge
@@ -143,7 +145,7 @@ confidence, and the receipt is one of:
   rather than a change proposal; the same one-click answer approves the claim
   through the Knowledge review lifecycle, see below);
 - `activated` - a preference under `automatic` was activated by the governed
-  controller and is undoable from Learning & autonomy;
+  controller and is undoable through the `/learning` API/SDK undo operation;
 - `confirmation_required` - the proposal is durable but the policy will not
   activate it (Suggest mode, an ineligible decision, or a mandatory rule, which
   always keeps a human boundary). The receipt carries the exact
@@ -155,8 +157,8 @@ confidence, and the receipt is one of:
 `remember_confirm` invokes migration 0272's
 `activate_human_confirmed_learning_decision`. That SECURITY DEFINER capability
 requires the exact initiating human's `session_human_input_requests` row: same
-session and turn, same execution generation as the decision receipt, status
-`answered`, `responded_by` equal to the turn's initiating human, and the bound
+session and logical turn (at the decision receipt's execution generation or a
+later one of that turn), status `answered`, `responded_by` equal to the turn's initiating human, and the bound
 question answered with exactly `save`. The question the human saw is not
 trusted from the agent: the capability reconstructs the canonical prompt from
 the proposal lane, the help text from the exact Task-note text, and the fixed
@@ -168,12 +170,17 @@ It accepts `suggest`, `automatic`, and
 revalidates the current learning policy (not `off`), evidence, review, and
 destination CAS, and writes only through the destination-native lifecycle. The
 activation receipt records `authorityKind = human_confirmed` and the human-input
-request id, so Learning & autonomy history shows who authorized it and exact
-undo remains available. Because the receipt is minted before the human-input
-pause and the turn resumes on a new attempt of the same execution generation,
-the capability requires the turn's current live attempt rather than the minting
-attempt. Agents cannot fabricate that answer: the human-input row is written only
-by the authenticated human's response route.
+request id, so the `/learning` history API shows who authorized it and exact
+undo remains available through the API/SDK (not the web view). Because the
+receipt is minted before the human-input pause and the turn resumes on a new
+attempt at a later execution generation (and a recovery re-claim before the
+pause or another interruption answered first likewise advances the pending
+request row's generation), the capability requires the turn's current live
+attempt of the same logical turn at the minting generation or later rather than
+the minting attempt (migration 0316); neither the answered row nor the live
+attempt may belong to another turn or an earlier generation. Agents cannot
+fabricate that answer: the human-input row is written only by the authenticated
+human's response route.
 
 For the Knowledge lane, `remember_confirm` invokes migration 0274's
 `confirm_remember_knowledge_claim`. It performs the same live-turn,

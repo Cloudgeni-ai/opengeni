@@ -4,6 +4,7 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  Globe2Icon,
   KeyRoundIcon,
   ZapIcon,
 } from "lucide-react";
@@ -63,6 +64,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   codexOnly: "Codex-only session",
   billingHints: {
     opengeni_credits: "Will use credits",
+    external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
     byok: "Billed to your AI Gateway",
@@ -91,6 +93,8 @@ export type ModelPolicyPickerProps = {
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */
   menuSide?: "top" | "bottom" | undefined;
+  /** Hide latency controls on surfaces whose saved policy does not include latency. */
+  allowLatencyMode?: boolean | undefined;
   /** Classes for the portalled menu surface. Prefer --og-* tokens for theming. */
   contentClassName?: string | undefined;
   /** Inline styles for the portalled menu, applied after inherited --og-* tokens. */
@@ -150,6 +154,7 @@ export function BillingClassMark(props: {
 }) {
   const labels: Record<PickerBillingClass, string> = {
     opengeni_credits: "OpenGeni",
+    external: "External provider",
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
     byok: "Bring your own key",
@@ -172,6 +177,8 @@ export function BillingClassMark(props: {
     >
       {props.billingClass === "opengeni_credits" ? (
         <OpenGeniMark className={mark} />
+      ) : props.billingClass === "external" ? (
+        <Globe2Icon className={mark} aria-hidden />
       ) : props.billingClass === "codex_subscription" ? (
         <ChatGptMark className={mark} />
       ) : props.billingClass === "supergrok_subscription" ? (
@@ -433,7 +440,7 @@ export function ModelPolicyPickerMenu(
           icon={<BillingClassMark billingClass={focusModel.billingClass} />}
           onBack={() => go({ level: "models", rail: focusModel.billingClass, modelId: null }, -1)}
           trailing={
-            supportsFast ? (
+            supportsFast && props.allowLatencyMode !== false ? (
               <button
                 type="button"
                 disabled={!focusModel.selectable}

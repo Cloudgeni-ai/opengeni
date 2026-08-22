@@ -228,6 +228,29 @@ delegated/MCP/stream credentials. The host still mints its ordinary user-facing
 delegated token, while OpenGeni continues minting technical first-party tokens
 and then consults this port with their durable caller authority.
 
+#### Delegated tokens carry no personal-connection authority
+
+A delegated grant never selects a subject's **personal** connections - not in a
+personal workspace, and not in an ordinary shared workspace either. A session
+created or steered through a host-minted delegated token gets workspace-owned
+connections only; personal X/Reddit/Atlassian/Google Drive delegation is
+omitted, exactly as it is for a member who never connected that provider.
+
+This is deliberate and is a change in behaviour: before, a delegated grant did
+pick up personal connections in shared workspaces, because a real
+`workspace_memberships` row backed the lookup. A delegated payload's
+`subjectId` and `workspaceId` are signed token fields with no database row
+behind them (`delegatedAccessContext` builds the grant inline), so treating that
+subject as authority to borrow someone's private provider credentials is not a
+boundary OpenGeni is willing to hold. Denying it everywhere is the honest
+version of the rule; scoping the denial to personal workspaces would have left
+the same defect one room over.
+
+Hosts that need agent runs to act on a user's personal provider account should
+have that user connect it from a canonical signed-in OpenGeni session, which
+freezes an ordinary personal-connection delegation onto the causal turn. See
+`docs/organization-tenancy.md` for the authority model.
+
 ### Tenancy / Bootstrap Workspace
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.
@@ -238,7 +261,7 @@ The workspace remains the operational boundary. Route and core code must use the
 
 ### Entitlements / Admit Run
 
-Canonical sources: `EntitlementsPort` in `packages/contracts/src/index.ts`, core `checkLimit`/`requireLimit` in `packages/core/src/billing/limits.ts`, worker-side `ensureRunAllowed` in `apps/worker/src/activities/agent-turn.ts`.
+Canonical sources: `EntitlementsPort` in `packages/contracts/src/index.ts`, core `checkLimit`/`requireLimit` in `packages/core/src/billing/limits.ts`, worker-side `ensureRunAllowed` in `apps/worker/src/activities/agent-turn/admission.ts`.
 
 `EntitlementsPort` is:
 

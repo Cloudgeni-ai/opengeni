@@ -43,7 +43,7 @@ interface ConfiguredModel {
     toolOutputTruncationTokens: number | null;
   };
   credentialSource:
-    | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+    | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
     | { kind: "connected_subscription"; provider: "codex" }
     | { kind: "workspace_connection"; mechanism: "api_key" };
   billing: {
@@ -87,9 +87,15 @@ credential location, and one or more model definitions:
 ```
 
 Registry providers default to `kind: "api-key"` and `api: "chat"`. Prefer
-`apiKeyEnv` to an inline `apiKey`. `defaultQuery` and `defaultHeaders` are
-provider request configuration, not model identity aliases. Provider base URLs
-must not contain userinfo, a query, or a fragment.
+`apiKeyEnv` to an inline `apiKey`. A provider that intentionally accepts public,
+unauthenticated inference must set `kind: "anonymous"`; that kind rejects
+`apiKey`, `apiKeyEnv`, and all configured default header/query metadata. This
+keeps an operator from attaching an upstream session cookie or another hidden
+credential while retaining external-metered billing. Missing a key on an
+ordinary `api-key` provider remains a boot error. `defaultQuery` and
+`defaultHeaders` are provider request configuration, not model identity aliases,
+and are available only to authenticated provider kinds. Provider base URLs must
+not contain userinfo, a query, or a fragment.
 
 A registry model may add:
 
@@ -108,6 +114,7 @@ derives both from the provider kind:
 | Provider kind | Credential source | Upstream payer | Metering |
 | --- | --- | --- | --- |
 | Built-in or registry API key | deployment | deployment | OpenGeni credits |
+| Anonymous registry route | deployment, no authentication | deployment | external |
 | Azure without an API key | deployment Azure AD bearer | deployment | OpenGeni credits |
 | Connected Codex subscription | connected subscription | connected subscription | external |
 | Connected SuperGrok/xAI subscription | connected subscription | connected subscription | external |
@@ -115,6 +122,87 @@ derives both from the provider kind:
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
+
+### OpenCode Zen temporary free preview
+
+OpenCode Zen currently exposes an OpenAI-compatible endpoint at
+`https://opencode.ai/zen/v1`. On August 21, 2026, its public model registry
+included `x-preview-f-free`, and that model accepted keyless Chat Completions,
+Responses, SSE streaming, and function calls. OpenCode documents the Ox Alpha
+free window as temporary, so configure it as an operator-owned registry entry
+rather than treating it as a permanent built-in or availability promise:
+
+```json
+[
+  {
+    "kind": "anonymous",
+    "id": "opencode-zen",
+    "label": "OpenCode Zen",
+    "api": "chat",
+    "baseUrl": "https://opencode.ai/zen/v1",
+    "models": [
+      {
+        "id": "opencode/x-preview-f-free",
+        "upstreamModelId": "x-preview-f-free",
+        "label": "OpenCode Ox Alpha (temporary free preview)",
+        "contextWindowTokens": 1000000,
+        "reasoningEffort": true,
+        "hostedWebSearch": false
+      }
+    ]
+  }
+]
+```
+
+Requests go from OpenGeni to OpenCode's `opencode.ai` service; this is not local
+inference. Anonymous routes are shown on the External rail, bypass OpenGeni
+credit debit, and still emit ordinary model-call/token telemetry plus a
+zero-cost audit marker. They remain subject to the upstream provider's changing
+model catalogue, rate limits, retention policy, preview duration, and terms.
+Verify `GET /zen/v1/models` before enabling the route and remove or update the
+registry entry when keyless access or the model slug changes. OpenCode's
+client-side model metadata advertises image input, but raw image probes on
+August 21, 2026 returned upstream `503`/image-parse failures, so this example
+deliberately keeps OpenGeni's runnable input capability at its text-only default.
+
+OpenCode Zen uses the same provider-neutral progressive disclosure as other
+ordinary Chat Completions providers. The first request receives the stable
+`tool_search` and `tool_invoke` functions plus OpenGeni's always-visible base
+tools and any explicitly eager MCP tools. Deferred MCP and other non-base tool
+schemas stay out of the initial prompt; matching definitions are disclosed on
+demand, and a valid invocation is rebound to the real authorized tool before
+approval, guardrails, execution, and event handling. This needs only ordinary
+function calling from Zen—no OpenCode-specific lazy-tool protocol.
+
+OpenCode 1.18.21 also documented a client-side workaround for model responses
+whose finish reason is `unknown`: continue the model loop instead of accepting
+the response as final. OpenGeni handles the same signal at the generic Chat
+Completions adapter boundary. It withholds `response_done`, executes no tool call
+from the ambiguous response, and routes the same accepted turn through the
+existing fenced recovery path from durable history. This is intentionally
+narrower than blindly replaying every interrupted stream; ordinary partial or
+outcome-unknown provider operations retain their existing safety classification.
+
+Other Zen models use the same generic registry, but authentication and billing
+ownership must stay explicit:
+
+- Add another currently keyless model under the same `kind: "anonymous"`
+  provider only after verifying that the exact slug accepts requests with no
+  `Authorization` header.
+- For deployment-managed paid Zen models, declare a separate `kind: "api-key"`
+  provider (it may reuse the same base URL) with `apiKeyEnv` and reviewed model
+  pricing/capabilities. The deployment owns the upstream account and OpenGeni
+  meters those turns through the ordinary OpenGeni-credit path.
+- A workspace member connecting their own OpenCode key/account is not generic
+  registry JSON. That requires a reviewed encrypted workspace-connection broker,
+  readiness/re-auth UI, and `upstreamPayer: workspace` external billing—the same
+  authority boundary used by workspace AI Gateway.
+
+Provider JSON is deliberately a static reviewed catalogue. OpenGeni does not
+silently mirror `GET /models` into the picker because a mutable upstream list
+does not supply stable product IDs, capability evidence, context limits,
+pricing, billing ownership, or definition versions. An operator may use the
+endpoint to prepare an update, but the accepted registry remains canonical.
 
 ## Curated AI Gateway models
 
@@ -157,8 +245,11 @@ object-store URL.
 
 DeepSeek V4 Flash 0731 and Kimi K3 use OpenGeni's provider-neutral lazy-tool
 dispatcher on the Responses wire. Their initial tool block contains the stable
-ordinary `tool_search` and `tool_invoke` schemas plus local control tools and
-exact session MCP refs marked `eager: true`, never the deferred MCP catalogue. A search result carries only bounded
+ordinary `tool_search` and `tool_invoke` schemas, the always-visible base
+runtime tools (`exec_command`, `write_stdin`, `apply_patch`, `view_image`,
+`load_skill`, `request_human_input`), and exact session MCP refs marked
+`eager: true`, never the deferred MCP catalogue or Browser/Computer/`generate_image`/
+`generate_video`/`get_video_generation_capabilities` schemas. A search result carries only bounded
 matching definitions. A valid `tool_invoke` call is renamed to the exact real authorized tool and
 bound through `resolveMissingFunctionTool` in that same model response before
 normal approval, guardrail, timeout, MCP error, and event handling. Leftover
@@ -193,7 +284,14 @@ canonical record types that its SDK converter cannot represent; that view is
 never persisted. Historical `tool_search` calls/outputs remain inert completed
 facts. A session frozen to `remote_v2` compaction admits only Codex models;
 portable sessions may use any supported route whose request adapter can express
-their canonical history.
+their canonical history. Responses output items may carry `status`
+(`completed` / `in_progress` / `incomplete`); that field is not conversation
+meaning — pairing is `call_id` — and Codex's input schema rejects it
+(`400 Unknown parameter: 'input[N].status'`). New `session_history_items` rows
+omit it at persist (`canonicalizePersistedHistoryItem`). The Codex request
+normalizer still strips leftover item `id` and `status` on the wire for
+already-stored SuperGrok rows and mid-turn SDK items — ordinary inference and
+portable compaction share that seam — and never rewrites stored rows.
 
 SuperGrok models use the `supergrok/` product namespace and the curated
 `supergrok-subscription` provider. The catalog advertises image input, which is
@@ -278,10 +376,11 @@ the session uses workspace defaults or an explicit/inherited MCP policy.
 Changing a session's connected or OpenGeni tools therefore cannot silently
 disable web search.
 
-`tool_search` is a different capability: it searches bounded deferred tool
-schemas so the model can discover MCP tools without preloading every schema. It
-does not search the public web and must not be presented as a fallback for
-native `web_search`.
+`tool_search` is a different capability: it searches bounded lazy tool
+schemas (deferred MCP plus every non-MCP function tool outside the
+always-visible base set) so the model can discover them without preloading
+every schema. It does not search the public web and must not be presented as a
+fallback for native `web_search`.
 
 Progressive disclosure is selected explicitly per resolved provider:
 
@@ -296,6 +395,16 @@ Progressive disclosure is selected explicitly per resolved provider:
   receives stable ordinary `tool_search` and `tool_invoke` functions. No provider
   protocol extension is required. This includes an OpenAI-compatible custom base
   URL: configuring the built-in OpenAI slot does not prove native-search support.
+
+Classification is origin, not transport. The same first-request set is eager on
+every path: the closed non-MCP allowlist (`exec_command`, `write_stdin`,
+`apply_patch`, `view_image`, `load_skill`, `request_human_input`) plus MCP
+tools whose session `ToolRef.eager` is true. Every other function tool —
+deferred MCP, Browser/Computer, `generate_image`, `generate_video`,
+`get_video_generation_capabilities`, and later first-party additions — is
+searchable on Codex, OpenAI, and generic dispatch alike. Native hosted image
+generation stays a `hosted_tool` and is not in this function-tool hide set.
+`ToolRef.eager` remains a per-session MCP choice and is untouched.
 
 The sandbox's hosted-vs-function structured-tool setting does not select any of
 these modes. `OPENGENI_CODEX_TOOL_SEARCH_ENABLED` controls only Codex native

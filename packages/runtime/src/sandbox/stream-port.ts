@@ -140,6 +140,104 @@ export function buildStreamUrl(endpoint: ExposedPortEndpoint): string {
   return query ? `${authority}?${query}` : authority;
 }
 
+/**
+ * Join a provider tunnel prefix with a controller/API path. Modal/Daytona/Blaxel
+ * serve the edge at `/`; OpenSandbox's lifecycle proxy serves it at
+ * `/v1/sandboxes/<id>/proxy/<port>`. The request path (`/v1/browser-sessions/...`)
+ * must keep that prefix so Channel B hits browserd, not the lifecycle API root.
+ */
+export function joinExposedPortPath(endpointPath: string | undefined, requestPath: string): string {
+  if (
+    typeof requestPath !== "string" ||
+    !requestPath.startsWith("/") ||
+    requestPath.includes("\0") ||
+    requestPath.includes("#") ||
+    requestPath.includes("?")
+  ) {
+    throw new StreamPortUnavailableError("exposed-port request path is invalid");
+  }
+  const raw = typeof endpointPath === "string" && endpointPath.length > 0 ? endpointPath : "/";
+  const prefix = (raw.startsWith("/") ? raw : `/${raw}`).replace(/\/+$/u, "") || "";
+  return `${prefix}${requestPath}`;
+}
+
+const OPENSANDBOX_LIFECYCLE_PROXY_PATH = /\/v1\/sandboxes\/[^/]+\/proxy\/\d+(?:\/|$)/u;
+/** OSEP-0011 URI mode: `/{sandbox_id}/{port}/{expires_b36}/{signature}/…`. */
+const OPENSANDBOX_SIGNED_URI_PATH =
+  /^\/([^/]{1,128})\/(\d{1,5})\/([0-9a-z]{1,13})\/([0-9a-z]{8,64})(?:\/|$)/iu;
+const SIGNED_ENDPOINT_REFRESH_SKEW_MS = 30_000;
+
+export type OpenSandboxSignedUriPath = {
+  sandboxId: string;
+  port: number;
+  expiresAtSeconds: number;
+  signature: string;
+};
+
+export function isOpenSandboxLifecycleProxyPath(path: string): boolean {
+  return OPENSANDBOX_LIFECYCLE_PROXY_PATH.test(path);
+}
+
+export function parseOpenSandboxSignedUriPath(path: string): OpenSandboxSignedUriPath | null {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  const match = OPENSANDBOX_SIGNED_URI_PATH.exec(normalized);
+  if (!match) return null;
+  const port = Number(match[2]);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) return null;
+  const expiresAtSeconds = Number.parseInt(match[3]!, 36);
+  if (!Number.isSafeInteger(expiresAtSeconds) || expiresAtSeconds < 0) return null;
+  return {
+    sandboxId: match[1]!,
+    port,
+    expiresAtSeconds,
+    signature: match[4]!,
+  };
+}
+
+function pathnameFromExposedPort(endpoint: ExposedPortEndpoint | string): string | null {
+  if (typeof endpoint === "string") {
+    try {
+      return new URL(endpoint).pathname;
+    } catch {
+      return null;
+    }
+  }
+  return typeof endpoint.path === "string" && endpoint.path.length > 0 ? endpoint.path : "/";
+}
+
+/**
+ * Host-side JSON/WebSocket may send the browserd Bearer only when the edge does
+ * not rewrite `Authorization`. Lifecycle `/v1/sandboxes/<id>/proxy/<port>` does;
+ * native `/` tunnels and OSEP-0011 signed URIs do not.
+ */
+export function exposedPortAllowsHostFetch(endpoint: ExposedPortEndpoint | string): boolean {
+  const path = pathnameFromExposedPort(endpoint);
+  if (path === null) return false;
+  if (isOpenSandboxLifecycleProxyPath(path)) return false;
+  if (path === "/" || path === "") return true;
+  return parseOpenSandboxSignedUriPath(path) !== null;
+}
+
+export function signedEndpointExpiresAtMs(path: string): number | null {
+  const parsed = parseOpenSandboxSignedUriPath(path);
+  return parsed ? parsed.expiresAtSeconds * 1000 : null;
+}
+
+export function signedEndpointNeedsRefresh(
+  path: string,
+  nowMs = Date.now(),
+  skewMs = SIGNED_ENDPOINT_REFRESH_SKEW_MS,
+): boolean {
+  const expiresAt = signedEndpointExpiresAtMs(path);
+  if (expiresAt === null) return false;
+  return nowMs + skewMs >= expiresAt;
+}
+
+/** Logs and artifacts may keep the signed path shape, never the signature. */
+export function redactOpenSandboxSignedUriPath(path: string): string {
+  return path.replace(/^(\/[^/]+\/\d+\/[0-9a-z]+)\/[0-9a-z]+/iu, "$1/[redacted]");
+}
+
 /** Rehydrate a persisted provider tunnel URL without contacting the provider.
  * Only the exact ws/wss shape emitted by buildStreamUrl is accepted. */
 export function exposedPortEndpointFromUrl(value: string): ExposedPortEndpoint {

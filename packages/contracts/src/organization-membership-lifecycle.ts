@@ -10,6 +10,8 @@ export const OrganizationInvitation = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
   targetEmail: z.string().email(),
+  targetName: z.string().trim().min(1).max(120).nullable().default(null),
+  initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
   role: OrganizationMembershipRole,
   status: OrganizationInvitationStatus,
   revision: z.number().int().positive(),
@@ -34,6 +36,48 @@ export const OrganizationMember = z.object({
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type OrganizationMember = z.infer<typeof OrganizationMember>;
+
+export const OrganizationSummary = z.object({
+  id: z.string().uuid(),
+  name: z.string().trim().min(1).max(120),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type OrganizationSummary = z.infer<typeof OrganizationSummary>;
+
+export const OrganizationWorkspaceAccessMember = z.object({
+  membershipId: z.string().uuid(),
+  subjectId: z.string().min(1).max(1024),
+  subjectLabel: z.string().min(1).max(1024).nullable(),
+  principalKind: z.enum(["human", "service"]),
+  role: z.string().min(1).max(64),
+  permissions: z.array(z.string().min(1).max(128)),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type OrganizationWorkspaceAccessMember = z.infer<typeof OrganizationWorkspaceAccessMember>;
+
+export const OrganizationWorkspaceAccess = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1),
+  slug: z.string().nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+  members: z.array(OrganizationWorkspaceAccessMember).max(1000),
+});
+export type OrganizationWorkspaceAccess = z.infer<typeof OrganizationWorkspaceAccess>;
+
+export const OrganizationAdministrationOverview = z.object({
+  organization: OrganizationSummary,
+  workspaces: z.array(OrganizationWorkspaceAccess).max(500),
+});
+export type OrganizationAdministrationOverview = z.infer<typeof OrganizationAdministrationOverview>;
+
+export const UpdateOrganizationNameRequest = z.object({
+  name: z.string().trim().min(1).max(120),
+  expectedUpdatedAt: z.string().datetime({ offset: true }),
+  operationId: z.string().uuid(),
+});
+export type UpdateOrganizationNameRequest = z.infer<typeof UpdateOrganizationNameRequest>;
 
 export const OrganizationRetentionPolicy = z
   .object({
@@ -127,6 +171,8 @@ export type OrganizationRetentionDeletionPreview = z.infer<
 
 export const CreateOrganizationInvitationRequest = z.object({
   email: z.string().email().max(320),
+  name: z.string().trim().min(1).max(120).optional(),
+  initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
   role: OrganizationMembershipRole.default("member"),
   expiresAt: z.string().datetime({ offset: true }),
   operationId: z.string().uuid(),

@@ -115,6 +115,51 @@ describe("managed browser profile cryptography", () => {
     }
   });
 
+  test.skipIf(process.platform !== "linux")(
+    "terminates the exact managed Linux browser left behind by daemon shutdown",
+    async () => {
+      const root = await mkdtemp("/tmp/og-linux-stop-");
+      const profileDirectory = join(root, "profile");
+      const runner = await AgentBrowserJsonRunner.create({
+        namespace: "og",
+        sessionName: "browser-stop",
+        socketDirectory: join(root, "socket"),
+        profileDirectory,
+        downloadDirectory: join(root, "downloads"),
+        screenshotDirectory: join(root, "screenshots"),
+        headed: true,
+        browserExecutablePath: process.execPath,
+        binary: {
+          path: process.execPath,
+          name: "agent-browser-linux-x64",
+          version: "0.33.2",
+          sha256: "fixture",
+        },
+      });
+      const browser = Bun.spawn(
+        [
+          process.execPath,
+          "-e",
+          "setInterval(() => {}, 60_000)",
+          `--user-data-dir=${profileDirectory}`,
+        ],
+        { stdin: "ignore", stdout: "ignore", stderr: "ignore" },
+      );
+      try {
+        expect(() => process.kill(browser.pid, 0)).not.toThrow();
+        await runner.terminate();
+        expect(await browser.exited).not.toBe(0);
+        expect(() => process.kill(browser.pid, 0)).toThrow();
+      } finally {
+        if (browser.exitCode === null) {
+          browser.kill("SIGKILL");
+          await browser.exited;
+        }
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.skipIf(process.platform === "win32")(
     "keeps proxy authority in the isolated daemon environment and out of argv",
     async () => {

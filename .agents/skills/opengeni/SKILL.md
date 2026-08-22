@@ -40,8 +40,8 @@ Then open the smallest source files that answer the question:
 - Core domain/access/billing helpers: `packages/core/src/` (`access/`, `domain/`, `billing/`, and `dependencies.ts`). These moved out of `apps/api`; API routes are HTTP adapters over `@opengeni/core`.
 - Public shapes: `packages/contracts/src/index.ts`, especially workspace, access, billing, usage, session, file, document, schedule, and MCP contracts.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
-- Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn.ts`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog).
+- Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
+- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/packs.md` and `docs/capabilities.md` (capability packs / MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`.
@@ -54,7 +54,7 @@ Then open the smallest source files that answer the question:
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
 - Documents/retrieval/knowledge memory: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`, and the `knowledge_memories` schema/helpers in `packages/db`.
 - GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`.
-- Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
+- Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
 - React hooks + styled components: `packages/react/src/` (hooks on the SDK, timeline projection, ChatComposer/MessageTimeline/SessionStatus/FleetTile, CSS-variable design tokens in `packages/react/styles/`) and `packages/react/README.md`; runnable harness under `packages/react/demo/`.
@@ -98,12 +98,13 @@ Keep these concepts straight while working:
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
 - **Worker activity**: side-effect boundary where the OpenAI Agents SDK actually runs. Treat model/tool/sandbox/cloud calls as side-effectful.
-- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. OpenGeni should describe the contract and selected backend, not pretend the backend is hard-coded. The shipped `SandboxBackend` enum is broad (currently eleven members), so never claim it is only Docker/Modal/local/none.
+- **Sandbox**: pluggable execution environment behind the OpenAI Agents SDK sandbox interface. OpenGeni should describe the contract and selected backend, not pretend the backend is hard-coded. The shipped `SandboxBackend` enum is broad (currently twelve members), so never claim it is only Docker/Modal/local/none.
 - **Connected Machine**: a user's own machine (enrolled through the `agent/` Rust agent) that acts as a first-class *primary* compute target, co-equal with the managed cloud sandbox — a sibling compute target, not a backend overlay bolted onto Modal. Its enum value is `selfhosted`. A machine-targeted turn establishes a `SelfhostedSession` directly and does NOT create, lease, or bill a cloud (Modal) box; the platform mints no GitHub token for it and never clones repos onto it (the machine uses its own git auth and already owns its filesystem). Runs execute at a per-session `workingDir` (default = the agent's launch dir), not a fixed `/workspace`. The whole feature is gated by `OPENGENI_SANDBOX_SELFHOSTED_ENABLED` (default off). See `docs/connected-machines.md` and `references/sandbox-configuration.md`.
 - **Resources**: external context mounted or made available to a run, commonly repositories and uploaded files.
 - **Tools**: currently MCP-first. Tool refs select configured MCP servers. Built-ins are defaults, not limits.
 - **Object storage**: stores uploaded bytes. Database stores metadata/object keys. Sandbox file access is normally via manifest/mount/injection based on current runtime code.
 - **Scheduled task**: persisted schedule plus agent config that dispatches one or more session turns through Temporal scheduling.
+- **Automation**: an authenticated external event accepted by a source and matched by an immutable trigger revision into one deduplicated logical run. Temporal dispatches an ordinary session; provider-specific review or incident features are adapters and Packs over this substrate.
 - **Knowledge memory**: reviewed workspace memory records stored separately from per-session conversation history. First-party docs MCP can search approved memories and propose new ones; approval/rejection lives in workspace API/UI review paths.
 
 ## Source Discovery Workflow
@@ -134,6 +135,7 @@ Before editing, identify which layer owns the behavior:
 - Sandbox resources: resource validation, manifest building, object storage, sandbox environment.
 - MCP tools: config parsing, runtime tool preparation, API MCP servers.
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
+- Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter or Pack layered above it.
 - UI: `apps/web` API helpers/types/components.
 
 For pull-request delivery, preserve immutable candidates across a moving base:

@@ -5,6 +5,7 @@ import {
   normalizeCompanyProfileStableKey,
   type CompanyProfileContent,
   type CompanyProfileEntry,
+  type CompanyProfileRevision,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   normalizeWorkspaceInstructionPolicyRoleKey,
   type WorkspaceInstructionPolicyKind,
@@ -298,10 +299,148 @@ function emptyCompanyProfile(): CompanyProfileContent {
   };
 }
 
-export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }) {
+export function CompanyProfileContentView({ profile }: { profile: CompanyProfileContent }) {
+  return (
+    <div className="grid gap-3 rounded-md border border-border bg-surface-2/30 p-3 text-xs leading-5 text-fg-muted">
+      {profile.identity ? (
+        <div>
+          <strong className="text-fg">Identity:</strong> {profile.identity}
+        </div>
+      ) : null}
+      {profile.mission ? (
+        <div>
+          <strong className="text-fg">Mission:</strong> {profile.mission}
+        </div>
+      ) : null}
+      {(["products", "customers", "goals", "constraints"] as const).map((field) =>
+        profile[field].length > 0 ? (
+          <div key={field}>
+            <strong className="text-fg">{humanize(field)}:</strong>
+            <ul className="mt-1 grid gap-0.5">
+              {profile[field].map((entry) => (
+                <li key={entry.key}>
+                  <span className="font-mono text-2xs text-fg-subtle">{entry.key}:</span>{" "}
+                  {entry.content}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null,
+      )}
+    </div>
+  );
+}
+
+/**
+ * One route-level company-profile inventory is shared by the pending-proposals
+ * card and the manual editor/history so an activation from either keeps the
+ * other's head and CAS values in sync.
+ */
+export type CompanyProfileInventoryHandle = Pick<
+  ReturnType<typeof useCompanyProfileInventory>,
+  "response" | "reload" | "loading" | "error"
+>;
+
+export function pendingCompanyProfileProposals(
+  response: CompanyProfileInventoryHandle["response"],
+): CompanyProfileRevision[] {
+  if (!response) return [];
+  const activated = new Set(
+    response.activationEvents.flatMap((event) => (event.newRevision ? [event.newRevision.id] : [])),
+  );
+  return response.revisions
+    .filter((revision) => revision.intent === "proposal" && !activated.has(revision.id))
+    .sort((left, right) => right.revision - left.revision);
+}
+
+export function CompanyProfilePendingProposals({
+  workspaceId,
+  canManage,
+  inventory,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+  inventory: Pick<CompanyProfileInventoryHandle, "response" | "reload">;
+}) {
+  const { client } = useAppContext();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pending = pendingCompanyProfileProposals(inventory.response);
+  if (pending.length === 0) return null;
+
+  const activate = async (revisionId: string): Promise<void> => {
+    if (!canManage || !inventory.response || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await client.activateCompanyProfileRevision(workspaceId, revisionId, {
+        operationId: crypto.randomUUID(),
+        expectedCurrentRevisionId: inventory.response.current?.revisionId ?? null,
+        expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
+        reason: "Activate reviewed company-profile proposal",
+      });
+    } catch (activationError) {
+      setError(
+        activationError instanceof Error ? activationError.message : String(activationError),
+      );
+    } finally {
+      // Reload even on failure so a COMPANY_PROFILE_CONFLICT re-syncs the
+      // shared head and CAS values before the next action.
+      await inventory.reload();
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <StateCard
+      title="Pending proposals"
+      description="Proposed company profiles waiting for review. Activating one replaces the active profile for every workspace in the organization."
+    >
+      <ul aria-label="Pending company profile proposals" className="grid gap-3">
+        {pending.map((revision) => (
+          <li
+            key={revision.id}
+            className="grid gap-2 rounded-md border border-border p-3"
+            data-revision-id={revision.id}
+          >
+            <div className="flex flex-col gap-2 text-xs sm:flex-row sm:items-center sm:justify-between">
+              <div className="text-fg-muted">
+                <span className="font-medium text-fg">r{revision.revision}</span> · Proposed{" "}
+                {formatDate(revision.createdAt)} · {humanize(revision.provenance.source)}
+              </div>
+              {canManage ? (
+                <button
+                  className="w-fit rounded-md bg-brand px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                  type="button"
+                  disabled={submitting}
+                  onClick={() => void activate(revision.id)}
+                >
+                  Activate
+                </button>
+              ) : (
+                <span className="text-fg-subtle">
+                  Only an organization owner or admin can activate this proposal.
+                </span>
+              )}
+            </div>
+            <CompanyProfileContentView profile={revision.profile} />
+          </li>
+        ))}
+      </ul>
+      {error ? <p className="mt-2 text-xs text-status-danger">{error}</p> : null}
+    </StateCard>
+  );
+}
+
+export function CompanyProfileInventory({
+  workspaceId,
+  inventory,
+}: {
+  workspaceId: string;
+  inventory: CompanyProfileInventoryHandle;
+}) {
   const context = useAppContext();
   const { client } = context;
-  const inventory = useCompanyProfileInventory(client, workspaceId);
   const workspaceGrant = context.accessContext.workspaceGrants.find(
     (grant) => grant.workspaceId === workspaceId,
   );
@@ -350,10 +489,10 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
         expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
         reason,
       });
-      await inventory.reload();
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError));
     } finally {
+      await inventory.reload();
       setSubmitting(false);
     }
   };
@@ -369,12 +508,12 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
         expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
         reason: "Activate reviewed company-profile proposal",
       });
-      await inventory.reload();
     } catch (activationError) {
       setError(
         activationError instanceof Error ? activationError.message : String(activationError),
       );
     } finally {
+      await inventory.reload();
       setSubmitting(false);
     }
   };
@@ -392,10 +531,10 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
         expectedActivationVersion: current.activationVersion,
         reason: "Restore a previously active company profile",
       });
-      await inventory.reload();
     } catch (rollbackError) {
       setError(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
     } finally {
+      await inventory.reload();
       setSubmitting(false);
     }
   };
@@ -429,26 +568,7 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
             <Metric label="History" value={inventory.response.revisions.length} />
           </div>
           {currentRevision ? (
-            <div className="grid gap-3 rounded-md border border-border bg-surface-2/30 p-3 text-xs leading-5 text-fg-muted">
-              {currentRevision.profile.identity ? (
-                <div>
-                  <strong className="text-fg">Identity:</strong> {currentRevision.profile.identity}
-                </div>
-              ) : null}
-              {currentRevision.profile.mission ? (
-                <div>
-                  <strong className="text-fg">Mission:</strong> {currentRevision.profile.mission}
-                </div>
-              ) : null}
-              {(["products", "customers", "goals", "constraints"] as const).map((field) =>
-                currentRevision.profile[field].length > 0 ? (
-                  <div key={field}>
-                    <strong className="text-fg">{humanize(field)}:</strong>{" "}
-                    {currentRevision.profile[field].map((entry) => entry.content).join(" · ")}
-                  </div>
-                ) : null,
-              )}
-            </div>
+            <CompanyProfileContentView profile={currentRevision.profile} />
           ) : (
             <EmptyState>No organization company profile is active.</EmptyState>
           )}
@@ -520,7 +640,8 @@ export function CompanyProfileInventory({ workspaceId }: { workspaceId: string }
             </form>
           ) : (
             <p className="text-xs text-fg-muted">
-              Editing and rollback require direct organization account-admin authority.
+              Only organization owners and admins can edit or activate the company profile. You can
+              still ask OpenGeni to draft a proposal above.
             </p>
           )}
 
@@ -1427,7 +1548,15 @@ export function WorkspaceStateRoute({
   workspaceId: string;
   view?: "company" | "instructions" | "preferences" | "learning";
 }) {
-  const { client } = useAppContext();
+  const context = useAppContext();
+  const { client } = context;
+  const workspaceGrant = context.accessContext.workspaceGrants.find(
+    (grant) => grant.workspaceId === workspaceId,
+  );
+  const canManageCompanyProfile = Boolean(
+    workspaceGrant?.accountId &&
+    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
+  );
   const [attemptInput, setAttemptInput] = useState("");
   const [attemptId, setAttemptId] = useState<string | undefined>();
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -1484,15 +1613,9 @@ export function WorkspaceStateRoute({
       : companyProfile.response?.current
         ? { label: "Configured" }
         : { label: "Not configured" };
-  const activatedProfileProposalIds = new Set(
-    companyProfile.response?.activationEvents.flatMap((event) =>
-      event.newRevision ? [event.newRevision.id] : [],
-    ) ?? [],
-  );
-  const pendingProfileProposalCount =
-    companyProfile.response?.revisions.filter(
-      (revision) => revision.intent === "proposal" && !activatedProfileProposalIds.has(revision.id),
-    ).length ?? 0;
+  const pendingProfileProposalCount = pendingCompanyProfileProposals(
+    companyProfile.response,
+  ).length;
   const profileProposalStatus = companyProfile.loading
     ? "loading"
     : companyProfile.error
@@ -1543,7 +1666,7 @@ export function WorkspaceStateRoute({
               : view === "preferences"
                 ? "Save reusable instructions agents can apply when relevant."
                 : view === "learning"
-                  ? "Choose how governed, source-backed changes are reviewed and applied."
+                  ? "Choose whether agents may turn what they learn into durable rules and preferences, and whether a human reviews first."
                   : "Knowledge, rules, guides, review, and learning - with scope and delivery kept explicit."
         }
         actions={
@@ -1582,12 +1705,17 @@ export function WorkspaceStateRoute({
             {view === "company" ? (
               <div className="grid gap-4">
                 <AgentBrainPrompt kind="company_profile" workspaceId={workspaceId} />
+                <CompanyProfilePendingProposals
+                  workspaceId={workspaceId}
+                  canManage={canManageCompanyProfile}
+                  inventory={companyProfile}
+                />
                 <details className="rounded-lg border border-border bg-surface">
                   <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
                     Edit manually and view history
                   </summary>
                   <div className="border-t border-border p-4">
-                    <CompanyProfileInventory workspaceId={workspaceId} />
+                    <CompanyProfileInventory workspaceId={workspaceId} inventory={companyProfile} />
                   </div>
                 </details>
               </div>

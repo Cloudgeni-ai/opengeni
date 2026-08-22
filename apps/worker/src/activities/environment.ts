@@ -19,6 +19,7 @@ import {
   type TurnInitiator,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
+import { personalGitHubRepositoryResources } from "@opengeni/core";
 import { mintSandboxCodemodeToken, type SandboxCodemodeAuthority } from "@opengeni/runtime/sandbox";
 import {
   loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
@@ -114,6 +115,7 @@ type RunGitCredentialOptions = {
   scope?: ConnectionScope;
   authority?: GitCredentialAuthority;
   gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
+  personalGitHubCredentials?: ConnectionCredentialsPort["gitCredentials"];
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
 
@@ -447,14 +449,16 @@ async function mintRunGitTokensWithIdentity(
         repositoryIds: selection.repositoryIds,
       });
     }
-    if (options?.gitCredentials && options.scope) {
+    const gitCredentials = credentialsForSelection(options, selection);
+    assertPersonalGitHubConsumerAvailable(selection, gitCredentials, options.scope);
+    if (gitCredentials && options.scope) {
       const request = gitCredentialsRequestForSelection(
         options.scope,
         requireGitCredentialAuthority(options),
         selection,
         "token",
       );
-      const minted: GitCredentials = await options.gitCredentials(request);
+      const minted: GitCredentials = await gitCredentials(request);
       // workspace-scope cross-check: assert the provider scoped the token to THIS run's workspace
       // before accepting the token for clone seeding.
       assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
@@ -470,9 +474,9 @@ async function mintRunGitTokensWithIdentity(
         ? validatedGitCredentialExpiry(selection.provider, minted.expiresAt)
         : undefined;
       if (minted.identity) {
-        identity = minted.identity;
+        identity = mergeGitIdentity(identity, minted.identity);
       } else if (selection.provider === "github") {
-        identity = githubAppBotIdentity(settings);
+        identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
       }
     } else if (selection.provider === "github" && selection.installationId > 0) {
       const minted = await createGitHubAppInstallationTokenWithExpiry(settings, {
@@ -483,7 +487,7 @@ async function mintRunGitTokensWithIdentity(
       tokenExpiresAt = minted.expiresAt
         ? validatedGitCredentialExpiry("github", minted.expiresAt)
         : undefined;
-      identity = githubAppBotIdentity(settings);
+      identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
     }
     if (token) {
       bindings.push({
@@ -648,23 +652,25 @@ async function resolveRunGitIdentityWithSelections(
 ): Promise<{ name: string; email: string } | null> {
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
-    if (options.gitCredentials && options.scope) {
+    const gitCredentials = credentialsForSelection(options, selection);
+    assertPersonalGitHubConsumerAvailable(selection, gitCredentials, options.scope);
+    if (gitCredentials && options.scope) {
       const request = gitCredentialsRequestForSelection(
         options.scope,
         requireGitCredentialAuthority(options),
         selection,
         "identity",
       );
-      const resolved: GitCredentials = await options.gitCredentials(request);
+      const resolved: GitCredentials = await gitCredentials(request);
       assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
       assertGitCredentialBindingEcho(selection, request, resolved);
       if (resolved.identity) {
-        identity = resolved.identity;
+        identity = mergeGitIdentity(identity, resolved.identity);
       } else if (selection.provider === "github") {
-        identity = githubAppBotIdentity(settings);
+        identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
       }
     } else if (selection.provider === "github" && selection.installationId > 0) {
-      identity = githubAppBotIdentity(settings);
+      identity = mergeGitIdentity(identity, githubAppBotIdentity(settings));
     }
   }
   return identity;
@@ -679,6 +685,7 @@ type GitCredentialSelection = {
   installationId: number;
   repositoryIds: number[];
   repositoryRefs: GitCredentialRepositoryRef[];
+  personalGitHub: boolean;
 };
 
 function gitCredentialsRequestForSelection(
@@ -783,6 +790,12 @@ export function gitHubTokenMintSelection(
 }
 
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
+  // The repository-authority phase admits and freezes this selection, while the
+  // personal Git broker owns immediately-before-use revalidation. Until that
+  // consumer is active, never let a generic host/App callback substitute a token.
+  const personalGitHubResources = new Set<ResourceRef>(
+    personalGitHubRepositoryResources(resources),
+  );
   const byBinding = new Map<string, GitCredentialSelection>();
   const remoteBindings = new Map<string, string>();
   const bindingProviders = new Map<string, GitCredentialProvider>();
@@ -790,6 +803,7 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
     if (resource.kind !== "repository") {
       continue;
     }
+    const personalGitHub = personalGitHubResources.has(resource);
     const provider = repositoryCredentialProvider(resource);
     if (!provider) {
       continue;
@@ -823,7 +837,13 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
       installationId: 0,
       repositoryIds: [],
       repositoryRefs: [],
+      personalGitHub,
     };
+    if (entry.personalGitHub !== personalGitHub) {
+      throw new Error(
+        `credential binding ${credentialBindingId} mixes personal and app GitHub repositories`,
+      );
+    }
     entry.explicitCredentialBinding ||= Boolean(resource.credentialBindingId);
     const ref = gitCredentialRepositoryRef(resource, provider);
     entry.repositoryRefs.push(ref);
@@ -858,6 +878,38 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
   return selections;
 }
 
+function credentialsForSelection(
+  options: RunGitCredentialOptions,
+  selection: GitCredentialSelection,
+): ConnectionCredentialsPort["gitCredentials"] | undefined {
+  return selection.personalGitHub ? options.personalGitHubCredentials : options.gitCredentials;
+}
+
+function assertPersonalGitHubConsumerAvailable(
+  selection: GitCredentialSelection,
+  resolver: ConnectionCredentialsPort["gitCredentials"] | undefined,
+  scope: ConnectionScope | undefined,
+): void {
+  if (selection.personalGitHub && (!resolver || !scope)) {
+    throw new Error("personal GitHub Git broker is unavailable for this managed sandbox turn");
+  }
+}
+
+function mergeGitIdentity(
+  current: { name: string; email: string } | null,
+  candidate: { name: string; email: string } | null,
+): { name: string; email: string } | null {
+  if (!candidate) return current;
+  if (
+    current &&
+    (current.name !== candidate.name ||
+      current.email.toLowerCase() !== candidate.email.toLowerCase())
+  ) {
+    throw new Error("repository resources require different Git commit identities");
+  }
+  return current ?? candidate;
+}
+
 function normalizedGitHost(uri: string): string {
   try {
     return new URL(uri).host.toLowerCase();
@@ -882,6 +934,7 @@ function gitCredentialRepositoryRef(
     ...(resource.access ? { access: resource.access } : {}),
     uri: resource.uri,
     ref: resource.ref,
+    ...(resource.expectedCommitSha ? { expectedCommitSha: resource.expectedCommitSha } : {}),
     ...(resource.repositoryId !== undefined
       ? { repositoryId: resource.repositoryId }
       : resource.githubRepositoryId !== undefined

@@ -53,10 +53,10 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
         </header>
 
         {loading && sessions.length === 0 ? (
-          <p className="px-1 py-6 text-sm text-fg-subtle">Loading workstreams…</p>
+          <p className="px-1 py-6 text-sm text-fg-subtle">Loading sessions…</p>
         ) : error && sessions.length === 0 ? (
           <div role="alert" className="px-1 py-6 text-sm text-fg-subtle">
-            Workstreams are unavailable.{" "}
+            Sessions are unavailable.{" "}
             <button
               type="button"
               className="underline hover:text-fg"
@@ -121,7 +121,7 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
                 <ChevronRightIcon className="size-3.5" />
                 Running fine without you
                 <span className="ml-auto font-mono text-2xs tabular-nums">
-                  {feed.healthy.workstreams} workstream{feed.healthy.workstreams === 1 ? "" : "s"} ·{" "}
+                  {feed.healthy.workstreams} session{feed.healthy.workstreams === 1 ? "" : "s"} ·{" "}
                   {feed.healthy.agents.toLocaleString()} agent{feed.healthy.agents === 1 ? "" : "s"}
                 </span>
               </Link>
@@ -131,14 +131,13 @@ export function PriorityRoute({ workspaceId }: { workspaceId: string }) {
               // active root page, so long-stalled workstreams past it are not
               // ranked here yet.
               <p role="status" className="px-3 pt-3 text-xs text-fg-subtle">
-                Ranked over the {sessions.length} most recently active workstreams. Older ones are
-                in{" "}
+                Ranked over the {sessions.length} most recently active sessions. Older ones are in{" "}
                 <Link
                   to="/workspaces/$workspaceId/sessions"
                   params={{ workspaceId }}
                   className="underline hover:text-fg-muted"
                 >
-                  Workstreams
+                  Sessions
                 </Link>
                 .
               </p>

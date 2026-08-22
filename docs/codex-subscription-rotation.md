@@ -2,7 +2,7 @@
 
 This is the canonical contract for selecting, leasing, refreshing, and failing
 over ChatGPT/Codex subscription credentials. The implementation sources are
-`apps/worker/src/activities/agent-turn.ts`,
+`apps/worker/src/activities/agent-turn/codex-capacity.ts`,
 `apps/worker/src/activities/codex-rotation.ts`, and the Codex accessors in
 `packages/db/src/index.ts`.
 

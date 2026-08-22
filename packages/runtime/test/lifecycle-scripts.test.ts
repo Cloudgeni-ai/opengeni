@@ -49,6 +49,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       githubInstallationId: 123,
       githubRepositoryId: 456,
     },
+    ref = resource.ref,
   ): string {
     const generated = repositoryCloneCommand([
       { ...resource, mountPath: resource.mountPath ?? "repos/test/repository" },
@@ -60,7 +61,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           !line.startsWith("start_repository_clone '") && line !== "wait_repository_clone_batch",
       )
       .join("\n");
-    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' ''`;
+    return `${withoutInvocations}\nclone_repository '${target}' '${uri}' '${ref}' '' '${resource.expectedCommitSha ?? ""}'`;
   }
 
   function setupScript(
@@ -89,7 +90,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       GIT_COMMITTER_EMAIL: "t@t",
     };
     execFileSync("git", ["-C", origin, "add", "."], { env: gitEnv });
-    execFileSync("git", ["-C", origin, "commit", "-m", "init"], { env: gitEnv });
+    execFileSync("git", ["-C", origin, "commit", "-m", "init"], {
+      env: gitEnv,
+    });
     // file:// partial clone (--filter=blob:none) needs the origin to allow it.
     execFileSync("git", ["-C", origin, "config", "uploadpack.allowfilter", "true"]);
     return origin;
@@ -109,7 +112,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       return { status: 0, output };
     } catch (error) {
       const e = error as { status?: number; stdout?: string; stderr?: string };
-      return { status: e.status ?? 1, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
+      return {
+        status: e.status ?? 1,
+        output: `${e.stdout ?? ""}${e.stderr ?? ""}`,
+      };
     }
   }
 
@@ -134,6 +140,44 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         },
       ]),
     ).toThrow("claimed by multiple credential bindings");
+  });
+
+  test("fails closed when a repository ref does not resolve to the expected immutable commit", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-exact-head-"));
+    try {
+      const origin = makeOrigin(root);
+      const actual = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      const target = join(root, "workspace", "repo");
+      const resource = {
+        kind: "repository" as const,
+        uri: "https://github.com/opengeni/exact-head-fixture.git",
+        ref: "main",
+        expectedCommitSha: "f".repeat(40),
+      };
+      const mismatch = runScript(cloneScriptWithTarget(target, `file://${origin}`, resource), {});
+      expect(mismatch.status).not.toBe(0);
+      expect(mismatch.output).toContain("resolved to an unexpected commit");
+      expect(existsSync(target)).toBe(false);
+
+      const matched = runScript(
+        cloneScriptWithTarget(target, `file://${origin}`, {
+          ...resource,
+          ref: actual,
+          expectedCommitSha: actual,
+        }),
+        {},
+      );
+      expect(matched.status).toBe(0);
+      expect(
+        execFileSync("git", ["-C", target, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+        }).trim(),
+      ).toBe(actual);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("keeps exact-path provider remotes distinct when one name ends in .git", () => {
@@ -436,12 +480,20 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           providerBindingCount: 1,
         },
       ];
+      const initialSeedPath = join(root, "broker-seed-one");
+      writeFileSync(initialSeedPath, "broker-bearer-one", { mode: 0o600 });
+      const initialRefresh = gitCredentialBindingTokenRefreshCommand(initialBindings, [
+        {
+          bindingHash: gitCredentialBindingHash(initialBindings[0]!.credentialBindingId),
+          path: initialSeedPath,
+        },
+      ]);
+      expect(initialRefresh).not.toContain("broker-bearer-one");
       expect(
-        runScript(
-          `${gitCredentialBindingTokenRefreshCommand(initialBindings)}\n${setupScript(resources, initialBindings)}`,
-          { HOME: home },
-        ).status,
+        runScript(`${initialRefresh}\n${setupScript(resources, initialBindings)}`, { HOME: home })
+          .status,
       ).toBe(0);
+      expect(existsSync(initialSeedPath)).toBe(false);
 
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
@@ -485,9 +537,17 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           token: "broker-bearer-two",
         },
       ];
-      expect(
-        runScript(gitCredentialBindingTokenRefreshCommand(renewedBindings), { HOME: home }).status,
-      ).toBe(0);
+      const renewedSeedPath = join(root, "broker-seed-two");
+      writeFileSync(renewedSeedPath, "broker-bearer-two", { mode: 0o600 });
+      const renewedRefresh = gitCredentialBindingTokenRefreshCommand(renewedBindings, [
+        {
+          bindingHash: gitCredentialBindingHash(renewedBindings[0]!.credentialBindingId),
+          path: renewedSeedPath,
+        },
+      ]);
+      expect(renewedRefresh).not.toContain("broker-bearer-two");
+      expect(runScript(renewedRefresh, { HOME: home }).status).toBe(0);
+      expect(existsSync(renewedSeedPath)).toBe(false);
       expect(fill()).toContain("password=broker-bearer-two");
       expect(
         execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
@@ -604,12 +664,19 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           },
         },
       ];
+      const brokerSeedPath = join(root, "mixed-broker-seed");
+      writeFileSync(brokerSeedPath, "broker-bearer", { mode: 0o600 });
+      const refresh = gitCredentialBindingTokenRefreshCommand(bindings, [
+        {
+          bindingHash: gitCredentialBindingHash(bindings[1]!.credentialBindingId),
+          path: brokerSeedPath,
+        },
+      ]);
+      expect(refresh).not.toContain("broker-bearer");
       expect(
-        runScript(
-          `${gitCredentialBindingTokenRefreshCommand(bindings)}\n${setupScript(resources, bindings)}`,
-          { HOME: home },
-        ).status,
+        runScript(`${refresh}\n${setupScript(resources, bindings)}`, { HOME: home }).status,
       ).toBe(0);
+      expect(existsSync(brokerSeedPath)).toBe(false);
 
       const fill = (host: string, path: string) =>
         execFileSync("git", ["credential", "fill"], {
@@ -1000,8 +1067,12 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       );
 
       rmSync(join(home, ".opengeni", "git-token"), { force: true });
-      rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), { force: true });
-      rmSync(join(home, ".opengeni", "git-credentials", "azure_devops-token"), { force: true });
+      rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), {
+        force: true,
+      });
+      rmSync(join(home, ".opengeni", "git-credentials", "azure_devops-token"), {
+        force: true,
+      });
       expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GH=unset\n");
       expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GL=unset\n");
       expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe("AZ=unset\n");
@@ -1064,6 +1135,103 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(
         existsSync(parent) ? readdirSync(parent).filter((f) => f.includes(".tmp.")) : [],
       ).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("clone script guards origin/HEAD behind the remote-tracking ref check and keeps fetch + checkout failure-gated", () => {
+    const command = repositoryCloneCommand([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/repo.git",
+        ref: "pull/1720/head",
+        mountPath: "repos/github.com/acme/repo",
+      },
+    ]);
+    const lines = command.split("\n");
+    const fetchIndex = lines.findIndex((line) =>
+      line.includes('git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"'),
+    );
+    const guardIndex = lines.findIndex((line) =>
+      line.includes('if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref"'),
+    );
+    const setHeadIndex = lines.findIndex((line) =>
+      line.includes('git -C "$tmp" remote set-head origin "$ref" >/dev/null || true'),
+    );
+    const checkoutIndex = lines.findIndex((line) =>
+      line.includes('if ! git -C "$tmp" checkout --detach FETCH_HEAD'),
+    );
+
+    expect(fetchIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeGreaterThan(fetchIndex);
+    expect(setHeadIndex).toBe(guardIndex + 1);
+    expect(lines[setHeadIndex + 1]).toBe("  fi");
+    expect(checkoutIndex).toBeGreaterThan(setHeadIndex);
+    // set-head never shares the failure gate with fetch or checkout, and an
+    // unexpected set-head failure after the guard cannot exit the set -e shell.
+    expect(lines[setHeadIndex].trim().endsWith("|| true")).toBe(true);
+    expect(lines[fetchIndex]).not.toContain("set-head");
+    expect(lines[checkoutIndex]).not.toContain("set-head");
+    expect(lines[setHeadIndex]).not.toContain("exit 1");
+    expect(
+      lines.filter((line) =>
+        line.includes('echo "Repository resource fetch failed for $target" >&2'),
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("clone by branch sets origin/HEAD; PR ref, tag, and commit SHA clone without origin/HEAD (previously set-head failed the clone)", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
+    try {
+      const origin = makeOrigin(root);
+      const sha = execFileSync("git", ["-C", origin, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      // GitHub-style PR ref outside refs/heads/: fetchable, never remote-tracked.
+      execFileSync("git", ["-C", origin, "update-ref", "refs/pull/1/head", sha]);
+      // Lightweight tag: fetched by short name, never under refs/remotes/origin/.
+      execFileSync("git", ["-C", origin, "tag", "v1.0", sha]);
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const env = { HOME: home };
+      const cases: { ref: string; expectOriginHead: boolean }[] = [
+        { ref: "main", expectOriginHead: true },
+        { ref: "pull/1/head", expectOriginHead: false },
+        { ref: "v1.0", expectOriginHead: false },
+        { ref: sha, expectOriginHead: false },
+      ];
+      for (const [index, { ref, expectOriginHead }] of cases.entries()) {
+        const target = join(root, "ws", "repos", "acme", `repo-${index}`);
+        const run = runScript(
+          cloneScriptWithTarget(target, `file://${origin}`, undefined, ref),
+          env,
+        );
+        expect({ ref, status: run.status, output: run.output }).toEqual({
+          ref,
+          status: 0,
+          output: expect.stringContaining(`Repository resource ready at ${target}`),
+        });
+        expect(existsSync(join(target, "README.md"))).toBe(true);
+        expect(
+          execFileSync("git", ["-C", target, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        ).toBe(sha);
+        const originHead = (() => {
+          try {
+            return execFileSync(
+              "git",
+              ["-C", target, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/HEAD"],
+              { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+            ).trim();
+          } catch {
+            return null;
+          }
+        })();
+        expect({ ref, originHead }).toEqual({ ref, originHead: expectOriginHead ? sha : null });
+        expect(
+          readdirSync(join(root, "ws", "repos", "acme")).filter((f) => f.includes(".tmp.")),
+        ).toEqual([]);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

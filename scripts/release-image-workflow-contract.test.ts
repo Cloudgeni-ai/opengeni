@@ -158,6 +158,42 @@ describe("release image workflow contract", () => {
     }
   });
 
+  test.each(["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"])(
+    "%s source stage installs from staged manifests before copying the tree",
+    async (path) => {
+      const [dockerfile, workload] = await Promise.all([
+        readFile(resolve(root, path), "utf8"),
+        readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8"),
+      ]);
+      const stageStart = dockerfile.indexOf("AS browserd-source-build");
+      const stageEnd = dockerfile.indexOf("\nFROM ", stageStart);
+      const stage = dockerfile.slice(stageStart, stageEnd);
+      const frozenInstall = stage.indexOf("bun install --frozen-lockfile");
+      const patchCopy = stage.indexOf("COPY patches patches");
+      const treeCopy = stage.indexOf("COPY . .");
+
+      expect(stageStart).toBeGreaterThan(-1);
+      expect(frozenInstall).toBeGreaterThan(-1);
+      expect(patchCopy).toBeGreaterThan(-1);
+      expect(patchCopy).toBeLessThan(frozenInstall);
+      expect(treeCopy).toBeGreaterThan(frozenInstall);
+      expect(stage.slice(frozenInstall - 120, frozenInstall)).toContain("--mount=type=cache,");
+
+      const staged = (source: string, end: number) =>
+        Array.from(
+          source.slice(0, end).matchAll(/^COPY (\S+\/package\.json) \S+\/package\.json$/gmu),
+          (match) => match[1]!,
+        ).sort();
+      const sandboxStaged = staged(stage, frozenInstall);
+      const workloadStaged = staged(
+        workload,
+        workload.indexOf("RUN bun install --frozen-lockfile"),
+      );
+      expect(sandboxStaged).toEqual(workloadStaged);
+      expect(sandboxStaged).toEqual([...(await workspaceManifestPaths()).values()].sort());
+    },
+  );
+
   test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {
     const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
 
@@ -188,6 +224,11 @@ describe("release image workflow contract", () => {
       expect(dockerfile).toContain(
         "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
       );
+      expect(dockerfile).toContain("ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6");
+      expect(dockerfile).toContain(
+        'az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"',
+      );
+      expect(dockerfile).not.toContain("az extension add --name azure-devops; \\");
     }
   });
 
@@ -987,6 +1028,20 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("gh release delete");
     expect(agentRelease).not.toContain("gh release create agent-latest");
     expect(agentRelease).not.toContain("releases/download/agent-latest");
+  });
+
+  test("linux agent release embeds a glibc browserd sidecar", async () => {
+    const agentRelease = await workflow("agent-release.yml");
+
+    expect(agentRelease).toContain("Build interaction helpers (Linux glibc)");
+    expect(agentRelease).toContain("bun_target=bun-linux-x64;");
+    expect(agentRelease).toContain("bun_target=bun-linux-arm64;");
+    expect(agentRelease).toContain("OPENGENI_BROWSERD_TARGET_MUSL=false");
+    expect(agentRelease).toContain("linux browserd must use the glibc dynamic linker");
+    expect(agentRelease).not.toContain("bun-linux-x64-musl");
+    expect(agentRelease).not.toContain("bun-linux-arm64-musl");
+    expect(agentRelease).not.toContain("OPENGENI_BROWSERD_TARGET_MUSL=true");
+    expect(agentRelease).not.toContain("Build interaction helpers (Linux musl)");
   });
 
   test("release-state parsing accepts a valid absent release without weakening type checks", async () => {

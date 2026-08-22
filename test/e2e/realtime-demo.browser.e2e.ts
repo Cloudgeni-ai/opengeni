@@ -100,7 +100,7 @@ describe("public realtime React demo browser acceptance", () => {
     expect(await primary.getAttribute("data-phase")).toBe("listening");
     await humanInput.getByRole("radio", { name: /Staging/ }).check();
     await capture(page, "04b-realtime-with-structured-question.png");
-    await humanInput.getByRole("button", { name: "Continue" }).click();
+    await humanInput.getByRole("button", { name: "Send answers" }).click();
     await existing.locator("[data-human-input-surface]").waitFor({ state: "detached" });
     expect(await primary.getAttribute("data-phase")).toBe("listening");
 
@@ -122,9 +122,13 @@ describe("public realtime React demo browser acceptance", () => {
 
     await openPicker(existing);
     const diagnostics = page.getByText("Realtime diagnostics", { exact: true });
-    await diagnostics.hover();
-    await page.getByText("controller", { exact: true }).last().waitFor();
-    expect(await page.getByText("active", { exact: true }).last().count()).toBe(1);
+    await diagnostics.focus();
+    await diagnostics.press("ArrowRight");
+    const diagnosticsMenu = page.locator('[data-slot="dropdown-menu-sub-content"]');
+    await diagnosticsMenu.waitFor();
+    const controllerRow = diagnosticsMenu.getByText("controller", { exact: true }).locator("..");
+    await controllerRow.waitFor();
+    expect(await controllerRow.getByText("active", { exact: true }).count()).toBe(1);
     await capture(page, "06-diagnostics-desktop.png");
     await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");

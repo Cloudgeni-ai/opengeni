@@ -479,6 +479,55 @@ function projectMonitoringContainer(
   };
 }
 
+const SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT = 12;
+
+function projectEffectiveToolPolicy(value: Session["effectiveToolPolicy"]): {
+  value: unknown;
+  fact: SessionDetailFieldFact;
+  details: string[];
+} {
+  if (!value) return projectMonitoringContainer(null, 16_000);
+  const sample = (ids: string[]) => ids.slice(0, SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT);
+  const sampled =
+    value.selectedIds.length > SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT ||
+    value.effectiveIds.length > SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT ||
+    value.mandatoryIds.length > SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT ||
+    value.lazyRouter.deferredIds.length > SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT ||
+    value.configuredIds.length > SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT ||
+    value.droppedIds.length > SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT;
+  const bounded = {
+    ...value,
+    selectedIds: sample(value.selectedIds),
+    effectiveIds: sample(value.effectiveIds),
+    mandatoryIds: sample(value.mandatoryIds),
+    lazyRouter: { ...value.lazyRouter, deferredIds: sample(value.lazyRouter.deferredIds) },
+    configuredIds: sample(value.configuredIds),
+    droppedIds: sample(value.droppedIds),
+    idsTruncated: value.idsTruncated || sampled,
+  };
+  const projected = projectMonitoringContainer(bounded, 16_000);
+  const sourceMeasurement = measureSessionEventJson(value);
+  return {
+    ...projected,
+    fact: {
+      ...projected.fact,
+      truncated:
+        sampled ||
+        projected.fact.truncated ||
+        sourceMeasurement.bytes === null ||
+        sourceMeasurement.bytes !== projected.fact.deliveredBytes,
+      originalBytes: sourceMeasurement.bytes,
+      ...(sourceMeasurement.bytes === null ? { measurementBounded: true } : {}),
+    },
+    details: sampled
+      ? [
+          `effectiveToolPolicy: ids sampled at ${SESSION_DETAIL_EFFECTIVE_TOOL_POLICY_ID_LIMIT} per set; counts remain exact`,
+          ...projected.details,
+        ]
+      : projected.details,
+  };
+}
+
 /** Purpose-built, flat, model-facing detail projection for `session_get`. */
 export function boundSessionDetailMcp(
   session: Session,
@@ -494,6 +543,7 @@ export function boundSessionDetailMcp(
   const tools = projectMonitoringContainer(session.tools, 4_000);
   const mcpServers = projectMonitoringContainer(session.mcpServers, 3_000);
   const permissions = projectMonitoringContainer(session.firstPartyMcpPermissions, 1_500);
+  const effectiveToolPolicy = projectEffectiveToolPolicy(session.effectiveToolPolicy);
   const control = projectMonitoringContainer(effectiveControl, 2_000);
   const fieldFacts: Record<string, SessionDetailFieldFact> = {
     title: title?.fact ?? {
@@ -512,6 +562,7 @@ export function boundSessionDetailMcp(
     tools: tools.fact,
     mcpServers: mcpServers.fact,
     firstPartyMcpPermissions: permissions.fact,
+    effectiveToolPolicy: effectiveToolPolicy.fact,
     effectiveControl: control.fact,
   };
   const details = [
@@ -520,6 +571,7 @@ export function boundSessionDetailMcp(
     ...tools.details,
     ...mcpServers.details,
     ...permissions.details,
+    ...effectiveToolPolicy.details,
     ...control.details,
   ].slice(0, 32);
   const result = {
@@ -545,6 +597,7 @@ export function boundSessionDetailMcp(
     rigId: session.rigId,
     rigVersionId: session.rigVersionId,
     firstPartyMcpPermissions: permissions.value,
+    effectiveToolPolicy: effectiveToolPolicy.value,
     mcpServers: mcpServers.value,
     parentSessionId: session.parentSessionId,
     createIdempotencyKey:
@@ -594,6 +647,7 @@ export function boundSessionDetailMcp(
     ["mcpServers", fieldFacts.mcpServers!],
     ["effectiveControl", fieldFacts.effectiveControl!],
     ["firstPartyMcpPermissions", fieldFacts.firstPartyMcpPermissions!],
+    ["effectiveToolPolicy", fieldFacts.effectiveToolPolicy!],
   ];
   for (const [field, fact] of fallbackContainers) {
     if (result.projection.bytes <= maxBytes) break;

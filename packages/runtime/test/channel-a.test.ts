@@ -717,6 +717,68 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     }
   });
 
+  test("fsList accepts confinement frames when the provider strips newlines", async () => {
+    const recordDelimiter = String.fromCharCode(0);
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => ({
+          stdout: framedConfinedOutput(
+            args.cmd,
+            `f\t12\t1.0\t644\t./modal-class-proof.txt${recordDelimiter}`,
+          ).replace("_OK__\n", "_OK__"),
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+
+    const list = await svc.fsList({ path: "", depth: 1, maxEntries: 10, includeHidden: true });
+    expect(list.root.children?.map((node) => node.path)).toEqual(["modal-class-proof.txt"]);
+  });
+
+  test("gitStatus accepts git chunk frames when the provider strips newlines", async () => {
+    const payload = Buffer.from("__OPENGENI_GIT_STATUS_REPO_V1__not-repo\0");
+    const digest = new Bun.CryptoHasher("sha256").update(payload).digest("hex");
+    const capture = [
+      `__OPENGENI_GIT_CHUNK_V1__\t0\t${payload.byteLength}\t${digest}\t0\t${payload.byteLength}`,
+      payload.toString("base64"),
+      "__OPENGENI_GIT_CHUNK_END_V1__",
+    ].join("");
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => ({
+          stdout: framedConfinedOutput(args.cmd, capture).replaceAll("\n", ""),
+          stderr: "",
+          exitCode: 0,
+        }),
+      },
+    });
+
+    const status = await svc.gitStatus({ path: "" });
+    expect(status.isRepo).toBe(false);
+    expect(status.files).toEqual([]);
+  });
+
+  test("fsList prefers a provider-native listDir for a depth-1 tree", async () => {
+    const commands: string[] = [];
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          commands.push(args.cmd);
+          throw new Error("exec should not run for a native depth-1 listing");
+        },
+        listDir: async () => [
+          { name: "modal-class-proof.txt", path: "modal-class-proof.txt", type: "file" },
+          { name: ".git", path: ".git", type: "dir" },
+        ],
+      },
+    });
+
+    const list = await svc.fsList({ path: "", depth: 1, maxEntries: 10, includeHidden: true });
+    expect(commands).toEqual([]);
+    expect(list.root.children?.map((node) => node.path)).toEqual([".git", "modal-class-proof.txt"]);
+  });
+
   test("fsList accepts a trusted success record after provider prelude output", async () => {
     let calls = 0;
     const svc = new SandboxChannelAService({

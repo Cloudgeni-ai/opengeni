@@ -93,6 +93,11 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     );
     expect(actions).toBeTruthy();
     expect(actions?.className).toContain("max-sm:flex-nowrap");
+    const controlsStart = mounted.container.querySelector(
+      '[data-testid="chat-model"]',
+    )?.parentElement;
+    expect(controlsStart?.className).toContain("flex-1");
+    expect(controlsStart?.className).toContain("min-w-0");
   });
 
   test("Enter queues while Cmd/Ctrl+Enter steers", async () => {

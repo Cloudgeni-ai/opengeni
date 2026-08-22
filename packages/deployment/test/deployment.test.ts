@@ -12,6 +12,7 @@ import {
   SANDBOX_REQUIRED_ENV,
   SANDBOX_LIFECYCLE_PASSTHROUGH_ENV,
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
+  WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
 } from "../src/index";
@@ -257,7 +258,11 @@ describe("deployment contract", () => {
   test("allows Modal with Azure Blob because runtime materializes file resources into the sandbox", () => {
     const contract = parseDeploymentContract({
       ...deploymentProfiles["azure-managed"],
-      sandbox: { backend: "modal", preparationProfiles: ["none"], envAllowlist: [] },
+      sandbox: {
+        backend: "modal",
+        preparationProfiles: ["none"],
+        envAllowlist: [],
+      },
     });
 
     expect(contract.sandbox.backend).toBe("modal");
@@ -416,6 +421,176 @@ describe("deployment contract", () => {
     expect(commands).not.toContain("opengeni-postgres-ca");
   });
 
+  test("plans pinned private OpenSandbox only when a Kubernetes deployment selects it", () => {
+    const contract = withSandboxBackend("opensandbox");
+    const plan = stackPlanFor(contract);
+    const dependency = plan.platformDependencies.find((entry) => entry.id === "opensandbox");
+
+    expect(dependency).toMatchObject({
+      lifecycle: "officialChart",
+      namespace: "opensandbox-system",
+      releaseName: "opensandbox",
+      chartName: "opensandbox-group/OpenSandbox@88004c989e334ffd7811acbe193cddcd9014f14e",
+      valuesFile: "deploy/stacks/official-opensandbox.values.yaml",
+      runtimeEnv: {
+        OPENGENI_OPENSANDBOX_BASE_URL:
+          "http://opensandbox-server.opensandbox-system.svc.cluster.local",
+      },
+    });
+    expect(dependency?.requiredSecretKeys).toEqual(["opensandbox-api-key/api-key"]);
+    expect(dependency?.installCommands.join("\n")).toContain("prepare-opensandbox-chart.sh");
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "--post-renderer scripts/operator/opensandbox-image-post-renderer.sh",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "create secret generic opensandbox-api-key",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "kubectl apply -f deploy/stacks/opensandbox-controller-metrics-service.yaml",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "opensandbox-batchsandbox-template.azure.yaml",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "ensure-opensandbox-secure-access-secret.sh",
+    );
+    expect(dependency?.installCommands.join("\n")).toContain(
+      "opensandbox-secure-access-runtime-config",
+    );
+    expect(dependency?.verifyCommands.join("\n")).toContain("opensandbox-ingress-gateway");
+    expect(dependency?.notes.join("\n")).toContain("signed endpoints");
+    expect(dependency?.verifyCommands.join("\n")).toContain("grep -qx ClusterIP");
+    expect(dependency?.verifyCommands.join("\n")).toContain(
+      "get svc opensandbox-controller-metrics",
+    );
+    expect(dependency?.destroyCommands.join("\n")).toContain(
+      "delete crd batchsandboxes.sandbox.opensandbox.io",
+    );
+
+    const artifacts = generateRuntimeArtifacts(
+      contract,
+      {
+        temporal_host: { value: "host:7233" },
+        object_storage_bucket: { value: "opengeni-files" },
+        object_storage_azure_connection_string: { value: "x", sensitive: true },
+        helm_set_values: { value: {} },
+      },
+      {
+        OPENGENI_OPENSANDBOX_API_KEY: "opensandbox-secret",
+        OPENGENI_OPENSANDBOX_IMAGE: `docker.io/opengeni/sandbox@sha256:${"a".repeat(64)}`,
+      },
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local",
+    );
+    expect(artifacts.missingEnvVars).not.toContain("OPENGENI_OPENSANDBOX_BASE_URL");
+  });
+
+  test("uses the generic OpenSandbox template and installs it from local Kubernetes profiles", () => {
+    for (const profileId of ["local-kubernetes", "single-node-kubernetes"] as const) {
+      const contract = parseDeploymentContract({
+        ...deploymentProfiles[profileId],
+        sandbox: {
+          backend: "opensandbox",
+          preparationProfiles: ["none"],
+          envAllowlist: [],
+        },
+      });
+      const plan = stackPlanFor(contract);
+      const dependency = plan.platformDependencies.find((entry) => entry.id === "opensandbox");
+      const installCommands = dependency?.installCommands.join("\n") ?? "";
+      const deployCommands = plan.deployCommands.join("\n");
+
+      expect(installCommands).toContain(
+        "kubectl apply -f deploy/stacks/opensandbox-batchsandbox-template.yaml",
+      );
+      expect(installCommands).not.toContain("opensandbox-batchsandbox-template.azure.yaml");
+      expect(deployCommands).toContain("prepare-opensandbox-chart.sh");
+      expect(deployCommands).toContain("OPENGENI_OPENSANDBOX_API_KEY");
+      expect(deployCommands).toContain(
+        "config.OPENGENI_OPENSANDBOX_BASE_URL=http://opensandbox-server.opensandbox-system.svc.cluster.local",
+      );
+      expect(plan.destroyCommands).not.toContain(
+        "kubectl delete namespace opengeni-platform --ignore-not-found",
+      );
+    }
+
+    const genericTemplate = readFileSync(
+      new URL("../../../deploy/stacks/opensandbox-batchsandbox-template.yaml", import.meta.url),
+      "utf8",
+    );
+    const azureTemplate = readFileSync(
+      new URL(
+        "../../../deploy/stacks/opensandbox-batchsandbox-template.azure.yaml",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    expect(genericTemplate).not.toContain("nodeSelector:");
+    expect(genericTemplate).not.toContain("tolerations:");
+    expect(azureTemplate).toContain("opengeni.ai/sandbox-pool: opensandbox");
+    expect(azureTemplate).toContain("opengeni.ai/sandbox");
+  });
+
+  test("disables upstream native-snapshot controller defaults for the pinned OpenSandbox set", () => {
+    const values = readFileSync(
+      new URL("../../../deploy/stacks/official-opensandbox.values.yaml", import.meta.url),
+      "utf8",
+    );
+    expect(values).toContain('imageCommitterImage: ""');
+    expect(values).toContain('containerdSocketPath: ""');
+    expect(values).toContain('commitJobTimeout: ""');
+    expect(values).toContain("sandbox_create_timeout_seconds = 900");
+    expect(values).toContain("metrics:");
+    expect(values).toContain("enabled: true");
+    expect(values).toContain("port: 8080");
+    expect(values).toContain("secure: false");
+    expect(values).not.toContain("sandbox-registry.cn-");
+  });
+
+  test("keeps the worker image target reachable by legacy remote Docker builders", () => {
+    const dockerfile = readFileSync(
+      new URL("../../../docker/opengeni.Dockerfile", import.meta.url),
+      "utf8",
+    );
+    expect(dockerfile.indexOf("FROM source-base AS worker")).toBeGreaterThan(-1);
+    expect(dockerfile.indexOf("FROM source-base AS worker")).toBeLessThan(
+      dockerfile.indexOf("FROM source-base AS artifact-runtime-base"),
+    );
+  });
+
+  test("prepares the declared non-root sandbox workspace in every runtime image", () => {
+    const dockerfile = readFileSync(
+      new URL("../../../docker/opengeni.Dockerfile", import.meta.url),
+      "utf8",
+    );
+    const workspaceSetup = "RUN install -d -o bun -g bun -m 0755 /workspace";
+
+    expect(dockerfile).toContain(workspaceSetup);
+    expect(dockerfile.indexOf(workspaceSetup)).toBeLessThan(
+      dockerfile.indexOf("FROM source-base AS worker"),
+    );
+  });
+
+  test("keeps OpenSandbox absent from default and non-Kubernetes stack plans", () => {
+    for (const profile of Object.values(deploymentProfiles)) {
+      if (profile.sandbox.backend === "opensandbox") continue;
+      expect(
+        stackPlanFor(profile).platformDependencies.some((entry) => entry.id === "opensandbox"),
+      ).toBe(false);
+    }
+
+    const nonKubernetes = parseDeploymentContract({
+      ...deploymentProfiles["local-compose"],
+      sandbox: {
+        backend: "opensandbox",
+        preparationProfiles: ["none"],
+        envAllowlist: [],
+      },
+    });
+    expect(stackPlanFor(nonKubernetes).platformDependencies).toEqual([]);
+  });
+
   test("does not plan cloud substrate for existing-service profiles", () => {
     const plan = stackPlanFor(deploymentProfiles["aws-existing-services"]);
 
@@ -565,6 +740,15 @@ describe("deployment contract", () => {
         OPENGENI_DELEGATION_SECRET: "delegation",
         OPENGENI_BETTER_AUTH_SECRET: "better-auth",
         OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: testEnvironmentsEncryptionKey,
+        OPENGENI_INTEGRATIONS_ENABLED: "true",
+        OPENGENI_INTEGRATIONS_STATE_SECRET: "integration-state",
+        OPENGENI_SLACK_CLIENT_ID: "slack-staging-client",
+        OPENGENI_SLACK_CLIENT_SECRET: "slack-staging-secret",
+        OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
+        OPENGENI_SLACK_COMMAND: "/opengeni-staging",
+        OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
+        OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
+        OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
         OPENGENI_RESEND_API_KEY: "resend",
         OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET: "state",
         OPENGENI_GITHUB_APP_ID: "1",
@@ -606,6 +790,19 @@ describe("deployment contract", () => {
       "OPENGENI_PUBLIC_BASE_URL=https://staging.app.opengeni.ai",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_ID=slack-staging-client");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_CLIENT_SECRET=slack-staging-secret");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID=github-personal-staging",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET=github-personal-secret",
+    );
     expect(artifacts.helmValuesYaml).toContain('tag: "release-1"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:api"');
     expect(artifacts.helmValuesYaml).toContain('digest: "sha256:worker"');
@@ -786,6 +983,29 @@ describe("deployment contract", () => {
       "OPENGENI_AZURE_OPENAI_BASE_URL=https://example.openai.azure.com/openai/v1/",
     );
     expect(artifacts.runtimeEnv).not.toContain("OPENGENI_AZURE_OPENAI_API_VERSION=");
+  });
+
+  test("requires separate personal GitHub OAuth secrets only when explicitly enabled", () => {
+    const contract = contractForProfile("azure-managed", "managed-saas-staging");
+    const disabled = requiredRuntimeEnvVars(contract, {
+      OPENGENI_OPENAI_PROVIDER: "openai",
+    });
+    expect(disabled).not.toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID");
+    expect(disabled).not.toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET");
+
+    const enabled = requiredRuntimeEnvVars(contract, {
+      OPENGENI_OPENAI_PROVIDER: "openai",
+      OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
+    });
+    expect(enabled).toEqual(
+      expect.arrayContaining([
+        "OPENGENI_INTEGRATIONS_ENABLED",
+        "OPENGENI_INTEGRATIONS_STATE_SECRET",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
+        "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
+      ]),
+    );
   });
 
   test("generates preview runtime artifacts with a restricted DB identity", () => {
@@ -996,6 +1216,9 @@ describe("deployment contract", () => {
         "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
       ]),
     );
+    expect(WORKSPACE_CONTROL_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS",
+    ]);
     expect(EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_BROWSERBASE_API_KEY",
       "OPENGENI_KERNEL_API_KEY",
@@ -1004,6 +1227,22 @@ describe("deployment contract", () => {
       "OPENGENI_KERNEL_BROWSER_STEALTH",
     ]);
     expect(SANDBOX_REQUIRED_ENV.daytona.required).toEqual(["OPENGENI_DAYTONA_API_KEY"]);
+    expect(SANDBOX_REQUIRED_ENV.opensandbox).toEqual({
+      required: [
+        "OPENGENI_OPENSANDBOX_BASE_URL",
+        "OPENGENI_OPENSANDBOX_API_KEY",
+        "OPENGENI_OPENSANDBOX_IMAGE",
+      ],
+      optional: [
+        "OPENGENI_OPENSANDBOX_TTL_SECONDS",
+        "OPENGENI_OPENSANDBOX_USE_SERVER_PROXY",
+        "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINTS",
+        "OPENGENI_OPENSANDBOX_SIGNED_ENDPOINT_TTL_SECONDS",
+        "OPENGENI_OPENSANDBOX_CHANNEL_B_PUBLIC_BASE_URL",
+        "OPENGENI_OPENSANDBOX_INTERACTION_FRAME_PROXY",
+        "OPENGENI_OPENSANDBOX_POOL_REF",
+      ],
+    });
     expect(SANDBOX_REQUIRED_ENV.docker.required).toEqual([]);
     expect(SANDBOX_REQUIRED_ENV.none.required).toEqual([]);
   });
@@ -1111,6 +1350,23 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_MODAL_IMAGE_REF=ghcr.io/opengeni/modal:latest",
     );
+  });
+
+  test("renders the workspace control lock budget only when configured", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS: "45000",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS=45000");
+    expect(configured.missingEnvVars).not.toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {

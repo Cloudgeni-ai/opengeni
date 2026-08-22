@@ -1,5 +1,9 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import {
+  createLocalMcpBridgeFromAdapters,
+  type LocalMcpBridgeAdapter,
+} from "@opengeni/capabilities";
+import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   collectSandboxEnvironment,
   configuredProviders,
@@ -83,13 +87,31 @@ import {
   lazyToolRuntimeForAgent,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
-import { GmailRestMcpServer, isOfficialGmailMcpConfig } from "./gmail-rest-mcp";
+import {
+  GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  type GmailRestMcpBridgeConfig,
+  type GmailRestMcpBridgeContext,
+} from "./gmail-rest-mcp";
+
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
   ConnectorAttachmentTransferError,
   projectConnectorAttachmentTransfers,
   type ConnectorAttachmentMaterializer,
 } from "./connector-attachments";
+import {
+  wrapAttemptToolDefinitions,
+  wrapAttemptToolExecute,
+  type SpillOversizedModelToolResult,
+} from "./tool-result-spill";
+export {
+  modelToolResultOverflowError,
+  projectAttemptToolResultForCaller,
+  spilledModelToolResult,
+  wrapAttemptToolDefinitions,
+  wrapAttemptToolExecute,
+  type SpillOversizedModelToolResult,
+} from "./tool-result-spill";
 export {
   CONNECTOR_ATTACHMENT_PROVIDER_RESULT_MAX_BYTES,
   CONNECTOR_ATTACHMENT_SANITIZED_RESULT_MAX_BYTES,
@@ -192,6 +214,7 @@ import {
   isRoutingMutationOutcomeUnknownError,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
+  setOpenSandboxApplyDiff,
   setSelfhostedApplyDiff,
   codemodeTokenFileFromEnvironment,
   withCodemodeTokenClient,
@@ -326,7 +349,10 @@ export {
 export {
   CodexSubscriptionUnavailableError,
   MultiProviderModelProvider,
+  OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
+  UNKNOWN_MODEL_FINISH_REASON_CODE,
+  UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
@@ -442,6 +468,9 @@ export type {
 setSelfhostedApplyDiff(
   applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string,
 );
+setOpenSandboxApplyDiff(
+  applyDiff as unknown as (input: string, diff: string, mode?: "default" | "create") => string,
+);
 
 export {
   elideSupersededViewImagePairs,
@@ -555,6 +584,10 @@ export type {
 
 ensureReadableStreamFrom();
 
+const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
+  GmailRestMcpBridgeConfig,
+  GmailRestMcpBridgeContext
+>[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -2115,7 +2148,7 @@ export function buildOpenGeniAgent(
       : agentTool({
           name: HUMAN_INPUT_TOOL_NAME,
           description:
-            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
+            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
           parameters: RequestHumanInputToolInput,
           needsApproval: true,
           inputGuardrails: [
@@ -2376,9 +2409,11 @@ export function buildOpenGeniAgent(
  * Codex and direct OpenAI/Azure use the SDK's native client tool_search. Their
  * exact MCP objects may finish materializing after the first request begins.
  * A remembered authorized name binds through resolveMissingFunctionTool after
- * that catalog is ready. Generic providers receive only stable ordinary
- * tool_search/tool_invoke schemas; a valid dispatcher call is renamed to the
- * real tool and bound by the same hook before approval and execution.
+ * that catalog is ready. Classification is origin, not transport: the same
+ * always-visible base set and eager MCP tools are in the first request on
+ * every path. Generic providers add stable ordinary tool_search/tool_invoke
+ * schemas; a valid dispatcher call is renamed to the real tool and bound by
+ * the same hook before approval and execution.
  */
 function maybeInstallLazyToolTransport(
   agent: Agent<any, any>,
@@ -3160,6 +3195,11 @@ export type PrepareToolsOptions = {
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
   /**
+   * Persist an oversized *model-visible* tool result as a workspace File and
+   * return the compact receipt. Codemode callers skip the 1 MiB cap entirely.
+   */
+  spillOversizedModelToolResult?: SpillOversizedModelToolResult;
+  /**
    * Private exact-byte connector attachment bridge. Source URLs are passed only
    * through this host callback and never included in the returned MCP result.
    */
@@ -3407,6 +3447,10 @@ export async function prepareAgentTools(
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
+  const attemptToolDefinitions = wrapAttemptToolDefinitions(
+    options.attemptToolDefinitions ?? [],
+    options.spillOversizedModelToolResult,
+  );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   const aggregateToolBudget = new McpAggregateToolListBudget();
@@ -3513,57 +3557,66 @@ export async function prepareAgentTools(
         // auth misses are still published as actionable state because the
         // workspace catalog explicitly told the user that the surface existed.
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
-        // Every official-Gmail-resource turn executes through OpenGeni's own
-        // REST bridge, never Google's Developer Preview MCP endpoint directly:
-        // the bridge is the sole Gmail path (see gmail-rest-mcp.ts).
-        const useGmailRestAdapter = isOfficialGmailMcpConfig(config.url, config.connectionRef);
-        const innerServer = useGmailRestAdapter
-          ? new GmailRestMcpServer({
-              workspaceId: options.workspaceId ?? "",
-              ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
-              serverId: config.id,
-              connectionRef: config.connectionRef!,
-              resolveCredential: async (request) =>
-                await resolveConnectionForRequest(
-                  options,
-                  request.serverId,
-                  request.connectionRef,
-                  request.destinationUrl,
-                  request.toolName,
-                  request.forceRefresh === true,
-                ),
-              onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
-              onResolvedConnectionId: (connectionId) =>
-                recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
-              fetchImpl: mcpFetchImpl,
-            })
-          : new MCPServerStreamableHttp({
-              url,
-              name: config.name ?? config.id,
-              cacheToolsList: config.cacheToolsList,
-              // The upstream transport logger receives raw thrown errors, whose
-              // messages may contain response bodies, URLs, headers, or echoed
-              // credentials. Keep its diagnostic surface structural only.
-              logger: mcpTransportLogger(config.id, {
-                // Codex Apps setup is a read-only initialize/tools-list handshake.
-                // A statusless transport failure is safe to retry, while auth
-                // responses remain non-retryable and publish their specific
-                // reconnect reason through codexAppsAuthFetch.
-                recoverySafeSetup: isCodexAppsMcpServer(config),
-              }),
-              // codex_apps returns connector tools with empty `outputSchema: {}` that the
-              // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
-              // sanitize the response on the wire before validation. The namespace Set
-              // also captures each tool's original connector namespace (P4 Part B.1).
-              fetch: fetchImpl,
-              ...(await mcpServerRequestInit(settings, config)),
-              ...(config.timeoutMs
-                ? {
-                    timeout: config.timeoutMs,
-                    clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
-                  }
-                : {}),
-            });
+        // First-party bridges are ordinary in-process MCP servers selected by
+        // adapter-owned matchers. Adding another provider extends this registry;
+        // generic transport/catalog code never branches on provider identity.
+        const bridge = createLocalMcpBridgeFromAdapters<
+          GmailRestMcpBridgeConfig,
+          GmailRestMcpBridgeContext
+        >(
+          BUILT_IN_MCP_BRIDGE_ADAPTERS,
+          {
+            url: config.url,
+            ...(config.connectionRef ? { connectionRef: config.connectionRef } : {}),
+          },
+          {
+            workspaceId: options.workspaceId ?? "",
+            ...(options.credentialSubjectId ? { subjectId: options.credentialSubjectId } : {}),
+            serverId: config.id,
+            resolveCredential: async (request) =>
+              await resolveConnectionForRequest(
+                options,
+                request.serverId,
+                request.connectionRef,
+                request.destinationUrl,
+                request.toolName,
+                request.forceRefresh === true,
+              ),
+            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onResolvedConnectionId: (connectionId) =>
+              recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
+            fetchImpl: mcpFetchImpl,
+          },
+        );
+        const innerServer =
+          bridge ??
+          new MCPServerStreamableHttp({
+            url,
+            name: config.name ?? config.id,
+            cacheToolsList: config.cacheToolsList,
+            // The upstream transport logger receives raw thrown errors, whose
+            // messages may contain response bodies, URLs, headers, or echoed
+            // credentials. Keep its diagnostic surface structural only.
+            logger: mcpTransportLogger(config.id, {
+              // Codex Apps setup is a read-only initialize/tools-list handshake.
+              // A statusless transport failure is safe to retry, while auth
+              // responses remain non-retryable and publish their specific
+              // reconnect reason through codexAppsAuthFetch.
+              recoverySafeSetup: isCodexAppsMcpServer(config),
+            }),
+            // codex_apps returns connector tools with empty `outputSchema: {}` that the
+            // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
+            // sanitize the response on the wire before validation. The namespace Set
+            // also captures each tool's original connector namespace (P4 Part B.1).
+            fetch: fetchImpl,
+            ...(await mcpServerRequestInit(settings, config)),
+            ...(config.timeoutMs
+              ? {
+                  timeout: config.timeoutMs,
+                  clientSessionTimeoutSeconds: Math.ceil(config.timeoutMs / 1000),
+                }
+              : {}),
+          });
         const server = new PrefixedMcpServer(
           innerServer,
           config.id,
@@ -3676,9 +3729,9 @@ export async function prepareAgentTools(
   warnBestEffortFailures(connectedEagerBestEffort);
   let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
   let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
-  let localToolServer: AttemptDefinitionMcpServer | null = options.attemptToolDefinitions?.length
+  let localToolServer: AttemptDefinitionMcpServer | null = attemptToolDefinitions.length
     ? new AttemptDefinitionMcpServer(
-        options.attemptToolDefinitions,
+        attemptToolDefinitions,
         aggregateToolBudget,
         options.subjectId ?? "worker:mcp-model",
       )
@@ -3689,7 +3742,7 @@ export async function prepareAgentTools(
       createAttemptToolEnvironment({
         scope: localScope,
         generation: options.attemptToolCatalogGeneration ?? 1,
-        definitions: [...(options.attemptToolDefinitions ?? [])],
+        definitions: [...attemptToolDefinitions],
         ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
       }),
     );
@@ -3898,18 +3951,21 @@ async function prepareAttemptToolEnvironment(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
-          execute: async (args, context) =>
-            await server.executeCatalogTool(
-              toolName,
-              args,
-              {
-                ...(context.transportMeta ?? {}),
-                opengeniOperationId: context.operationId,
-              },
-              {
-                ...(context.signal ? { signal: context.signal } : {}),
-              },
-            ),
+          execute: wrapAttemptToolExecute(
+            async (args, context) =>
+              await server.executeCatalogTool(
+                toolName,
+                args,
+                {
+                  ...(context.transportMeta ?? {}),
+                  opengeniOperationId: context.operationId,
+                },
+                {
+                  ...(context.signal ? { signal: context.signal } : {}),
+                },
+              ),
+            options.spillOversizedModelToolResult,
+          ),
         };
       });
     },
@@ -3917,7 +3973,13 @@ async function prepareAttemptToolEnvironment(
   const environment = createAttemptToolEnvironment({
     scope,
     generation: options.attemptToolCatalogGeneration ?? 1,
-    definitions: [...perServerDefinitions.flat(), ...(options.attemptToolDefinitions ?? [])],
+    definitions: [
+      ...perServerDefinitions.flat(),
+      ...wrapAttemptToolDefinitions(
+        options.attemptToolDefinitions ?? [],
+        options.spillOversizedModelToolResult,
+      ),
+    ],
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
   });
   const subjectId = options.subjectId ?? "worker:mcp-model";
@@ -5710,17 +5772,20 @@ export class PrefixedMcpServer implements MCPServer {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
     }
-    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
-      this.attemptToolEnvironment
-        ? this.attemptToolEnvironment.callModel({
-            modelName: toolName,
-            arguments: cleanArgs ?? {},
-            subjectId: this.attemptToolSubjectId,
-            ...(meta === undefined ? {} : { transportMeta: meta }),
-            ...(options?.signal ? { signal: options.signal } : {}),
-          })
-        : this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options),
-    );
+    return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) => {
+      if (this.attemptToolEnvironment) {
+        return await this.attemptToolEnvironment.callModel({
+          modelName: toolName,
+          arguments: cleanArgs ?? {},
+          subjectId: this.attemptToolSubjectId,
+          ...(meta === undefined ? {} : { transportMeta: meta }),
+          ...(options?.signal ? { signal: options.signal } : {}),
+        });
+      }
+      const result = await this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options);
+      assertMcpPayloadWithinBytes(result, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+      return result;
+    });
   }
 
   async executeCatalogTool(
@@ -5758,7 +5823,9 @@ export class PrefixedMcpServer implements MCPServer {
         operationId,
         connectionId,
         ...(this.connectorAttachmentAuthority?.expectedProvider
-          ? { expectedProvider: this.connectorAttachmentAuthority.expectedProvider }
+          ? {
+              expectedProvider: this.connectorAttachmentAuthority.expectedProvider,
+            }
           : {}),
         authorizeAndMaterialize: async (attachments) => {
           if (!operationId || !connectionId || !this.connectorAttachmentAuthority) {
@@ -5773,7 +5840,6 @@ export class PrefixedMcpServer implements MCPServer {
           });
         },
       });
-      assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       const result = AttemptToolResult.parse(output);
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
       return result;
@@ -5914,7 +5980,9 @@ export async function restoreInterruptedRunState(
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
     ...(lazyRuntime
-      ? { resolveMissingFunctionTool: createResolveMissingFunctionTool(lazyRuntime) }
+      ? {
+          resolveMissingFunctionTool: createResolveMissingFunctionTool(lazyRuntime),
+        }
       : {}),
   });
 }
@@ -6490,7 +6558,9 @@ export async function runAgentStream(
             ? { contextCompactionSignal: overrides.contextCompactionSignal }
             : {}),
           ...(overrides.contextCompactionRequested
-            ? { contextCompactionRequested: overrides.contextCompactionRequested }
+            ? {
+                contextCompactionRequested: overrides.contextCompactionRequested,
+              }
             : {}),
         }),
       ),
@@ -7633,9 +7703,8 @@ export type SandboxLifecycleHookContext = {
   // TOKEN-BROKER (B1): back-compat GitHub alias for gitTokenSeeds.github.
   gitTokenSeed?: string;
   // Provider tokens to seed into box token FILES before repository clone/setup
-  // runs. Threaded OFF-MANIFEST — they ride ONLY the setup exec command prefix,
-  // NEVER the box/agent manifest env (validateNoEnvironmentDelta must never see
-  // rotating values).
+  // runs. Direct tokens retain the off-manifest setup prefix; smart-Git broker
+  // bearers use the private editor/file ingress and never enter command text.
   gitTokenSeeds?: GitTokenSeeds;
   gitCredentialBindings?: GitCredentialBindingSeed[];
   codemodeTokenSeed?: string;
@@ -8013,6 +8082,7 @@ export function repositoryUsesSandboxClone(
   }
   return (
     settings.sandboxBackend === "modal" ||
+    Boolean(resource.expectedCommitSha) ||
     Boolean(resource.githubInstallationId && resource.githubRepositoryId) ||
     Boolean(resource.provider)
   );
@@ -8036,10 +8106,71 @@ function gitBindingSeedEnv(binding: GitCredentialBindingSeed): string {
   return `OPENGENI_GIT_BINDING_${gitCredentialBindingHash(binding.credentialBindingId).toUpperCase()}_TOKEN_SEED`;
 }
 
+type StagedGitCredentialBindingSeed = {
+  bindingHash: string;
+  path: string;
+};
+
 function gitCredentialBindingSeedExportPrefix(bindings: GitCredentialBindingSeed[]): string {
   return bindings
+    .filter((binding) => binding.transport?.kind !== "http_broker")
     .map((binding) => `export ${gitBindingSeedEnv(binding)}=${shellQuote(binding.token)}`)
     .join("\n");
+}
+
+async function stageGitHttpBrokerBindingSeeds(
+  session: GitCredentialTokenWriterSession,
+  bindings: GitCredentialBindingSeed[],
+  runAs?: string,
+): Promise<{
+  editor: ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>> | null;
+  staged: StagedGitCredentialBindingSeed[];
+}> {
+  const brokered = bindings.filter((binding) => binding.transport?.kind === "http_broker");
+  if (brokered.length === 0) return { editor: null, staged: [] };
+  const editor = session.createEditor?.(runAs);
+  if (!editor) {
+    throw new Error("Sandbox does not support private Git broker credential delivery");
+  }
+  const staged: StagedGitCredentialBindingSeed[] = [];
+  const cleanupEligible: StagedGitCredentialBindingSeed[] = [];
+  try {
+    for (const binding of brokered) {
+      const bindingHash = gitCredentialBindingHash(binding.credentialBindingId);
+      const path = `/workspace/.opengeni/git-broker-seeds/${randomUUID()}`;
+      const candidate = { bindingHash, path };
+      const diff = binding.token
+        .split("\n")
+        .map((line) => `+${line}`)
+        .join("\n");
+      // A routed editor write can take effect remotely and still reject if its
+      // response is lost. Register the random path for best-effort cleanup
+      // before awaiting, but expose it to the token command only after success.
+      cleanupEligible.push(candidate);
+      await editor.createFile({ type: "create_file", path, diff });
+      staged.push(candidate);
+    }
+    return { editor, staged };
+  } catch {
+    await cleanupStagedGitCredentialSeeds(editor, cleanupEligible);
+    throw new Error("Sandbox could not receive the Git broker credential");
+  }
+}
+
+async function cleanupStagedGitCredentialSeeds(
+  editor: NonNullable<ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>>>,
+  staged: StagedGitCredentialBindingSeed[],
+): Promise<void> {
+  await Promise.all(
+    staged.map(async ({ path }) => {
+      try {
+        await editor.deleteFile({ type: "delete_file", path });
+      } catch {
+        // Cleanup is best effort. The staged path is random, excluded from
+        // workspace capture, and the broker bearer expires within five minutes.
+      }
+    }),
+  );
 }
 
 function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
@@ -8352,13 +8483,24 @@ function gitAskpassHostProviderCaseLines(
   ];
 }
 
-function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed[] = []): string[] {
+function gitCredentialTokenWriterCommandLines(
+  bindings: GitCredentialBindingSeed[] = [],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+): string[] {
+  const stagedByBindingHash = new Map(
+    stagedSeeds.map((seed) => [seed.bindingHash, seed.path] as const),
+  );
   const bindingWrites = bindings.flatMap((binding) => {
     const hash = gitCredentialBindingHash(binding.credentialBindingId);
     const seedEnv = gitBindingSeedEnv(binding);
     const count = Math.max(1, binding.providerBindingCount ?? 1);
     const provider = binding.provider;
-    const lines = [`write_git_binding_token ${shellQuote(hash)} "\${${seedEnv}:-}"`];
+    const stagedPath = stagedByBindingHash.get(hash);
+    const lines = [
+      stagedPath
+        ? `write_git_binding_token_file ${shellQuote(hash)} ${shellQuote(stagedPath)}`
+        : `write_git_binding_token ${shellQuote(hash)} "\${${seedEnv}:-}"`,
+    ];
     if (count === 1 && binding.transport?.kind !== "http_broker") {
       lines.push(`write_git_provider_token ${shellQuote(provider)} "\${${seedEnv}:-}"`);
     } else {
@@ -8387,6 +8529,17 @@ function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed
     '  mkdir -p "$credential_dir"',
     '  token_file="$credential_dir/$binding_hash-token"',
     '  printf \'%s\' "$token" > "$token_file.tmp.$$"',
+    '  mv -f "$token_file.tmp.$$" "$token_file"',
+    "}",
+    "write_git_binding_token_file() {",
+    '  binding_hash="$1"',
+    '  seed_file="$2"',
+    '  [ -f "$seed_file" ] && [ ! -L "$seed_file" ] || return 73',
+    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  mkdir -p "$credential_dir"',
+    '  token_file="$credential_dir/$binding_hash-token"',
+    '  command cat -- "$seed_file" > "$token_file.tmp.$$"',
+    '  rm -f -- "$seed_file"',
     '  mv -f "$token_file.tmp.$$" "$token_file"',
     "}",
     "remove_git_provider_token() {",
@@ -8442,6 +8595,7 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
   bindings: GitCredentialBindingSeed[] = [],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
 ): string[] {
   const brokerRoutes = runtimeGitHttpBrokerRouteDescriptors(resources, bindings);
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources, brokerRoutes);
@@ -8519,7 +8673,7 @@ function gitCredentialHelperCommandLines(
     .filter(([, counts]) => counts.brokered > 0 && counts.direct === 0)
     .map(([provider]) => provider);
   return [
-    ...gitCredentialTokenWriterCommandLines(bindings),
+    ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
     ...gitCredentialBindingInventoryCommandLines(resources, bindings),
     // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
     // runs. Renewal updates only token files and deliberately leaves these
@@ -8755,15 +8909,16 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
 
 export function gitCredentialBindingTokenRefreshCommand(
   bindings: GitCredentialBindingSeed[],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
 ): string {
   const seedPrefix = gitCredentialBindingSeedExportPrefix(bindings);
-  if (!seedPrefix) return "";
+  if (!seedPrefix && stagedSeeds.length === 0) return "";
   return [
     "set +x",
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
-    ...gitCredentialTokenWriterCommandLines(bindings),
+    ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
   ].join("\n");
 }
 
@@ -8800,24 +8955,30 @@ export async function refreshGitCredentialBindingTokenFiles(
     commandRunner?: SandboxLifecycleCommandRunner;
   } = {},
 ): Promise<void> {
-  const command = gitCredentialBindingTokenRefreshCommand(bindings);
-  if (!command) return;
-  const args = {
-    cmd: command,
-    workdir: "/workspace",
-    ...(options.runAs ? { runAs: options.runAs } : {}),
-    yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-    maxOutputTokens: 4_000,
-  };
-  assertSandboxCommandSucceeded(
-    await runSandboxLifecycleCommand(session, args, options.commandRunner),
-    "Git credential binding refresh",
-  );
+  const { editor, staged } = await stageGitHttpBrokerBindingSeeds(session, bindings, options.runAs);
+  try {
+    const command = gitCredentialBindingTokenRefreshCommand(bindings, staged);
+    if (!command) return;
+    const args = {
+      cmd: command,
+      workdir: "/workspace",
+      ...(options.runAs ? { runAs: options.runAs } : {}),
+      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+      maxOutputTokens: 4_000,
+    };
+    assertSandboxCommandSucceeded(
+      await runSandboxLifecycleCommand(session, args, options.commandRunner),
+      "Git credential binding refresh",
+    );
+  } finally {
+    if (editor) await cleanupStagedGitCredentialSeeds(editor, staged);
+  }
 }
 
 export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
+  stagedSeeds: StagedGitCredentialBindingSeed[] = [],
 ): string {
   const cloneConcurrency = 4;
   assertUniqueResourceMountPaths(resources);
@@ -8841,12 +9002,13 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
-    ...gitCredentialHelperCommandLines(resources, bindings),
+    ...gitCredentialHelperCommandLines(resources, bindings, stagedSeeds),
     "clone_repository() {",
     '  target="$1"',
     '  uri="$2"',
     '  ref="$3"',
     '  subpath="$4"',
+    '  expected_commit="${5:-}"',
     '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
     // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
     // proof of a completed materialization: an interrupted clone (worker crash /
@@ -8856,8 +9018,11 @@ export function repositoryCloneCommand(
     // the mount path before the repo exists). Subpath extracts are not git repos —
     // for those the plain non-empty check stands (no stronger signal available).
     '    if [ -n "$subpath" ] || git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-    '      echo "Repository resource already present at $target"',
-    "      return 0",
+    '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+    '        echo "Repository resource already present at $target"',
+    "        return 0",
+    "      fi",
+    '      echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
     "    fi",
     '    echo "Re-materializing partial repository resource at $target" >&2',
     '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
@@ -8867,9 +9032,27 @@ export function repositoryCloneCommand(
     '  rm -rf "$tmp"',
     // Fetch failures must not leak the pid-suffixed tmp clone beside the mount
     // (set -eu would exit before any cleanup).
-    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref" && git -C "$tmp" remote set-head origin "$ref" && git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; }; then',
+    '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
     '    rm -rf "$tmp"',
     '    echo "Repository resource fetch failed for $target" >&2',
+    "    exit 1",
+    "  fi",
+    // origin/HEAD is best-effort: workspace capture diffs the branch against it
+    // when present and already treats a missing origin/HEAD as additive. `git
+    // remote set-head` only accepts a branch that the fetch materialized under
+    // refs/remotes/origin/, so a PR ref (pull/N/head), a tag, or a commit SHA
+    // must not turn a successful fetch into a failed clone.
+    '  if git -C "$tmp" rev-parse --verify --quiet "refs/remotes/origin/$ref" >/dev/null; then',
+    '    git -C "$tmp" remote set-head origin "$ref" >/dev/null || true',
+    "  fi",
+    '  if ! git -C "$tmp" checkout --detach FETCH_HEAD >/dev/null; then',
+    '    rm -rf "$tmp"',
+    '    echo "Repository resource fetch failed for $target" >&2',
+    "    exit 1",
+    "  fi",
+    '  if [ -n "$expected_commit" ] && [ "$(git -C "$tmp" rev-parse HEAD)" != "$expected_commit" ]; then',
+    '    echo "Repository resource resolved to an unexpected commit for $target" >&2',
+    '    rm -rf "$tmp"',
     "    exit 1",
     "  fi",
     '  if [ -n "$subpath" ]; then',
@@ -8894,7 +9077,7 @@ export function repositoryCloneCommand(
     // accept it; a non-empty non-repo survivor here is a mount point the manifest
     // re-filled — install into it by content copy instead of rename.
     '    if [ -e "$target" ]; then',
-    '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+    '      if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
     '        rm -rf "$tmp"',
     '        echo "Repository resource already present at $target"',
     "        return 0",
@@ -8939,6 +9122,7 @@ export function repositoryCloneCommand(
         shellQuote(resource.uri),
         shellQuote(resource.ref),
         shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
+        shellQuote(resource.expectedCommitSha ?? ""),
       ].join(" "),
     );
     if ((index + 1) % cloneConcurrency === 0 || index === resources.length - 1) {
@@ -9413,27 +9597,36 @@ export async function runRepositoryCloneHook(
     type: "sandbox.operation.started",
     payload,
   });
+  let stagedBrokerSeeds: Awaited<ReturnType<typeof stageGitHttpBrokerBindingSeeds>> = {
+    editor: null,
+    staged: [],
+  };
   try {
-    // TOKEN-BROKER (B1): thread run-scoped provider tokens PER-EXEC, never on
-    // the manifest. The SDK's ExecCommandArgs has no `environment` field (exec
-    // inherits the box's manifest env), so we can't hand seeds through an exec
-    // option — and we MUST NOT put them on the manifest (validateNoEnvironmentDelta
-    // would see rotating values). We inline ephemeral `export` prefixes on THIS
-    // exec's command text only. The clone command writes them to provider token
-    // FILES before fetch/CLI use. Absent seeds -> no prefix; helper wrappers still
-    // install and passthrough cleanly.
+    // Direct provider tokens retain the established off-manifest per-exec seed.
+    // Smart-Git broker bearers take a stricter path: stage opaque bytes through
+    // the sandbox editor, then let a token-free command atomically move them into
+    // the stable binding file. No broker bearer enters command text or argv.
     const gitTokenSeeds = {
       ...(context.gitTokenSeeds ?? {}),
       ...(context.gitTokenSeed ? { github: context.gitTokenSeed } : {}),
     } satisfies GitTokenSeeds;
     const gitCredentialBindings = context.gitCredentialBindings ?? [];
+    stagedBrokerSeeds = await stageGitHttpBrokerBindingSeeds(
+      session,
+      gitCredentialBindings,
+      context.runAs,
+    );
     const seedPrefix = [
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
     ]
       .filter(Boolean)
       .join("\n");
-    const cloneCommand = repositoryCloneCommand(resources, gitCredentialBindings);
+    const cloneCommand = repositoryCloneCommand(
+      resources,
+      gitCredentialBindings,
+      stagedBrokerSeeds.staged,
+    );
     const command = seedPrefix ? `set +x\n${seedPrefix}\n${cloneCommand}` : cloneCommand;
     const result = await runSandboxLifecycleCommand(
       session,
@@ -9460,6 +9653,10 @@ export async function runRepositoryCloneHook(
       },
     });
     throw error;
+  } finally {
+    if (stagedBrokerSeeds.editor) {
+      await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
+    }
   }
 }
 

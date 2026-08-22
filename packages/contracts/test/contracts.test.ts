@@ -3,6 +3,8 @@ import {
   AddDocumentRequest,
   assertUniqueResourceMountPaths,
   approvalIdentifier,
+  CreateBillingPortalRequest,
+  CreateBillingPortalResponse,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
@@ -87,6 +89,7 @@ import {
   readTurnExecutionPolicyV1,
   resourceMountPath,
   resourceMountPathCollisionKey,
+  sandboxShellPath,
   turnExecutionPolicyAuditMetadata,
   TurnExecutionPolicyV1,
   UpdateScheduledTaskRequest,
@@ -98,6 +101,18 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  test("validates Stripe billing portal sessions", () => {
+    const accountId = "00000000-0000-4000-8000-000000000001";
+    expect(CreateBillingPortalRequest.parse({ accountId })).toEqual({
+      accountId,
+    });
+    expect(
+      CreateBillingPortalResponse.parse({
+        portalSessionId: "bps_123",
+        url: "https://billing.stripe.com/p/session/test",
+      }).url,
+    ).toBe("https://billing.stripe.com/p/session/test");
+  });
   test("keeps model context contribution summaries content-free and uniquely keyed", () => {
     const valid = {
       source: "workspace_instruction_policy",
@@ -619,6 +634,11 @@ describe("contracts", () => {
     expect(payload.skills).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+    expect(payload.visibility).toBe("workspace");
+    expect(
+      CreateSessionRequest.parse({ initialMessage: "private work", visibility: "private" })
+        .visibility,
+    ).toBe("private");
   });
 
   test("normalizes immutable session policy roles without accepting membership-shaped paths", () => {
@@ -836,6 +856,19 @@ describe("contracts", () => {
         mountPath: "inputs/current",
       }),
     ).toBe("inputs/current");
+  });
+
+  test("projects virtual /workspace paths to cwd-relative shell paths", () => {
+    expect(sandboxShellPath("/workspace")).toBe(".");
+    expect(sandboxShellPath("/workspace/.opengeni/files/file-1/report.pdf")).toBe(
+      ".opengeni/files/file-1/report.pdf",
+    );
+    expect(sandboxShellPath("/workspace/generated-images/out.png")).toBe(
+      "generated-images/out.png",
+    );
+    expect(sandboxShellPath(".opengeni/connector-attachments/gmail/ab/file.pdf")).toBe(
+      ".opengeni/connector-attachments/gmail/ab/file.pdf",
+    );
   });
 
   test("rejects non-portable and traversal mount paths", () => {
@@ -1382,6 +1415,29 @@ describe("contracts", () => {
       api: "responses",
     });
     expect(without.shortLabel).toBeUndefined();
+  });
+
+  test("keeps externally metered client models compatible without widening closed enums", () => {
+    const model = ClientModel.parse({
+      id: "opencode/x-preview-f-free",
+      label: "OpenCode Ox Alpha",
+      provider: "opencode-zen",
+      providerLabel: "OpenCode Zen",
+      api: "chat",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+    });
+    expect(model.source).toBeUndefined();
+    expect(model.credentialSource).toBeUndefined();
+    expect(
+      ModelCredentialSourceV1.safeParse({ kind: "deployment", mechanism: "none" }).success,
+    ).toBe(false);
+    expect(
+      TurnExecutionPolicyV1.safeParse({
+        ...turnExecutionPolicy,
+        credentialSource: { kind: "deployment", mechanism: "none" },
+        billing: { upstreamPayer: "deployment", metering: "external" },
+      }).success,
+    ).toBe(true);
   });
 
   test("accepts additive normalized model definitions and authenticated availability", () => {

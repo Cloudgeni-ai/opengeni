@@ -5,6 +5,11 @@ import type { EventLogger } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
+  OPENSANDBOX_BATCHSANDBOX_PHASES,
+  OPENSANDBOX_WORKLOAD_POD_CONDITIONS,
+  type OpenSandboxKubernetesInventory,
+} from "./opensandbox-kubernetes-inventory";
+import {
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   modelUsageTokenCountOrNull,
   type RuntimeMetricsHooks,
@@ -115,6 +120,34 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_sandbox_warming_timeouts_total",
         help: "Total sandbox warming timeouts.",
         labels: { backend, stage },
+      });
+    },
+    onSandboxProviderApiThrottle: ({ backend, operation }) => {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_provider_api_throttles_total",
+        help: "Total sandbox provider API throttle responses.",
+        labels: { backend, operation },
+      });
+    },
+    onSandboxTtlRenewal: ({ backend, outcome }) => {
+      observability.incrementCounter({
+        name: "opengeni_sandbox_ttl_renewals_total",
+        help: "Total renewable sandbox provider TTL refresh attempts.",
+        labels: { backend, outcome },
+      });
+    },
+    onOpenSandboxSignedEndpoint: ({ outcome, port }) => {
+      observability.incrementCounter({
+        name: "opengeni_opensandbox_signed_endpoint_total",
+        help: "OpenSandbox signed Channel B mint and host-fetch outcomes.",
+        labels: { outcome, port: String(port) },
+      });
+    },
+    onWorkspaceArchiveObject: ({ outcome, backend }) => {
+      observability.incrementCounter({
+        name: "opengeni_workspace_archive_object_total",
+        help: "Workspace archive object-storage put/delete outcomes.",
+        labels: { outcome, backend },
       });
     },
     onMcpToolCall: ({ outcome, durationSeconds }) => {
@@ -657,12 +690,45 @@ export function recordSandboxLeaseGauges(
   }
 }
 
+export function recordOpenSandboxKubernetesInventoryGauges(
+  observability: Observability,
+  inventory: OpenSandboxKubernetesInventory,
+): void {
+  for (const phase of OPENSANDBOX_BATCHSANDBOX_PHASES) {
+    observability.setGauge({
+      name: "opengeni_opensandbox_batchsandboxes",
+      help: "Current OpenSandbox BatchSandboxes by bounded lifecycle phase.",
+      labels: { phase },
+      value: inventory.batchSandboxPhases[phase],
+    });
+  }
+  for (const condition of OPENSANDBOX_WORKLOAD_POD_CONDITIONS) {
+    observability.setGauge({
+      name: "opengeni_opensandbox_workload_pods",
+      help: "Current OpenSandbox workload Pods by bounded operational condition.",
+      labels: { condition },
+      value: inventory.workloadPodConditions[condition],
+    });
+  }
+  observability.setGauge({
+    name: "opengeni_opensandbox_cleanup_stuck",
+    help: "Current OpenSandbox BatchSandboxes deleting past the cleanup threshold with finalizers.",
+    value: inventory.cleanupStuck,
+  });
+  observability.setGauge({
+    name: "opengeni_opensandbox_expiration_overdue",
+    help: "Current OpenSandbox BatchSandboxes still present past the provider-expiry threshold.",
+    value: inventory.expirationOverdue,
+  });
+}
+
 export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "leases",
   "checkpoint_artifacts",
   "rotation_backlog",
   "retained_processes",
   "expired_drains",
+  "opensandbox_kubernetes",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =

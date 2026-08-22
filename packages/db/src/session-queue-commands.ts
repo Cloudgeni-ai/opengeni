@@ -3,6 +3,7 @@ import {
   XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
   McpPersonalConnectionDelegations,
+  PersonalResourceAttachmentSummary,
   TimelineAnnotations,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
@@ -25,6 +26,7 @@ import {
   type ToolRef,
   type TurnExecutionPolicyV1,
   type TimelineAnnotation,
+  type PersonalResourceAttachmentIntent,
 } from "@opengeni/contracts";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { setSubjectRlsContext, type Database, type SessionActivityDatabase } from "./database";
@@ -42,6 +44,7 @@ import {
   evaluateSessionControl,
   lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
+  lockWorkspaceInferenceControlForAdmission,
   registerInternalUpdateWakeInTransaction,
   reserveSessionCommandReceipt,
   registerSessionWorkflowWakeInTransaction,
@@ -66,6 +69,7 @@ import {
 } from "./turn-initiator";
 import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
+import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -78,7 +82,8 @@ export type QueueCommandConflictCode =
   | "PROMPT_CHANGED"
   | "DRAFT_CHANGED"
   | "DRAFT_NOT_EMPTY"
-  | "EDIT_SOURCE_CHANGED";
+  | "EDIT_SOURCE_CHANGED"
+  | "ONCE_ATTACHMENT_IMMUTABLE";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -188,6 +193,9 @@ function mapSubmittedPromptTurn(row: typeof schema.sessionTurns.$inferSelect): S
     ),
     initiatorContext: row.initiatorContext ?? {},
     personalConnections,
+    personalResources: row.personalResourceAttachmentSummary
+      ? PersonalResourceAttachmentSummary.parse(row.personalResourceAttachmentSummary)
+      : null,
     cancelledBy: row.cancelledBy,
     cancelReason: row.cancelReason,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
@@ -705,9 +713,18 @@ export async function saveComposerDraftInTransaction(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: LatencyMode;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<ComposerDraftRow> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -768,9 +785,18 @@ export async function moveQueuedTurnInTransaction(
     expectedQueueVersion: number;
     actor: SessionCommandActor;
     operationKey: string;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<QueueCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -904,9 +930,18 @@ export async function deleteSessionQueueItemInTransaction(
     actor: SessionCommandActor;
     operationKey: string;
     reason?: string | null;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<QueueCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -1037,9 +1072,18 @@ export async function editQueuedTurnInTransaction(
     replaceDraft: boolean;
     actor: SessionCommandActor;
     operationKey: string;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<EditQueueCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -1109,6 +1153,17 @@ export async function editQueuedTurnInTransaction(
       turnVersion: turn.version,
       draftRevision,
     });
+  }
+  if (turn.personalResourceAttachmentSummary?.mode === "once") {
+    throw new QueueCommandConflictError(
+      "ONCE_ATTACHMENT_IMMUTABLE",
+      "A queued prompt with a once personal-resource attachment cannot be edited into new work",
+      {
+        queueVersion: session.queueVersion,
+        turnVersion: turn.version,
+        draftRevision,
+      },
+    );
   }
   const nextDraftRevision = draftRevision + 1;
   const draftValues = {
@@ -1217,9 +1272,18 @@ export async function steerQueuedTurnInTransaction(
     controlEtag?: string | null;
     actor: SessionCommandActor;
     operationKey: string;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<SteerQueueCommandResult> {
-  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const admission = await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
+  const workspaceControl = admission.control;
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -1284,6 +1348,7 @@ export async function steerQueuedTurnInTransaction(
         : input.actor.subjectId,
     reason: "human_steer",
     observedControlEtag: input.controlEtag ?? null,
+    admission,
   });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   const rows = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
@@ -1474,14 +1539,27 @@ export async function submitHumanPromptInTransaction(
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
     personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+    personalResourceAttachment?: PersonalResourceAttachmentIntent;
     mcpCredentialUpdates?: Array<{
       id: string;
       headersEncrypted: Record<string, string>;
     }>;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
-  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  // Send/Steer mutate the control row only when they auto-resume a paused
+  // branch. Hold the prefix shared otherwise so concurrent admission on the
+  // workspace is not serialized and genuine mutators are not starved.
+  const admission = await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
+  const workspaceControl = admission.control;
   if (input.actor.type === "human") {
     await setSubjectRlsContext(db, input.actor.subjectId);
     await assertActiveManagedHumanOrganizationMembership(db, {
@@ -1515,6 +1593,7 @@ export async function submitHumanPromptInTransaction(
     messagePresentation: input.messagePresentation ?? null,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
+    personalResourceAttachment: input.personalResourceAttachment ?? null,
     ...(input.actor.type === "service"
       ? {
           serviceInitiator: {
@@ -1623,6 +1702,7 @@ export async function submitHumanPromptInTransaction(
           ? "human_steer"
           : "human_send",
     observedControlEtag: input.controlEtag ?? null,
+    admission,
   });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   if (session.status === "cancelled") {
@@ -1775,12 +1855,11 @@ export async function submitHumanPromptInTransaction(
   if (
     (input.personalConnectionDelegations ?? []).some(
       (delegation) => delegation.userDelegation !== undefined,
-    )
+    ) ||
+    input.personalResourceAttachment !== undefined
   ) {
     if (!acceptedInitiatingHumanSubjectId) {
-      throw new SessionControlInvariantError(
-        "Activated connection authority requires an exact causal human",
-      );
+      throw new SessionControlInvariantError("Personal authority requires an exact causal human");
     }
     await db.execute(
       sql`select set_config(
@@ -1883,6 +1962,49 @@ export async function submitHumanPromptInTransaction(
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
   let committedTurn = turn;
+  const personalResourceExpectedAuthorityEpoch =
+    input.personalResourceAttachment?.expectedAuthorityEpoch;
+  let acceptedPersonalResources: Awaited<
+    ReturnType<typeof acceptTurnPersonalResourceAttachmentInTransaction>
+  > | null = null;
+  if (input.personalResourceAttachment) {
+    if (personalResourceExpectedAuthorityEpoch === undefined) {
+      throw new SessionControlInvariantError(
+        "Personal-resource attachment requires an expected authority epoch",
+      );
+    }
+    acceptedPersonalResources = await acceptTurnPersonalResourceAttachmentInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId,
+      subjectId: acceptedInitiatingHumanSubjectId!,
+      intent: {
+        ...input.personalResourceAttachment,
+        expectedAuthorityEpoch: personalResourceExpectedAuthorityEpoch,
+      },
+    });
+  }
+  if (acceptedPersonalResources) {
+    committedTurn = {
+      ...turn,
+      personalResourceAttachmentSummary: acceptedPersonalResources.summary,
+      personalResourceProtocolVersion: 1,
+    };
+    eventValues.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId,
+      sequence: ++sequence,
+      type: "session.personal_resources.attached",
+      payload: {
+        turnId,
+        ...acceptedPersonalResources.summary,
+      },
+      occurredAt: now,
+    });
+  }
   eventValues.push({
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -2188,9 +2310,18 @@ export async function sendAgentMessageInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     text: string;
+    /**
+     * Bound the workspace control prefix wait (request-scoped API callers pass
+     * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
+     */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
-  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  const workspaceControl = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", {
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -2403,9 +2534,17 @@ export async function steerAgentSessionInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     instruction: string;
+    /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
+    controlLockTimeoutMs?: number;
   },
 ): Promise<AgentInternalUpdateCommandResult> {
-  await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  const admission = await lockWorkspaceInferenceControlForAdmission(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    ...(input.controlLockTimeoutMs !== undefined
+      ? { lockTimeoutMs: input.controlLockTimeoutMs }
+      : {}),
+  });
   await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -2470,6 +2609,7 @@ export async function steerAgentSessionInTransaction(
     sessionId: input.targetSessionId,
     actor: `attempt:${input.actor.attemptId}`,
     reason: "agent_steer",
+    admission,
   });
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
   if (session.status === "cancelled") {

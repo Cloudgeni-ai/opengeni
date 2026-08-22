@@ -7,19 +7,21 @@ import {
 } from "./composer-launch";
 
 describe("parseComposerLaunchSearch", () => {
-  test("accepts model, effort, latency, and realtime", () => {
+  test("accepts model, effort, latency, realtime, and a folder", () => {
     expect(
       parseComposerLaunchSearch({
         model: " codex/gpt-5.6-sol ",
         effort: "xhigh",
         latency: "fast",
         realtime: "opengeni-gateway/openai/gpt-realtime-2.1",
+        channelId: "00000000-0000-4000-8000-0000000000a1",
       }),
     ).toEqual({
       model: "codex/gpt-5.6-sol",
       effort: "xhigh",
       latency: "fast",
       realtime: "opengeni-gateway/openai/gpt-realtime-2.1",
+      channelId: "00000000-0000-4000-8000-0000000000a1",
     });
   });
 
@@ -31,6 +33,7 @@ describe("parseComposerLaunchSearch", () => {
         latency: "turbo",
         realtime: "not-a-realtime-model",
         other: "x",
+        channelId: "not-a-folder-id",
       }),
     ).toEqual({});
   });

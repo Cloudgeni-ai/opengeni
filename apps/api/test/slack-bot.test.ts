@@ -78,6 +78,7 @@ beforeAll(async () => {
     integrationsStateSecret: "slack-state-secret-for-tests",
     slackClientId: "slack-client-id",
     slackClientSecret: "slack-client-secret",
+    slackSigningSecret: "slack-signing-secret",
   }) as Settings;
 }, 180_000);
 
@@ -941,9 +942,9 @@ describe("OpenGeni Slack bot credential verification", () => {
   });
 });
 
-function app(slackFetch: typeof globalThis.fetch) {
+function app(slackFetch: typeof globalThis.fetch, routeSettings: Settings = settings) {
   return createApp({
-    settings,
+    settings: routeSettings,
     db: client.db,
     bus: {} as never,
     workflowClient: {} as never,
@@ -1163,6 +1164,35 @@ describe("OpenGeni Slack bot connection", () => {
     );
 
     expect(denied.status).toBe(403);
+    expect(slack.calls).toEqual([]);
+  });
+
+  test("refuses workspace-bot installation when inbound Slack signatures cannot be verified", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const slack = fakeSlack();
+    const response = await app(slack.fetch, {
+      ...settings,
+      slackSigningSecret: undefined,
+    } as Settings).request(
+      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(workspace, "subject-a", [
+            "connections:read",
+            "connections:write",
+          ]),
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { status: 503, code: "upstream_unavailable", retryable: true },
+    });
     expect(slack.calls).toEqual([]);
   });
 

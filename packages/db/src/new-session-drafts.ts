@@ -1,5 +1,6 @@
 import type {
   NewSessionDraftOptions,
+  NewSessionSelectionHistory,
   LatencyMode,
   ReasoningEffort,
   RepositoryResourceRef,
@@ -10,6 +11,10 @@ import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import * as schema from "./schema";
+import {
+  accountIdInRlsScope,
+  subjectHasLiveWorkspaceAuthorityInScope,
+} from "./workspace-authority";
 
 export type NewSessionDraftRow = typeof schema.newSessionDrafts.$inferSelect;
 
@@ -53,13 +58,54 @@ export class NewSessionDraftAccessError extends Error {
 type StoredNewSessionDraftOptions = NewSessionDraftOptions & {
   /** JSONB-only compatibility marker; deliberately not part of public options. */
   toolsProvided?: boolean;
+  /** Successful-create preference state, separate from transient draft edits. */
+  selectionHistory?: NewSessionSelectionHistory;
 };
+
+const REMEMBERED_WORKING_DIR_MAX_LENGTH = 4096;
 
 function storedOptions(
   options: NewSessionDraftOptions,
   toolsProvided: boolean,
+  selectionHistory: NewSessionSelectionHistory = { projects: [] },
 ): StoredNewSessionDraftOptions {
-  return { ...options, toolsProvided };
+  return { ...options, toolsProvided, selectionHistory };
+}
+
+export function newSessionSelectionHistory(row: NewSessionDraftRow): NewSessionSelectionHistory {
+  const raw = (row.sessionOptions as StoredNewSessionDraftOptions).selectionHistory;
+  if (!raw || !Array.isArray(raw.projects)) return { projects: [] };
+  return {
+    projects: raw.projects.slice(0, 50).flatMap((project) => {
+      if (!project || (project.channelId !== null && typeof project.channelId !== "string")) {
+        return [];
+      }
+      return [
+        {
+          channelId: project.channelId,
+          targetSandboxId:
+            typeof project.targetSandboxId === "string" ? project.targetSandboxId : null,
+          machines: Array.isArray(project.machines)
+            ? project.machines.slice(0, 20).flatMap((machine) =>
+                machine && typeof machine.sandboxId === "string"
+                  ? [
+                      {
+                        sandboxId: machine.sandboxId,
+                        workingDir:
+                          typeof machine.workingDir === "string" &&
+                          machine.workingDir.length > 0 &&
+                          machine.workingDir.length <= REMEMBERED_WORKING_DIR_MAX_LENGTH
+                            ? machine.workingDir
+                            : null,
+                      },
+                    ]
+                  : [],
+              )
+            : [],
+        },
+      ];
+    }),
+  };
 }
 
 export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
@@ -75,6 +121,7 @@ export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
 export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessionDraftOptions {
   const options = { ...(row.sessionOptions as StoredNewSessionDraftOptions) };
   delete options.toolsProvided;
+  delete options.selectionHistory;
   return options;
 }
 
@@ -113,6 +160,12 @@ export async function saveNewSessionDraftInTransaction(
     options: NewSessionDraftOptions;
     /** API-key and delegated service subjects have no workspace-membership row. */
     requireWorkspaceMembership?: boolean;
+    /**
+     * May this caller use the owner-only managed personal-workspace exception?
+     * See `PersonalWorkspaceOwnerException` in `@opengeni/db`. Absent means the
+     * historical bare-membership fence, unchanged.
+     */
+    personalWorkspaceOwnerException?: boolean;
   },
 ): Promise<NewSessionDraftRow> {
   if (input.requireWorkspaceMembership !== false) {
@@ -131,10 +184,36 @@ export async function saveNewSessionDraftInTransaction(
       )
       .for("key share")
       .limit(1);
-    if (!membership) throw new NewSessionDraftAccessError();
+    // The owner of a managed personal workspace never has a membership row there
+    // (migration 0219 raises on one), so the bare probe above would 403 the
+    // composer inside the one workspace they always belong to. Ask the canonical
+    // resolver instead of re-deriving that rule — it runs on this same
+    // transaction handle, and there is no membership row for removeWorkspaceMember()
+    // to delete in a personal workspace, so nothing is lost by taking no
+    // `FOR KEY SHARE` on this path.
+    if (
+      !membership &&
+      !(
+        input.personalWorkspaceOwnerException === true &&
+        (await subjectHasLiveWorkspaceAuthorityInScope(db, {
+          // Scope-derived, NOT `input.accountId`: the applied RLS GUC is the
+          // tenant this transaction actually runs under, so an authority
+          // decision never reads a caller-supplied account. Matches
+          // listSessionsForSubject and setSessionPin.
+          accountId: await accountIdInRlsScope(db),
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+        }))
+      )
+    ) {
+      throw new NewSessionDraftAccessError();
+    }
   }
   await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
-  const current = await getNewSessionDraftInTransaction(db, { ...input, lock: true });
+  const current = await getNewSessionDraftInTransaction(db, {
+    ...input,
+    lock: true,
+  });
   const currentRevision = current?.revision ?? 0;
   if (currentRevision !== input.expectedRevision) {
     throw new NewSessionDraftConflictError(currentRevision);
@@ -154,7 +233,11 @@ export async function saveNewSessionDraftInTransaction(
     latencyMode: input.latencyMode,
     // Keep the explicit/omitted policy in the existing JSONB extension point;
     // adding a column here would turn a client preference into a migration.
-    sessionOptions: storedOptions(input.options, input.toolsProvided),
+    sessionOptions: storedOptions(
+      input.options,
+      input.toolsProvided,
+      current ? newSessionSelectionHistory(current) : { projects: [] },
+    ),
     updatedAt: new Date(),
   };
   if (current) {
@@ -178,7 +261,10 @@ export async function saveNewSessionDraftInTransaction(
     })
     .returning();
   if (inserted) return inserted;
-  const raced = await getNewSessionDraftInTransaction(db, { ...input, lock: true });
+  const raced = await getNewSessionDraftInTransaction(db, {
+    ...input,
+    lock: true,
+  });
   throw new NewSessionDraftConflictError(raced?.revision ?? 0);
 }
 
@@ -200,25 +286,74 @@ function safeRepositoryResource(resource: RepositoryResourceRef): RepositoryReso
   };
 }
 
-function safeWorkingDir(value: unknown, targetSandboxId: string | undefined): string | undefined {
-  if (!targetSandboxId || typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  // Only a workspace-root-relative path is safe to remember. Absolute host
-  // paths and traversal would leak or unexpectedly target a different machine
-  // location after the user changes machines.
-  if (
-    !trimmed ||
-    trimmed === "." ||
-    trimmed === ".." ||
-    trimmed.includes("\u0000") ||
-    trimmed.startsWith("/") ||
-    trimmed.startsWith("\\") ||
-    /^[A-Za-z]:[\\/]/.test(trimmed) ||
-    trimmed.split(/[\\/]+/).some((part) => part === "..")
-  ) {
-    return undefined;
+export type AcceptedNewSessionSelection = {
+  channelId: string | null;
+  targetSandboxId: string | null;
+  workingDir: string | null;
+};
+
+export function rememberNewSessionSelection(
+  history: NewSessionSelectionHistory,
+  selection: AcceptedNewSessionSelection,
+): NewSessionSelectionHistory {
+  const existingProject = history.projects.find(
+    (project) => project.channelId === selection.channelId,
+  );
+  let machines = existingProject?.machines ?? [];
+  if (selection.targetSandboxId) {
+    machines = [
+      {
+        sandboxId: selection.targetSandboxId,
+        workingDir:
+          selection.workingDir && selection.workingDir.length <= REMEMBERED_WORKING_DIR_MAX_LENGTH
+            ? selection.workingDir
+            : null,
+      },
+      ...machines.filter((machine) => machine.sandboxId !== selection.targetSandboxId),
+    ].slice(0, 20);
   }
-  return trimmed;
+  return {
+    projects: [
+      {
+        channelId: selection.channelId,
+        targetSandboxId: selection.targetSandboxId,
+        machines,
+      },
+      ...history.projects.filter((project) => project.channelId !== selection.channelId),
+    ].slice(0, 50),
+  };
+}
+
+/**
+ * Record a successful create without consuming the editable draft. Realtime
+ * session creation uses this path because it must preserve the actor's pending
+ * text/files for a later ordinary session. The hidden preference update shares
+ * the draft identity lock with saves, and deliberately leaves its OCC revision
+ * unchanged because no browser-editable field changed.
+ */
+export async function rememberNewSessionSelectionInTransaction(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    acceptedSelection: AcceptedNewSessionSelection;
+  },
+): Promise<boolean> {
+  await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
+  const current = await getNewSessionDraftInTransaction(db, { ...input, lock: true });
+  if (!current) return false;
+  const [updated] = await db
+    .update(schema.newSessionDrafts)
+    .set({
+      sessionOptions: storedOptions(
+        publicNewSessionDraftOptions(current),
+        newSessionDraftToolsProvided(current),
+        rememberNewSessionSelection(newSessionSelectionHistory(current), input.acceptedSelection),
+      ),
+    })
+    .where(eq(schema.newSessionDrafts.id, current.id))
+    .returning({ id: schema.newSessionDrafts.id });
+  return Boolean(updated);
 }
 
 /**
@@ -235,6 +370,7 @@ export async function seedNewSessionDraftInTransaction(
     subjectId: string;
     expectedRevision: number;
     expectedSnapshot?: NewSessionDraftSnapshot;
+    acceptedSelection?: AcceptedNewSessionSelection;
   },
 ): Promise<boolean> {
   await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
@@ -277,8 +413,8 @@ export async function seedNewSessionDraftInTransaction(
   const safeOptions: NewSessionDraftOptions = {
     ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
     ...(targetSandboxId ? { targetSandboxId } : {}),
-    ...(safeWorkingDir(options.workingDir, targetSandboxId)
-      ? { workingDir: safeWorkingDir(options.workingDir, targetSandboxId) }
+    ...(targetSandboxId && typeof options.workingDir === "string"
+      ? { workingDir: options.workingDir }
       : {}),
     ...(options.variableSetId ? { variableSetId: options.variableSetId } : {}),
     ...(options.rigId ? { rigId: options.rigId } : {}),
@@ -301,7 +437,16 @@ export async function seedNewSessionDraftInTransaction(
       model: current.model,
       reasoningEffort: current.reasoningEffort,
       latencyMode: current.latencyMode,
-      sessionOptions: storedOptions(safeOptions, newSessionDraftToolsProvided(current)),
+      sessionOptions: storedOptions(
+        safeOptions,
+        newSessionDraftToolsProvided(current),
+        input.acceptedSelection
+          ? rememberNewSessionSelection(
+              newSessionSelectionHistory(current),
+              input.acceptedSelection,
+            )
+          : newSessionSelectionHistory(current),
+      ),
       updatedAt: new Date(),
     })
     .where(

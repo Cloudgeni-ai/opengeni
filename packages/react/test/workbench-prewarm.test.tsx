@@ -1282,8 +1282,18 @@ describe("capture-driven default tab (Refinement 2)", () => {
 // ── Refinement 2: no post-paint content switch (component level) ──────────────
 
 describe("SandboxWorkspace capture-driven default renders with no content switch", () => {
-  function selectedTabText(container: HTMLElement): string {
-    return container.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? "";
+  function tabName(element: HTMLElement | null): string {
+    return element?.getAttribute("aria-label") ?? element?.textContent ?? "";
+  }
+
+  function selectedTabName(container: HTMLElement): string {
+    return tabName(container.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'));
+  }
+
+  function findTab(container: HTMLElement, name: string): HTMLElement | undefined {
+    return [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
+      (element) => tabName(element).trim() === name,
+    );
   }
 
   test("pure embedder, changes present: Changes is the selected tab before AND after resolve", async () => {
@@ -1306,13 +1316,13 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     await flush();
     // Pending (capture unresolved): the dock falls back to its first tab (Changes);
     // Files is NOT shown first. The body is a loader, not real content.
-    expect(selectedTabText(rendered.container)).toContain("Changes");
+    expect(selectedTabName(rendered.container)).toBe("Changes");
     await act(async () => {
       resolveCapture(captureAvailable(fakeManifest(2)));
     });
     await flush();
     // Default resolved to Changes → the first REAL content paint is Changes: no switch.
-    expect(selectedTabText(rendered.container)).toContain("Changes");
+    expect(selectedTabName(rendered.container)).toBe("Changes");
     await rendered.unmount();
   });
 
@@ -1332,7 +1342,7 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       ),
     );
     await flush();
-    expect(selectedTabText(rendered.container)).toContain("Files");
+    expect(selectedTabName(rendered.container)).toBe("Files");
     await rendered.unmount();
   });
 
@@ -1355,11 +1365,9 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       ),
     );
     await flush();
-    expect(selectedTabText(rendered.container)).toContain("Files");
+    expect(selectedTabName(rendered.container)).toBe("Files");
 
-    const changesTab = [...rendered.container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
-      (element) => element.textContent?.includes("Changes"),
-    );
+    const changesTab = findTab(rendered.container, "Changes");
     await act(async () => {
       changesTab?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
@@ -1391,7 +1399,7 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     );
     await flush();
 
-    expect(selectedTabText(rendered.container)).toContain("Changes");
+    expect(selectedTabName(rendered.container)).toBe("Changes");
     const degraded = rendered.container.querySelector("[data-opengeni-changes-degraded]");
     expect(degraded?.getAttribute("role")).toBe("status");
     expect(degraded?.textContent).toContain("Showing the latest captured revision");
@@ -1415,18 +1423,16 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       );
     const rendered = await renderComponent(workspace(SESSION_ID));
     await flush();
-    const filesTab = [...rendered.container.querySelectorAll<HTMLElement>('[role="tab"]')].find(
-      (element) => element.textContent?.includes("Files"),
-    );
+    const filesTab = findTab(rendered.container, "Files");
     expect(filesTab).toBeDefined();
     await act(async () => {
       filesTab!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
-    expect(selectedTabText(rendered.container)).toContain("Files");
+    expect(selectedTabName(rendered.container)).toBe("Files");
 
     await rendered.rerender(workspace(SECOND_SESSION_ID));
     await flush();
-    expect(selectedTabText(rendered.container)).toContain("Changes");
+    expect(selectedTabName(rendered.container)).toBe("Changes");
     await rendered.unmount();
   });
 });

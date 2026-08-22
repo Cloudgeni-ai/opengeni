@@ -65,6 +65,107 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("manages bounded session/always personal grants without exposing once", async () => {
+    const authorityId = "66666666-6666-4666-8666-666666666666";
+    const grantId = "77777777-7777-4777-8777-777777777777";
+    const { client, requests } = makeClient(() => jsonResponse({}));
+    await client.listUserResourceAuthorities(WORKSPACE_ID, {
+      resourceKind: "connection",
+      cursor: authorityId,
+      limit: 25,
+    });
+    await client.issueUserResourceGrant(WORKSPACE_ID, authorityId, {
+      scope: "user",
+      resourceKind: "connection",
+      mode: "session",
+      context: "workspace_shared",
+      sessionId: SESSION_ID,
+      expectedAuthorityEpoch: 3,
+      workspaceSharedAcknowledged: true,
+    });
+    await client.revokeUserResourceGrant(WORKSPACE_ID, grantId);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/user-resource-authorities`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/user-resource-authorities/${authorityId}/grants`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/user-resource-authorities/grants/${grantId}`,
+      ],
+    );
+    const listUrl = new URL(requests[0]!.url);
+    expect(Object.fromEntries(listUrl.searchParams)).toEqual({
+      scope: "user",
+      resourceKind: "connection",
+      cursor: authorityId,
+      limit: "25",
+    });
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      scope: "user",
+      resourceKind: "connection",
+      mode: "session",
+      context: "workspace_shared",
+      sessionId: SESSION_ID,
+      expectedAuthorityEpoch: 3,
+      workspaceSharedAcknowledged: true,
+    });
+    expect(new URL(requests[2]!.url).searchParams.get("scope")).toBe("user");
+  });
+
+  test("sends explicit visibility and fork idempotency contracts without inventing defaults", async () => {
+    const visibilityResponse = {
+      operationId: "11111111-1111-4111-8111-111111111111",
+      eventId: "22222222-2222-4222-8222-222222222222",
+      eventSequence: 7,
+      visibility: "private" as const,
+      authorityEpoch: 2,
+      changed: true,
+      replay: false,
+      revokedGrantCount: 1,
+    };
+    const forkResponse = {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      eventId: "44444444-4444-4444-8444-444444444444",
+      eventSequence: 1,
+      sessionId: "55555555-5555-4555-8555-555555555555",
+      workspaceId: WORKSPACE_ID,
+      visibility: "private" as const,
+      authorityEpoch: 1 as const,
+      copiedHistoryItemCount: 4,
+      replay: false,
+    };
+    const { client, requests } = makeClient((request) =>
+      jsonResponse(request.method === "PUT" ? visibilityResponse : forkResponse),
+    );
+
+    expect(
+      await client.updateSessionVisibility(WORKSPACE_ID, SESSION_ID, {
+        visibility: "private",
+        expectedAuthorityEpoch: 1,
+        idempotencyKey: "sdk-visibility-1",
+      }),
+    ).toEqual(visibilityResponse);
+    expect(
+      await client.forkSession(WORKSPACE_ID, SESSION_ID, {
+        idempotencyKey: "sdk-session-copy-1",
+      }),
+    ).toEqual(forkResponse);
+    expect(requests).toEqual([
+      expect.objectContaining({
+        method: "PUT",
+        url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/visibility`,
+        body: JSON.stringify({
+          visibility: "private",
+          expectedAuthorityEpoch: 1,
+          idempotencyKey: "sdk-visibility-1",
+        }),
+      }),
+      expect.objectContaining({
+        method: "POST",
+        url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/forks`,
+        body: JSON.stringify({ idempotencyKey: "sdk-session-copy-1" }),
+      }),
+    ]);
+  });
+
   test("identity-scoped workspace reads forward AbortSignal cancellation", async () => {
     let receivedSignal: AbortSignal | undefined;
     const client = new OpenGeniClient({

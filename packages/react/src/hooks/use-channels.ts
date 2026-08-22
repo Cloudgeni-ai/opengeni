@@ -1,6 +1,7 @@
 import type { Channel, CreateChannelRequest, Session, UpdateChannelRequest } from "@opengeni/sdk";
-import { useCallback } from "react";
+import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { channelCacheFor } from "./channel-cache";
 import { useMutationRunner, usePolledValue } from "./internal";
 
 export type UseChannelsOptions = ClientOverride & {
@@ -15,6 +16,7 @@ export type UseChannelsResult = {
   refresh: () => Promise<void>;
   create: (request: CreateChannelRequest) => Promise<Channel | null>;
   update: (channelId: string, request: UpdateChannelRequest) => Promise<Channel | null>;
+  reorder: (channelIds: string[]) => Promise<Channel[] | null>;
   remove: (channelId: string) => Promise<boolean>;
   /** Re-file a session into a channel; null moves it back to the inbox. */
   moveSession: (sessionId: string, channelId: string | null) => Promise<Session | null>;
@@ -30,25 +32,33 @@ export type UseChannelsResult = {
  */
 export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const load = useCallback(
-    async () => await client.listChannels(workspaceId),
-    [client, workspaceId],
-  );
-  const { data, loading, error, refresh } = usePolledValue(load, {
+  const cache = useMemo(() => channelCacheFor(client, workspaceId), [client, workspaceId]);
+  const snapshot = useSyncExternalStore(cache.subscribe, cache.getSnapshot, cache.getSnapshot);
+  const load = useCallback(async () => {
+    const ticket = cache.beginLoad();
+    const channels = await client.listChannels(workspaceId);
+    cache.acceptLoad(ticket, channels);
+    return channels;
+  }, [cache, client, workspaceId]);
+  const { loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner(cache);
 
   const create = useCallback(
     async (request: CreateChannelRequest): Promise<Channel | null> => {
       const result = await run(() => client.createChannel(workspaceId, request));
       if (result) {
+        // Publish the canonical write response before this promise can resolve.
+        // The composer may create a session with this id immediately, while a
+        // sibling rail hook could still have an older list request in flight.
+        cache.publishCreated(result);
         await refresh();
       }
       return result;
     },
-    [client, workspaceId, run, refresh],
+    [cache, client, workspaceId, run, refresh],
   );
 
   const update = useCallback(
@@ -76,6 +86,15 @@ export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult
     [client, workspaceId, run, refresh],
   );
 
+  const reorder = useCallback(
+    async (channelIds: string[]): Promise<Channel[] | null> => {
+      const result = await run(() => client.reorderChannels(workspaceId, { channelIds }));
+      if (result) await refresh();
+      return result;
+    },
+    [client, workspaceId, run, refresh],
+  );
+
   const moveSession = useCallback(
     async (sessionId: string, channelId: string | null): Promise<Session | null> => {
       return await run(() => client.updateSessionChannel(workspaceId, sessionId, { channelId }));
@@ -84,12 +103,15 @@ export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult
   );
 
   return {
-    channels: data ?? [],
-    loading,
+    // Cache snapshots replace arrays instead of mutating them, so preserve the
+    // stable reference expected from the previous polled-value implementation.
+    channels: snapshot.channels as Channel[],
+    loading: loading && !snapshot.ready,
     error,
     refresh,
     create,
     update,
+    reorder,
     remove,
     moveSession,
     mutating,

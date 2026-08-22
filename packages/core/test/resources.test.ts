@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { normalizeResources } from "../src/domain/resources";
+import {
+  normalizeResources,
+  personalGitHubRepositoryResources,
+  validateGitHubRepositorySelectionShapes,
+} from "../src/domain/resources";
 
 describe("repository resource normalization", () => {
   test("preserves Azure DevOps clone paths without appending a GitHub-style suffix", () => {
@@ -92,5 +96,58 @@ describe("repository resource normalization", () => {
         mountPath: "repos/dev.azure.com/acme/project/_git/infrastructure.git",
       },
     ]);
+  });
+
+  test("separates personal GitHub bindings from GitHub App aliases", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/octocat/private-repository",
+      ref: "main",
+      provider: "github" as const,
+      connectionType: "github_personal" as const,
+      credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      repositoryId: "9007199254740993123",
+      access: "write" as const,
+    };
+    expect(personalGitHubRepositoryResources([resource])).toEqual([resource]);
+    const appResource = {
+      ...resource,
+      connectionType: undefined,
+      credentialBindingId: "github-primary",
+      repositoryId: 456,
+      installationId: 123,
+    };
+    expect(personalGitHubRepositoryResources([appResource])).toEqual([]);
+    expect(validateGitHubRepositorySelectionShapes([appResource])).toEqual([123]);
+    const establishedHostBinding = {
+      kind: "repository" as const,
+      uri: "https://github.com/Cloudgeni-ai/opengeni",
+      ref: "main",
+      provider: "github" as const,
+      credentialBindingId: "github-installation:123",
+      access: "read" as const,
+    };
+    expect(personalGitHubRepositoryResources([establishedHostBinding])).toEqual([]);
+    expect(validateGitHubRepositorySelectionShapes([establishedHostBinding])).toEqual([]);
+    const opaqueUuidHostBinding = {
+      ...establishedHostBinding,
+      credentialBindingId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    };
+    expect(personalGitHubRepositoryResources([opaqueUuidHostBinding])).toEqual([]);
+    expect(validateGitHubRepositorySelectionShapes([opaqueUuidHostBinding])).toEqual([]);
+    expect(() =>
+      personalGitHubRepositoryResources([
+        {
+          ...resource,
+          repositoryId: undefined,
+        },
+      ]),
+    ).toThrow();
+    expect(() =>
+      personalGitHubRepositoryResources([
+        { ...resource, uri: "https://github.com/octocat/private-repository.git" },
+      ]),
+    ).toThrow();
+    expect(() => personalGitHubRepositoryResources([resource, resource])).toThrow();
   });
 });

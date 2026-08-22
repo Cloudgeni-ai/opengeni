@@ -22,6 +22,7 @@ import {
   appendSessionEventsForTurnAttempt,
   appendSessionEventsWithLockedSessionUpdate,
   bootstrapWorkspace,
+  attachOpenSuffixToPendingToolCalls,
   beginConnectorActionExecution,
   claimSessionWorkForAttempt,
   commitSessionAttemptQuiescence,
@@ -46,6 +47,7 @@ import {
   listSessionDiscoverySummaries,
   listSessionDiscoveryAncestorPaths,
   listSessionSystemUpdatesForTurn,
+  listTurnOpenSuffixToolCalls,
   listUsageEvents,
   listWorkspaceControlEvents,
   isSessionCompactionRequested,
@@ -80,7 +82,7 @@ import {
 import * as schema from "../src/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import postgres from "postgres";
 
 let shared: SharedTestDatabase;
@@ -1515,7 +1517,8 @@ describe("clean session control plane", () => {
     expect(Buffer.byteLength(JSON.stringify(canonical[2]!.item), "utf8")).toBeLessThan(10_000);
     const canonicalMixed = canonical[4]!.item;
     const canonicalMixedOutput = canonicalMixed.output as Array<Record<string, unknown>>;
-    expect(canonicalMixed).toEqual(boundModelToolOutputItem(canonicalMixedItem));
+    expect(canonicalMixed).toEqual(canonicalizePersistedHistoryItem(canonicalMixedItem));
+    expect(canonicalMixed).not.toHaveProperty("status");
     expect(canonicalMixedOutput.length).toBeLessThanOrEqual(256);
     expect(
       canonicalMixedOutput.every(
@@ -1733,7 +1736,9 @@ describe("clean session control plane", () => {
           item.type === "function_call_result" &&
           (item as { callId?: unknown }).callId === "pending-mixed-call",
       ) as { output: Array<Record<string, unknown>> };
-    expect(recoveredMixedResult).toEqual(boundModelToolOutputItem(pendingMixedResultItem, 100));
+    expect(recoveredMixedResult).toEqual(
+      canonicalizePersistedHistoryItem(pendingMixedResultItem, 100),
+    );
     expect(JSON.stringify(boundModelToolOutputItem(recoveredMixedResult, 100))).toBe(
       JSON.stringify(recoveredMixedResult),
     );
@@ -2183,7 +2188,6 @@ describe("clean session control plane", () => {
         type: "function_call",
         name: "mutate_state",
         callId: "call-interrupted",
-        status: "in_progress",
         arguments: JSON.stringify({
           token: "model-truth-must-not-be-redacted",
         }),
@@ -2192,7 +2196,6 @@ describe("clean session control plane", () => {
         type: "function_call_result",
         name: "mutate_state",
         callId: "call-interrupted",
-        status: "incomplete",
         output: {
           type: "text",
           text: expect.stringContaining("side-effect outcome is unknown"),
@@ -2331,15 +2334,23 @@ describe("clean session control plane", () => {
       ["function_call_result", "call-a"],
       ["function_call_result", "call-c"],
     ]);
-    expect(history[4]?.item).toEqual(boundModelToolOutputItem(completedParallelResult, 100));
+    expect(history[4]?.item).toEqual(
+      canonicalizePersistedHistoryItem(completedParallelResult, 100),
+    );
     expect(JSON.stringify(boundModelToolOutputItem(history[4]!.item, 100))).toBe(
       JSON.stringify(history[4]!.item),
     );
-    expect(history[5]?.item).toEqual(boundModelToolOutputItem(laterCompletedParallelResult, 100));
+    expect(history[5]?.item).toEqual(
+      canonicalizePersistedHistoryItem(laterCompletedParallelResult, 100),
+    );
     expect(JSON.stringify(boundModelToolOutputItem(history[5]!.item, 100))).toBe(
       JSON.stringify(history[5]!.item),
     );
-    expect(history[6]?.item).toMatchObject({ status: "incomplete" });
+    expect(history[6]?.item).toMatchObject({
+      type: "function_call_result",
+      callId: "call-c",
+    });
+    expect(history[6]?.item).not.toHaveProperty("status");
   });
 
   test("a completed response batch clears even when an older call remains unresolved", async () => {
@@ -2718,6 +2729,17 @@ describe("clean session control plane", () => {
         arguments: "{}",
       },
     });
+    expect(
+      await attachOpenSuffixToPendingToolCalls(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId: firstAttemptId,
+        members: [{ callId: "approval-call", interruptionKind: "approval", reasoningItems: [] }],
+      }),
+    ).toEqual({ accepted: true, attached: 1 });
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -2772,6 +2794,23 @@ describe("clean session control plane", () => {
         resultItem: approvalResult,
       }),
     ).toEqual({ accepted: true, recorded: true });
+    await registerPendingSessionToolCall(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: resumedTurn!.executionGeneration,
+      attemptId: resumedAttemptId,
+      callId: "post-approval-call",
+      callType: "function_call",
+      callItem: {
+        type: "function_call",
+        name: "post_approval_tool",
+        callId: "post-approval-call",
+        status: "in_progress",
+        arguments: "{}",
+      },
+    });
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -2779,21 +2818,110 @@ describe("clean session control plane", () => {
       attemptId: resumedAttemptId,
       reason: "worker_shutdown",
     });
-    expect(recovery.events[0]).toMatchObject({
-      turnAttemptId: firstAttemptId,
-      payload: {
-        id: "approval-call",
-        recovery: { interrupted: false, outcome: "durable_result_found" },
+    expect(
+      recovery.events
+        .filter((event) => event.type === "agent.toolCall.output")
+        .map((event) => event.payload),
+    ).toEqual([
+      expect.objectContaining({
+        id: "post-approval-call",
+        recovery: expect.objectContaining({
+          interrupted: true,
+          outcome: "unknown",
+          reason: "worker_shutdown",
+        }),
+      }),
+    ]);
+    const preservedSuffix = await listTurnOpenSuffixToolCalls(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      turn!.id,
+    );
+    expect(preservedSuffix).toHaveLength(1);
+    expect(preservedSuffix[0]).toMatchObject({
+      callId: "approval-call",
+      interruptionKind: "approval",
+      resultItem: {
+        type: "function_call_result",
+        callId: "approval-call",
+        status: "completed",
+        output: { type: "text" },
       },
     });
-    const resumedHistory = (
-      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
-    ).slice(-2);
-    expect(resumedHistory.map((row) => row.item.type)).toEqual([
-      "function_call",
-      "function_call_result",
-    ]);
-    expect(resumedHistory[1]!.item).toEqual(boundModelToolOutputItem(approvalResult, 100));
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, async (db) =>
+        db
+          .select({ callId: schema.sessionPendingToolCalls.callId })
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id)),
+      ),
+    ).toEqual([{ callId: "approval-call" }]);
+  });
+
+  test("recoverable worker loss preserves every open-suffix interruption kind", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "wait for several forms of human authority");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const members = [
+      { callId: "approval-member", interruptionKind: "approval" as const },
+      { callId: "human-input-member", interruptionKind: "human_input" as const },
+      {
+        callId: "interaction-member",
+        interruptionKind: "interaction_intervention" as const,
+      },
+    ];
+    for (const member of members) {
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: member.callId,
+        callType: "function_call",
+        callItem: {
+          type: "function_call",
+          name: "authority_gated_tool",
+          callId: member.callId,
+          arguments: "{}",
+        },
+      });
+    }
+    expect(
+      await attachOpenSuffixToPendingToolCalls(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        members: members.map((member) => ({ ...member, reasoningItems: [] })),
+      }),
+    ).toEqual({ accepted: true, attached: members.length });
+
+    const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    expect(recovery.action).toBe("recovering");
+    expect(recovery.events.filter((event) => event.type === "agent.toolCall.output")).toEqual([]);
+    expect(
+      (await listTurnOpenSuffixToolCalls(client.db, grant.workspaceId!, session.id, turn!.id)).map(
+        (row) => ({ callId: row.callId, interruptionKind: row.interruptionKind }),
+      ),
+    ).toEqual(members);
   });
 
   test("Pause preserves a pending approval, while Steer permanently closes it", async () => {
@@ -2823,6 +2951,23 @@ describe("clean session control plane", () => {
         arguments: "{}",
       },
     });
+    expect(
+      await attachOpenSuffixToPendingToolCalls(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        members: [
+          {
+            callId: "pause-approval-call",
+            interruptionKind: "approval",
+            reasoningItems: [],
+          },
+        ],
+      }),
+    ).toEqual({ accepted: true, attached: 1 });
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn!.id,
@@ -2864,14 +3009,14 @@ describe("clean session control plane", () => {
       status: "superseded",
       cancelReason: "steer",
     });
-    expect(
-      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).slice(-1)[0]
-        ?.item,
-    ).toMatchObject({
+    const steeredResult = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).slice(-1)[0]?.item;
+    expect(steeredResult).toMatchObject({
       type: "function_call_result",
       callId: "pause-approval-call",
-      status: "incomplete",
     });
+    expect(steeredResult).not.toHaveProperty("status");
   });
 
   test("Send appends, Steer head-inserts, and the snapshot is server order", async () => {

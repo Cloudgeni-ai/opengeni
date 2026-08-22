@@ -170,6 +170,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/index.ts#holdSessionGoalContinuationWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#rejectSessionGoalRevisionWithEvent": {
     inserts: 1,
     contract: "canonical",
@@ -184,7 +188,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#initializeSessionStartAtomically": {
-    inserts: 3,
+    inserts: 4,
     contract: "canonical",
   },
   "packages/db/src/index.ts#claimSessionWorkForAttempt": {
@@ -557,6 +561,9 @@ function controlAwarePrefixPositions(functionNode: FunctionLikeDeclaration): num
     ),
     ...callPositionsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "share"),
     ...callPositionsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "update"),
+    // Send/Steer admission: shared prefix for an active branch, exclusive for a
+    // paused one, decided inside the helper before any other lock.
+    ...callPositions(functionNode, "lockWorkspaceInferenceControlForAdmission"),
     ...callPositions(functionNode, "lockChildLifecycleOutboxWriteRowsTx"),
   ].sort((left, right) => left - right);
 }

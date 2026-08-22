@@ -22,6 +22,27 @@ import { getManagedSession } from "../managed-session";
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
 
+/**
+ * Contexts that were authenticated by a verified canonical managed cookie
+ * (Better Auth session), stamped at the single branch of
+ * {@link resolveAccessContext} that performs that verification.
+ *
+ * This is provenance — HOW the request authenticated — not a shape check on a
+ * value. It cannot be forged by a token claim, and it FAILS CLOSED by default:
+ * membership is only ever added at that one branch, so every other path
+ * (delegated bearer, API key, local bootstrap, configured key, and any path
+ * added later) is absent from the set without anyone maintaining a list. A
+ * request that never resolves an access context has no context to test at all.
+ *
+ * Keyed on the resolved `AccessContext` object identity, deliberately NOT on
+ * the `Request`: a reused, wrapped, or retried request object can therefore
+ * never carry a stale positive into a differently-authenticated resolution, and
+ * the non-cached `requireFreshAccessGrant` path is stamped correctly too. Each
+ * resolution produces a fresh context object, so the mark travels with exactly
+ * the value the cookie branch produced.
+ */
+const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+
 export type AccessDeps = {
   db: Database;
   settings: Settings;
@@ -74,6 +95,14 @@ export type AccessGrantAuthorization = {
   accountGrant: AccountGrant | null;
   authenticatedSubjectId: string;
   contextIntegrity: boolean;
+  /**
+   * Did this request authenticate as the canonical managed-cookie (Better Auth)
+   * session that OWNS this grant's subject? The single input to the owner-only
+   * managed personal-workspace exception; see `isCanonicalManagedHumanSession`.
+   * False for every bearer, API-key, delegated, service, local, and configured
+   * principal, and for any future path that does not verify a cookie.
+   */
+  canonicalManagedHumanSession: boolean;
 };
 
 export function accessGrantAuthorizationFromContext(
@@ -105,6 +134,7 @@ export function accessGrantAuthorizationFromContext(
     accountGrant: contextIntegrity ? matchingAccountGrants[0]! : null,
     authenticatedSubjectId: context.subjectId,
     contextIntegrity,
+    canonicalManagedHumanSession: isCanonicalManagedHumanSession(context, grant),
   };
 }
 
@@ -144,6 +174,37 @@ async function accessGrantAuthorization(
     requirePermission(grant, permission);
   }
   return accessGrantAuthorizationFromContext(context, grant);
+}
+
+/**
+ * May this grant use the owner-only managed personal-workspace exception?
+ *
+ * A managed human's personal workspace has no `workspace_memberships` row
+ * (migration 0219), so seams that fence on one must consult the
+ * `organization_memberships.personal_workspace_id` pointer instead. `AGENTS.md`
+ * scopes that exception tightly: it "derives an owner-only personal-workspace
+ * grant only for the canonical managed-cookie (Better Auth) session", and
+ * "Bearer/delegated principals, API keys, and account or organization
+ * administrators receive no personal-workspace access through that exception."
+ *
+ * This asks about PROVENANCE, not shape. Inspecting a grant's `principalKind`,
+ * `metadata.delegated`, or `serviceInitiator` is not sufficient: a delegated
+ * bearer chooses every one of those claims inside its own host-signed token and
+ * can name any subject, including the owner's. So the answer comes from
+ * {@link canonicalManagedCookieContexts}, stamped only where a Better Auth
+ * cookie was actually verified.
+ *
+ * The subject equality is the second half: the exception is OWNER-only, so the
+ * grant must belong to the authenticated human itself, not to some other
+ * subject reached from an authenticated session. `user:` excludes machine
+ * principals, which can never own an organization membership.
+ */
+function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGrant): boolean {
+  return (
+    canonicalManagedCookieContexts.has(context) &&
+    grant.subjectId === context.subjectId &&
+    grant.subjectId.startsWith("user:")
+  );
 }
 
 function hostedHumanSessionPrincipalKind(context: AccessContext): "human_session" | undefined {
@@ -193,10 +254,12 @@ export function requireLiteralPermission(grant: AccessGrant, permission: Permiss
 }
 
 export function hasLiteralPermission(permissions: Permission[], permission: Permission): boolean {
+  if (!Array.isArray(permissions)) return false;
   return permissions.includes(permission);
 }
 
 export function hasPermission(permissions: Permission[], permission: Permission): boolean {
+  if (!Array.isArray(permissions)) return false;
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
@@ -263,11 +326,18 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   if (deps.managedAuth) {
     const session = await getManagedSession(c, deps.managedAuth, { db: deps.db });
     if (session?.user) {
-      return await ensureManagedAccessForUser(deps.db, {
+      // THE canonical managed-cookie (Better Auth) branch, and the only place
+      // that may stamp a context as such. Every `return` above this point leaves
+      // its context unstamped, so the owner-only personal-workspace exception
+      // fails closed for them without depending on an exclusion list.
+      const context = await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,
         email: session.user.email,
         name: session.user.name,
+        emailVerified: session.user.emailVerified,
       });
+      canonicalManagedCookieContexts.add(context);
+      return context;
     }
   }
 

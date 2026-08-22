@@ -14,6 +14,7 @@ import {
   ChevronRightIcon,
   PauseCircleIcon,
   PauseIcon,
+  MessageCircleQuestionIcon,
   PencilLineIcon,
   PlayIcon,
   RefreshCwIcon,
@@ -71,6 +72,7 @@ import {
   type AuthNeededItem,
   type ContextCompactionItem,
   type GoalItem,
+  type HumanInputItem,
   type MachineInputBatchItem,
   type NoticeItem,
   type TimelineGroup,
@@ -2031,7 +2033,9 @@ function useLiveSettleFold(folded: boolean): boolean {
 function timelineGroupKey(group: TimelineGroup): string {
   switch (group.kind) {
     case "item":
-      return group.item.id;
+      return group.item.kind === "user-message" && group.item.reconciliationKey
+        ? group.item.reconciliationKey
+        : group.item.id;
     case "activity":
       return group.id;
     case "turn":
@@ -2249,6 +2253,8 @@ export function TimelineRow({
   switch (item.kind) {
     case "user-message":
       return <UserMessageRow item={item} renderMessageText={renderMessageText} />;
+    case "human-input":
+      return <HumanInputConversationRow item={item} />;
     case "agent-message":
       return <AgentMessageRow item={item} renderMessageText={renderMessageText} />;
     case "worker-completion":
@@ -2380,14 +2386,7 @@ function UserMessageRow({
     | undefined;
 }) {
   const enter = useEntranceAnimation();
-  const deliveryLabel =
-    item.delivery?.state === "sending"
-      ? "Sending…"
-      : item.delivery?.state === "queued"
-        ? "Queued"
-        : item.delivery?.state === "failed"
-          ? "Not sent"
-          : null;
+  const deliveryFailed = item.delivery?.state === "failed";
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
@@ -2422,19 +2421,25 @@ function UserMessageRow({
             ) : null}
           </div>
         </CopyHoverFrame>
-        {deliveryLabel ? (
-          <div className="flex max-w-full items-center gap-2 px-1 text-og-xs text-og-fg-subtle">
-            <span title={item.delivery?.error}>{deliveryLabel}</span>
-            {item.delivery?.state === "failed" && item.delivery.onRetry ? (
+        {deliveryFailed ? (
+          <div
+            role="status"
+            className="flex max-w-full items-center gap-2 px-1 text-og-xs text-og-status-failed"
+          >
+            <span className="inline-flex items-center gap-1" title={item.delivery?.error}>
+              <TriangleAlertIcon className="size-3.5 shrink-0" aria-hidden="true" />
+              <span>Message not sent</span>
+            </span>
+            {item.delivery?.onRetry ? (
               <button
                 type="button"
-                className="font-medium text-og-fg underline decoration-og-border underline-offset-2 hover:text-og-fg-strong"
+                className="font-medium text-og-status-failed underline decoration-og-status-failed/50 underline-offset-2 hover:text-og-fg"
                 onClick={item.delivery.onRetry}
               >
                 Retry
               </button>
             ) : null}
-            {item.delivery?.state === "failed" && item.delivery.onRemove ? (
+            {item.delivery?.onRemove ? (
               <button
                 type="button"
                 className="font-medium text-og-fg-subtle underline decoration-og-border underline-offset-2 hover:text-og-fg"
@@ -2448,6 +2453,139 @@ function UserMessageRow({
       </div>
     </div>
   );
+}
+
+function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
+  const enter = useEntranceAnimation();
+  const multipleQuestions = Math.max(item.questions.length, item.answers.length) > 1;
+  const questionNumberById = new Map(
+    item.questions.map((question, index) => [question.id, index + 1]),
+  );
+  const settledLabel =
+    item.response.outcome === "answered"
+      ? "You answered"
+      : item.response.outcome === "skipped"
+        ? "Skipped"
+        : item.response.outcome === "expired"
+          ? "Expired"
+          : "Cancelled";
+  const copyText = humanInputConversationCopyText(item, settledLabel);
+
+  return (
+    <div
+      className={cn(enter && "animate-og-enter", "flex w-full flex-col gap-2.5")}
+      data-human-input-history={item.requestId}
+    >
+      <div className="flex max-w-[90%] items-start gap-3 rounded-og-lg rounded-bl-og-xs border border-og-border bg-og-surface-1 px-3.5 py-3 sm:max-w-[82%]">
+        <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/10 text-og-status-waiting">
+          <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-og-xs font-medium text-og-fg-subtle">Agent asked</p>
+          <div className="mt-1.5 space-y-3">
+            {item.questions.length > 0 ? (
+              item.questions.map((question, index) => (
+                <div key={question.id}>
+                  {question.label ? (
+                    <p className="text-og-sm font-semibold text-og-fg">
+                      {multipleQuestions ? (
+                        <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
+                      ) : null}
+                      {multipleQuestions ? " " : null}
+                      {question.label}
+                    </p>
+                  ) : null}
+                  <p
+                    className={cn(
+                      "text-og-md leading-6 text-og-fg",
+                      question.label && "mt-0.5 text-og-sm text-og-fg-muted",
+                    )}
+                  >
+                    {!question.label && multipleQuestions ? (
+                      <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
+                    ) : null}
+                    {!question.label && multipleQuestions ? " " : null}
+                    {question.prompt}
+                  </p>
+                </div>
+              ))
+            ) : (
+              <p className="text-og-sm text-og-fg-muted">The agent requested structured input.</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex justify-end">
+        <CopyHoverFrame
+          copyText={copyText}
+          label="Copy answer"
+          className="w-fit max-w-[90%] min-w-0 sm:max-w-[82%]"
+          trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
+        >
+          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
+            <p className="text-og-xs font-medium text-og-fg-subtle">{settledLabel}</p>
+            {item.response.outcome === "answered" ? (
+              <div className="mt-1.5 space-y-3">
+                {item.answers.length > 0 ? (
+                  item.answers.map((answer, answerIndex) => (
+                    <div key={answer.questionId}>
+                      {multipleQuestions ? (
+                        <p className="text-og-sm font-semibold text-og-fg">
+                          <span className="mr-1.5 tabular-nums text-og-fg-muted">
+                            {questionNumberById.get(answer.questionId) ?? answerIndex + 1}.
+                          </span>{" "}
+                          {answer.label}
+                        </p>
+                      ) : null}
+                      <div className={cn("text-og-md text-og-fg", multipleQuestions && "mt-0.5")}>
+                        {answer.values.length > 1 ? (
+                          <ul className="list-disc space-y-0.5 pl-5">
+                            {answer.values.map((value) => (
+                              <li key={`${answer.questionId}-${value}`}>{value}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p>{answer.values[0] || "Answered"}</p>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p>Answered</p>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </CopyHoverFrame>
+      </div>
+    </div>
+  );
+}
+
+function humanInputConversationCopyText(item: HumanInputItem, settledLabel: string): string {
+  const questions = item.questions
+    .map(
+      (question, index) =>
+        `${item.questions.length > 1 ? `${index + 1}. ` : ""}${question.label || "Question"}: ${question.prompt}`,
+    )
+    .join("\n\n");
+  const questionNumberById = new Map(
+    item.questions.map((question, index) => [question.id, index + 1]),
+  );
+  const answers = item.answers
+    .map(
+      (answer, index) =>
+        `${
+          item.questions.length > 1
+            ? `${questionNumberById.get(answer.questionId) ?? index + 1}. `
+            : ""
+        }${answer.label}: ${answer.values.join(", ") || "Answered"}`,
+    )
+    .join("\n\n");
+  return [questions, `${settledLabel}${answers ? `\n\n${answers}` : ""}`]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function AgentMessageRow({
@@ -2701,6 +2839,11 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
   cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
+  held: {
+    label: "Goal held",
+    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    icon: PauseCircleIcon,
+  },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
 };
 

@@ -15,20 +15,11 @@ import {
 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
-
-type ConnectionAuthorityRow = {
-  authorityId: string;
-  authorityGeneration: number;
-  authorityStatus: "active" | "retained" | "revoked";
-  grantId: string | null;
-  targetWorkspaceId: string | null;
-  targetSessionId: string | null;
-  mode: "once" | "session" | "always" | null;
-  context: "user_private" | "workspace_shared" | null;
-  grantGeneration: number | null;
-  grantStatus: "active" | "consumed" | "revoked" | "expired" | null;
-  expiresAt: string | null;
-};
+import {
+  issueSelfUserResourceGrant,
+  listSelfUserResourceAuthorities,
+  revokeSelfUserResourceGrant,
+} from "./user-resource-authority";
 
 async function withOwnerContext<T>(
   db: Database,
@@ -45,56 +36,14 @@ export async function listSelfConnectionAuthorities(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<ConnectionAuthoritySummary[]> {
-  return await withOwnerContext(db, input, async (scopedDb) => {
-    const rows = await rawRows<ConnectionAuthorityRow>(
-      scopedDb,
-      sql`
-        select authority_id as "authorityId",
-          authority_generation::int as "authorityGeneration",
-          authority_status as "authorityStatus", grant_id as "grantId",
-          target_workspace_id as "targetWorkspaceId",
-          target_session_id as "targetSessionId", grant_mode as mode,
-          grant_context as context, grant_generation::int as "grantGeneration",
-          grant_status as "grantStatus", expires_at::text as "expiresAt"
-        from list_self_connection_authorities(${input.accountId}::uuid)
-      `,
-    );
-    const grouped = new Map<string, ConnectionAuthoritySummary>();
-    for (const row of rows) {
-      const authority =
-        grouped.get(row.authorityId) ??
-        ConnectionAuthoritySummary.parse({
-          authorityId: row.authorityId,
-          generation: row.authorityGeneration,
-          status: row.authorityStatus,
-          grants: [],
-        });
-      if (
-        row.grantId &&
-        row.targetWorkspaceId &&
-        row.mode &&
-        row.context &&
-        row.grantGeneration &&
-        row.grantStatus
-      ) {
-        authority.grants.push(
-          ConnectionAuthorityGrant.parse({
-            grantId: row.grantId,
-            targetWorkspaceId: row.targetWorkspaceId,
-            targetSessionId: row.targetSessionId,
-            action: "connection.use",
-            mode: row.mode,
-            context: row.context,
-            generation: row.grantGeneration,
-            status: row.grantStatus,
-            expiresAt: row.expiresAt,
-          }),
-        );
-      }
-      grouped.set(row.authorityId, authority);
-    }
-    return [...grouped.values()];
+  const page = await listSelfUserResourceAuthorities(db, {
+    ...input,
+    resourceKind: "connection",
+    limit: 100,
   });
+  return page.authorities.map(({ resourceKind: _resourceKind, ...authority }) =>
+    ConnectionAuthoritySummary.parse(authority),
+  );
 }
 
 export async function issueSelfConnectionUseGrant(
@@ -107,60 +56,27 @@ export async function issueSelfConnectionUseGrant(
     request: IssueConnectionUseGrantRequest;
   },
 ) {
-  return await withOwnerContext(db, input, async (scopedDb) => {
-    const [row] = await rawRows<{
-      grantId: string;
-      targetWorkspaceId: string;
-      targetSessionId: string | null;
-      action: "connection.use";
-      mode: "once" | "session" | "always";
-      context: "user_private" | "workspace_shared";
-      generation: number;
-      status: "active" | "consumed" | "revoked" | "expired";
-      expiresAt: string | null;
-    }>(
-      scopedDb,
-      sql`
-        select grant_id as "grantId", target_workspace_id as "targetWorkspaceId",
-          target_session_id as "targetSessionId", action, grant_mode as mode,
-          grant_context as context, grant_generation::int as generation,
-          grant_status as status, expires_at::text as "expiresAt"
-        from issue_self_connection_use_grant(
-          ${input.accountId}::uuid, ${input.authorityId}::uuid,
-          ${input.workspaceId}::uuid, ${input.request.mode}, ${input.request.context},
-          ${input.request.sessionId ?? null}::uuid,
-          ${input.request.workspaceSharedAcknowledged}
-        )
-      `,
-    );
-    if (!row) throw new Error("connection use grant was not returned");
-    return ConnectionAuthorityGrant.parse(row);
-  });
+  return ConnectionAuthorityGrant.parse(
+    await issueSelfUserResourceGrant(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.subjectId,
+      authorityId: input.authorityId,
+      resourceKind: "connection",
+      mode: input.request.mode,
+      context: input.request.context,
+      sessionId: input.request.sessionId ?? null,
+      expectedAuthorityEpoch: input.request.expectedAuthorityEpoch ?? null,
+      workspaceSharedAcknowledged: input.request.workspaceSharedAcknowledged,
+    }),
+  );
 }
 
 export async function revokeSelfConnectionUseGrant(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string; grantId: string },
 ): Promise<{ grantId: string; generation: number; status: "revoked"; revokedAt: string }> {
-  return await withOwnerContext(db, input, async (scopedDb) => {
-    const [row] = await rawRows<{
-      grantId: string;
-      generation: number;
-      status: "revoked";
-      revokedAt: string;
-    }>(
-      scopedDb,
-      sql`
-        select grant_id as "grantId", grant_generation::int as generation,
-          grant_status as status, revoked_at::text as "revokedAt"
-        from revoke_self_connection_use_grant(
-          ${input.accountId}::uuid, ${input.grantId}::uuid
-        )
-      `,
-    );
-    if (!row) throw new Error("connection use grant was not returned");
-    return row;
-  });
+  return await revokeSelfUserResourceGrant(db, input);
 }
 
 /**

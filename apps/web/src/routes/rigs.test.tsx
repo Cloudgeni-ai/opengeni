@@ -21,7 +21,7 @@ describe("Rigs access scope", () => {
     const root = createRoot(container);
     try {
       for (const [scope, label] of [
-        ["user", "Personal"],
+        ["user", "Only me"],
         ["workspace", "Workspace"],
         ["organization", "Organization"],
       ] as const) {

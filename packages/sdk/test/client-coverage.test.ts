@@ -1754,6 +1754,10 @@ describe("OpenGeniClient billing", () => {
     });
     await client.getBillingEntitlements();
     await client.createBillingCheckout({ amountUsd: 25 });
+    await client.createBillingPortalSession({
+      accountId: "acc-1",
+      returnUrl: "https://app.opengeni.ai/billing",
+    });
     expect(
       requests.map(
         (request) =>
@@ -1764,8 +1768,13 @@ describe("OpenGeniClient billing", () => {
       `GET /v1/billing/usage?accountId=acc-1&workspaceId=${WORKSPACE_ID}`,
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
+      "POST /v1/billing/portal",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
+      accountId: "acc-1",
+      returnUrl: "https://app.opengeni.ai/billing",
+    });
   });
 });
 
@@ -1838,6 +1847,131 @@ describe("OpenGeniClient connections", () => {
     expect(JSON.parse(requests[4]!.body!)).toEqual({
       expectedVersion: connection.version,
       idempotencyKey: "disconnect-generation-1",
+    });
+  });
+
+  test("uses only the dedicated personal GitHub lifecycle routes", async () => {
+    const connection = fakeConnection({
+      subjectId: "user:owner",
+      providerDomain: "github.com",
+      kind: "oauth2",
+    });
+    const oauth = {
+      authorizationUrl: "https://github.com/login/oauth/authorize?state=signed",
+      expiresAt: "2026-06-12T00:10:00.000Z",
+    };
+    const { client, requests } = makeClient((request) => {
+      if (request.method === "GET") {
+        return jsonResponse({ enabled: true, connection, reviewUrl: "https://github.com/review" });
+      }
+      if (request.method === "DELETE") return jsonResponse({ connection });
+      return jsonResponse(oauth);
+    });
+
+    expect(await client.personalGitHubStatus(WORKSPACE_ID)).toMatchObject({
+      enabled: true,
+      connection,
+    });
+    expect(await client.startPersonalGitHubOAuth(WORKSPACE_ID)).toEqual(oauth);
+    expect(
+      await client.reconnectPersonalGitHub(WORKSPACE_ID, connection.id, {
+        returnPath: `/workspaces/${WORKSPACE_ID}/capabilities`,
+      }),
+    ).toEqual(oauth);
+    expect(
+      await client.disconnectPersonalGitHub(WORKSPACE_ID, connection.id, {
+        expectedVersion: 1,
+        idempotencyKey: "github-disconnect-1",
+      }),
+    ).toEqual(connection);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/connections/github`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/connections/github/oauth/start`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}/github/reconnect`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/connections/${connection.id}`,
+      ],
+    );
+  });
+
+  test("uses bounded personal GitHub repository authority routes", async () => {
+    const connectionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const repository = {
+      repositoryId: "1234567890123456",
+      fullName: "Cloudgeni-ai/opengeni",
+      canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
+      defaultBranch: "main",
+      visibility: "private" as const,
+      private: true,
+      archived: false,
+      disabled: false,
+      permissions: { pull: true, push: true, admin: false, maintain: true, triage: true },
+    };
+    const selection = {
+      connectionAuthorityGeneration: 4,
+      credentialBindingId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      providerPrincipalId: "123456",
+      selectionGeneration: 2,
+      repositories: [
+        {
+          ...repository,
+          selectedAccess: "write" as const,
+          selectionGeneration: 2,
+          selectedAt: "2026-08-21T08:00:00.000Z",
+          lastVerifiedAt: "2026-08-21T08:00:00.000Z",
+        },
+      ],
+    };
+    const { client, requests } = makeClient((request) =>
+      jsonResponse(
+        request.method === "GET"
+          ? {
+              repositories: [{ ...repository, selectedAccess: "write" }],
+              nextCursor: 3,
+              selection,
+            }
+          : selection,
+      ),
+    );
+
+    expect(
+      await client.listPersonalGitHubRepositories(WORKSPACE_ID, connectionId, {
+        cursor: 2,
+        limit: 50,
+      }),
+    ).toMatchObject({ nextCursor: 3, selection });
+    expect(
+      await client.replacePersonalGitHubRepositorySelections(WORKSPACE_ID, connectionId, {
+        expectedConnectionAuthorityGeneration: 4,
+        expectedSelectionGeneration: 1,
+        idempotencyKey: "github-repositories-1",
+        repositories: [
+          { repositoryId: repository.repositoryId, fullName: repository.fullName, access: "write" },
+        ],
+      }),
+    ).toEqual(selection);
+    expect(
+      await client.verifyPersonalGitHubRepositorySelections(WORKSPACE_ID, connectionId, {
+        expectedConnectionAuthorityGeneration: 4,
+        expectedSelectionGeneration: 2,
+        idempotencyKey: "github-repositories-verify-1",
+      }),
+    ).toEqual(selection);
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `GET /v1/workspaces/${WORKSPACE_ID}/connections/${connectionId}/github/repositories`,
+        `PUT /v1/workspaces/${WORKSPACE_ID}/connections/${connectionId}/github/repositories`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/connections/${connectionId}/github/repositories/verify`,
+      ],
+    );
+    const listUrl = new URL(requests[0]!.url);
+    expect(listUrl.searchParams.get("cursor")).toBe("2");
+    expect(listUrl.searchParams.get("limit")).toBe("50");
+    expect(JSON.parse(requests[1]!.body!)).toMatchObject({
+      expectedConnectionAuthorityGeneration: 4,
+      expectedSelectionGeneration: 1,
+      idempotencyKey: "github-repositories-1",
     });
   });
 
