@@ -1,4 +1,4 @@
-import { configuredStaticUsageLimits } from "@opengeni/config";
+import { configuredStaticUsageLimits, resolveModelProvider } from "@opengeni/config";
 import type {
   LimitAction,
   LimitDecision,
@@ -25,12 +25,11 @@ export type LimitCheckInput = {
   workspaceId?: string;
   action: LimitAction;
   quantity?: number;
-  // The turn's model id, when the action represents an agent turn. When this is a
-  // Codex-billed turn (codex/<slug> + feature enabled + active workspace
-  // credential) the turn is paid by the user's ChatGPT/Codex plan and consumes
-  // ZERO OpenGeni credits, so the credit-balance + model-cost + token gates are
-  // skipped. Non-model infra actions (workspace/api_key/schedule create) leave
-  // this undefined and are unaffected.
+  // The turn's model id, when the action represents an agent turn. Externally
+  // billed models consume ZERO OpenGeni credits, so the credit-balance +
+  // model-cost + token gates are skipped. Connected subscriptions still require
+  // live workspace readiness; an explicitly anonymous deployment route is
+  // statically ready by definition. Non-model infra actions leave this undefined.
   model?: string | null;
 };
 
@@ -59,23 +58,34 @@ export async function checkLimit(
         model: input.model,
       })
     : false;
-  const creditDecision = await checkCreditBalance(deps, input, codexBilled);
+  const credentialFreeExternal = input.model
+    ? (() => {
+        const resolved = resolveModelProvider(deps.settings, input.model);
+        return (
+          resolved?.model.billing.metering === "external" &&
+          resolved.model.credentialSource.kind === "deployment" &&
+          resolved.model.credentialSource.mechanism === "none"
+        );
+      })()
+    : false;
+  const externallyBilled = codexBilled || credentialFreeExternal;
+  const creditDecision = await checkCreditBalance(deps, input, externallyBilled);
   if (!creditDecision.allowed) {
     return creditDecision;
   }
   if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
     return { allowed: true };
   }
-  return await checkStaticCaps(deps, input, codexBilled);
+  return await checkStaticCaps(deps, input, externallyBilled);
 }
 
 async function checkCreditBalance(
   deps: LimitDependencies,
   input: LimitCheckInput,
-  codexBilled: boolean,
+  externallyBilled: boolean,
 ): Promise<LimitDecision> {
-  if (codexBilled) {
-    return { allowed: true }; // paid by the user's ChatGPT/Codex plan — zero OpenGeni credits
+  if (externallyBilled) {
+    return { allowed: true }; // paid outside OpenGeni — zero OpenGeni credits
   }
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
@@ -90,10 +100,10 @@ async function checkCreditBalance(
 async function checkStaticCaps(
   deps: LimitDependencies,
   input: LimitCheckInput,
-  codexBilled: boolean,
+  externallyBilled: boolean,
 ): Promise<LimitDecision> {
   const limits = configuredStaticUsageLimits(deps.settings);
-  if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action) && !codexBilled) {
+  if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action) && !externallyBilled) {
     const used = await sumUsageQuantity(deps.db, {
       accountId: input.accountId,
       eventType: "model.cost",
@@ -172,7 +182,7 @@ async function checkStaticCaps(
           );
     }
     case "tokens:consume": {
-      if (codexBilled || !limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
+      if (externallyBilled || !limits.maxMonthlyTokensPerWorkspace || !input.workspaceId) {
         return { allowed: true };
       }
       const used = await sumUsageQuantity(deps.db, {

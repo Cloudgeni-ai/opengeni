@@ -14119,6 +14119,16 @@ export const ModelCredentialSourceV1 =
   );
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
 
+const TurnExecutionCredentialSourceV1 = z.union([
+  ModelCredentialSourceV1,
+  z
+    .object({
+      kind: z.literal("deployment"),
+      mechanism: z.literal("none"),
+    })
+    .strict(),
+]);
+
 export const ModelBillingAttributionV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z
@@ -14175,7 +14185,7 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
       wireApi: z.enum(["responses", "chat"]),
-      credentialSource: ModelCredentialSourceV1,
+      credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
     })

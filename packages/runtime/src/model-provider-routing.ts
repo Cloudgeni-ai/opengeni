@@ -3,8 +3,10 @@ import { configuredProviders, resolveModelProvider } from "@opengeni/config";
 import {
   OpenAIChatCompletionsModel,
   type Model,
+  type ModelResponse,
   type ModelProvider,
   type ModelRequest,
+  type ResponseStreamEvent,
 } from "@openai/agents";
 import OpenAI from "openai";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
@@ -15,8 +17,58 @@ import { recordModelPreparationMeasurement } from "./model-preparation-diagnosti
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
+  UnknownModelFinishReasonError,
   XaiSubscriptionUnavailableError,
 } from "./model-provider-errors";
+
+function isUnknownFinishReason(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === "unknown";
+}
+
+function chatCompletionFinishReason(value: unknown): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  const choices = (value as { choices?: unknown }).choices;
+  if (!Array.isArray(choices)) return undefined;
+  const primary = choices.find(
+    (choice) => choice && typeof choice === "object" && (choice as { index?: unknown }).index === 0,
+  );
+  return primary && typeof primary === "object"
+    ? (primary as { finish_reason?: unknown }).finish_reason
+    : undefined;
+}
+
+/**
+ * Chat-compatible providers can report `finish_reason: "unknown"` after an
+ * interrupted generation. The upstream SDK otherwise converts that terminal
+ * into an ordinary `response_done`, which can commit a truncated answer. Fail
+ * before that boundary so the worker's fenced same-turn recovery owns the
+ * continuation and no OpenGeni tool call from the ambiguous response executes.
+ */
+export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
+  override async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    const response = await super.getResponse(request);
+    if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
+      throw new UnknownModelFinishReasonError();
+    }
+    return response;
+  }
+
+  override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
+    let finishReason: unknown;
+    for await (const event of super.getStreamedResponse(request)) {
+      if (event.type === "model") {
+        const observed = chatCompletionFinishReason(event.event);
+        if (observed !== undefined && observed !== null) {
+          finishReason = observed;
+        }
+      }
+      if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
+        throw new UnknownModelFinishReasonError();
+      }
+      yield event;
+    }
+  }
+}
 
 export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
   constructor(
@@ -53,7 +105,7 @@ export function buildModelInstance(
   modelId: string,
 ): Model {
   return provider.api === "chat"
-    ? new OpenAIChatCompletionsModel(client, modelId)
+    ? new OpenGeniChatCompletionsModel(client, modelId)
     : new OpenGeniResponsesModel(client, modelId, provider);
 }
 
