@@ -39,7 +39,7 @@ Workspace admins manage sources and triggers under `/v1/workspaces/:workspaceId/
 
 ## Packs
 
-A Pack may declare `automationTemplates`. Installing a Pack makes these frozen templates available but does not manufacture a provider connection. After the required connection/app is registered, setup may create a source owned by the exact Pack installation and connector, then instantiate a trigger tied to the exact installation and template. Generic source mutation is rejected for a Pack-owned source; the Pack setup API owns credential rotation and lifecycle synchronization. Pack-owned trigger configuration and execution fields are immutable; per-installation `parameters`, pause/disable, and display-name edits remain revisioned. Disabling or uninstalling the Pack prevents a pending run from dispatching.
+A Pack may declare `automationTemplates`. Installing a Pack makes these frozen templates available but does not manufacture a provider connection. After the required connection/app is registered, setup may create a source owned by the exact Pack installation and connector, then instantiate a trigger tied to the exact installation and template. The generic API cannot claim Pack ownership or mutate Pack-owned sources or triggers; the Pack setup API exclusively owns their credential rotation, configuration, parameters, and lifecycle synchronization. Disabling or uninstalling the Pack prevents a pending run from dispatching.
 
 Canonical implementation:
 

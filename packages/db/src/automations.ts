@@ -122,7 +122,11 @@ export async function createAutomationSource(
 export async function resolveAutomationWebhookEndpoint(
   db: Database,
   endpointId: string,
-): Promise<{ accountId: string; workspaceId: string; sourceId: string } | null> {
+): Promise<{
+  accountId: string;
+  workspaceId: string;
+  sourceId: string;
+} | null> {
   const [row] = await db
     .select({
       accountId: schema.automationWebhookEndpoints.accountId,
@@ -151,7 +155,12 @@ export async function getAutomationSourceSecret(
         ),
       )
       .limit(1);
-    return row ? { ...mapSource(row), webhookSecretEncrypted: row.webhookSecretEncrypted } : null;
+    return row
+      ? {
+          ...mapSource(row),
+          webhookSecretEncrypted: row.webhookSecretEncrypted,
+        }
+      : null;
   });
 }
 
@@ -226,6 +235,7 @@ export async function createAutomationTrigger(
             id: schema.automationSources.id,
             adapterId: schema.automationSources.adapterId,
             status: schema.automationSources.status,
+            packInstallationId: schema.automationSources.packInstallationId,
           })
           .from(schema.automationSources)
           .where(
@@ -240,6 +250,9 @@ export async function createAutomationTrigger(
         if (source.status !== "active") throw new Error("Automation source is disabled");
         if (source.adapterId !== input.adapterId) {
           throw new Error("Automation source and trigger adapter do not match");
+        }
+        if (source.packInstallationId !== input.request.packInstallationId) {
+          throw new Error("Automation source and trigger Pack ownership do not match");
         }
         if (input.request.packInstallationId) {
           const [installation] = await tx
@@ -317,7 +330,10 @@ export async function listAutomationTriggers(
 ): Promise<AutomationTrigger[]> {
   return await withWorkspaceRls(db, workspaceId, async (scoped) => {
     const rows = await scoped
-      .select({ head: schema.automationTriggers, revision: schema.automationTriggerRevisions })
+      .select({
+        head: schema.automationTriggers,
+        revision: schema.automationTriggerRevisions,
+      })
       .from(schema.automationTriggers)
       .innerJoin(
         schema.automationTriggerRevisions,
@@ -385,7 +401,10 @@ export async function getAutomationTriggerRevisions(
   if (input.refs.length === 0) return [];
   return await withWorkspaceRls(db, input.workspaceId, async (scoped) => {
     const rows = await scoped
-      .select({ head: schema.automationTriggers, revision: schema.automationTriggerRevisions })
+      .select({
+        head: schema.automationTriggers,
+        revision: schema.automationTriggerRevisions,
+      })
       .from(schema.automationTriggers)
       .innerJoin(
         schema.automationTriggerRevisions,
@@ -427,7 +446,10 @@ export async function updateAutomationTrigger(
     async (scoped) =>
       await scoped.transaction(async (tx) => {
         const [existing] = await tx
-          .select({ head: schema.automationTriggers, revision: schema.automationTriggerRevisions })
+          .select({
+            head: schema.automationTriggers,
+            revision: schema.automationTriggerRevisions,
+          })
           .from(schema.automationTriggers)
           .innerJoin(
             schema.automationTriggerRevisions,
@@ -451,13 +473,10 @@ export async function updateAutomationTrigger(
         if (existing.head.currentRevision !== input.request.expectedRevision) {
           throw new AutomationRevisionConflictError();
         }
-        if (
-          existing.head.packInstallationId &&
-          (input.request.eventTypes !== undefined ||
-            input.request.configuration !== undefined ||
-            input.request.sessionTemplate !== undefined)
-        ) {
-          throw new Error("Pack-owned automation execution templates are immutable");
+        if (existing.head.packInstallationId) {
+          throw new Error(
+            "Pack-owned automation triggers must be managed through their Pack setup API",
+          );
         }
         const revisionNumber = existing.head.currentRevision + 1;
         const [head] = await tx
@@ -680,7 +699,11 @@ export async function claimAutomationRun(
         if (row.status === "dispatched" || row.status === "skipped") return mapRunExecution(row);
         const [updated] = await tx
           .update(schema.automationRuns)
-          .set({ status: "dispatching", errorCode: null, updatedAt: new Date() })
+          .set({
+            status: "dispatching",
+            errorCode: null,
+            updatedAt: new Date(),
+          })
           .where(eq(schema.automationRuns.id, row.id))
           .returning();
         return updated ? mapRunExecution(updated) : null;

@@ -46,7 +46,9 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/automations/sources", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    return c.json({ sources: await listAutomationSources(deps.db, workspaceId) });
+    return c.json({
+      sources: await listAutomationSources(deps.db, workspaceId),
+    });
   });
 
   app.post("/v1/workspaces/:workspaceId/automations/sources", async (c) => {
@@ -96,7 +98,10 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       request,
       ...(webhookSecretEncrypted ? { webhookSecretEncrypted } : {}),
     });
-    if (!source) throw new HTTPException(404, { message: "automation source not found" });
+    if (!source)
+      throw new HTTPException(404, {
+        message: "automation source not found",
+      });
     return c.json(source);
   });
 
@@ -115,23 +120,36 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       sourceId: c.req.param("sourceId"),
       request: { status: "disabled" },
     });
-    if (!source) throw new HTTPException(404, { message: "automation source not found" });
+    if (!source)
+      throw new HTTPException(404, {
+        message: "automation source not found",
+      });
     return c.body(null, 204);
   });
 
   app.get("/v1/workspaces/:workspaceId/automations/triggers", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    return c.json({ triggers: await listAutomationTriggers(deps.db, workspaceId) });
+    return c.json({
+      triggers: await listAutomationTriggers(deps.db, workspaceId),
+    });
   });
 
   app.post("/v1/workspaces/:workspaceId/automations/triggers", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const request = CreateAutomationTriggerRequest.parse(await c.req.json());
+    if (request.packInstallationId || request.packTemplateId) {
+      throw new HTTPException(409, {
+        message: "Pack-owned automation triggers must be created through their Pack setup API",
+      });
+    }
     const source = await requireSource(deps, grant.accountId, workspaceId, request.sourceId);
+    assertGenericSourceMutable(source);
     if (source.status !== "active") {
-      throw new HTTPException(409, { message: "automation source is disabled" });
+      throw new HTTPException(409, {
+        message: "automation source is disabled",
+      });
     }
     const adapter = requireAutomationAdapter(source.adapterId);
     adapter.validateTriggerConfiguration(request.configuration);
@@ -158,7 +176,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const existing = (await listAutomationTriggers(deps.db, workspaceId)).find(
       (trigger) => trigger.id === c.req.param("triggerId"),
     );
-    if (!existing) throw new HTTPException(404, { message: "automation trigger not found" });
+    if (!existing)
+      throw new HTTPException(404, {
+        message: "automation trigger not found",
+      });
+    assertGenericTriggerMutable(existing);
     if (request.configuration) {
       requireAutomationAdapter(existing.adapterId).validateTriggerConfiguration(
         request.configuration,
@@ -167,6 +189,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (request.parameters) {
       requireAutomationAdapter(existing.adapterId).validateTriggerParameters(request.parameters);
     }
+    if (request.sessionTemplate) {
+      for (const permission of request.sessionTemplate.firstPartyMcpPermissions) {
+        requirePermission(grant, permission);
+      }
+    }
     try {
       const trigger = await updateAutomationTrigger(deps.db, {
         workspaceId,
@@ -174,7 +201,10 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
         request,
       });
-      if (!trigger) throw new HTTPException(404, { message: "automation trigger not found" });
+      if (!trigger)
+        throw new HTTPException(404, {
+          message: "automation trigger not found",
+        });
       return c.json(trigger);
     } catch (error) {
       if (error instanceof AutomationRevisionConflictError) {
@@ -189,8 +219,18 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const expectedRevision = Number(c.req.query("expectedRevision"));
     if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
-      throw new HTTPException(400, { message: "expectedRevision must be a positive integer" });
+      throw new HTTPException(400, {
+        message: "expectedRevision must be a positive integer",
+      });
     }
+    const existing = (await listAutomationTriggers(deps.db, workspaceId)).find(
+      (trigger) => trigger.id === c.req.param("triggerId"),
+    );
+    if (!existing)
+      throw new HTTPException(404, {
+        message: "automation trigger not found",
+      });
+    assertGenericTriggerMutable(existing);
     try {
       const trigger = await updateAutomationTrigger(deps.db, {
         workspaceId,
@@ -198,7 +238,10 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
         request: { expectedRevision, status: "disabled" },
       });
-      if (!trigger) throw new HTTPException(404, { message: "automation trigger not found" });
+      if (!trigger)
+        throw new HTTPException(404, {
+          message: "automation trigger not found",
+        });
       return c.body(null, 204);
     } catch (error) {
       if (error instanceof AutomationRevisionConflictError) {
@@ -220,7 +263,9 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const request = TriggerAutomationManuallyRequest.parse(await c.req.json());
     const source = await requireSource(deps, grant.accountId, workspaceId, c.req.param("sourceId"));
     if (source.status !== "active") {
-      throw new HTTPException(409, { message: "automation source is disabled" });
+      throw new HTTPException(409, {
+        message: "automation source is disabled",
+      });
     }
     const normalizedEvent = AutomationNormalizedEvent.parse({
       adapterId: source.adapterId,
@@ -250,10 +295,15 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         endpointId,
       )
     ) {
-      throw new HTTPException(404, { message: "automation endpoint not found" });
+      throw new HTTPException(404, {
+        message: "automation endpoint not found",
+      });
     }
     const endpoint = await resolveAutomationWebhookEndpoint(deps.db, endpointId);
-    if (!endpoint) throw new HTTPException(404, { message: "automation endpoint not found" });
+    if (!endpoint)
+      throw new HTTPException(404, {
+        message: "automation endpoint not found",
+      });
     const source = await requireSource(
       deps,
       endpoint.accountId,
@@ -261,7 +311,9 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
       endpoint.sourceId,
     );
     if (source.status !== "active") {
-      throw new HTTPException(410, { message: "automation source is disabled" });
+      throw new HTTPException(410, {
+        message: "automation source is disabled",
+      });
     }
     const rawBody = await readBoundedBody(c.req.raw, AUTOMATION_WEBHOOK_MAX_BYTES);
     const adapter = requireAutomationAdapter(source.adapterId);
@@ -277,12 +329,17 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         sourceConfiguration: source.configuration,
       })
     ) {
-      throw new HTTPException(401, { message: "automation signature is invalid" });
+      throw new HTTPException(401, {
+        message: "automation signature is invalid",
+      });
     }
     const requestDigest = automationRequestDigest(source.adapterId, rawBody);
     try {
       const result = await acceptEvent(deps, source, {
-        deliveryKey: adapter.deliveryKey({ headers: c.req.raw.headers, requestDigest }),
+        deliveryKey: adapter.deliveryKey({
+          headers: c.req.raw.headers,
+          requestDigest,
+        }),
         requestDigest,
         normalizedEvent: adapter.normalize({
           rawBody,
@@ -310,7 +367,9 @@ async function acceptEvent(
   },
 ) {
   if (input.normalizedEvent.adapterId !== source.adapterId) {
-    throw new HTTPException(422, { message: "automation event adapter does not match source" });
+    throw new HTTPException(422, {
+      message: "automation event adapter does not match source",
+    });
   }
   const adapter = requireAutomationAdapter(source.adapterId);
   const triggers = await listActiveAutomationTriggersForSource(deps.db, {
@@ -353,7 +412,9 @@ async function acceptEvent(
   const runIds: string[] = [];
   const triggerAutomationRun = deps.workflowClient.triggerAutomationRun;
   if (matching.length > 0 && !triggerAutomationRun) {
-    throw new HTTPException(503, { message: "automation dispatcher is unavailable" });
+    throw new HTTPException(503, {
+      message: "automation dispatcher is unavailable",
+    });
   }
   for (const trigger of matching) {
     const render = adapter.render({
@@ -402,7 +463,11 @@ async function requireSource(
   workspaceId: string,
   sourceId: string,
 ): Promise<AutomationSourceSecret> {
-  const source = await getAutomationSourceSecret(deps.db, { accountId, workspaceId, sourceId });
+  const source = await getAutomationSourceSecret(deps.db, {
+    accountId,
+    workspaceId,
+    sourceId,
+  });
   if (!source) throw new HTTPException(404, { message: "automation source not found" });
   return source;
 }
@@ -411,6 +476,14 @@ function assertGenericSourceMutable(source: AutomationSourceSecret): void {
   if (source.packInstallationId) {
     throw new HTTPException(409, {
       message: "Pack-owned automation sources must be managed through their Pack setup API",
+    });
+  }
+}
+
+function assertGenericTriggerMutable(trigger: { packInstallationId: string | null }): void {
+  if (trigger.packInstallationId) {
+    throw new HTTPException(409, {
+      message: "Pack-owned automation triggers must be managed through their Pack setup API",
     });
   }
 }
@@ -428,7 +501,9 @@ function requireEncryptionKey(deps: ApiRouteDeps): Uint8Array {
 async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array> {
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new HTTPException(413, { message: "automation webhook payload is too large" });
+    throw new HTTPException(413, {
+      message: "automation webhook payload is too large",
+    });
   }
   if (!request.body) return new Uint8Array();
   const reader = request.body.getReader();
@@ -441,7 +516,9 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
       length += value.byteLength;
       if (length > maxBytes) {
         await reader.cancel();
-        throw new HTTPException(413, { message: "automation webhook payload is too large" });
+        throw new HTTPException(413, {
+          message: "automation webhook payload is too large",
+        });
       }
       chunks.push(value);
     }

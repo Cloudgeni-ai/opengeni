@@ -14,6 +14,7 @@ import {
   listAutomationTriggers,
   recordAutomationEvent,
   updateAutomationSource,
+  updateAutomationTrigger,
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
@@ -68,11 +69,52 @@ describe("automation persistence", () => {
       packInstallationId: null,
       packConnectorId: null,
     });
+    const packSessionTemplate = {
+      prompt: "Review",
+      instructions: null,
+      resources: [],
+      skills: [],
+      tools: [],
+      firstPartyMcpTools: [],
+      firstPartyMcpPermissions: [],
+      model: null,
+      reasoningEffort: null,
+      sandboxBackend: null,
+      policyRole: null,
+      metadata: {},
+    };
     const packInstallation = await enablePackInstallation(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       packId: "automation-test-pack",
       installedBySubjectId: grant.subjectId,
+      manifestSnapshot: {
+        id: "automation-test-pack",
+        name: "Automation test",
+        description: "Tests Pack-owned automation authority",
+        role: "engineering",
+        category: "development",
+        version: "1.0.0",
+        skills: [],
+        components: [],
+        tools: [],
+        connectors: [],
+        knowledge: [],
+        scheduledTaskTemplates: [],
+        automationTemplates: [
+          {
+            id: "review",
+            name: "Review",
+            description: "Review a Pack event",
+            adapterId: "signed-json.v1",
+            eventTypes: ["pack.event"],
+            configuration: {},
+            sessionTemplate: packSessionTemplate,
+            connectionRequirement: "test-connection",
+          },
+        ],
+        metadata: {},
+      },
     });
     const packSource = await createAutomationSource(client.db, {
       accountId: grant.accountId,
@@ -231,9 +273,54 @@ describe("automation persistence", () => {
       occurrenceKey: normalizedEvent.occurrenceKey,
       acceptedExecution,
     });
-    expect(sameRun).toMatchObject({ duplicate: true, run: { id: firstRun.run.id } });
+    expect(sameRun).toMatchObject({
+      duplicate: true,
+      run: { id: firstRun.run.id },
+    });
     expect(await listAutomationSources(client.db, grant.workspaceId)).toHaveLength(2);
     expect(await listAutomationTriggers(client.db, grant.workspaceId)).toHaveLength(1);
     expect(await listAutomationRuns(client.db, grant.workspaceId)).toHaveLength(1);
+    const packTriggerRequest = {
+      sourceId: packSource.id,
+      name: "Pack-owned trigger",
+      eventTypes: ["pack.event"],
+      configuration: {},
+      parameters: { protected: true },
+      sessionTemplate: packSessionTemplate,
+      status: "active" as const,
+      packInstallationId: packInstallation.id,
+      packTemplateId: "review",
+    };
+    await expect(
+      createAutomationTrigger(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        createdBySubjectId: grant.subjectId,
+        adapterId: packSource.adapterId,
+        request: {
+          ...packTriggerRequest,
+          packInstallationId: null,
+          packTemplateId: null,
+        },
+      }),
+    ).rejects.toThrow("Automation source and trigger Pack ownership do not match");
+    const packTrigger = await createAutomationTrigger(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      createdBySubjectId: grant.subjectId,
+      adapterId: packSource.adapterId,
+      request: packTriggerRequest,
+    });
+    await expect(
+      updateAutomationTrigger(client.db, {
+        workspaceId: grant.workspaceId,
+        triggerId: packTrigger.id,
+        subjectId: grant.subjectId,
+        request: {
+          expectedRevision: packTrigger.revision,
+          parameters: { protected: false },
+        },
+      }),
+    ).rejects.toThrow("Pack-owned automation triggers must be managed");
   }, 60_000);
 });
