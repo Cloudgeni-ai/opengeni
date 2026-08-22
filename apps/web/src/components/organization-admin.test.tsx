@@ -14,8 +14,8 @@ import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
-  OrganizationRetentionPolicy,
   OrganizationPrivateSessionSettings,
+  OrganizationRetentionPolicy,
 } from "@/types";
 
 const toastSuccess = mock((_message: string) => undefined);
@@ -231,13 +231,18 @@ describe("organization administration component fences", () => {
       version: 0,
       updatedAt: timestamp,
     } satisfies OrganizationPrivateSessionSettings;
-    const getOrganizationPrivateSessionSettings = mock(async () => current);
-    const updateOrganizationPrivateSessionSettings = mock(async () => ({
-      ...current,
-      enabled: true,
-      version: 1,
-      changed: true,
-    }));
+    const getOrganizationPrivateSessionSettings = mock(async (_organizationId: string) => current);
+    const updateOrganizationPrivateSessionSettings = mock(
+      async (
+        _organizationId: string,
+        _request: { enabled: boolean; expectedVersion: number; operationId: string },
+      ) => ({
+        ...current,
+        enabled: true,
+        version: 1,
+        changed: true,
+      }),
+    );
     const client = {
       getOrganizationPrivateSessionSettings,
       updateOrganizationPrivateSessionSettings,
@@ -270,6 +275,65 @@ describe("organization administration component fences", () => {
       expectedVersion: 0,
     });
     expect(container.textContent).toContain("permission to start chats");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("makes a delayed organization A private-session read inert after switching to B", async () => {
+    const pendingA = deferred<OrganizationPrivateSessionSettings>();
+    const settingsB = {
+      organizationId: identityB.organizationId,
+      enabled: true,
+      available: true,
+      version: 4,
+      updatedAt: timestamp,
+    } satisfies OrganizationPrivateSessionSettings;
+    const getOrganizationPrivateSessionSettings = mock(async (organizationId: string) =>
+      organizationId === identityA.organizationId ? pendingA.promise : settingsB,
+    );
+    const client = { getOrganizationPrivateSessionSettings } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationPrivateSessionsSection
+          key="a"
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+        />,
+      );
+    });
+    await act(async () => {
+      root.render(
+        <OrganizationPrivateSessionsSection
+          key="b"
+          client={client}
+          identity={identityB}
+          actorRole="owner"
+          managedSession
+        />,
+      );
+    });
+    await flush();
+    expect(container.textContent).toContain("Members who have permission to start chats");
+
+    pendingA.resolve({
+      organizationId: identityA.organizationId,
+      enabled: false,
+      available: true,
+      version: 0,
+      updatedAt: timestamp,
+    });
+    await flush();
+
+    expect(getOrganizationPrivateSessionSettings).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain("Members who have permission to start chats");
+    expect(container.textContent).not.toContain("workspace-visible chats only");
 
     await act(async () => root.unmount());
     container.remove();

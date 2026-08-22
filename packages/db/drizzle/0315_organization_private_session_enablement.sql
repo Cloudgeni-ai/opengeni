@@ -36,12 +36,40 @@ CREATE POLICY organization_private_session_settings_scoped_read
 -- Organizations that completed the older operator activation already had the
 -- product surface enabled. Preserve that behavior; only organizations activated
 -- after this migration require an owner/admin product decision.
+--
+-- Both the source and target are FORCE-RLS tables. Production migrations run as
+-- their NOSUPERUSER/NOBYPASSRLS owner with no tenant GUC, so the owner would
+-- otherwise see zero activation rows and be unable to insert the compatibility
+-- settings. The migration runner executes this file in one transaction: NO
+-- FORCE relaxes only the owner, the application role remains policy-bound, and
+-- any failed verification rolls the data and posture changes back together.
+ALTER TABLE session_tenancy_activations NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE organization_private_session_settings NO FORCE ROW LEVEL SECURITY;
 INSERT INTO organization_private_session_settings (
   account_id, enabled, version, updated_by_membership_id, updated_at
 )
 SELECT activation.account_id, true, 1, NULL, activation.activated_at
 FROM session_tenancy_activations activation
 ON CONFLICT (account_id) DO NOTHING;
+DO $organization_private_session_compatibility_backfill$
+DECLARE
+  missing_enabled_settings bigint;
+BEGIN
+  SELECT count(*) INTO missing_enabled_settings
+  FROM session_tenancy_activations activation
+  LEFT JOIN organization_private_session_settings setting
+    ON setting.account_id = activation.account_id
+  WHERE setting.account_id IS NULL OR NOT setting.enabled;
+  IF missing_enabled_settings > 0 THEN
+    RAISE EXCEPTION
+      'organization private-session compatibility backfill did not converge: % activated organization(s) remain disabled',
+      missing_enabled_settings
+      USING ERRCODE = '55000';
+  END IF;
+END
+$organization_private_session_compatibility_backfill$;
+ALTER TABLE organization_private_session_settings FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_tenancy_activations FORCE ROW LEVEL SECURITY;
 
 CREATE TABLE organization_private_session_setting_events (
   id uuid PRIMARY KEY,

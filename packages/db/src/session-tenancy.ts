@@ -189,18 +189,26 @@ export async function openPrivateSessionCreateCapability(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string; actorSubjectId: string },
 ): Promise<{ capabilityId: string; ownerMembershipId: string }> {
-  const rows = await rawRows<{ capabilityId: string; ownerMembershipId: string }>(
-    db,
-    sql`select
-      capability_id as "capabilityId",
-      owner_membership_id as "ownerMembershipId"
-    from open_private_session_create_capability(
-      ${input.accountId}::uuid,
-      ${input.workspaceId}::uuid,
-      ${input.sessionId}::uuid,
-      ${input.actorSubjectId}
-    )`,
-  );
+  let rows: Array<{ capabilityId: string; ownerMembershipId: string }>;
+  try {
+    rows = await rawRows<{ capabilityId: string; ownerMembershipId: string }>(
+      db,
+      sql`select
+        capability_id as "capabilityId",
+        owner_membership_id as "ownerMembershipId"
+      from open_private_session_create_capability(
+        ${input.accountId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid,
+        ${input.actorSubjectId}
+      )`,
+    );
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "55000") {
+      throw new SessionTenancyNotActivatedError();
+    }
+    throw error;
+  }
   const capabilityId = rows[0]?.capabilityId;
   const ownerMembershipId = rows[0]?.ownerMembershipId;
   if (!capabilityId || !ownerMembershipId) {

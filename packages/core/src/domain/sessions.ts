@@ -1463,7 +1463,11 @@ export async function createSessionForRequestWithOutcome(
         message: "managed human session required",
       });
     }
-    if (!personalWorkspace) {
+    if (!personalWorkspace && !payload.idempotencyKey) {
+      // A committed keyed success must replay after an owner/admin disables
+      // new organization-private creates. The database admission transaction
+      // checks the durable success/denial ledger before opening the mutable
+      // private-create capability; fresh keys still fail closed there.
       await requireManagedHumanPrivateSessionCreate(deps, authorization, workspaceId);
     }
     if (payload.sandbox === "shared" || typeof payload.sandbox === "object") {

@@ -172,6 +172,31 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
   }));
 }
 
+function organizationPrivateSessionAuthorityTables(): RuntimeTablePosture[] {
+  return [
+    "managed_accounts",
+    "organization_private_session_setting_events",
+    "organization_private_session_settings",
+    "session_tenancy_activations",
+  ].map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function xaiAuthorityTables(): RuntimeTablePosture[] {
   return ["workspace_memberships", "xai_subscription_credentials"].map((name) => ({
     name,
@@ -250,6 +275,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...canonicalHumanIdentityAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),
+      ...organizationPrivateSessionAuthorityTables(),
       ...xaiAuthorityTables(),
     ],
     privateTables: [
@@ -368,14 +394,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 267],
+            [FORCE_RLS_TABLES, 269],
             [NON_RLS_RUNTIME_TABLES, 11],
             [RUNTIME_FULL_DML_TABLES, 135],
             [RUNTIME_READ_ONLY_TABLES, 19],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 31],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 47],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 49],
             [RUNTIME_DML_TABLES, 231],
           ] as const)
         : ([
@@ -400,7 +426,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 278 : 204;
+      const tableCount = hasCurrentMainActivityLedger ? 280 : 204;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -677,6 +703,27 @@ describe("runtime database posture evaluator", () => {
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
     }
+  });
+
+  test("classifies organization private-session settings as capability-only FORCE-RLS state", () => {
+    for (const table of [
+      "organization_private_session_setting_events",
+      "organization_private_session_settings",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    for (const routine of [
+      "get_private_session_create_policy(uuid, uuid, text)",
+      "get_organization_private_session_settings(uuid, text)",
+      "update_organization_private_session_settings(uuid, text, boolean, bigint, uuid)",
+    ] as const) {
+      expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(routine);
+    }
+    expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(
+      "organization_private_sessions_enabled(uuid)",
+    );
   });
 
   test("classifies logical-turn personal-resource ledgers as FORCE-RLS with no direct DML", () => {

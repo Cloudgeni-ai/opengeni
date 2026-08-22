@@ -72,11 +72,7 @@ export async function getManagedHumanSessionCreateCapabilities(
     }
     throw error;
   }
-  const policy = await getManagedHumanPrivateSessionCreatePolicy(
-    deps,
-    authorization,
-    workspaceId,
-  );
+  const policy = await getManagedHumanPrivateSessionCreatePolicy(deps, authorization, workspaceId);
   const activated = policy.personalWorkspace || policy.organizationEnabled;
   return SessionTenancyCreateCapabilities.parse({
     activated,
@@ -104,11 +100,7 @@ export async function requireManagedHumanPrivateSessionCreate(
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): Promise<{ personalWorkspace: boolean }> {
-  const policy = await getManagedHumanPrivateSessionCreatePolicy(
-    deps,
-    authorization,
-    workspaceId,
-  );
+  const policy = await getManagedHumanPrivateSessionCreatePolicy(deps, authorization, workspaceId);
   if (!policy.personalWorkspace && !policy.organizationEnabled) {
     throw new SessionTenancyNotActivatedError();
   }

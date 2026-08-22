@@ -70,6 +70,20 @@ describe("managed-human session tenancy application service", () => {
     } satisfies AccessGrantAuthorization;
 
     await expect(
+      getManagedHumanSessionCreateCapabilities(
+        { db: client.db },
+        {
+          ...canonical,
+          grant: {
+            ...grant,
+            permissions: grant.permissions.filter((permission) => permission !== "sessions:create"),
+          },
+        },
+        grant.workspaceId,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+
+    await expect(
       getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
     ).resolves.toEqual({
       activated: false,

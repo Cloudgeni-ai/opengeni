@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { createDb, type DbClient } from "@opengeni/db";
+import { createDb, ensureManagedAccessForUser, type DbClient } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
 import {
   acquireSharedTestDatabase,
@@ -337,7 +337,7 @@ describe("organization membership routes", () => {
   });
 
   test("exposes owner-managed private-session settings behind readiness", async () => {
-    if (!shared || !app) return;
+    if (!shared || !client || !app) return;
     const membershipResponse = await app.request("http://x/v1/organization-memberships", {
       headers: { cookie: "session=present" },
     });
@@ -346,6 +346,36 @@ describe("organization membership routes", () => {
     };
     accountId = membershipBody.memberships[0]!.organizationId;
     const endpoint = `http://x/v1/organizations/${accountId}/private-session-settings`;
+    const [ownerMembership] = await shared.admin<Array<{ id: string }>>`
+      select id from organization_memberships
+      where account_id = ${accountId} and subject_id = ${subjectId}`;
+    if (!ownerMembership) throw new Error("owner membership missing");
+
+    const otherUserId = `private-settings-idor-${crypto.randomUUID()}`;
+    const otherAccess = await ensureManagedAccessForUser(client.db, {
+      userId: otherUserId,
+      email: `${otherUserId}@example.test`,
+      name: "Other organization owner",
+    });
+    const otherOrganizationId = otherAccess.organizationMemberships[0]?.accountId;
+    if (!otherOrganizationId) throw new Error("other organization missing");
+    const otherEndpoint = `http://x/v1/organizations/${otherOrganizationId}/private-session-settings`;
+    expect(
+      (await app.request(otherEndpoint, { headers: { cookie: "session=present" } })).status,
+    ).toBe(403);
+    expect(
+      (
+        await app.request(otherEndpoint, {
+          method: "PATCH",
+          headers: { cookie: "session=present", "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: false,
+            expectedVersion: 0,
+            operationId: crypto.randomUUID(),
+          }),
+        })
+      ).status,
+    ).toBe(403);
 
     const initial = await app.request(endpoint, { headers: { cookie: "session=present" } });
     expect(initial.status).toBe(200);
@@ -400,6 +430,25 @@ describe("organization membership routes", () => {
       version: 1,
       changed: true,
     });
+
+    await shared.admin`
+      update organization_memberships set role = 'member'
+      where id = ${ownerMembership.id}`;
+    const memberGet = await app.request(endpoint, { headers: { cookie: "session=present" } });
+    const memberPatch = await app.request(endpoint, {
+      method: "PATCH",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        enabled: false,
+        expectedVersion: 1,
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    await shared.admin`
+      update organization_memberships set role = 'owner'
+      where id = ${ownerMembership.id}`;
+    expect(memberGet.status).toBe(403);
+    expect(memberPatch.status).toBe(403);
   });
 
   test("renames the canonical organization and inventories every shared workspace without Personal workspaces", async () => {

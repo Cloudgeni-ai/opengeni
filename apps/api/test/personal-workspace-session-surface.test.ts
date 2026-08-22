@@ -23,6 +23,7 @@ import {
   setSessionPin,
   subjectHasLiveWorkspaceAuthorityInScope,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   withRlsContext,
   withWorkspaceSubjectRls,
   type DbClient,
@@ -400,6 +401,69 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session surface inside their own personal workspace", () => {
+  test("replays a committed organization-private create after disable but rejects a fresh key", async () => {
+    if (!shared || !client) return;
+    const owner = await provisionManagedHuman();
+    await activateSessionTenancy(owner);
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: owner.accountId,
+      actorSubjectId: owner.subjectId,
+      enabled: true,
+      expectedVersion: 0,
+      operationId: crypto.randomUUID(),
+    });
+    const endpoint = `http://x/v1/workspaces/${owner.legacyWorkspaceId}/sessions`;
+    const headers = { cookie: owner.cookie, "content-type": "application/json" };
+    const idempotencyKey = crypto.randomUUID();
+    const request = {
+      initialMessage: "private organization session",
+      visibility: "private",
+      idempotencyKey,
+    };
+
+    const createdResponse = await owner.app.request(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    expect(createdResponse.status).toBe(202);
+    const created = (await createdResponse.json()) as { id: string; visibility: string };
+    expect(created).toMatchObject({ visibility: "private" });
+
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: owner.accountId,
+      actorSubjectId: owner.subjectId,
+      enabled: false,
+      expectedVersion: 1,
+      operationId: crypto.randomUUID(),
+    });
+    const replayResponse = await owner.app.request(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    expect(replayResponse.status).toBe(202);
+    expect(await replayResponse.json()).toMatchObject({ id: created.id, visibility: "private" });
+
+    const freshResponse = await owner.app.request(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...request, idempotencyKey: crypto.randomUUID() }),
+    });
+    expect(freshResponse.status).toBe(409);
+    expect(await freshResponse.json()).toEqual({
+      code: "SESSION_TENANCY_NOT_ACTIVATED",
+      message: "Private sessions are not enabled for this organization.",
+    });
+
+    const existing = await owner.app.request(
+      `http://x/v1/workspaces/${owner.legacyWorkspaceId}/sessions/${created.id}`,
+      { headers: { cookie: owner.cookie } },
+    );
+    expect(existing.status).toBe(200);
+    expect(await existing.json()).toMatchObject({ id: created.id, visibility: "private" });
+  }, 180_000);
+
   test("PUT visibility and POST private fork activate only for the canonical owner cookie", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

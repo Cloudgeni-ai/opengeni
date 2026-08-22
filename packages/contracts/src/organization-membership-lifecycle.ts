@@ -53,9 +53,7 @@ export const OrganizationPrivateSessionSettings = z.object({
   updatedAt: z.string().datetime({ offset: true }),
   changed: z.boolean().optional(),
 });
-export type OrganizationPrivateSessionSettings = z.infer<
-  typeof OrganizationPrivateSessionSettings
->;
+export type OrganizationPrivateSessionSettings = z.infer<typeof OrganizationPrivateSessionSettings>;
 
 export const UpdateOrganizationPrivateSessionSettingsRequest = z
   .object({
