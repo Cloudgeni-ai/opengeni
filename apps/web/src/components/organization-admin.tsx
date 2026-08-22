@@ -1,5 +1,9 @@
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import {
+  getOrganizationPrivateSessionSettings,
+  updateOrganizationPrivateSessionSettings,
+} from "@opengeni/sdk/organization-private-session-settings";
+import {
   Building2Icon,
   CheckIcon,
   ClockIcon,
@@ -131,7 +135,8 @@ export function OrganizationPrivateSessionsSection(props: {
     const operation = claim("read");
     setState({ ownerKey: identityKey, value: null, loading: true, error: null });
     try {
-      const value = await props.client.getOrganizationPrivateSessionSettings(
+      const value = await getOrganizationPrivateSessionSettings(
+        props.client,
         props.identity.organizationId,
       );
       if (!owns(operation)) return;
@@ -161,7 +166,8 @@ export function OrganizationPrivateSessionsSection(props: {
     setBusyOwnerKey(identityKey);
     setBusy(true);
     try {
-      const value = await props.client.updateOrganizationPrivateSessionSettings(
+      const value = await updateOrganizationPrivateSessionSettings(
+        props.client,
         props.identity.organizationId,
         {
           enabled,

@@ -151,6 +151,7 @@ import {
   getPrivateSessionCreatePolicy,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
+  SessionTenancyNotActivatedError,
   sessionTenancyProductActivated,
 } from "./session-tenancy";
 import {
@@ -26618,6 +26619,11 @@ async function existingSpawnDenialForKey(
       ),
     )
     .limit(1);
+  if (
+    existing?.organizationPrivateSessionDenialReason === "organization_private_sessions_disabled"
+  ) {
+    throw new SessionTenancyNotActivatedError();
+  }
   return existing ? mapSessionSpawnDenial(existing) : null;
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { SessionTenancyManagedHumanRequiredError } from "@opengeni/core";
+import { SessionSpawnDeniedError, SessionTenancyManagedHumanRequiredError } from "@opengeni/core";
 import { SessionTenancyNotActivatedError } from "@opengeni/db";
 import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
@@ -138,6 +138,43 @@ describe("session create error envelope", () => {
     expect(await notActivated.json()).toEqual({
       code: "SESSION_TENANCY_NOT_ACTIVATED",
       message: "Private sessions are not enabled for this organization.",
+    });
+  });
+
+  test("keeps the rolling-old database denial contract on HTTP 409", async () => {
+    const app = new Hono();
+    app.get("/rolling-old-denial", (c) =>
+      sessionCreateErrorResponse(
+        c,
+        new SessionSpawnDeniedError({
+          id: "00000000-0000-4000-8000-000000000084",
+          accountId,
+          workspaceId,
+          parentSessionId: null,
+          rootSessionId: null,
+          currentDepth: 0,
+          attemptedDepth: 1,
+          effectiveMaxNestedAgentDepth: 0,
+          requestedMaxNestedAgentDepthOverride: null,
+          policySource: "default",
+          policySessionId: null,
+          subjectId: "user:rolling-old",
+          code: "nested_agent_depth_exceeded",
+          idempotencyKey: "rolling-old-private-disabled",
+          createdAt: "2026-08-22T00:00:00.000Z",
+        }),
+      ),
+    );
+
+    const response = await app.request("http://x/rolling-old-denial");
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "nested_agent_depth_exceeded",
+        details: {
+          denial: { idempotencyKey: "rolling-old-private-disabled" },
+        },
+      },
     });
   });
 });

@@ -231,22 +231,22 @@ describe("organization administration component fences", () => {
       version: 0,
       updatedAt: timestamp,
     } satisfies OrganizationPrivateSessionSettings;
-    const getOrganizationPrivateSessionSettings = mock(async (_organizationId: string) => current);
-    const updateOrganizationPrivateSessionSettings = mock(
+    const requestJson = mock(
       async (
-        _organizationId: string,
-        _request: { enabled: boolean; expectedVersion: number; operationId: string },
-      ) => ({
-        ...current,
-        enabled: true,
-        version: 1,
-        changed: true,
-      }),
+        method: string,
+        _path: string,
+        _request?: { enabled: boolean; expectedVersion: number; operationId: string },
+      ) =>
+        method === "GET"
+          ? current
+          : {
+              ...current,
+              enabled: true,
+              version: 1,
+              changed: true,
+            },
     );
-    const client = {
-      getOrganizationPrivateSessionSettings,
-      updateOrganizationPrivateSessionSettings,
-    } as unknown as OpenGeniCoreClient;
+    const client = { requestJson } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -266,11 +266,12 @@ describe("organization administration component fences", () => {
     await act(async () => button(container, "Enable").click());
     await flush();
 
-    expect(updateOrganizationPrivateSessionSettings).toHaveBeenCalledTimes(1);
-    expect(updateOrganizationPrivateSessionSettings.mock.calls[0]?.[0]).toBe(
-      identityA.organizationId,
+    expect(requestJson).toHaveBeenCalledTimes(2);
+    expect(requestJson.mock.calls[1]?.[0]).toBe("PATCH");
+    expect(requestJson.mock.calls[1]?.[1]).toBe(
+      `/v1/organizations/${identityA.organizationId}/private-session-settings`,
     );
-    expect(updateOrganizationPrivateSessionSettings.mock.calls[0]?.[1]).toMatchObject({
+    expect(requestJson.mock.calls[1]?.[2]).toMatchObject({
       enabled: true,
       expectedVersion: 0,
     });
@@ -289,10 +290,10 @@ describe("organization administration component fences", () => {
       version: 4,
       updatedAt: timestamp,
     } satisfies OrganizationPrivateSessionSettings;
-    const getOrganizationPrivateSessionSettings = mock(async (organizationId: string) =>
-      organizationId === identityA.organizationId ? pendingA.promise : settingsB,
+    const requestJson = mock(async (_method: string, path: string) =>
+      path.includes(identityA.organizationId) ? pendingA.promise : settingsB,
     );
-    const client = { getOrganizationPrivateSessionSettings } as unknown as OpenGeniCoreClient;
+    const client = { requestJson } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -331,7 +332,7 @@ describe("organization administration component fences", () => {
     });
     await flush();
 
-    expect(getOrganizationPrivateSessionSettings).toHaveBeenCalledTimes(2);
+    expect(requestJson).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain("Members who have permission to start chats");
     expect(container.textContent).not.toContain("workspace-visible chats only");
 

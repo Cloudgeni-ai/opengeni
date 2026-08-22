@@ -153,8 +153,8 @@ describe("release schema contract", () => {
       "0314_unregistered_organization_invitations.sql",
       "0316_human_confirmed_activation_resumed_generation.sql",
       "0317_session_goal_continuation_hold.sql",
-      "0318_organization_private_session_enablement.sql",
       "0318_session_turn_startup_milestones.sql",
+      "0319_organization_private_session_enablement.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -214,6 +214,9 @@ export async function openPrivateSessionCreateCapability(
   if (!capabilityId || !ownerMembershipId) {
     throw new Error("Private session create capability was not returned");
   }
+  if (capabilityId === "00000000-0000-0000-0000-000000000000") {
+    throw new SessionTenancyNotActivatedError();
+  }
   return { capabilityId, ownerMembershipId };
 }
 

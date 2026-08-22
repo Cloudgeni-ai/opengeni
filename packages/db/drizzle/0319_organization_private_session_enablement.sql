@@ -7,6 +7,14 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+ALTER TABLE session_spawn_denials
+  ADD COLUMN organization_private_session_denial_reason text;
+ALTER TABLE session_spawn_denials
+  ADD CONSTRAINT session_spawn_denials_organization_private_reason_check CHECK (
+    organization_private_session_denial_reason IS NULL
+    OR organization_private_session_denial_reason = 'organization_private_sessions_disabled'
+  );
+
 CREATE TABLE organization_private_session_settings (
   account_id uuid PRIMARY KEY REFERENCES managed_accounts(id) ON DELETE CASCADE,
   enabled boolean NOT NULL DEFAULT false,
@@ -337,6 +345,13 @@ BEGIN
   THEN
     RAISE EXCEPTION 'private session create authority required' USING ERRCODE = '42501';
   END IF;
+  -- This is the same organization-scoped fence taken by settings disablement
+  -- and organization membership lifecycle writes. It must be the first lock
+  -- after request/GUC validation so an old writer cannot authorize while the
+  -- setting is enabled and commit after disablement.
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'organization-membership:' || p_account_id::text, 0
+  ));
   PERFORM 1 FROM workspace_inference_controls control
   WHERE control.account_id = p_account_id AND control.workspace_id = p_workspace_id
   FOR SHARE;
@@ -354,10 +369,6 @@ BEGIN
     RAISE EXCEPTION 'private session create authority required' USING ERRCODE = '42501';
   END IF;
   IF NOT actor_personal_workspace THEN
-    IF NOT organization_private_sessions_enabled(p_account_id) THEN
-      RAISE EXCEPTION 'private sessions are not enabled for this organization'
-        USING ERRCODE = '55000';
-    END IF;
     SELECT access.id INTO workspace_access_id
     FROM workspace_memberships access
     WHERE access.account_id = p_account_id
@@ -366,6 +377,14 @@ BEGIN
     FOR KEY SHARE;
     IF NOT FOUND THEN
       RAISE EXCEPTION 'private session create authority required' USING ERRCODE = '42501';
+    END IF;
+    IF NOT organization_private_sessions_enabled(p_account_id) THEN
+      -- Rolling-old binaries do not map a new database exception on this
+      -- function. Return a reserved, transaction-local capability instead;
+      -- the early sessions trigger below consumes it into the existing keyed
+      -- denial contract. Repaired callers recognize the reserved value before
+      -- attempting INSERT and retain the precise product-setting error.
+      new_capability_id := '00000000-0000-0000-0000-000000000000'::uuid;
     END IF;
   END IF;
   PERFORM pg_catalog.set_config(
@@ -387,15 +406,114 @@ BEGIN
 END
 $body$;
 
-DO $pin_private_session_create$
+DO $organization_private_session_denial_guard$
 DECLARE data_schema text := current_schema();
 BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.guard_disabled_organization_private_session_create()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, pg_temp
+    AS $function$
+    DECLARE
+      denied_capability_id uuid;
+    BEGIN
+      IF NEW.create_idempotency_key IS NULL
+        OR NEW.created_by_kind <> 'subject'
+        OR NEW.visibility <> 'user_private'
+        OR NEW.create_requested_visibility <> 'user_private'
+        OR NEW.authority_epoch <> 1
+        OR NEW.parent_session_id IS NOT NULL
+        OR NEW.owner_organization_membership_id IS NULL
+        OR NEW.owner_subject_id IS DISTINCT FROM NEW.created_by_subject_id
+        OR NEW.sandbox_group_id IS DISTINCT FROM NEW.id
+        OR NEW.forked_from_session_id IS NOT NULL
+        OR NEW.forked_from_authority_epoch IS NOT NULL
+        OR NEW.forked_from_visibility IS NOT NULL
+        OR NEW.forked_at IS NOT NULL
+        OR NEW.forked_by_organization_membership_id IS NOT NULL
+      THEN
+        RETURN NEW;
+      END IF;
+
+      PERFORM pg_catalog.set_config(
+        'opengeni.private_session_create_lifecycle', 'private_session_create', true
+      );
+      DELETE FROM %1$I.private_session_create_capabilities capability
+      WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+        AND capability.transaction_id = pg_catalog.pg_current_xact_id()
+        AND capability.capability_id = '00000000-0000-0000-0000-000000000000'::uuid
+        AND capability.capability_id = nullif(
+          pg_catalog.current_setting(
+            'opengeni.private_session_create_capability', true
+          ),
+          ''
+        )::uuid
+        AND capability.account_id = NEW.account_id
+        AND capability.workspace_id = NEW.workspace_id
+        AND capability.session_id = NEW.id
+        AND capability.actor_subject_id = NEW.created_by_subject_id
+        AND capability.owner_membership_id = NEW.owner_organization_membership_id
+      RETURNING capability.capability_id INTO denied_capability_id;
+      IF denied_capability_id IS NULL THEN
+        RETURN NEW;
+      END IF;
+
+      PERFORM pg_catalog.set_config('opengeni.private_session_create_capability', '', true);
+      INSERT INTO %1$I.session_spawn_denials (
+        account_id, workspace_id, parent_session_id, root_session_id,
+        current_depth, attempted_depth, effective_max_nested_agent_depth,
+        requested_max_nested_agent_depth_override, policy_source,
+        policy_session_id, subject_id, code, idempotency_key,
+        organization_private_session_denial_reason
+      ) VALUES (
+        NEW.account_id, NEW.workspace_id, NULL, NULL,
+        0, 1, 0, NULL, 'default', NULL, NEW.created_by_subject_id,
+        'nested_agent_depth_exceeded', NEW.create_idempotency_key,
+        'organization_private_sessions_disabled'
+      );
+      RETURN NULL;
+    END
+    $function$;
+
+    REVOKE ALL ON FUNCTION %1$I.guard_disabled_organization_private_session_create()
+      FROM PUBLIC;
+    DROP TRIGGER IF EXISTS session_00_disabled_organization_private_create
+      ON %1$I.sessions;
+    CREATE TRIGGER session_00_disabled_organization_private_create
+      BEFORE INSERT ON %1$I.sessions
+      FOR EACH ROW
+      EXECUTE FUNCTION %1$I.guard_disabled_organization_private_session_create();
+  $ddl$, data_schema);
+END
+$organization_private_session_denial_guard$;
+
+DO $pin_organization_private_session_routines$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.organization_private_sessions_enabled(uuid) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.get_private_session_create_policy(uuid,uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.get_organization_private_session_settings(uuid,text) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.update_organization_private_session_settings(uuid,text,boolean,bigint,uuid) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
   EXECUTE format(
     'ALTER FUNCTION %I.open_private_session_create_capability(uuid,uuid,uuid,text) SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
 END
-$pin_private_session_create$;
+$pin_organization_private_session_routines$;
 
 DO $grants$
 BEGIN

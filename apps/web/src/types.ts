@@ -54,6 +54,7 @@ export type {
   McpPersonalConnectionSummary,
   OAuthStartRequest,
   OAuthStartResponse,
+  OrganizationPrivateSessionSettings,
   CreateWorkspaceRequest,
   Document as IndexedDocument,
   DocumentAuthorityKind,
@@ -147,9 +148,9 @@ export type {
   WorkspaceMemorySearchResult,
 } from "@opengeni/sdk";
 
-// These lifecycle methods are already part of OpenGeniCoreClient, while their
-// leaf response aliases are intentionally not re-exported from the SDK barrel.
-// Infer the UI types from that public client rather than mirroring wire shapes.
+// Infer lifecycle leaf types from the public client rather than mirroring wire
+// shapes. Organization private-session settings are exported directly because
+// their request helpers live in an opt-in SDK subpath.
 export type OrganizationInvitation = Awaited<
   ReturnType<OpenGeniCoreClient["listOrganizationInvitations"]>
 >["invitations"][number];
@@ -159,9 +160,6 @@ export type OrganizationMember = Awaited<
 export type OrganizationMembershipRole = OrganizationMember["role"];
 export type OrganizationAdministrationOverview = Awaited<
   ReturnType<OpenGeniCoreClient["getOrganizationAdministrationOverview"]>
->;
-export type OrganizationPrivateSessionSettings = Awaited<
-  ReturnType<OpenGeniCoreClient["getOrganizationPrivateSessionSettings"]>
 >;
 export type OrganizationWorkspaceAccess = OrganizationAdministrationOverview["workspaces"][number];
 export type OrganizationWorkspaceAccessMember = OrganizationWorkspaceAccess["members"][number];

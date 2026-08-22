@@ -4113,6 +4113,7 @@ export const sessionSpawnDenials = pgTable(
     subjectId: text("subject_id"),
     code: text("code").notNull(),
     idempotencyKey: text("idempotency_key"),
+    organizationPrivateSessionDenialReason: text("organization_private_session_denial_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -4132,6 +4133,11 @@ export const sessionSpawnDenials = pgTable(
     idempotency: uniqueIndex("session_spawn_denials_workspace_idempotency_idx")
       .on(table.workspaceId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} is not null`),
+    organizationPrivateSessionDenialReasonValid: check(
+      "session_spawn_denials_organization_private_reason_check",
+      sql`${table.organizationPrivateSessionDenialReason} is null
+        or ${table.organizationPrivateSessionDenialReason} = 'organization_private_sessions_disabled'`,
+    ),
     workspaceAccount: foreignKey({
       name: "session_spawn_denials_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],

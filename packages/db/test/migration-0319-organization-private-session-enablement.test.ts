@@ -23,7 +23,7 @@ import {
 } from "@opengeni/testing";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const ENABLEMENT_MIGRATION = "0318_organization_private_session_enablement.sql";
+const ENABLEMENT_MIGRATION = "0319_organization_private_session_enablement.sql";
 
 async function migrationFiles(): Promise<string[]> {
   return (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
@@ -79,7 +79,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0318-private-session-enablement");
+  shared = await acquireSharedTestDatabase("migration-0319-private-session-enablement");
   if (!shared) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL required");
     return;
@@ -92,16 +92,29 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0318 organization private-session enablement", () => {
-  test("pins private-create authority to the configured data schema", async () => {
+describe("migration 0319 organization private-session enablement", () => {
+  test("pins every new definer routine to the configured data schema", async () => {
     const source = await readFile(join(migrationsDir, ENABLEMENT_MIGRATION), "utf8");
     expect(source).toContain("SET search_path FROM CURRENT");
     expect(source).toContain("DECLARE data_schema text := current_schema();");
-    expect(source).toContain(
-      "ALTER FUNCTION %I.open_private_session_create_capability(uuid,uuid,uuid,text) SET search_path = pg_catalog, %I, pg_temp",
-    );
+    for (const signature of [
+      "organization_private_sessions_enabled(uuid)",
+      "get_private_session_create_policy(uuid,uuid,text)",
+      "get_organization_private_session_settings(uuid,text)",
+      "update_organization_private_session_settings(uuid,text,boolean,bigint,uuid)",
+      "open_private_session_create_capability(uuid,uuid,uuid,text)",
+    ]) {
+      expect(source).toContain(
+        `ALTER FUNCTION %I.${signature} SET search_path = pg_catalog, %I, pg_temp`,
+      );
+    }
     expect(source).not.toContain("SET search_path = pg_catalog, public, pg_temp");
     expect(source).not.toContain("$user");
+    expect(source).toContain("'organization-membership:' || p_account_id::text");
+    expect(source).toContain("session_00_disabled_organization_private_create");
+    expect(source).toContain("00000000-0000-0000-0000-000000000000");
+    expect(source).toContain("organization_private_session_denial_reason");
+    expect(source).toContain("organization_private_sessions_disabled");
   });
 
   test("personal workspaces are private-ready without organization activation", async () => {
@@ -165,19 +178,35 @@ describe("migration 0318 organization private-session enablement", () => {
     if (created.denied || replay.denied) throw new Error("personal private create denied");
     expect(replay.session.id).toBe(created.session.id);
 
-    const [routine] = await shared.admin<
-      Array<{ securityDefiner: boolean; settings: string[] | null }>
+    const routines = await shared.admin<
+      Array<{ name: string; securityDefiner: boolean; settings: string[] | null }>
     >`
-      select procedure.prosecdef as "securityDefiner", procedure.proconfig as settings
+      select procedure.proname as name, procedure.prosecdef as "securityDefiner",
+        procedure.proconfig as settings
       from pg_proc procedure
       join pg_namespace namespace on namespace.oid = procedure.pronamespace
       where namespace.nspname = 'public'
-        and procedure.proname = 'open_private_session_create_capability'
-        and pg_catalog.oidvectortypes(procedure.proargtypes) = 'uuid, uuid, uuid, text'`;
-    expect(routine).toEqual({
-      securityDefiner: true,
-      settings: ["search_path=pg_catalog, public, pg_temp"],
-    });
+        and procedure.proname in (
+          'organization_private_sessions_enabled',
+          'get_private_session_create_policy',
+          'get_organization_private_session_settings',
+          'update_organization_private_session_settings',
+          'open_private_session_create_capability'
+        )
+      order by procedure.proname`;
+    expect([...routines]).toEqual(
+      [
+        "get_organization_private_session_settings",
+        "get_private_session_create_policy",
+        "open_private_session_create_capability",
+        "organization_private_sessions_enabled",
+        "update_organization_private_session_settings",
+      ].map((name) => ({
+        name,
+        securityDefiner: true,
+        settings: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
   });
 
   test("owner/admin enablement gates ordinary members without using member-list authority", async () => {
@@ -341,7 +370,7 @@ describe("migration 0318 organization private-session enablement", () => {
     expect(nestedPostgresSqlState(denied)).toBe("42501");
   }, 180_000);
 
-  test("disablement fences a queued fresh organization-private create", async () => {
+  test("disablement fences a queued direct capability call and rolling-old keyed writer", async () => {
     if (!shared || !client) return;
     const userId = `org-private-fence-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;
@@ -369,12 +398,41 @@ describe("migration 0318 organization private-session enablement", () => {
       operationId: crypto.randomUUID(),
     });
 
+    const template = await createSessionWithIdempotencyKeyResult(client.db, {
+      accountId: sharedGrant.accountId,
+      workspaceId: sharedGrant.workspaceId,
+      visibility: "user_private",
+      initialMessage: "rolling-old private template",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      createIdempotencyKey: `organization-private-template-${crypto.randomUUID()}`,
+    });
+    if (template.denied) throw new Error("private template unexpectedly denied");
+
+    const oldSessionId = crypto.randomUUID();
+    const oldCreateKey = `organization-private-rolling-old-${crypto.randomUUID()}`;
+    const oldPool = postgres(shared.appUrl, { max: 1, onnotice: () => undefined });
+
     const fence = await shared.admin.reserve();
     let fenceCommitted = false;
     let disable: ReturnType<typeof updateOrganizationPrivateSessionSettings> | null = null;
-    let createOutcome: Promise<
-      { status: "fulfilled"; value: unknown } | { status: "rejected"; reason: unknown }
-    > | null = null;
+    let oldWriter: Promise<{
+      capabilityId: string;
+      insertedSessionIds: string[];
+      denial:
+        | {
+            code: string;
+            idempotencyKey: string | null;
+            organizationPrivateSessionDenialReason: string | null;
+          }
+        | undefined;
+    }> | null = null;
     try {
       await fence`begin`;
       const [backend] = await fence<Array<{ pid: number }>>`
@@ -393,44 +451,131 @@ describe("migration 0318 organization private-session enablement", () => {
       });
       await waitForOrganizationFenceWaiters(shared.admin, backend.pid, 1);
 
-      createOutcome = createSessionWithIdempotencyKeyResult(client.db, {
-        accountId: sharedGrant.accountId,
-        workspaceId: sharedGrant.workspaceId,
-        visibility: "user_private",
-        initialMessage: "private create queued behind disable",
-        resources: [],
-        metadata: {},
-        createdBy: { kind: "subject", subjectId },
-        subjectId,
-        model: "test-model",
-        reasoningEffort: "medium",
-        latencyMode: "standard",
-        sandboxBackend: "none",
-        createIdempotencyKey: `organization-private-fenced-${crypto.randomUUID()}`,
-      }).then(
-        (value) => ({ status: "fulfilled" as const, value }),
-        (reason: unknown) => ({ status: "rejected" as const, reason }),
-      );
+      oldWriter = oldPool.begin(async (tx) => {
+        await tx`select
+          set_config('opengeni.account_id', ${sharedGrant.accountId}, true),
+          set_config('opengeni.workspace_id', ${sharedGrant.workspaceId}, true),
+          set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [capability] = await tx<Array<{ capabilityId: string; ownerMembershipId: string }>>`
+          select capability_id as "capabilityId",
+            owner_membership_id as "ownerMembershipId"
+          from open_private_session_create_capability(
+            ${sharedGrant.accountId}::uuid,
+            ${sharedGrant.workspaceId}::uuid,
+            ${oldSessionId}::uuid,
+            ${subjectId}
+          )`;
+        if (!capability) throw new Error("rolling-old capability missing");
+
+        // Reproduce current-main exactly where it matters: it accepts any
+        // returned capability id and proceeds to the session INSERT. Clone a
+        // known-good private row so the regression exercises PostgreSQL's
+        // capability/trigger boundary rather than repaired TypeScript code.
+        const inserted = await tx<Array<{ id: string }>>`
+          insert into sessions
+          select (pg_catalog.jsonb_populate_record(
+            null::sessions,
+            pg_catalog.to_jsonb(template_row) || pg_catalog.jsonb_build_object(
+              'id', ${oldSessionId},
+              'sandbox_group_id', ${oldSessionId},
+              'initial_message', 'rolling-old private create after disable',
+              'create_idempotency_key', ${oldCreateKey}
+            )
+          )).*
+          from sessions template_row
+          where template_row.id = ${template.session.id}::uuid
+          returning id`;
+        const [denial] = await tx<
+          Array<{
+            code: string;
+            idempotencyKey: string | null;
+            organizationPrivateSessionDenialReason: string | null;
+          }>
+        >`
+          select code, idempotency_key as "idempotencyKey",
+            organization_private_session_denial_reason as
+              "organizationPrivateSessionDenialReason"
+          from session_spawn_denials
+          where workspace_id = ${sharedGrant.workspaceId}::uuid
+            and idempotency_key = ${oldCreateKey}`;
+        return {
+          capabilityId: capability.capabilityId,
+          insertedSessionIds: [...inserted].map((row) => row.id),
+          denial,
+        };
+      });
       await waitForOrganizationFenceWaiters(shared.admin, backend.pid, 2);
 
       await fence`commit`;
       fenceCommitted = true;
       await expect(disable).resolves.toMatchObject({ enabled: false, version: 2, changed: true });
-      const outcome = await createOutcome;
-      expect(outcome.status).toBe("rejected");
-      if (outcome.status === "rejected") {
-        expect(outcome.reason).toBeInstanceOf(Error);
-        expect(outcome.reason).toHaveProperty("name", "SessionTenancyNotActivatedError");
+      await expect(oldWriter).resolves.toEqual({
+        capabilityId: "00000000-0000-0000-0000-000000000000",
+        insertedSessionIds: [],
+        denial: {
+          code: "nested_agent_depth_exceeded",
+          idempotencyKey: oldCreateKey,
+          organizationPrivateSessionDenialReason: "organization_private_sessions_disabled",
+        },
+      });
+      const [persisted] = await shared.admin<Array<{ count: number }>>`
+        select count(*)::int as count from sessions where id = ${oldSessionId}::uuid`;
+      expect(persisted?.count).toBe(0);
+
+      let repairedReplayDenied: unknown;
+      try {
+        await createSessionWithIdempotencyKeyResult(client.db, {
+          accountId: sharedGrant.accountId,
+          workspaceId: sharedGrant.workspaceId,
+          requestedSessionId: oldSessionId,
+          visibility: "user_private",
+          initialMessage: "repaired retry of rolling-old denial",
+          resources: [],
+          metadata: {},
+          createdBy: { kind: "subject", subjectId },
+          subjectId,
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createIdempotencyKey: oldCreateKey,
+        });
+      } catch (error) {
+        repairedReplayDenied = error;
       }
+      expect(repairedReplayDenied).toHaveProperty("name", "SessionTenancyNotActivatedError");
+
+      let repairedCreateDenied: unknown;
+      try {
+        await createSessionWithIdempotencyKeyResult(client.db, {
+          accountId: sharedGrant.accountId,
+          workspaceId: sharedGrant.workspaceId,
+          visibility: "user_private",
+          initialMessage: "repaired private create after disable",
+          resources: [],
+          metadata: {},
+          createdBy: { kind: "subject", subjectId },
+          subjectId,
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createIdempotencyKey: `organization-private-repaired-${crypto.randomUUID()}`,
+        });
+      } catch (error) {
+        repairedCreateDenied = error;
+      }
+      expect(repairedCreateDenied).toHaveProperty("name", "SessionTenancyNotActivatedError");
     } finally {
       if (!fenceCommitted) await fence`rollback`.catch(() => undefined);
       fence.release();
-      await Promise.allSettled([disable, createOutcome].filter((value) => value !== null));
+      await Promise.allSettled([disable, oldWriter].filter((value) => value !== null));
+      await oldPool.end({ timeout: 5 });
     }
   }, 180_000);
 });
 
-describe("migration 0318 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
+describe("migration 0319 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
   let owned: OwnerMigratedTestDatabase | null = null;
 
   beforeAll(async () => {
