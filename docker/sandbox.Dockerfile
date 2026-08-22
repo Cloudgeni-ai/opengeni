@@ -239,6 +239,7 @@ FROM python:3.12-slim
 
 ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
+ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
 ARG OPENGENI_CHROMIUM_VERSION=151.0.7922.108-1~deb13u1
@@ -340,7 +341,7 @@ RUN set -eux; \
 ENV AZURE_EXTENSION_DIR=/opt/az/extensions
 RUN set -eux; \
     install -d -m 0755 "$AZURE_EXTENSION_DIR"; \
-    az extension add --name azure-devops; \
+    az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"; \
     az repos --help >/dev/null
 
 RUN set -eux; \

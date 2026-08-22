@@ -224,6 +224,11 @@ describe("release image workflow contract", () => {
       expect(dockerfile).toContain(
         "curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://aka.ms/InstallAzureCLIDeb",
       );
+      expect(dockerfile).toContain("ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6");
+      expect(dockerfile).toContain(
+        'az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"',
+      );
+      expect(dockerfile).not.toContain("az extension add --name azure-devops; \\");
     }
   });
 

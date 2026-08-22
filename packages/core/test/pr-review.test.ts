@@ -26,6 +26,22 @@ describe("OpenGeni Review Bot provider boundary", () => {
       "gitlab",
       "azure_devops",
     ]);
+    expect(pack?.connectors.map(({ id, scopes }) => ({ id, scopes }))).toEqual([
+      {
+        id: "github",
+        scopes: ["metadata:read", "contents:read", "pull_requests:write"],
+      },
+      { id: "gitlab", scopes: ["api", "read_repository"] },
+      { id: "azure-devops", scopes: ["vso.code", "vso.threads_full"] },
+    ]);
+    expect(pack?.automationTemplates).toEqual([
+      expect.objectContaining({
+        id: "review-pull-request",
+        adapterId: "source-control.pull-request.v1",
+        eventTypes: ["pull_request.review_requested"],
+        connectionRequirement: "source-control-provider",
+      }),
+    ]);
 
     const skill = pack?.skills[0]?.files.find((file) => file.path === "SKILL.md")?.content;
     expect(skill).toContain("## Security review");

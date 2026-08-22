@@ -185,6 +185,7 @@ FROM debian:13-slim
 
 ARG TERRAFORM_VERSION=1.13.3
 ARG GLAB_VERSION=1.109.0
+ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG CHECKOV_VERSION=3.2.526
 ARG NOVNC_REF=v1.5.0
 ARG WEBSOCKIFY_REF=v0.12.0
@@ -388,7 +389,7 @@ RUN set -eux; curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://ak
 ENV AZURE_EXTENSION_DIR=/opt/az/extensions
 RUN set -eux; \
     install -d -m 0755 "$AZURE_EXTENSION_DIR"; \
-    az extension add --name azure-devops; \
+    az extension add --name azure-devops --version "$AZURE_DEVOPS_EXTENSION_VERSION"; \
     az repos --help >/dev/null
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC; \

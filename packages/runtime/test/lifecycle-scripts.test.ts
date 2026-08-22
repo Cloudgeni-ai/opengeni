@@ -49,7 +49,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       githubInstallationId: 123,
       githubRepositoryId: 456,
     },
-    ref = "main",
+    ref = resource.ref,
   ): string {
     const generated = repositoryCloneCommand([
       { ...resource, mountPath: resource.mountPath ?? "repos/test/repository" },
@@ -90,7 +90,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       GIT_COMMITTER_EMAIL: "t@t",
     };
     execFileSync("git", ["-C", origin, "add", "."], { env: gitEnv });
-    execFileSync("git", ["-C", origin, "commit", "-m", "init"], { env: gitEnv });
+    execFileSync("git", ["-C", origin, "commit", "-m", "init"], {
+      env: gitEnv,
+    });
     // file:// partial clone (--filter=blob:none) needs the origin to allow it.
     execFileSync("git", ["-C", origin, "config", "uploadpack.allowfilter", "true"]);
     return origin;
@@ -110,7 +112,10 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       return { status: 0, output };
     } catch (error) {
       const e = error as { status?: number; stdout?: string; stderr?: string };
-      return { status: e.status ?? 1, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
+      return {
+        status: e.status ?? 1,
+        output: `${e.stdout ?? ""}${e.stderr ?? ""}`,
+      };
     }
   }
 
@@ -159,13 +164,16 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       const matched = runScript(
         cloneScriptWithTarget(target, `file://${origin}`, {
           ...resource,
+          ref: actual,
           expectedCommitSha: actual,
         }),
         {},
       );
       expect(matched.status).toBe(0);
       expect(
-        execFileSync("git", ["-C", target, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        execFileSync("git", ["-C", target, "rev-parse", "HEAD"], {
+          encoding: "utf8",
+        }).trim(),
       ).toBe(actual);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1059,8 +1067,12 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       );
 
       rmSync(join(home, ".opengeni", "git-token"), { force: true });
-      rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), { force: true });
-      rmSync(join(home, ".opengeni", "git-credentials", "azure_devops-token"), { force: true });
+      rmSync(join(home, ".opengeni", "git-credentials", "gitlab-token"), {
+        force: true,
+      });
+      rmSync(join(home, ".opengeni", "git-credentials", "azure_devops-token"), {
+        force: true,
+      });
       expect(execFileSync("gh", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GH=unset\n");
       expect(execFileSync("glab", [], { env: wrapperEnv, encoding: "utf8" })).toBe("GL=unset\n");
       expect(execFileSync("az", [], { env: wrapperEnv, encoding: "utf8" })).toBe("AZ=unset\n");

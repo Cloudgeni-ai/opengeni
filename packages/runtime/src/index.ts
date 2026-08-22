@@ -5823,7 +5823,9 @@ export class PrefixedMcpServer implements MCPServer {
         operationId,
         connectionId,
         ...(this.connectorAttachmentAuthority?.expectedProvider
-          ? { expectedProvider: this.connectorAttachmentAuthority.expectedProvider }
+          ? {
+              expectedProvider: this.connectorAttachmentAuthority.expectedProvider,
+            }
           : {}),
         authorizeAndMaterialize: async (attachments) => {
           if (!operationId || !connectionId || !this.connectorAttachmentAuthority) {
@@ -5978,7 +5980,9 @@ export async function restoreInterruptedRunState(
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
     ...(lazyRuntime
-      ? { resolveMissingFunctionTool: createResolveMissingFunctionTool(lazyRuntime) }
+      ? {
+          resolveMissingFunctionTool: createResolveMissingFunctionTool(lazyRuntime),
+        }
       : {}),
   });
 }
@@ -6554,7 +6558,9 @@ export async function runAgentStream(
             ? { contextCompactionSignal: overrides.contextCompactionSignal }
             : {}),
           ...(overrides.contextCompactionRequested
-            ? { contextCompactionRequested: overrides.contextCompactionRequested }
+            ? {
+                contextCompactionRequested: overrides.contextCompactionRequested,
+              }
             : {}),
         }),
       ),
