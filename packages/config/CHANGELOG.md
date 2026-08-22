@@ -1,5 +1,54 @@
 # @opengeni/config
 
+## 0.18.0
+
+### Minor Changes
+
+- 650d6f9: Add an optional OpenSandbox Kubernetes sandbox backend with exact ID-addressed
+  resume, renewable provider TTL, portable workspace archives, private server
+  proxy support, pinned upstream deployment artifacts, and Azure sandbox-pool
+  capacity isolation. Existing backend defaults, including Modal, remain
+  unchanged unless `opensandbox` is selected explicitly.
+- f7497fd: Add a disabled-by-default, user-owned personal GitHub OAuth lifecycle with
+  separate deployment credentials, signed PKCE state, encrypted token custody,
+  verified GitHub identity, typed SDK routes, reconnect fencing, and idempotent
+  disconnect.
+
+### Patch Changes
+
+- 438e476: Add explicit anonymous OpenAI-compatible model providers with credential-free
+  transport, external billing attribution, catalog readiness, and an External
+  picker rail while preserving older client parsing by classifying the route from
+  existing billing metadata instead of widening closed client enums. Anonymous
+  providers reject all configured request headers and query parameters, and the
+  runtime strips credential-like headers as a defense in depth. Document the
+  temporary OpenCode Zen free-preview configuration.
+  Generic Chat Completions routes also reject an `unknown` finish reason before
+  accepting a terminal response, so the same accepted turn recovers from durable
+  history without executing tools from ambiguous output.
+- 3999dd5: Fail closed when Modal Computer/Browser is enabled without a digest-pinned desktop image, and classify a missing `opengeni-browserd-up` as unsupported instead of a retryable driver failure.
+- Updated dependencies [3e1ad07]
+- Updated dependencies [438e476]
+- Updated dependencies [1cd0eb0]
+- Updated dependencies [ebb3669]
+- Updated dependencies [dc8c73f]
+- Updated dependencies [9b4d5d5]
+- Updated dependencies [492fb71]
+- Updated dependencies [fbc760e]
+- Updated dependencies [650d6f9]
+- Updated dependencies [650d6f9]
+- Updated dependencies [fe54954]
+- Updated dependencies [f7497fd]
+- Updated dependencies [ff011e6]
+- Updated dependencies [ba0be3d]
+- Updated dependencies [5b509be]
+- Updated dependencies [c7cafb1]
+- Updated dependencies [5a651c8]
+- Updated dependencies [29a44c2]
+- Updated dependencies [48b9f09]
+  - @opengeni/contracts@2.1.0
+  - @opengeni/codex@0.2.18
+
 ## 0.17.1
 
 ### Patch Changes

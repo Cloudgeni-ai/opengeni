@@ -1,5 +1,111 @@
 # @opengeni/db
 
+## 3.0.0
+
+### Major Changes
+
+- 9530e19: Let a managed human use the session surface inside their own personal workspace, without widening the owner-only exception to anyone else.
+
+  A managed human's personal workspace deliberately has no `workspace_memberships` row (migration 0219 raises on one) — their access is the `organization_memberships.personal_workspace_id` pointer. Three session seams fenced on a bare membership probe and therefore denied the one human who always belongs: `GET /v1/workspaces/:id/sessions` returned **403** so the workspace looked empty, `PUT …/sessions/:id/pin` returned **403**, and `PUT …/new-session-draft` returned **403**.
+
+  `subjectHasLiveWorkspaceAuthorityInScope` (`packages/db/src/workspace-authority.ts`) is now the single implementation of the corrected rule. It refuses to set `opengeni.subject_id`, which makes the arbitrary-subject oracle shape unrepresentable at these seams and keeps the authority read inside the caller's transaction and advisory fence.
+
+  **The authorization is not that resolver.** Neither it nor the exported `namedSubjectHasLiveWorkspaceAuthority` establishes who the caller is — both answer "does subject X hold authority here". The one thing that authorizes the exception is `AccessGrantAuthorization.canonicalManagedHumanSession`, stamped only inside the branch of `resolveAccessContext` that verified a Better Auth cookie. Inspecting the grant would not do: a delegated bearer chooses its own `principalKind`, `metadata.delegated`, `serviceInitiator`, and `subjectId`. Bearer/delegated principals, API keys, service initiators, same-organization co-members, organization admins and owners, and account administrators all fail closed, as does any authentication path added later.
+
+  The public helper is renamed `subjectHasLiveWorkspaceAuthority` → `namedSubjectHasLiveWorkspaceAuthority`, and it now restores `opengeni.subject_id` after probing (`withRlsContext` restores account/workspace but not subject, so the probed subject leaked out of the savepoint). This changeset declares the required `@opengeni/db` **major** at the first PR that lands the breaking rename; the companion connection-authority change retains its own `@opengeni/core` major for its separate public break.
+
+- 6909443: Activate the database prerequisite for session visibility changes and independent private forks through a drained, forward-only per-organization receipt. The session-tenancy adapter now rejects non-quiescent mutations with a typed conflict, limits the first fork contract to same-workspace private destinations, and returns the exact durable event identity.
+
+### Minor Changes
+
+- 3e1ad07: Add turn-atomic personal Variable Set and Rig attachments for create, Send, and
+  Steer, including logical-turn once receipts, recovery-safe snapshots, warning
+  acknowledgement, and SDK contracts.
+- dc8c73f: Add professional organization administration with canonical rename and a
+  Personal-safe shared-workspace access inventory, explicit Organization /
+  Workspace / Only-me scope at Rig and Variable Set creation, and activation-gated
+  atomic private visibility when creating sessions.
+- fbc760e: Add the first-party `goal_wait` MCP tool and a durable goal continuation hold.
+  An orchestrator whose active goal depends on child sessions or an external
+  event records a bounded hold (reason plus mandatory deadline, at most 7 days)
+  with a `goal.held` timeline fact instead of busy-polling. The continuation
+  materializer returns `held` while the declaring turn is still the latest
+  finished turn and the deadline is ahead: it never consumes the goal wake
+  revision and re-arms a delayed workflow wake at the deadline on every idle
+  evaluation. Pending machine input wins with `queue`, and any newer finished
+  turn, a passed deadline, or a human/API/agent goal mutation clears the hold.
+  The goal projection reports a current hold as `blocked` / `held_for_input`
+  with `nextAttemptAt` at the deadline (rolling migration 0317).
+- f7497fd: Add a disabled-by-default, user-owned personal GitHub OAuth lifecycle with
+  separate deployment credentials, signed PKCE state, encrypted token custody,
+  verified GitHub identity, typed SDK routes, reconnect fencing, and idempotent
+  disconnect.
+- ff011e6: Add bounded owner-only personal GitHub repository discovery, immutable selected-repository
+  authority storage, full-replacement and verification APIs, typed SDK methods, and exact
+  accepted-turn/scheduled-task authority snapshots for explicitly bound repository resources.
+  The dedicated `connectionType: "github_personal"` resource discriminator preserves existing
+  host-opaque Git credential bindings without reclassifying them as personal OAuth authority.
+  Runtime Git and GitHub API execution remain unavailable until their separately audited broker
+  and provider-consumer phases land.
+- 48b9f09: Allow organization administrators to invite an email before registration, bind
+  the invitation only after exact Better Auth email verification, and apply its
+  initial shared-workspace access when the invited user joins without creating a
+  redundant fallback organization.
+
+### Patch Changes
+
+- e57ce11: Replace full session-id snapshots with bounded activity-fenced keyset pagination so workspaces with more than 5,000 sessions remain listable.
+- 3825727: Normalize legacy or malformed workspace-membership permissions before member listing and authorization, without restoring any obsolete authority.
+- 1cd0eb0: Omit Responses output-only item `status` when persisting conversation history, and omit opaque `encrypted_content` from the portable compaction temporary copy, so SuperGrok-origin portable sessions can continue and compact on Codex. Keep the Codex wire strip as defense for already-stored rows and mid-turn SDK items. Durable history is not rewritten on a model switch.
+- ebb3669: Add the agent-facing `company_profile_propose` first-party MCP tool over a new `proposeCompanyProfile` seam: an exact agent attempt records one inactive organization company-profile proposal (durable-learning provenance, `agent-attempt:<attemptId>` source) that an organization account admin reviews and activates from Company Brain → Company profile & goals, which now lists pending proposals with their content.
+- 492fb71: Allow foreground session readers to acknowledge an exact rendered event sequence so later unseen events remain unread.
+- 66593eb: Reconcile and verify the session-list visibility predicate grant when a fresh
+  deployment runs migrations before creating its restricted application role,
+  and keep app-supplied composer controls shrinkable within a single footer row.
+- cc2fa1b: Keep a live sandbox turn holder alive through a provider-deadline rotation: the resume-side holder-liveness loop releases only when the holder itself is gone or its attempt is superseded (`heartbeatLeaseHolderStatus` separates holder liveness from lease extension), the turn-side rotation checkpoint reinstates its exact lost holder at the same epoch/instance before the warm capture, mutation admission under a requested rotation reports `rotation_in_progress` instead of `lease_fenced` and starts that checkpoint, `write_stdin` to a retained PTY renders admission faults as the tool result instead of failing the turn, and `sandbox.box.terminated` carries the drain reason.
+- e9ff652: Fix human-confirmed `remember_confirm` activation after the human-input resume
+  (migration 0316): the human answer is bound to the same logical turn and exact
+  proposal rather than one execution generation, so the answered request row and
+  the live attempt may both carry a later generation of that turn than the
+  decision receipt, for both governed-learning activation and knowledge-claim
+  confirmation.
+- fe54954: Add an authorized, quiescence-fenced API and SDK operation for permanently deleting a root session tree.
+- ba0be3d: Add activation-gated owner management for personal-resource session and standing grants, with kind-derived actions and permissions, exact session authority epochs, route-workspace-fenced revocation, RFC3339 lifecycle timestamps, bounded keyset pages, complete credential-free delegation receipts, FORCE-RLS-safe expiry and invalid-action settlement, and SDK methods that intentionally exclude standalone `once` and custom expiry.
+- d8ba09d: Make private children inherit their parent's visibility through an exact live-attempt capability, expose effective tool policy in session monitoring, keep late child results from restarting settled parents, and preserve private-owner authority on internal-update turns.
+- 72736ef: Take the canonical turn/attempt lock prefix before retaining a screenshot, retry that idempotent prepare on deadlock, and keep leftover persistence failures from failing the tool.
+- c7cafb1: Activate owner-only session visibility changes and same-workspace private forks
+  through the public API and SDK after per-organization tenancy activation.
+
+  Expose activation-gated session tenancy metadata, typed quiescence and
+  idempotency conflicts, exact durable event fanout, and explicit retry fences.
+
+- c83c590: Decide turn-startup SLO milestone receipts (queue, provider_dispatch, first_byte) through a per-turn ledger, `session_turn_startup_milestones` (migration 0318), instead of re-reading the turn's `session_events` rows on every inserted model-request event. Each append or settlement claims its checkpoints with one primary-key `insert ... on conflict do nothing returning`, so the cost is O(1) per model request and no longer grows with the turn inside the transaction that holds the workspace inference-control row; recovery and replay remain no-ops, the terminal failed first-byte outcome is fenced on ledger state, and a turn already in flight before the ledger is sealed once so it never re-observes a checkpoint.
+- 3b6b30e: Make the workspace control prefix fair and bounded: `lockWorkspaceInferenceControl` takes a FIFO transaction advisory lock before the row lock so Pause/Resume cannot be starved by continuous shared claim/settlement/append traffic, Send/Steer/queued Steer/realtime sync hold the prefix shared while the target branch is active and escalate through a savepoint only for a paused branch, and request-scoped API mutations fail with a typed retryable `WorkspaceControlBusyError` (HTTP 503) instead of parking a pooled connection and snapshot when the prefix stays busy.
+- Updated dependencies [3e1ad07]
+- Updated dependencies [438e476]
+- Updated dependencies [1cd0eb0]
+- Updated dependencies [ebb3669]
+- Updated dependencies [dc8c73f]
+- Updated dependencies [3999dd5]
+- Updated dependencies [9b4d5d5]
+- Updated dependencies [492fb71]
+- Updated dependencies [fbc760e]
+- Updated dependencies [650d6f9]
+- Updated dependencies [650d6f9]
+- Updated dependencies [fe54954]
+- Updated dependencies [f7497fd]
+- Updated dependencies [ff011e6]
+- Updated dependencies [ba0be3d]
+- Updated dependencies [5b509be]
+- Updated dependencies [c7cafb1]
+- Updated dependencies [5a651c8]
+- Updated dependencies [29a44c2]
+- Updated dependencies [48b9f09]
+  - @opengeni/contracts@2.1.0
+  - @opengeni/config@0.18.0
+  - @opengeni/codex@0.2.18
+  - @opengeni/codemode@0.4.10
+
 ## 2.1.0
 
 ### Minor Changes
