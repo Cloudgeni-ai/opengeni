@@ -624,7 +624,29 @@ describe("personal MCP connection delegation", () => {
           toolsProvided: true,
         }),
       ).rejects.toThrow(
-        "changing personal GitHub repository resources requires explicit connectionAuthorities",
+        "material changes to a personal GitHub-authorized task require explicit connectionAuthorities",
+      );
+      await expect(
+        validatedScheduledTaskUpdate({
+          settings: testSettings({ githubPersonalOauthEnabled: true }),
+          db: client.db,
+          objectStorage: null,
+          grant: {
+            ...originGrant,
+            workspaceId: target!.id,
+            principalKind: "human_session",
+          },
+          existing: task,
+          payload: {
+            agentConfig: {
+              ...task.agentConfig,
+              prompt: "materially changed instructions for the same repository",
+            },
+          },
+          toolsProvided: true,
+        }),
+      ).rejects.toThrow(
+        "material changes to a personal GitHub-authorized task require explicit connectionAuthorities",
       );
 
       await replacePersonalGitHubRepositorySelections(client.db, {
@@ -640,6 +662,22 @@ describe("personal MCP connection delegation", () => {
       await expect(freeze()).rejects.toThrow(
         "personal GitHub repository resource is outside the selected authority",
       );
+
+      await sql`
+        delete from workspace_memberships
+        where workspace_id = ${target!.id} and subject_id = ${subjectId}
+      `;
+      await expect(
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+          tools: [],
+          resources: [resource],
+          source: { kind: "subject", subjectId, accountId: originGrant.accountId },
+          authoritySelections: [],
+        }),
+      ).rejects.toThrow("personal GitHub repository authority requires live causal user authority");
     } finally {
       await client.close();
       await sql.end({ timeout: 1 });
@@ -709,6 +747,31 @@ describe("personal MCP connection delegation", () => {
       }),
     ).rejects.toThrow(
       "agent-created personal GitHub repository authority is not activated in this delivery phase",
+    );
+  });
+
+  test("fails closed instead of dropping personal GitHub authority without a causal human", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: null as never,
+        workspaceId: crypto.randomUUID(),
+        settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+        tools: [],
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://github.com/octocat/private-repository",
+            ref: "main",
+            provider: "github",
+            credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        source: { kind: "none" },
+      }),
+    ).rejects.toThrow(
+      "personal GitHub repository authority requires an authenticated causal human",
     );
   });
 

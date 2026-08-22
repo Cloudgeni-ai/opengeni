@@ -779,12 +779,17 @@ export async function freezePersonalConnectionDelegations(input: {
   if (personalGitHubResources.length > 0 && input.settings.githubPersonalOauthEnabled !== true) {
     throw new Error("personal GitHub repository authority is not enabled");
   }
+  if (personalGitHubResources.length > 0 && input.source.kind === "none") {
+    throw new Error("personal GitHub repository authority requires an authenticated causal human");
+  }
   if (
-    (servers.length === 0 &&
-      !includeFirstPartyConnections &&
-      personalGitHubResources.length === 0) ||
-    input.source.kind === "none"
+    servers.length === 0 &&
+    !includeFirstPartyConnections &&
+    personalGitHubResources.length === 0
   ) {
+    return [];
+  }
+  if (input.source.kind === "none") {
     return [];
   }
   if (input.source.kind === "turn") {
@@ -864,7 +869,12 @@ export async function freezePersonalConnectionDelegations(input: {
       return connection;
     }),
   );
-  if (!membership && portableSelections.length === 0) return [];
+  if (!membership && portableSelections.length === 0) {
+    if (personalGitHubResources.length > 0) {
+      throw new Error("personal GitHub repository authority requires live causal user authority");
+    }
+    return [];
+  }
   const visibleConnections = [
     ...new Map(
       [...targetLocalConnections, ...portableSelections].map((connection) => [
