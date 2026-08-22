@@ -3747,6 +3747,7 @@ export async function prepareAgentTools(
       }),
     );
   }
+  const exposesDeferredPreparation = deferNonEager && deferredEntries.length > 0;
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
     try {
@@ -3807,11 +3808,17 @@ export async function prepareAgentTools(
         codexConnectorNamespaces,
       };
     } catch (error) {
-      await localToolServer?.close().catch(() => undefined);
+      // In deferred mode the eager and in-process servers have already been
+      // published to the Agent. The provisional PreparedAgentTools below owns
+      // them until turn finalization; a background preparation failure may
+      // clean up only resources acquired by that deferred preparation.
+      if (!exposesDeferredPreparation) {
+        await localToolServer?.close().catch(() => undefined);
+        await connectedEagerBestEffort?.close().catch(() => undefined);
+        await connectedEagerRequired?.close().catch(() => undefined);
+      }
       await connectedDeferredBestEffort?.close().catch(() => undefined);
       await connectedDeferredRequired?.close().catch(() => undefined);
-      await connectedEagerBestEffort?.close().catch(() => undefined);
-      await connectedEagerRequired?.close().catch(() => undefined);
       throw error;
     }
   };
@@ -3863,8 +3870,19 @@ export async function prepareAgentTools(
     attemptToolEnvironment: null,
     resolvedMcpConnectionIds,
     close: async () => {
-      const prepared = await ready;
-      await prepared.close();
+      try {
+        const prepared = await ready;
+        await prepared.close();
+      } catch (error) {
+        // completePreparation already released any deferred resources. The
+        // provisional owner must still release the eager and in-process
+        // servers that remained live so the Agent could observe the original
+        // preparation failure instead of a synthetic "server is closed" race.
+        await localToolServer?.close().catch(() => undefined);
+        await connectedEagerBestEffort?.close().catch(() => undefined);
+        await connectedEagerRequired?.close().catch(() => undefined);
+        throw error;
+      }
     },
     codexConnectorNamespaces,
     ready,
