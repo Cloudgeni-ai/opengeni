@@ -123,6 +123,11 @@ async function initialize(
   sessionId: string,
   expectedRevision: number,
   subjectId = context.subjectId,
+  acceptedSelection?: {
+    channelId: string | null;
+    targetSandboxId: string | null;
+    workingDir: string | null;
+  },
 ) {
   return await initializeSessionStartAtomically(client.db, {
     accountId: context.grant.accountId,
@@ -130,7 +135,11 @@ async function initialize(
     sessionId,
     reasoningEffortFallback: "low",
     createdEventPayload: {},
-    consumeNewSessionDraft: { subjectId, expectedRevision },
+    consumeNewSessionDraft: {
+      subjectId,
+      expectedRevision,
+      ...(acceptedSelection ? { acceptedSelection } : {}),
+    },
   });
 }
 
@@ -353,6 +362,9 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
 
   test("turns only an exact accepted revision into a safe seed after durable initialization", async () => {
     const exact = await fixture();
+    const channelId = crypto.randomUUID();
+    const targetSandboxId = crypto.randomUUID();
+    const workingDir = "/Users/jorgen/code/opengeni";
     await saveDraft(exact, 0, {
       text: "private prompt",
       resources: [
@@ -376,8 +388,8 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       toolsProvided: true,
       options: {
         sandboxBackend: "selfhosted",
-        targetSandboxId: crypto.randomUUID(),
-        workingDir: "projects/opengeni",
+        targetSandboxId,
+        workingDir,
         variableSetId: crypto.randomUUID(),
         rigId: crypto.randomUUID(),
         goal: { text: "do not retain", successCriteria: "never" },
@@ -385,7 +397,11 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       },
     });
     const exactSession = await createUninitializedSession(exact);
-    const initialized = await initialize(exact, exactSession.id, 1);
+    const initialized = await initialize(exact, exactSession.id, 1, exact.subjectId, {
+      channelId,
+      targetSandboxId,
+      workingDir,
+    });
     expect(initialized.turn?.status).toBe("queued");
     const seeded = await readDraft(exact.grant.workspaceId!, exact.subjectId);
     expect(seeded).toMatchObject({
@@ -407,11 +423,20 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     });
     expect(seeded?.sessionOptions).toEqual({
       sandboxBackend: "selfhosted",
-      targetSandboxId: expect.any(String),
-      workingDir: "projects/opengeni",
+      targetSandboxId,
+      workingDir,
       variableSetId: expect.any(String),
       rigId: expect.any(String),
       toolsProvided: true,
+      selectionHistory: {
+        projects: [
+          {
+            channelId,
+            targetSandboxId,
+            machines: [{ sandboxId: targetSandboxId, workingDir }],
+          },
+        ],
+      },
     });
 
     const advanced = await fixture();
@@ -475,6 +500,44 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       where s.id = ${session.id}
       group by s.id`;
     expect(state).toEqual({ status: "idle", eventTypes: ["session.created"], turns: 0, wakes: 0 });
+  });
+
+  test("a realtime create remembers selection without consuming editable draft state", async () => {
+    const context = await fixture();
+    const channelId = crypto.randomUUID();
+    const targetSandboxId = crypto.randomUUID();
+    const workingDir = "/Users/jorgen/code/realtime";
+    await saveDraft(context, 0, { text: "keep for a later text session" });
+    const session = await createUninitializedSession(context);
+
+    await initializeSessionStartAtomically(client.db, {
+      accountId: context.grant.accountId,
+      workspaceId: context.grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      rememberNewSessionSelection: {
+        subjectId: context.subjectId,
+        acceptedSelection: { channelId, targetSandboxId, workingDir },
+      },
+      deferInitialTurn: true,
+    });
+
+    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
+      revision: 1,
+      text: "keep for a later text session",
+      sessionOptions: {
+        selectionHistory: {
+          projects: [
+            {
+              channelId,
+              targetSandboxId,
+              machines: [{ sandboxId: targetSandboxId, workingDir }],
+            },
+          ],
+        },
+      },
+    });
   });
 
   test("an idempotent initialization retry cannot consume a later draft with a reused revision", async () => {

@@ -161,6 +161,13 @@ flat REST/SDK fields above. Consequently the model cannot generate a standalone
 `workingDir`. This is a model-contract hardening only; existing REST/SDK callers
 continue to use the flat fields.
 
+For the web new-session composer, the actor-private backend draft remembers
+only successful creates: the last project, that project's last managed or
+machine target, and the last working directory for every project+machine pair.
+Switching projects or machines restores the matching nested choice. Absolute
+host paths remain tied to the exact machine id and are never reused on another
+machine.
+
 ## Discover machines + metrics
 
 `listMachines` returns the workspace fleet plus the active-sandbox pointer. Pass
