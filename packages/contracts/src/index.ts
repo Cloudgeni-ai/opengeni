@@ -8570,6 +8570,7 @@ export const CreateAutomationTriggerRequest = z
     name: z.string().trim().min(1).max(200),
     eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64),
     configuration: AutomationBoundedJson.default({}),
+    parameters: AutomationBoundedJson.default({}),
     sessionTemplate: AutomationSessionTemplate,
     status: AutomationTriggerStatus.default("active"),
     packInstallationId: z.string().uuid().nullable().default(null),
@@ -8593,6 +8594,7 @@ export const UpdateAutomationTriggerRequest = z
     name: z.string().trim().min(1).max(200).optional(),
     eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
     configuration: AutomationBoundedJson.optional(),
+    parameters: AutomationBoundedJson.optional(),
     sessionTemplate: AutomationSessionTemplate.optional(),
     status: AutomationTriggerStatus.optional(),
   })
@@ -8611,6 +8613,7 @@ export const AutomationTrigger = z.object({
   adapterId: AutomationAdapterId,
   eventTypes: z.array(z.string()),
   configuration: z.record(z.string(), z.unknown()),
+  parameters: z.record(z.string(), z.unknown()),
   sessionTemplate: AutomationSessionTemplate,
   status: AutomationTriggerStatus,
   revision: z.number().int().positive(),

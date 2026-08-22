@@ -10316,6 +10316,7 @@ export const automationTriggerRevisions = pgTable(
     adapterId: text("adapter_id").notNull(),
     eventTypes: jsonb("event_types").$type<string[]>().notNull(),
     configuration: jsonb("configuration").$type<Record<string, unknown>>().notNull().default({}),
+    parameters: jsonb("parameters").$type<Record<string, unknown>>().notNull().default({}),
     sessionTemplate: jsonb("session_template").$type<AutomationSessionTemplate>().notNull(),
     createdBySubjectId: text("created_by_subject_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -10339,6 +10340,7 @@ export const automationTriggerRevisions = pgTable(
         and jsonb_typeof(${table.eventTypes}) = 'array'
         and jsonb_array_length(${table.eventTypes}) between 1 and 64
         and jsonb_typeof(${table.configuration}) = 'object'
+        and jsonb_typeof(${table.parameters}) = 'object'
         and jsonb_typeof(${table.sessionTemplate}) = 'object'`,
     ),
   }),

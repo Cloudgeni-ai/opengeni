@@ -37,6 +37,7 @@ const trigger = {
   adapterId: source.adapterId,
   eventTypes: ["build.failed"],
   configuration: {},
+  parameters: {},
   sessionTemplate,
   status: "active" as const,
   revision: 7,

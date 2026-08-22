@@ -91,6 +91,7 @@ CREATE TABLE automation_trigger_revisions (
   adapter_id text NOT NULL,
   event_types jsonb NOT NULL,
   configuration jsonb NOT NULL DEFAULT '{}'::jsonb,
+  parameters jsonb NOT NULL DEFAULT '{}'::jsonb,
   session_template jsonb NOT NULL,
   created_by_subject_id text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -103,6 +104,7 @@ CREATE TABLE automation_trigger_revisions (
     revision > 0 AND octet_length(adapter_id) BETWEEN 1 AND 128
     AND jsonb_typeof(event_types) = 'array' AND jsonb_array_length(event_types) BETWEEN 1 AND 64
     AND jsonb_typeof(configuration) = 'object'
+    AND jsonb_typeof(parameters) = 'object'
     AND jsonb_typeof(session_template) = 'object'
   )
 );

@@ -295,6 +295,7 @@ export async function createAutomationTrigger(
             adapterId: input.adapterId,
             eventTypes: [...new Set(input.request.eventTypes)],
             configuration: input.request.configuration,
+            parameters: input.request.parameters,
             sessionTemplate: input.request.sessionTemplate,
             createdBySubjectId: input.createdBySubjectId,
           })
@@ -477,6 +478,7 @@ export async function updateAutomationTrigger(
               ? [...new Set(input.request.eventTypes)]
               : existing.revision.eventTypes,
             configuration: input.request.configuration ?? existing.revision.configuration,
+            parameters: input.request.parameters ?? existing.revision.parameters,
             sessionTemplate: input.request.sessionTemplate ?? existing.revision.sessionTemplate,
             createdBySubjectId: input.subjectId,
           })
@@ -821,6 +823,7 @@ function mapTrigger(
     adapterId: revision.adapterId,
     eventTypes: revision.eventTypes,
     configuration: revision.configuration,
+    parameters: revision.parameters,
     sessionTemplate: AutomationSessionTemplate.parse(revision.sessionTemplate),
     status: head.status as AutomationTrigger["status"],
     revision: revisionNumber,

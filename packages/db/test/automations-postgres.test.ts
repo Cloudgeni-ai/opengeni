@@ -72,6 +72,7 @@ describe("automation persistence", () => {
         name: "Build failure",
         eventTypes: ["build.failed"],
         configuration: {},
+        parameters: {},
         sessionTemplate: {
           prompt: "Investigate",
           instructions: null,
