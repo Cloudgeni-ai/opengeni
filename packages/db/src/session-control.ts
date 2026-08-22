@@ -368,10 +368,13 @@ export const WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS = 20_000;
 let configuredRequestLockTimeoutMs = WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS;
 
 /**
- * Install the validated request-scoped budget for this process. The API calls
- * this once from its settings at app construction; workers never call it
- * because they never pass a bound. A non-positive or non-integer value is a
- * programming error here (the config layer already rejected it at boot).
+ * Install the validated request-scoped budget for this process. The value is
+ * process-global and last-writer-wins: the API calls this exactly once from
+ * its settings at app composition (`createApp`), and every later
+ * `workspaceControlRequestLockTimeoutMs()` read observes that value. Workers
+ * never call it because they never pass a bound. A non-positive or
+ * non-integer value is a programming error here (the config layer already
+ * rejected it at boot).
  */
 export function configureWorkspaceControlRequestLockTimeoutMs(lockTimeoutMs: number): void {
   if (!Number.isSafeInteger(lockTimeoutMs) || lockTimeoutMs <= 0) {
@@ -456,6 +459,9 @@ async function boundedLockStep<T>(
     return await step();
   } catch (error) {
     if (nestedPostgresSqlState(error) === "55P03") {
+      // Deliberately no `cause`: the 55P03 must not stay reachable through the
+      // cause chain, or persistence-retry classification and the delete-tree
+      // `live_sandboxes` 55P03 mapping would reclassify this typed busy error.
       throw new WorkspaceControlBusyError(workspaceId, budget.totalMs);
     }
     throw error;

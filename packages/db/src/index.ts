@@ -27343,6 +27343,9 @@ export async function deleteSessionTreeIfQuiescent(
         typeof current === "object" && "code" in current
           ? (current as { code?: unknown }).code
           : undefined;
+      // A bounded control-prefix wait surfaces as `WorkspaceControlBusyError`
+      // (code WORKSPACE_CONTROL_BUSY) with no `cause`, so the only 55P03 that
+      // reaches this chain is the NOWAIT tree lock below: live sandbox activity.
       if (code === "55P03") return { status: "live_sandboxes" };
       if (code === "23503" || code === "42501" || code === "55000") {
         return { status: "externally_referenced" };

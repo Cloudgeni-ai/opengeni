@@ -650,13 +650,21 @@ renders it for every route as HTTP 503 with `retryable: true`,
 `outcomeUnknown: false`, and `details.code: WORKSPACE_CONTROL_BUSY`, the MCP
 orchestration envelope reports `<tool>_workspace_busy` with a retry hint, and
 Slack interactions keep the raw error so their classifier retries it. Worker
-settlement and claims never pass a bound. Every HTTP-originated taker is bounded
-the same way: `updateWorkspaceSettings` (settings narrowing) and
-`deleteSessionTreeIfQuiescent` accept an optional `controlLockTimeoutMs` for
-their exclusive prefix, and queue move/edit/delete, composer draft save, and the
-MCP agent message accept it for their shared prefix; the API routes and
-`@opengeni/core` commands pass the request budget, while a lifecycle caller that
-omits it keeps the unbounded wait. Generic
+settlement and claims never pass a bound. The bounded request-scoped takers are
+exactly: Send, Steer, queued Steer, Pause/Resume/Cancel, workspace
+Pause/Resume, realtime ledger sync, queue move/edit/delete, composer draft save,
+the MCP agent message and agent Steer, `updateWorkspaceSettings` (settings
+narrowing, exclusive prefix), and `deleteSessionTreeIfQuiescent` (exclusive
+prefix); each accepts an optional `controlLockTimeoutMs`, the API routes and
+`@opengeni/core` commands pass the request budget, and a lifecycle caller that
+omits it keeps the unbounded wait. The remaining HTTP-originated shared takers
+stay unbounded by design: session create (`lockWorkspaceForSessionCreate`),
+goal clear/update (`clearSessionGoal`, `updateSessionGoalWithEvent`), the
+session MCP approval-policy and tool-policy writers
+(`appendSessionEventsWithLockedSessionUpdate`, shared with worker writers), and
+realtime session begin/end. They only hold `FOR SHARE`, so they wait solely
+behind an exclusive holder or a queued mutator and never behind each other; a
+bound there would trade a brief wait for a failed request. Generic
 audit/title appends skip the control row but use the same
 workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
 before insert so its turn/attempt FK checks cannot invert against event writers;
