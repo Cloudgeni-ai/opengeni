@@ -289,7 +289,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const slack = requireOpenGeniSlackOAuthSettings(settings);
       const redirectUri = `${baseUrl}/v1/integrations/slack/callback`;
-      const token = await exchangeOpenGeniSlackAuthorizationCode(
+      const authorization = await exchangeOpenGeniSlackAuthorizationCode(
         {
           code,
           clientId: slack.clientId,
@@ -300,10 +300,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
       stage = "credential_verification";
       const verified = await verifyOpenGeniSlackBotCredential(
-        token,
+        authorization.accessToken,
+        {
+          appId: authorization.appId,
+          displayName: settings.slackBotDisplayName,
+        },
         deps.slackFetch ?? fetch,
         new Date(),
-        settings.slackBotDisplayName,
       );
       stage = "permission_recheck";
       await requireSlackInstallCallbackGrant(db, state);
@@ -311,7 +314,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       const connection = await persistOpenGeniSlackBotConnection({
         deps,
         state,
-        token,
+        token: authorization.accessToken,
         verified,
       });
       return c.redirect(
