@@ -44251,6 +44251,7 @@ async function foldWorkspaceArchiveOntoLease(
     archive: archiveProjectionFromResumeState(folded),
   };
   const foldedJson = JSON.stringify(folded);
+  const inlineWorkspaceArchive = input.workspaceArchive ?? null;
   // Publication and GC must serialize on the provider-object receipt itself.
   // Merely checking its state in a lease UPDATE subquery permits a write-skew:
   // a concurrent failed callback can mark the object delete_pending after the
@@ -44279,7 +44280,7 @@ async function foldWorkspaceArchiveOntoLease(
         and artifact.source_workspace_generation = lease.workspace_generation
         and artifact.provenance = 'native_capture'
         and artifact.provider_backend = lease.backend
-        and artifact.archive_base64 = ${input.workspaceArchive}
+        and artifact.archive_base64 = ${inlineWorkspaceArchive}
         and artifact.descriptor_revision =
           coalesce(${input.workspaceArchiveMeta?.revision ?? null}, '')
         and artifact.state in ('candidate', 'delete_pending', 'delete_failed')
@@ -44333,7 +44334,7 @@ async function foldWorkspaceArchiveOntoLease(
             and artifact.source_instance_id = ${input.expectedInstanceId}
             and artifact.source_workspace_generation = lease.workspace_generation
             and artifact.provenance = 'native_capture'
-            and artifact.archive_base64 = ${input.workspaceArchive}
+            and artifact.archive_base64 = ${inlineWorkspaceArchive}
             and artifact.descriptor_revision =
               coalesce(${input.workspaceArchiveMeta?.revision ?? null}, '')
             and artifact.state in ('candidate', 'delete_pending', 'delete_failed')
