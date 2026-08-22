@@ -2403,3 +2403,424 @@ describe("agent goal_wait continuation hold", () => {
     expect((await holdColumns(ctx)).continuation_hold_turn_id).toBeNull();
   });
 });
+
+describe("input-aware continuation cap and idle backoff", () => {
+  function materializeWith(
+    ctx: GoalFixture,
+    overrides: {
+      defaultMaxAutoContinuations?: number | null;
+      idleBackoff?: { scheduleMs: readonly number[]; maxMs: number } | null;
+    } = {},
+  ) {
+    return materializeGoalContinuation(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      defaultMaxAutoContinuations: overrides.defaultMaxAutoContinuations ?? null,
+      budgetBlocked: null,
+      ...(overrides.idleBackoff !== undefined ? { idleBackoff: overrides.idleBackoff } : {}),
+      policy: {
+        model: "scripted-model",
+        reasoningEffort: "low",
+        latencyMode: "standard" as const,
+        tools: [],
+        sandboxBackend: "none",
+      },
+      prompt: (goal, count) => `continue ${goal.text} (${count})`,
+    });
+  }
+
+  async function goalRow(ctx: GoalFixture) {
+    const [row] = await shared.admin<
+      Array<{
+        status: string;
+        paused_reason: string | null;
+        auto_continuations: number;
+        version: number;
+        continuation_wake_revision: number | string;
+        continuation_observed_revision: number | string;
+        last_continuation_turn_id: string | null;
+      }>
+    >`
+      select status, paused_reason, auto_continuations, version,
+             continuation_wake_revision, continuation_observed_revision,
+             last_continuation_turn_id
+      from session_goals
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`;
+    return {
+      ...row!,
+      continuation_wake_revision: Number(row!.continuation_wake_revision),
+      continuation_observed_revision: Number(row!.continuation_observed_revision),
+    };
+  }
+
+  async function outboxRow(ctx: GoalFixture) {
+    const [row] = await shared.admin<
+      Array<{
+        reason: string;
+        wake_revision: number | string;
+        delivered_revision: number | string;
+        next_attempt_at: Date;
+      }>
+    >`
+      select reason, wake_revision, delivered_revision, next_attempt_at
+      from session_workflow_wake_outbox where session_id = ${ctx.session.id}`;
+    return row ?? null;
+  }
+
+  async function markOutboxDelivered(ctx: GoalFixture) {
+    await shared.admin`
+      update session_workflow_wake_outbox
+      set delivered_revision = wake_revision
+      where session_id = ${ctx.session.id}`;
+  }
+
+  async function claimAndSettle(ctx: GoalFixture) {
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("turn was not claimed");
+    const settled = await applySessionTurnSettlement(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      turnId: claimed.turn.id,
+      triggerEventId: claimed.turn.triggerEventId,
+      attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { reason: "test" } }],
+    });
+    expect(settled.action).toBe("settled");
+    const [turn] = await shared.admin<Array<{ finished_at: Date }>>`
+      select finished_at from session_turns where id = ${claimed.turn.id}`;
+    return { turn: claimed.turn, finishedAt: turn!.finished_at };
+  }
+
+  function childResult(ctx: GoalFixture) {
+    return addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "child_terminal_result",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-terminal-${crypto.randomUUID()}`,
+      summary: "Child finished",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+  }
+
+  /** Drive the goal to a `max_auto_continuations` pause with cap 1. */
+  async function pauseByCap(ctx: GoalFixture) {
+    await settleIdle(ctx);
+    expect((await materializeWith(ctx, { defaultMaxAutoContinuations: 1 })).action).toBe(
+      "continue",
+    );
+    await claimAndSettle(ctx);
+    const paused = await materializeWith(ctx, { defaultMaxAutoContinuations: 1 });
+    expect(paused.action).toBe("paused");
+    expect(paused.events.map((event) => event.type)).toEqual(["goal.paused"]);
+    expect(await goalRow(ctx)).toMatchObject({
+      status: "paused",
+      paused_reason: "max_auto_continuations",
+      auto_continuations: 1,
+    });
+    await markOutboxDelivered(ctx);
+  }
+
+  test("a goal turn whose batch coalesced external input resets the no-input streak at claim", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    expect((await materializeWith(ctx)).action).toBe("continue");
+    expect(await goalRow(ctx)).toMatchObject({ auto_continuations: 1 });
+    const result = await childResult(ctx);
+    if (!result.added) throw new Error("child result was not inserted");
+    // An active goal is never auto-resumed; the arrival only wakes it.
+    expect(result.events.map((event) => event.type)).toEqual(["system.update.pending"]);
+
+    const { turn } = await claimAndSettle(ctx);
+    expect(turn.source).toBe("goal");
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      turn.id,
+    );
+    expect(delivered.map((update) => update.kind).sort()).toEqual([
+      "child_terminal_result",
+      "goal_continuation",
+    ]);
+    // The claim bound the exact batch: this goal turn consumed external input,
+    // so the streak restarts while the continuation pointer still advances.
+    expect(await goalRow(ctx)).toMatchObject({
+      auto_continuations: 0,
+      last_continuation_turn_id: turn.id,
+    });
+
+    // A pure continuation keeps the evaluator's count.
+    expect((await materializeWith(ctx)).action).toBe("continue");
+    const pure = await claimAndSettle(ctx);
+    expect(pure.turn.source).toBe("goal");
+    expect(await goalRow(ctx)).toMatchObject({
+      auto_continuations: 1,
+      last_continuation_turn_id: pure.turn.id,
+    });
+  });
+
+  test("a child result auto-resumes a cap-paused goal and arms the wake", async () => {
+    const ctx = await runningGoalFixture();
+    await pauseByCap(ctx);
+    const before = await goalRow(ctx);
+
+    const result = await childResult(ctx);
+    if (!result.added) throw new Error("child result was not inserted");
+    expect(result.events.map((event) => event.type)).toEqual([
+      "system.update.pending",
+      "goal.resumed",
+    ]);
+    const resumed = result.events[1]!;
+    expect(resumed.payload).toMatchObject({
+      actor: "system",
+      reason: "external_input",
+      cause: { kind: "child_terminal_result", updateId: result.update.id },
+      version: before.version + 1,
+    });
+    expect(resumed.sequence).toBe(result.events[0]!.sequence + 1);
+    // The late child result revives the parent: same commit resumes the goal
+    // and wakes the idle session.
+    expect(result.shouldWake).toBe(true);
+    expect(result.workflowWakeRevision).not.toBeNull();
+    expect(await goalRow(ctx)).toMatchObject({
+      status: "active",
+      paused_reason: null,
+      auto_continuations: 0,
+      version: before.version + 1,
+      continuation_wake_revision: before.continuation_wake_revision + 1,
+      continuation_observed_revision: before.continuation_observed_revision,
+      last_continuation_turn_id: null,
+    });
+    const wake = await outboxRow(ctx);
+    expect(Number(wake!.wake_revision)).toBeGreaterThan(Number(wake!.delivered_revision));
+    expect(wake!.next_attempt_at.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+    // The pending child result is real model input: the next evaluation
+    // delivers it instead of synthesizing another continuation.
+    expect((await materializeWith(ctx, { defaultMaxAutoContinuations: 1 })).action).toBe("queue");
+  });
+
+  test("a human prompt auto-resumes a cap-paused goal in the same commit", async () => {
+    const ctx = await runningGoalFixture();
+    await pauseByCap(ctx);
+    const before = await goalRow(ctx);
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: ctx.grant.accountId,
+            workspaceId: ctx.grant.workspaceId!,
+            sessionId: ctx.session.id,
+            subjectId: ctx.grant.subjectId,
+            actor: { type: "human", subjectId: ctx.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "keep going",
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
+    const types = submitted.events.map((event) => event.type);
+    expect(types).toContain("goal.resumed");
+    expect(types.indexOf("goal.resumed")).toBeGreaterThan(types.indexOf("turn.queued"));
+    const resumed = submitted.events.find((event) => event.type === "goal.resumed")!;
+    expect(resumed.payload).toMatchObject({
+      actor: "system",
+      reason: "external_input",
+      cause: { kind: "human_prompt", turnId: submitted.turnId },
+    });
+    expect(await goalRow(ctx)).toMatchObject({
+      status: "active",
+      paused_reason: null,
+      auto_continuations: 0,
+      version: before.version + 1,
+      continuation_wake_revision: before.continuation_wake_revision + 1,
+    });
+    // The session sequence advanced past every appended event, so later
+    // writers cannot collide with the resume fact.
+    const [session] = await shared.admin<Array<{ last_sequence: number | string }>>`
+      select last_sequence from sessions where id = ${ctx.session.id}`;
+    expect(Number(session!.last_sequence)).toBe(
+      Math.max(...submitted.events.map((event) => event.sequence)),
+    );
+  });
+
+  test("only the continuation ceiling is auto-resumed; intent pauses stay paused", async () => {
+    for (const pausedReason of ["user_pause", "api", "limits", "agent"] as const) {
+      const ctx = await runningGoalFixture();
+      await settleIdle(ctx);
+      await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId!, ctx.session.id, {
+        status: "paused",
+        rationale: `paused: ${pausedReason}`,
+        pausedReason,
+        event: { type: "goal.paused", actor: "api", reason: pausedReason },
+      });
+      const before = await goalRow(ctx);
+      const result = await childResult(ctx);
+      if (!result.added) throw new Error("child result was not inserted");
+      expect(result.events.map((event) => event.type)).toEqual(["system.update.pending"]);
+      // A paused goal is settled authority for a late child: no wake.
+      expect(result.shouldWake).toBe(false);
+      expect(await goalRow(ctx)).toMatchObject({
+        status: "paused",
+        paused_reason: pausedReason,
+        version: before.version,
+      });
+      const [resumedEvents] = await shared.admin`
+        select count(*)::int as count from session_events
+        where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+          and type = 'goal.resumed'`;
+      expect(Number(resumedEvents!.count)).toBe(0);
+    }
+  });
+
+  test("consecutive no-input continuations back off, re-arm the delayed wake, and yield to new input", async () => {
+    const ctx = await runningGoalFixture();
+    const idleBackoff = { scheduleMs: [3_000, 30_000], maxMs: 10_000 };
+    await settleIdle(ctx);
+    // First continuation after external input (the initial human turn) is immediate.
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
+    const first = await claimAndSettle(ctx);
+    expect(first.turn.source).toBe("goal");
+    const armed = await counts(ctx);
+    expect(armed).toMatchObject({ autoContinuations: 1, updates: 1, usage: 1, events: 1 });
+    expect(armed.wakeRevision).toBeGreaterThan(armed.observedRevision);
+
+    // Second consecutive no-input continuation: deferred 3 s after the first finished.
+    const deferred = await materializeWith(ctx, { idleBackoff });
+    expect(deferred.action).toBe("deferred");
+    if (deferred.action !== "deferred") return;
+    expect(deferred.notBefore.getTime()).toBe(first.finishedAt.getTime() + 3_000);
+    // Nothing consumed: ledger, updates, usage, and events untouched.
+    expect(await counts(ctx)).toEqual(armed);
+    let wake = await outboxRow(ctx);
+    expect(wake!.reason).toBe("goal_idle_backoff");
+    // The settlement wake was still undelivered, so it coalesced with
+    // `least(...)`; once delivered, the re-armed row sits exactly at the deadline.
+    await markOutboxDelivered(ctx);
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("deferred");
+    wake = await outboxRow(ctx);
+    expect(wake!.reason).toBe("goal_idle_backoff");
+    expect(Number(wake!.wake_revision)).toBeGreaterThan(Number(wake!.delivered_revision));
+    expect(wake!.next_attempt_at.getTime()).toBe(first.finishedAt.getTime() + 3_000);
+    expect(await counts(ctx)).toEqual(armed);
+    const projection = await getSessionGoalWithContinuation(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    expect(projection?.continuation).toMatchObject({
+      state: "scheduled",
+      reason: "backoff_pending",
+      wakeRevision: armed.wakeRevision,
+      observedRevision: armed.observedRevision,
+      nextAttemptAt: new Date(first.finishedAt.getTime() + 3_000).toISOString(),
+    });
+
+    // The deadline passes (shift every finished turn into the past together so
+    // finish ordering is preserved): the continuation materializes as before.
+    await shared.admin`
+      update session_turns set finished_at = finished_at - interval '10 seconds'
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+        and finished_at is not null`;
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
+    const second = await claimAndSettle(ctx);
+    expect(await goalRow(ctx)).toMatchObject({
+      auto_continuations: 2,
+      last_continuation_turn_id: second.turn.id,
+    });
+    // Third consecutive: schedule says 30 s, the ceiling caps it at 10 s.
+    await markOutboxDelivered(ctx);
+    const capped = await materializeWith(ctx, { idleBackoff });
+    expect(capped.action).toBe("deferred");
+    if (capped.action !== "deferred") return;
+    expect(capped.notBefore.getTime()).toBe(second.finishedAt.getTime() + 10_000);
+    wake = await outboxRow(ctx);
+    expect(wake!.next_attempt_at.getTime()).toBe(second.finishedAt.getTime() + 10_000);
+
+    // New input mid-backoff pulls the delayed wake to now and wins the next
+    // evaluation as ordinary pending machine input.
+    const message = await addSessionSystemUpdate(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `backoff-message-${crypto.randomUUID()}`,
+      summary: "Peer update",
+      payload: {
+        type: "agent_message",
+        text: "Peer update",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!message.added) throw new Error("agent message was not inserted");
+    wake = await outboxRow(ctx);
+    expect(wake!.next_attempt_at.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
+    expect(Number(wake!.wake_revision)).toBeGreaterThan(Number(wake!.delivered_revision));
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("queue");
+    // No continuation was materialized while deferred, so the message is
+    // delivered on an ordinary system turn. That turn is newer external input:
+    // the next evaluation restarts the streak and continues immediately.
+    const mixed = await claimAndSettle(ctx);
+    expect(mixed.turn.source).toBe("system");
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
+    expect(await goalRow(ctx)).toMatchObject({ auto_continuations: 1 });
+  });
+
+  test("a human turn after a continuation restarts the streak without backoff", async () => {
+    const ctx = await runningGoalFixture();
+    const idleBackoff = { scheduleMs: [3_000], maxMs: 3_000 };
+    await settleIdle(ctx);
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
+    await claimAndSettle(ctx);
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("deferred");
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "human direction",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    const human = await claimAndSettle(ctx);
+    expect(human.turn.source).toBe("user");
+    // Latest finished turn is human work: no pacing, the streak restarts.
+    expect((await materializeWith(ctx, { idleBackoff })).action).toBe("continue");
+    expect(await goalRow(ctx)).toMatchObject({ auto_continuations: 1 });
+  });
+});

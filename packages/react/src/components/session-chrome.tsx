@@ -161,6 +161,8 @@ export function sessionChromeGoalPillState(
         ? "waiting"
         : "invariant_broken";
   }
+  // `backoff_pending` (idle pacing between consecutive no-input continuations,
+  // next evaluation at `nextAttemptAt`) is an ordinary scheduled state.
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
     // `held_for_input` is the agent's own goal_wait hold (waiting for child

@@ -128,6 +128,12 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       defaultMaxAutoContinuations: settings.goalMaxAutoContinuations ?? null,
+      // Pacing between consecutive no-input continuations (never a cap). The
+      // materializer re-arms a delayed outbox wake and returns `deferred`.
+      idleBackoff: {
+        scheduleMs: settings.goalIdleBackoffMs,
+        maxMs: settings.goalIdleBackoffMaxMs,
+      },
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.

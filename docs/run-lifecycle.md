@@ -762,12 +762,16 @@ for its surviving parent and copies the causal parent-turn delegation snapshot;
 cancelled descendants do not notify parents inside the same terminal subtree.
 Every child terminal result remains a durable pending machine input even when it
 arrives late. It may autonomously wake an idle parent only while the parent has
-an active goal, which is the durable obligation to keep working. A no-goal
-parent whose ordinary turn completed, a paused or completed goal, and an
-already-failed parent are settled authority: the result stays pending for a
-later human/new-goal turn and cannot manufacture a new inference or rewrite the
-settled public status by itself. A result arriving while the parent turn is live
-remains available to that turn's ordinary loop.
+an active goal, which is the durable obligation to keep working. A goal paused
+only by its continuation ceiling (`max_auto_continuations`) counts: that pause
+is pacing, not intent, so the arriving result resumes the goal in the same
+commit (`goal.resumed`, `reason: "external_input"`) and then wakes the parent. A
+no-goal parent whose ordinary turn completed, a goal paused by the user, API,
+agent, limits, or no-progress policy, a completed goal, and an already-failed
+parent are settled authority: the result stays pending for a later human/new-goal
+turn and cannot manufacture a new inference or rewrite the settled public status
+by itself. A result arriving while the parent turn is live remains available to
+that turn's ordinary loop.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -1206,6 +1210,10 @@ original attempt for audit. Receipt/result, goal version, session-sequenced
 event, and mutation commit atomically. A lost response can therefore be
 reconciled from a recovered attempt without double-applying the update, and an
 old replay returns its stored result rather than overwriting newer goal truth.
+Consecutive continuations that consumed no external input are paced by a
+delayed workflow-wake row (`goal_idle_backoff`), never by a Temporal timer or a
+cap; any new input pulls that wake to now, and the claim that binds a goal turn
+to a batch carrying other machine input restarts the no-input streak.
 Full detail in `docs/goals.md`; goals are bounded by budget/admission policy and
 explicit lifecycle control, not an inferred progress score.
 

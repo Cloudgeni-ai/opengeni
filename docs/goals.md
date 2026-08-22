@@ -61,8 +61,11 @@ A goal is `active`, `paused`, or `completed`.
   already has one remains a supported low-level/API/scheduler redirect: it
   re-activates the goal, resets continuation counters, and arms a wake. The
   agent-facing `goal_set` creates when no goal exists or replaces a completed
-  goal. Active and paused goals are changed through the policy-fenced
-  `goal_update`, so an incidental set cannot silently redirect live intent.
+  goal, and accepts only `text` and `successCriteria`: `maxAutoContinuations`
+  is API/scheduled-task configuration (an agent that capped its own goal used
+  to silence its orchestration for hours). Active and paused goals are changed
+  through the policy-fenced `goal_update`, so an incidental set cannot silently
+  redirect live intent.
 - `goal_update` declares `refinement`, `adaptation`, or `replacement`, a
   rationale, and the expected objective revision. `review_changes` always
   records an immutable proposal; `preserve_intent` directly applies only a
@@ -176,17 +179,47 @@ The locked decision applies these rules:
    `nextAttemptAt` at the deadline, and the deadline comparison uses the
    transaction's database clock, the same clock the wake-outbox dispatcher
    fires on.
-4. Budget/admission policy can pause the goal visibly with reason `limits`.
+4. Consecutive no-input continuations are paced, not capped. `auto_continuations`
+   counts only consecutive synthesized continuations whose claimed batch
+   contained no other machine input and that no human/API/Steer turn
+   interrupted: the claim transaction that binds a goal turn to its exact batch
+   resets the streak when any other member (child result, agent message,
+   schedule) rides along, a human/API/scheduled turn finishing after the last
+   continuation resets it, and a Steer supersession resets it. When the
+   streak is `n >= 1` and the last continuation turn is still the newest
+   finished turn, the materializer defers the next continuation until
+   `finished_at + schedule[min(n - 1, last)]` (`OPENGENI_GOAL_IDLE_BACKOFF_MS`,
+   default `3000,30000,120000,300000`, every delay bounded by
+   `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS`, default 600000). It returns
+   `deferred` without touching the wake/observed ledger, counters, updates, or
+   usage, and re-arms a delayed workflow wake (`goal_idle_backoff`,
+   `notBefore` at the deadline) through the session workflow-wake outbox on
+   every idle evaluation, exactly like the hold; the deadline lives only in
+   `session_workflow_wake_outbox.next_attempt_at`, never in a Temporal timer or
+   a new column. Any new input (pending machine input, a human prompt, Steer)
+   commits its own immediate wake, which pulls that row to now, and wins the
+   next evaluation as ordinary input. The API projects the wait as
+   `scheduled` / `backoff_pending` with `nextAttemptAt` at the deadline.
+5. Budget/admission policy can pause the goal visibly with reason `limits`.
    OpenGeni does not infer progress or blockage from tool/event shape; the
    model explicitly completes or pauses the goal under the continuation
    instructions, and a user can control it directly.
-5. Goals are NOT capped by continuation count by default — runs legitimately
+6. Goals are NOT capped by continuation count by default - runs legitimately
    span days. If a deployment sets
    `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` it becomes a hard ceiling
    (`min(goal.maxAutoContinuations, setting)`, pause reason
-   `"max_auto_continuations"`); a per-goal `maxAutoContinuations` applies on
-   its own even without the deployment setting.
-6. Otherwise one deterministic goal-continuation internal update is recorded.
+   `"max_auto_continuations"`); a per-goal `maxAutoContinuations` (API or
+   scheduled-task configuration only) applies on its own even without the
+   deployment setting. The ceiling bounds the same consecutive no-input streak
+   as the backoff, so any consumed external input resets it. Reaching it is
+   pacing, not user intent: any later external input (new machine input such
+   as a child result or agent message, a human/API prompt, or Steer) resumes
+   the goal automatically in the same commit as that input, with
+   `goal.resumed` (`actor: "system"`, `reason: "external_input"`, and the
+   causing update or turn), a fresh continuation epoch, and an armed wake. A
+   `user_pause`, `api`, `agent`, `limits`, or `no_progress` pause is never
+   auto-resumed.
+7. Otherwise one deterministic goal-continuation internal update is recorded.
    At claim, its exact prompt becomes one canonical user-role model-memory item
    with the frozen goal snapshot; it is not duplicated into the generic
    internal-update envelope. Any unrelated machine updates coalesced with it
@@ -223,7 +256,9 @@ recovery of the same turn, not creation or charging of another continuation.
   previous workflow run closed.
 - If a turn fails and the session is marked `failed`, the goal row is left
   as-is. A new human prompt can revive the session; it does not silently resume
-  a goal that the user paused.
+  a goal that the user paused. Only a goal paused by the continuation ceiling
+  (`max_auto_continuations`) is resumed by new input, because that pause is
+  pacing rather than intent.
 - Provider backpressure persists a capacity waiter. It blocks goal
   materialization until authoritative allocator re-evaluation records recovery;
   no model polling or synthetic human message is used.
@@ -255,14 +290,19 @@ recovery of the same turn, not creation or charging of another continuation.
   continuation; recovering or queued work is scheduled. Pause, approval,
   provider backpressure, cancellation, pending wake/update, an agent-declared
   `goal_wait` hold (`blocked` / `held_for_input`, `nextAttemptAt` at the
-  deadline), and a missing obligation are distinct truthful states.
+  deadline), idle backoff between consecutive no-input continuations
+  (`scheduled` / `backoff_pending`, `nextAttemptAt` at the pacing deadline),
+  and a missing obligation are distinct truthful states.
 - `PATCH /v1/workspaces/:id/sessions/:sessionId/goal` with
   `{ status: "paused" | "active", rationale? }` is the operator override
   (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
-  is only valid from `paused`: it resets the counters, emits `goal.resumed`,
-  and wakes the session workflow — resume works even on a fully idle session
-  because `signalWithStart` restarts a completed workflow. Invalid transitions
-  (e.g. resuming a completed goal) return 409.
+  is only valid from `paused`: it resets the counters, emits `goal.resumed`
+  (`actor: "api"`, `reason: "api"`), and wakes the session workflow - resume
+  works even on a fully idle session because `signalWithStart` restarts a
+  completed workflow. Invalid transitions (e.g. resuming a completed goal)
+  return 409. A `max_auto_continuations` pause additionally resumes itself on
+  new external input (`goal.resumed`, `actor: "system"`,
+  `reason: "external_input"`); no other pause reason does.
 - The same `PATCH` accepts a direct semantic redirect with `{ text,
   successCriteria?, rootConstraints?, mutationPolicy?, rationale,
   expectedObjectiveRevision }`.
@@ -320,4 +360,6 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 
 | Variable                               | Default            | Meaning                                                                                                                                                                                                                                                                             |
 | -------------------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset — no cap)_ | Optional hard ceiling on synthesized continuation turns per goal arming. Unset by default, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower. |
+| `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset - no cap)_ | Optional hard ceiling on consecutive no-input continuation turns per goal arming. Unset by default, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower; reaching it pauses the goal until new external input resumes it. |
+| `OPENGENI_GOAL_IDLE_BACKOFF_MS` | `3000,30000,120000,300000` | Comma-separated pacing delays (ms) before the n-th consecutive no-input continuation, measured from when the previous continuation turn finished; the last entry repeats. Not a cap: any new input wakes the session immediately. |
+| `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` | `600000` | Upper bound on every idle-backoff delay; schedule entries above it are rejected at boot. |

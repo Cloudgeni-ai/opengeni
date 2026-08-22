@@ -1,0 +1,5 @@
+---
+"@opengeni/db": minor
+---
+
+Input-aware goal continuation pacing. `auto_continuations` now counts only consecutive synthesized continuations that consumed no external input: the claim that binds a goal turn to a batch carrying any other machine input resets it, and the latest-finished-turn reset orders by finish time so a human prompt queued after internal turns restarts the streak. A `max_auto_continuations` pause is pacing rather than intent and auto-resumes in the same commit as new external input (machine input, human/API prompt, Steer) with `goal.resumed{actor:"system", reason:"external_input"}`; `user_pause`/`api`/`agent`/`limits`/`no_progress` pauses are never auto-resumed. A late child result can therefore revive a cap-paused parent. `materializeGoalContinuation` accepts an optional `idleBackoff` policy and returns `deferred` (armed `goal_idle_backoff` workflow-wake row at the pacing deadline, ledger untouched) between consecutive no-input continuations; the goal projection reports `backoff_pending` with `nextAttemptAt`. No migration.

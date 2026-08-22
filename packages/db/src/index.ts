@@ -348,6 +348,13 @@ import {
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
+import {
+  autoResumeGoalPausedByCapInTransaction,
+  SESSION_GOAL_CAP_PAUSED_REASON,
+  SESSION_GOAL_CONTINUATION_EPOCH_RESET,
+  SESSION_GOAL_HOLD_CLEARED,
+  type SessionGoalAutoResumedByExternalInput,
+} from "./session-goal-pacing";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -49876,6 +49883,7 @@ export type SessionGoalContinuationProjection = {
     | "session_cancelled"
     | "system_work_pending"
     | "held_for_input"
+    | "backoff_pending"
     | "missing_obligation";
   wakeRevision: number;
   observedRevision: number;
@@ -49989,6 +49997,7 @@ export async function getSessionGoalWithContinuation(
         .select({
           wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
           deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+          reason: schema.sessionWorkflowWakeOutbox.reason,
           nextAttemptAt: schema.sessionWorkflowWakeOutbox.nextAttemptAt,
           lastError: schema.sessionWorkflowWakeOutbox.lastError,
         })
@@ -50104,6 +50113,19 @@ export async function getSessionGoalWithContinuation(
           reason: "held_for_input",
           ...base,
           nextAttemptAt: currentHoldUntil.toISOString(),
+        };
+      } else if (
+        goal.continuationWakeRevision > goal.continuationObservedRevision &&
+        pendingWorkflowWake?.reason === GOAL_IDLE_BACKOFF_WAKE_REASON
+      ) {
+        // Consecutive no-input continuations are paced: the obligation stays
+        // armed (wake > observed) and the delayed workflow wake fires at
+        // `nextAttemptAt`. Any new input pulls that wake to now.
+        continuation = {
+          state: "scheduled",
+          reason: "backoff_pending",
+          ...base,
+          nextAttemptAt: pendingWorkflowWake.nextAttemptAt.toISOString(),
         };
       } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {
         continuation = { state: "scheduled", reason: "wake_pending", ...base };
@@ -51452,13 +51474,6 @@ export async function updateSessionGoalWithEvent(
  * goal head mutation (status transition, applied semantic revision, replace) so
  * newer truth never sits behind an older wait.
  */
-const SESSION_GOAL_HOLD_CLEARED = {
-  continuationHoldTurnId: null,
-  continuationHoldUntil: null,
-  continuationHoldReason: null,
-  continuationHoldSetAt: null,
-} as const;
-
 export const SESSION_GOAL_HOLD_MIN_SECONDS = 30;
 export const SESSION_GOAL_HOLD_MAX_SECONDS = 7 * 24 * 60 * 60;
 
@@ -51918,12 +51933,9 @@ export async function setSessionGoalStatus(
           ? {
               rationale: null,
               pausedReason: null,
-              autoContinuations: 0,
-              noProgressStreak: 0,
               // A re-armed goal starts a fresh continuation epoch; stale pointers to
               // a pre-pause continuation turn must not affect later lineage.
-              lastContinuationTurnId: null,
-              versionAtLastContinuation: null,
+              ...SESSION_GOAL_CONTINUATION_EPOCH_RESET,
               continuationWakeRevision: existing.continuationWakeRevision + 1,
             }
           : {}),
@@ -51960,6 +51972,9 @@ export type SetSessionGoalStatusEvent =
       reason: string;
       rationale?: string;
     }
+  // The operator PATCH resume. A system resume of a `max_auto_continuations`
+  // pause is a separate path (`autoResumeGoalPausedByCapInTransaction`) that
+  // commits with the external input that caused it.
   | { type: "goal.resumed"; actor: "api" };
 
 /** Status mutation and its timeline fact share the same session-first commit. */
@@ -52031,6 +52046,7 @@ export async function setSessionGoalStatusWithEvent(
                 objectiveRevision: result.goal.objectiveRevision,
                 mutationPolicy: result.goal.mutationPolicy,
                 actor: input.event.actor,
+                reason: "api",
               };
       const now = new Date();
       const [event] = await tx
@@ -52228,6 +52244,10 @@ export async function evaluateGoalContinuation(
             ? ({ decision: "queue" } as const)
             : ({ decision: "none" } as const);
         }
+        // Newest finished truth by finish time. Queue position alone is not
+        // enough: a human prompt queued after internal turns takes a low
+        // normalized position, yet it is the newer external input that must
+        // restart the no-input streak.
         const [latestFinished] = await tx
           .select({ id: schema.sessionTurns.id })
           .from(schema.sessionTurns)
@@ -52238,7 +52258,11 @@ export async function evaluateGoalContinuation(
               sql`${schema.sessionTurns.finishedAt} is not null`,
             ),
           )
-          .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+          .orderBy(
+            desc(schema.sessionTurns.finishedAt),
+            desc(schema.sessionTurns.position),
+            desc(schema.sessionTurns.createdAt),
+          )
           .limit(1);
         const contextCompactionFailure = latestFinished
           ? await turnHasFailureCodeTx(
@@ -52258,6 +52282,11 @@ export async function evaluateGoalContinuation(
         if (contextCompactionFailure) {
           return { decision: "none" } as const;
         }
+        // `autoContinuations` counts only CONSECUTIVE synthesized continuations
+        // that consumed no external input. The claim transaction already resets
+        // it when a goal-owned turn's batch coalesced any other machine input,
+        // and a Steer supersession resets it too; this branch covers a
+        // human/API/scheduled turn that finished after the last continuation.
         let autoContinuations = row.autoContinuations;
         // A 429-failover continuation (the last continuation turn carried the `rotated`
         // marker) is a multi-account rotate, not another unit of goal work. It must not burn
@@ -52266,8 +52295,8 @@ export async function evaluateGoalContinuation(
         if (row.lastContinuationTurnId) {
           const lastFinished = latestFinished;
           if (lastFinished && lastFinished.id !== row.lastContinuationTurnId) {
-            // A user/scheduled turn ran since the last continuation: human
-            // re-engagement re-arms the auto-continuation budget.
+            // A user/scheduled turn ran since the last continuation: that
+            // external input starts a fresh no-input streak.
             autoContinuations = 0;
           } else if (lastFinished) {
             const [{ rotatedFailures } = { rotatedFailures: 0 }] = await tx
@@ -52287,7 +52316,10 @@ export async function evaluateGoalContinuation(
           }
         }
         // No configured default means uncapped. When a default is configured it
-        // is a hard ceiling; per-goal overrides can only lower it.
+        // is a hard ceiling; per-goal overrides can only lower it. The ceiling
+        // bounds consecutive no-input continuations only: any later external
+        // input (machine input, human/API prompt, Steer) resumes this pause
+        // automatically through `autoResumeGoalPausedByCapInTransaction`.
         const capCandidates = [row.maxAutoContinuations, input.defaultMaxAutoContinuations].filter(
           (value): value is number => typeof value === "number",
         );
@@ -52297,7 +52329,7 @@ export async function evaluateGoalContinuation(
             .update(schema.sessionGoals)
             .set({
               status: "paused",
-              pausedReason: "max_auto_continuations",
+              pausedReason: SESSION_GOAL_CAP_PAUSED_REASON,
               autoContinuations,
               noProgressStreak: 0,
               version: row.version + 1,
@@ -52356,12 +52388,30 @@ export async function evaluateGoalContinuation(
   );
 }
 
+export const GOAL_IDLE_BACKOFF_WAKE_REASON = "goal_idle_backoff";
+
+/**
+ * Pacing between consecutive no-input goal continuations. `scheduleMs[n - 1]`
+ * (last entry repeats) is the delay before the n-th consecutive continuation,
+ * measured from when the previous continuation turn finished; `maxMs` bounds
+ * every delay. Omitted/null means no backoff (the legacy immediate behavior).
+ */
+export type GoalIdleBackoffPolicy = {
+  scheduleMs: readonly number[];
+  maxMs: number;
+};
+
 export type MaterializeGoalContinuationResult =
   | { action: "none" | "queue"; events: [] }
   // An agent-declared `goal_wait` hold is current: no continuation was
   // materialized, the wake/observed ledger is untouched, and a delayed
   // workflow wake is armed at the hold deadline.
   | { action: "held"; events: []; holdTurnId: string; holdUntil: Date }
+  // Idle backoff: the previous continuation consumed no external input and
+  // finished less than its pacing delay ago. Nothing was materialized, the
+  // wake/observed ledger is untouched, and a delayed workflow wake is armed at
+  // `notBefore`; any new input pulls that wake to now.
+  | { action: "deferred"; events: []; notBefore: Date }
   | { action: "paused"; events: SessionEvent[] }
   | {
       action: "continue";
@@ -52390,6 +52440,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
+    idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
       model: string;
       reasoningEffort: ReasoningEffort;
@@ -52691,6 +52742,76 @@ export async function materializeGoalContinuation(
             .update(schema.sessionGoals)
             .set({ ...SESSION_GOAL_HOLD_CLEARED, updatedAt: new Date() })
             .where(eq(schema.sessionGoals.id, goalRead.id));
+        }
+
+        // Idle backoff between CONSECUTIVE no-input continuations. This is
+        // pacing, not a cap, and it is decided here, before the ledger/cap
+        // evaluation, so a deferred pass consumes nothing. The streak is
+        // `auto_continuations` (claim resets it whenever a goal turn's batch
+        // carried other machine input); the previous continuation's finish time
+        // is `session_turns.finished_at` of `last_continuation_turn_id`; the
+        // deadline lives only in the workflow-wake outbox. Pending machine
+        // input, a human prompt, or Steer never reaches this branch (they win
+        // above), and they pull the delayed outbox wake to now.
+        if (
+          input.idleBackoff &&
+          goalRead.autoContinuations >= 1 &&
+          goalRead.lastContinuationTurnId
+        ) {
+          const [latestFinishedTurn] = await tx
+            .select({
+              id: schema.sessionTurns.id,
+              source: schema.sessionTurns.source,
+              finishedAt: schema.sessionTurns.finishedAt,
+            })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                sql`${schema.sessionTurns.finishedAt} is not null`,
+              ),
+            )
+            // Newest finished truth by finish time (see evaluateGoalContinuation):
+            // a human turn queued after internal turns has a low position but
+            // is the newer input that ends the no-input streak.
+            .orderBy(
+              desc(schema.sessionTurns.finishedAt),
+              desc(schema.sessionTurns.position),
+              desc(schema.sessionTurns.createdAt),
+            )
+            .limit(1);
+          if (
+            latestFinishedTurn?.finishedAt &&
+            latestFinishedTurn.source === "goal" &&
+            latestFinishedTurn.id === goalRead.lastContinuationTurnId
+          ) {
+            const schedule = input.idleBackoff.scheduleMs;
+            const delayMs = Math.min(
+              schedule[Math.min(goalRead.autoContinuations - 1, schedule.length - 1)] ?? 0,
+              input.idleBackoff.maxMs,
+            );
+            const dueAt = new Date(latestFinishedTurn.finishedAt.getTime() + delayMs);
+            // Database clock, like the hold deadline: the wake-outbox
+            // dispatcher fires on DB `now()`.
+            const dbNow = await transactionNow(tx);
+            if (delayMs > 0 && dbNow.getTime() < dueAt.getTime()) {
+              // Re-arm on every idle evaluation for the same reason the hold
+              // does: an earlier immediate wake delivered in between advances
+              // the outbox's delivered revision and would otherwise drop the
+              // deadline row; an undelivered earlier wake coalesces with
+              // `least(next_attempt_at, notBefore)`.
+              await enqueueSessionWorkflowWakeInTransaction(tx, {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? input.workflowId,
+                reason: GOAL_IDLE_BACKOFF_WAKE_REASON,
+                notBefore: dueAt,
+              });
+              return { action: "deferred", events: [], notBefore: dueAt } as const;
+            }
+          }
         }
 
         let goalWakeRevision = goalRead.continuationWakeRevision;
@@ -55899,9 +56020,22 @@ export async function claimSessionWorkForAttempt(
               withLosslessContentWriteVersion(delivered.events, "payload", "payloadCodecVersion"),
             );
           if (goalUpdate && typeof goalUpdate.payload.goalId === "string") {
+            // `auto_continuations` counts consecutive continuations that
+            // consumed NO external input. This claim binds the exact batch:
+            // when any other member (child result, agent message, schedule,
+            // Steer) rides along, this goal turn consumed input, so the streak
+            // and the idle backoff start over. A pure continuation keeps the
+            // count the evaluator incremented at materialization.
+            const consumedExternalInput = delivered.updates.some(
+              (update) => update.kind !== "goal_continuation",
+            );
             await tx
               .update(schema.sessionGoals)
-              .set({ lastContinuationTurnId: internalTurn.id, updatedAt: now })
+              .set({
+                lastContinuationTurnId: internalTurn.id,
+                ...(consumedExternalInput ? { autoContinuations: 0, noProgressStreak: 0 } : {}),
+                updatedAt: now,
+              })
               .where(
                 and(
                   eq(schema.sessionGoals.workspaceId, workspaceId),
@@ -62320,30 +62454,79 @@ export async function addSessionSystemUpdateWithSourceMutation(
           input.workspaceId,
           input.sessionId,
         );
-        const [goalForChildResult] =
-          input.kind === "child_terminal_result"
-            ? await tx
-                .select({ status: schema.sessionGoals.status })
-                .from(schema.sessionGoals)
-                .where(
-                  and(
-                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                    eq(schema.sessionGoals.sessionId, input.sessionId),
-                  ),
-                )
-                .for("update")
-                .limit(1)
-            : [];
+        // Every kind except the goal's own synthesized continuation is external
+        // input for the goal. A child result may not revive an already-failed
+        // parent (settled authority); every other kind already wakes one.
+        const externalGoalInput =
+          input.kind !== "goal_continuation" &&
+          (input.kind !== "child_terminal_result" || session.status !== "failed");
+        let goalStatus: string | null = null;
+        let autoResumed: SessionGoalAutoResumedByExternalInput | null = null;
+        if (externalGoalInput) {
+          // Session row first, then the goal row FOR UPDATE: the goal tools'
+          // order. A `max_auto_continuations` pause is pacing, not intent, so
+          // this new input resumes it in the same commit as the input itself
+          // and the goal counts as active for the wake decision below. Any
+          // other pause reason is left alone.
+          autoResumed = await autoResumeGoalPausedByCapInTransaction(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            cause: { kind: input.kind, updateId: inserted.id },
+            now,
+          });
+          if (autoResumed) {
+            goalStatus = autoResumed.goal.status;
+          } else {
+            const [goal] = await tx
+              .select({ status: schema.sessionGoals.status })
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            goalStatus = goal?.status ?? null;
+          }
+        }
+        const [resumedEvent] = autoResumed
+          ? await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 2,
+                    type: "goal.resumed",
+                    payload: autoResumed.payload,
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning()
+          : [];
+        if (autoResumed && !resumedEvent) {
+          throw new Error("Failed to append goal.resumed event");
+        }
+        const appendedSequences = autoResumed ? 2 : 1;
         // Child completion remains durable model memory, but it is not new
-        // human intent. A completed/paused goal or an already-failed parent is
-        // settled authority and cannot be restarted solely by a late child.
-        // A live parent turn consumes the update in its ordinary loop. Once an
-        // ordinary no-goal turn has settled, its child result remains pending
-        // until new human intent arrives. Only an active goal is a durable
-        // obligation that may autonomously wake an idle parent.
+        // human intent. A completed goal, a goal paused by intent, or an
+        // already-failed parent is settled authority and cannot be restarted
+        // solely by a late child. A live parent turn consumes the update in its
+        // ordinary loop. Once an ordinary no-goal turn has settled, its child
+        // result remains pending until new human intent arrives. Only an
+        // active goal (including one this input just resumed from its pacing
+        // ceiling) is a durable obligation that may autonomously wake an idle
+        // parent.
         const childResultMayWake =
           input.kind !== "child_terminal_result" ||
-          (session.status !== "failed" && goalForChildResult?.status === "active");
+          (session.status !== "failed" && goalStatus === "active");
         const shouldWake =
           childResultMayWake &&
           !realtimeActive &&
@@ -62360,7 +62543,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
         await tx
           .update(schema.sessions)
           .set({
-            lastSequence: session.lastSequence + 1,
+            lastSequence: session.lastSequence + appendedSequences,
             ...(shouldWake ? { status: "queued" as const } : {}),
             updatedAt: now,
           })
@@ -62373,7 +62556,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
           workflowWakeRevision: wake?.wakeRevision ?? null,
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,
-          events: event ? [mapEvent(event)] : [],
+          events: [mapEvent(event), ...(resumedEvent ? [mapEvent(resumedEvent)] : [])],
         };
       }),
   );

@@ -1,4 +1,9 @@
-import { DEFAULT_AGENT_INSTRUCTIONS, type Settings } from "@opengeni/config";
+import {
+  DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MS,
+  type Settings,
+} from "@opengeni/config";
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
@@ -77,6 +82,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     googleDriveProviderRetryBudgetMs: 15_000,
     socialOauthClientsJson: "{}",
     goalMaxAutoContinuations: 20,
+    goalIdleBackoffMs: DEFAULT_GOAL_IDLE_BACKOFF_MS,
+    goalIdleBackoffMaxMs: DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
     contextCompactionThresholdRatio: 0.9,

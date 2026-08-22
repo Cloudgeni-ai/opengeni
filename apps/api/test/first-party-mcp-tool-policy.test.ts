@@ -488,3 +488,28 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 });
+
+describe("agent-facing goal_set schema", () => {
+  test("does not accept maxAutoContinuations; the ceiling is API/scheduled configuration", async () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["goals:manage"]));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "goal-set-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (candidate) => candidate.name === "goal_set",
+      );
+      expect(tool).toBeDefined();
+      const serialized = JSON.stringify(tool?.inputSchema);
+      expect(serialized).not.toContain("maxAutoContinuations");
+      expect(tool?.inputSchema).toMatchObject({
+        properties: { text: expect.anything(), successCriteria: expect.anything() },
+        required: ["text"],
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+});

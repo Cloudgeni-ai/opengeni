@@ -55,6 +55,7 @@ import {
   updateSessionCommandReceiptResult,
 } from "./session-control";
 import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
+import { autoResumeGoalPausedByCapInTransaction } from "./session-goal-pacing";
 import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputContext,
@@ -2110,6 +2111,29 @@ export async function submitHumanPromptInTransaction(
         replacedTurnId: current.id,
         stopping: liveCurrentTurnId !== null,
       },
+      occurredAt: now,
+    });
+  }
+
+  // A human/API prompt is external input for the goal. A goal paused only by
+  // its continuation ceiling (`max_auto_continuations`, pacing rather than
+  // intent) resumes in this same commit; a user/API/agent/limits pause is never
+  // touched here. Goal row FOR UPDATE follows the session and turn locks above,
+  // the order the claim transaction uses.
+  const goalAutoResumed = await autoResumeGoalPausedByCapInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    cause: { kind: "human_prompt", turnId },
+    now,
+  });
+  if (goalAutoResumed) {
+    eventValues.push({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      sequence: ++sequence,
+      type: "goal.resumed",
+      payload: goalAutoResumed.payload,
       occurredAt: now,
     });
   }

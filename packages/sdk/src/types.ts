@@ -4009,6 +4009,7 @@ export type SessionGoalContinuationReason =
   | "session_cancelled"
   | "system_work_pending"
   | "held_for_input"
+  | "backoff_pending"
   | "missing_obligation";
 
 export type SessionGoalContinuation = {

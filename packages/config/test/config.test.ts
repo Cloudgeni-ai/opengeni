@@ -6,6 +6,8 @@ import {
   SandboxBackend,
 } from "@opengeni/contracts";
 import {
+  DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MS,
   collectGitIdentityEnvironment,
   configuredEntitlements,
   collectSandboxEnvironment,
@@ -58,6 +60,49 @@ describe(".env.example", () => {
     }
 
     expect(() => withEnv(sourcedEnv, () => getSettings())).not.toThrow();
+  });
+});
+
+describe("goal continuation pacing settings", () => {
+  test("defaults to the input-aware idle backoff schedule and cap", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.goalIdleBackoffMs).toEqual([...DEFAULT_GOAL_IDLE_BACKOFF_MS]);
+    expect(settings.goalIdleBackoffMaxMs).toBe(DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS);
+    expect(settings.goalMaxAutoContinuations).toBeUndefined();
+  });
+
+  test("parses a comma-separated schedule and an explicit ceiling", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_GOAL_IDLE_BACKOFF_MS: " 0, 5000 ,60000",
+        OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS: "60000",
+      },
+      () => getSettings(),
+    );
+    expect(settings.goalIdleBackoffMs).toEqual([0, 5_000, 60_000]);
+    expect(settings.goalIdleBackoffMaxMs).toBe(60_000);
+  });
+
+  test("rejects malformed schedules and entries above the ceiling at boot", () => {
+    expect(() =>
+      withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MS: "3000,abc" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MS: "3000,-1" }, () => getSettings()),
+    ).toThrow();
+    expect(() => withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MS: "1.5" }, () => getSettings())).toThrow();
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOAL_IDLE_BACKOFF_MS: "3000,900000",
+          OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS: "600000",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed/);
+    expect(() =>
+      withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS: "0" }, () => getSettings()),
+    ).toThrow();
   });
 });
 
