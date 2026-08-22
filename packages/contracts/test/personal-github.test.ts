@@ -134,6 +134,12 @@ describe("personal GitHub repository contracts", () => {
     expect(
       McpPersonalConnectionDelegation.safeParse({
         ...delegation,
+        providerDomain: "GitHub.com",
+      }).success,
+    ).toBe(false);
+    expect(
+      McpPersonalConnectionDelegation.safeParse({
+        ...delegation,
         personalGitHubRepositorySelection: undefined,
       }).success,
     ).toBe(false);

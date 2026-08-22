@@ -3832,7 +3832,7 @@ export const McpPersonalConnectionDelegation = z
     if (!personalGitHub) return;
     if (
       delegation.serverId !== "github:personal" ||
-      delegation.providerDomain.toLowerCase() !== "github.com" ||
+      delegation.providerDomain !== "github.com" ||
       delegation.kind !== "oauth2" ||
       !delegation.originWorkspaceId ||
       !delegation.userDelegation
