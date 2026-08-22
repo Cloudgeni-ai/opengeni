@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import { acquireBlankTestDatabase, testSettings } from "@opengeni/testing";
 import postgres from "postgres";
 import type { ConnectionMetadata, McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import {
@@ -12,7 +12,14 @@ import {
 import type { ResolveConnectionCredentialInput } from "@opengeni/db";
 import {
   createDb,
+  createScheduledTask,
+  createScheduledTaskRun,
   createSession,
+  ensureManagedAccessForUser,
+  getPersonalGitHubRepositorySelectionState,
+  getSessionTurnPersonalConnectionDelegations,
+  persistProviderOAuthConnection,
+  replacePersonalGitHubRepositorySelections,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
 } from "@opengeni/db";
@@ -26,6 +33,7 @@ import {
   personalConnectionDelegationsFromVisibleConnections,
   withFrozenPersonalConnectionDelegations,
 } from "../src/domain/personal-connection-delegations";
+import { validatedScheduledTaskUpdate } from "../src/domain/scheduled-tasks";
 
 const personalServer = {
   id: "linear",
@@ -37,6 +45,21 @@ const personalServer = {
     subjectScope: "subject" as const,
   },
 };
+
+async function rejectedErrorChain(promise: Promise<unknown>): Promise<string> {
+  try {
+    await promise;
+  } catch (error) {
+    const messages: string[] = [];
+    let current: unknown = error;
+    while (current instanceof Error) {
+      messages.push(current.message);
+      current = current.cause;
+    }
+    return messages.join("\ncaused by: ");
+  }
+  throw new Error("expected operation to reject");
+}
 
 function googleDriveConnection(overrides: Partial<ConnectionMetadata> = {}): ConnectionMetadata {
   const now = "2026-08-14T00:00:00.000Z";
@@ -346,6 +369,429 @@ describe("personal MCP connection delegation", () => {
     }
   }, 120_000);
 
+  test("freezes exact personal GitHub repository authority for a portable accepted turn", async () => {
+    const blank = await acquireBlankTestDatabase("core-personal-github-repository-authority");
+    if (!blank) return;
+    await migrate(blank.databaseUrl);
+    const sql = postgres(blank.databaseUrl, { max: 2, onnotice: () => undefined });
+    const client = createDb(blank.databaseUrl, { max: 2 });
+    try {
+      const userId = `personal-github-${crypto.randomUUID()}`;
+      const subjectId = `user:${userId}`;
+      const access = await ensureManagedAccessForUser(client.db, {
+        userId,
+        email: `${userId}@example.test`,
+        name: "Personal GitHub owner",
+      });
+      const originGrant = access.workspaceGrants.find(
+        (grant) => grant.workspaceId === access.defaultWorkspaceId,
+      );
+      if (!originGrant) throw new Error("managed personal workspace grant was not projected");
+      const [target] = await sql<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${originGrant.accountId}, 'Personal GitHub target') returning id
+      `;
+      await sql`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${target!.id}, ${originGrant.accountId})
+      `;
+      await sql`
+        insert into workspace_memberships (account_id, workspace_id, subject_id)
+        values (${originGrant.accountId}, ${target!.id}, ${subjectId})
+      `;
+
+      const credentialBindingId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const connection = await persistProviderOAuthConnection(client.db, {
+        accountId: originGrant.accountId,
+        workspaceId: originGrant.workspaceId,
+        subjectId,
+        visibleToSubjectId: subjectId,
+        providerDomain: "github.com",
+        kind: "oauth2",
+        status: "active",
+        credentialEncrypted: "test-ciphertext-never-resolved",
+        grantedScopes: ["repo"],
+        expiresAt: null,
+        metadata: {
+          credentialRole: "opengeni_github_personal",
+          providerFamily: "github",
+          providerPrincipalId: "9876543210987654321",
+          githubUserId: "9876543210987654321",
+          githubLogin: "octocat",
+          oauthEnvironment: "test",
+          oauthClientMarker: "a".repeat(32),
+          credentialBindingId,
+          connectedAt: now,
+          lastVerifiedAt: now,
+        },
+        createdBySubjectId: subjectId,
+        updatedBySubjectId: subjectId,
+        credentialRole: "opengeni_github_personal",
+        providerFamily: "github",
+        providerPrincipalId: "9876543210987654321",
+        requireLiveUserAuthority: true,
+        requiredLiveUserPermission: "connections:write",
+        exclusiveProviderPrincipalPerOwner: true,
+      });
+      if (!connection?.authorityId) throw new Error("personal GitHub connection was not created");
+      const initialSelection = await getPersonalGitHubRepositorySelectionState(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+      });
+      if (!initialSelection) throw new Error("personal GitHub selection head was not created");
+      const repository = {
+        repositoryId: "9007199254740993123",
+        fullName: "octocat/private-repository",
+        canonicalUrl: "https://github.com/octocat/private-repository",
+        defaultBranch: "main",
+        visibility: "private" as const,
+        private: true,
+        archived: false,
+        disabled: false,
+        permissions: {
+          pull: true,
+          push: true,
+          admin: false,
+          maintain: false,
+          triage: false,
+        },
+        selectedAccess: "write" as const,
+        lastVerifiedAt: now,
+      };
+      const selected = await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: 0,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [repository],
+      });
+      const targetGrant = await sql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${originGrant.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${target!.id}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        const [row] = await tx<Array<{ id: string; generation: number }>>`
+          select grant_id as id, grant_generation::int as generation
+          from issue_self_connection_use_grant(
+            ${originGrant.accountId}::uuid, ${connection.authorityId}::uuid,
+            ${target!.id}::uuid, 'always', 'workspace_shared', null::uuid, true
+          )
+        `;
+        return row!;
+      });
+      const resource = {
+        kind: "repository" as const,
+        uri: repository.canonicalUrl,
+        ref: repository.defaultBranch,
+        provider: "github" as const,
+        connectionType: "github_personal" as const,
+        credentialBindingId,
+        repositoryId: repository.repositoryId,
+        access: "write" as const,
+      };
+      const authoritySelection = {
+        serverId: "github:personal",
+        connectionId: connection.id,
+        userDelegation: {
+          organizationId: originGrant.accountId,
+          authorityId: connection.authorityId,
+          authorityGeneration: initialSelection.connectionAuthorityGeneration,
+          workspaceId: target!.id,
+          sessionId: null,
+          action: "connection.use" as const,
+          mode: "always" as const,
+          context: "workspace_shared" as const,
+          authorityEpoch: null,
+          grantId: targetGrant.id,
+          grantGeneration: targetGrant.generation,
+        },
+      };
+      const freeze = () =>
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+          tools: [],
+          resources: [resource],
+          source: { kind: "subject" as const, subjectId, accountId: originGrant.accountId },
+          authoritySelections: [authoritySelection],
+        });
+      const frozen = await freeze();
+      expect(frozen).toEqual([
+        {
+          serverId: "github:personal",
+          connectionId: connection.id,
+          originWorkspaceId: originGrant.workspaceId,
+          ownerSubjectId: subjectId,
+          providerDomain: "github.com",
+          kind: "oauth2",
+          connectionType: "github_personal",
+          userDelegation: authoritySelection.userDelegation,
+          personalGitHubRepositorySelection: {
+            credentialBindingId,
+            connectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+            selectionGeneration: selected.selectionGeneration,
+            repositories: [
+              {
+                repositoryId: repository.repositoryId,
+                fullName: repository.fullName,
+                canonicalUrl: repository.canonicalUrl,
+                ref: repository.defaultBranch,
+                access: "write",
+                selectionGeneration: selected.selectionGeneration,
+              },
+            ],
+          },
+        },
+      ]);
+
+      const session = await createSession(client.db, {
+        accountId: originGrant.accountId,
+        workspaceId: target!.id,
+        initialMessage: "personal GitHub authority persistence",
+        resources: [resource],
+        tools: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId },
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        subjectId,
+      });
+      const accepted = await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        target!.id,
+        subjectId,
+        (db) =>
+          submitHumanPromptInTransaction(db, {
+            accountId: originGrant.accountId,
+            workspaceId: target!.id,
+            sessionId: session.id,
+            subjectId,
+            actor: { type: "human", subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "use the selected repository",
+            resources: [],
+            model: "test-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+            personalConnectionDelegations: frozen,
+          }),
+      );
+      expect(
+        await getSessionTurnPersonalConnectionDelegations(
+          client.db,
+          target!.id,
+          session.id,
+          accepted.turnId,
+        ),
+      ).toEqual(frozen);
+
+      const task = await createScheduledTask(client.db, {
+        id: crypto.randomUUID(),
+        accountId: originGrant.accountId,
+        workspaceId: target!.id,
+        name: "personal GitHub authority persistence",
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: `personal-github-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "use the selected repository",
+          resources: [resource],
+          tools: [],
+          metadata: {},
+        },
+        createdBy: { kind: "subject", subjectId },
+        personalConnectionDelegations: frozen,
+        metadata: {},
+      });
+      const [persistedTask] = await sql<Array<{ delegations: unknown }>>`
+        select personal_connection_delegations as delegations
+        from scheduled_tasks where id = ${task.id}
+      `;
+      expect(persistedTask?.delegations).toEqual(frozen);
+
+      const [revisionAuthority] = await sql<
+        Array<{
+          organizationMembershipId: string;
+          membershipAuthorizationRevision: number;
+        }>
+      >`
+        select organization_membership_id as "organizationMembershipId",
+          membership_authorization_revision::int as "membershipAuthorizationRevision"
+        from scheduled_task_revision_authorities
+        where task_id = ${task.id} and task_authority_revision = ${task.authorityRevision}
+      `;
+      if (!revisionAuthority) throw new Error("scheduled task revision authority was not frozen");
+      const [depthPolicy] = await sql<
+        Array<{ maxNestedAgentDepth: number; policySource: "deployment" | "default" }>
+      >`
+        select max_nested_agent_depth::int as "maxNestedAgentDepth",
+          policy_source as "policySource"
+        from nested_agent_depth_configuration where singleton
+      `;
+      if (!depthPolicy) throw new Error("nested-agent depth policy is unavailable");
+      expect(
+        await rejectedErrorChain(
+          createScheduledTaskRun(client.db, {
+            workspaceId: task.workspaceId,
+            taskId: task.id,
+            taskAuthorityRevision: task.authorityRevision,
+            taskExecutionDigest: task.executionDigest,
+            triggerType: "manual",
+            producerKey: `personal-github-phase-fence-${crypto.randomUUID()}`,
+            acceptedExecutionSnapshot: {
+              version: 1,
+              task,
+              resolvedModel: "test-model",
+              resolvedReasoningEffort: "medium",
+              resolvedLatencyMode: "standard",
+              resolvedSandboxBackend: "none",
+              resolvedSandboxOs: "linux",
+              resolvedTools: [],
+              resolvedFirstPartyMcpTools: [],
+              resolvedFirstPartyMcpPermissions: [],
+              resolvedVariableSet: null,
+              resolvedRig: null,
+              resolvedSlackBotConnection: null,
+              targetSessionExecution: null,
+              generatedSessionBinding: {
+                createIdempotencyKey: `personal-github-phase-fence:${task.id}`,
+                effectiveMaxNestedAgentDepth: depthPolicy.maxNestedAgentDepth,
+                nestedAgentDepthPolicySource: depthPolicy.policySource,
+                codexCompactionMode: "portable",
+              },
+              personalConnectionDelegations: frozen,
+              personalResourceAuthoritySubjectId: null,
+              causalHumanSubjectId: subjectId,
+              causalHumanAuthority: {
+                subjectId,
+                organizationMembershipId: revisionAuthority.organizationMembershipId,
+                membershipAuthorizationRevision: revisionAuthority.membershipAuthorizationRevision,
+              },
+              xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+              xaiAuthoritySubjectId: null,
+              connectionAuthoritySubjectId: subjectId,
+              triggerInitiator: { kind: "service", subjectId: "scheduler" },
+              agentRunUsageIdempotencyKey: null,
+              incidentPreflightRequired: false,
+              alertOccurrenceLabels: null,
+            },
+          }),
+        ),
+      ).toContain("scheduled_run_connection_authority_shape_chk");
+      const [scheduledOccurrence] = await sql<Array<{ count: number }>>`
+        select count(*)::int as count from scheduled_task_runs where task_id = ${task.id}
+      `;
+      expect(scheduledOccurrence?.count).toBe(0);
+
+      await expect(
+        validatedScheduledTaskUpdate({
+          settings: testSettings({ githubPersonalOauthEnabled: true }),
+          db: client.db,
+          objectStorage: null,
+          grant: {
+            ...originGrant,
+            workspaceId: target!.id,
+            principalKind: "human_session",
+          },
+          existing: task,
+          payload: {
+            agentConfig: {
+              ...task.agentConfig,
+              resources: [{ ...resource, access: "read" }],
+            },
+          },
+          toolsProvided: true,
+        }),
+      ).rejects.toThrow(
+        "material changes to a personal GitHub-authorized task require explicit connectionAuthorities",
+      );
+      await expect(
+        validatedScheduledTaskUpdate({
+          settings: testSettings({ githubPersonalOauthEnabled: true }),
+          db: client.db,
+          objectStorage: null,
+          grant: {
+            ...originGrant,
+            workspaceId: target!.id,
+            principalKind: "human_session",
+          },
+          existing: task,
+          payload: {
+            agentConfig: {
+              ...task.agentConfig,
+              prompt: "materially changed instructions for the same repository",
+            },
+          },
+          toolsProvided: true,
+        }),
+      ).rejects.toThrow(
+        "material changes to a personal GitHub-authorized task require explicit connectionAuthorities",
+      );
+      await expect(
+        validatedScheduledTaskUpdate({
+          settings: testSettings({ githubPersonalOauthEnabled: true }),
+          db: client.db,
+          objectStorage: null,
+          grant: {
+            ...originGrant,
+            workspaceId: target!.id,
+            principalKind: "human_session",
+          },
+          existing: task,
+          payload: { connectionAuthorities: [] },
+        }),
+      ).rejects.toThrow(
+        "personal GitHub repository resources cannot be retained without connectionAuthorities",
+      );
+
+      await replacePersonalGitHubRepositorySelections(client.db, {
+        accountId: originGrant.accountId,
+        originWorkspaceId: originGrant.workspaceId,
+        subjectId,
+        connectionId: connection.id,
+        expectedConnectionAuthorityGeneration: initialSelection.connectionAuthorityGeneration,
+        expectedSelectionGeneration: selected.selectionGeneration,
+        idempotencyKey: crypto.randomUUID(),
+        repositories: [],
+      });
+      await expect(freeze()).rejects.toThrow(
+        "personal GitHub repository resource is outside the selected authority",
+      );
+
+      await sql`
+        delete from workspace_memberships
+        where workspace_id = ${target!.id} and subject_id = ${subjectId}
+      `;
+      await expect(
+        freezePersonalConnectionDelegations({
+          db: client.db,
+          workspaceId: target!.id,
+          settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+          tools: [],
+          resources: [resource],
+          source: { kind: "subject", subjectId, accountId: originGrant.accountId },
+          authoritySelections: [],
+        }),
+      ).rejects.toThrow("personal GitHub repository authority requires live causal user authority");
+    } finally {
+      await client.close();
+      await sql.end({ timeout: 1 });
+      await blank.release();
+    }
+  }, 120_000);
+
   test("uses human/API subjects but copies authority for agent attempts", () => {
     const humanAccountId = crypto.randomUUID();
     expect(
@@ -380,6 +826,90 @@ describe("personal MCP connection delegation", () => {
         metadata: { sessionId: "parent-session" },
       }),
     ).toEqual({ kind: "none" });
+  });
+
+  test("fails closed instead of dropping agent-created personal GitHub authority", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: null as never,
+        workspaceId: crypto.randomUUID(),
+        settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+        tools: [],
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://github.com/octocat/private-repository",
+            ref: "main",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        source: {
+          kind: "turn",
+          sessionId: crypto.randomUUID(),
+          turnId: crypto.randomUUID(),
+        },
+      }),
+    ).rejects.toThrow(
+      "agent-created personal GitHub repository authority is not activated in this delivery phase",
+    );
+  });
+
+  test("fails closed instead of dropping personal GitHub authority without a causal human", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: null as never,
+        workspaceId: crypto.randomUUID(),
+        settings: { mcpServers: [], githubPersonalOauthEnabled: true },
+        tools: [],
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://github.com/octocat/private-repository",
+            ref: "main",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        source: { kind: "none" },
+      }),
+    ).rejects.toThrow(
+      "personal GitHub repository authority requires an authenticated causal human",
+    );
+  });
+
+  test("keeps personal GitHub repository admission default-off", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: null as never,
+        workspaceId: crypto.randomUUID(),
+        settings: { mcpServers: [] },
+        tools: [],
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://github.com/octocat/private-repository",
+            ref: "main",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            repositoryId: "9007199254740993123",
+            access: "read",
+          },
+        ],
+        source: {
+          kind: "subject",
+          subjectId: "user:owner",
+          accountId: crypto.randomUUID(),
+        },
+      }),
+    ).rejects.toThrow("personal GitHub repository authority is not enabled");
   });
 
   test("freezes only an active exact subject connection", () => {
