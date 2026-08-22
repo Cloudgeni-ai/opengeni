@@ -966,7 +966,7 @@ describe("clean session control plane", () => {
         type: "turn.started",
         payload: expect.objectContaining({
           claimedUserMessage: expect.objectContaining({
-            eventId: accepted.event.id,
+            eventId: accepted.acceptedEventId,
             payload: expect.objectContaining({ text: "delegate this newly queued issue" }),
           }),
         }),
