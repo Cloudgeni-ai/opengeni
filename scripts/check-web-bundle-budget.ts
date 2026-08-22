@@ -82,10 +82,7 @@ const budgets = {
   initialFileGzip: 77 * kib,
   initialFiles: 17,
   directSessionRaw: 2035 * kib,
-  // Stripe-hosted invoice access adds its typed SDK request to the shared
-  // client. The exact macOS/arm64 production graph measures 579,626 gzip bytes;
-  // advance only this envelope to the next whole KiB.
-  directSessionGzip: 567 * kib,
+  directSessionGzip: 566 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
