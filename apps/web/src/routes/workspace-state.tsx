@@ -1543,7 +1543,7 @@ export function WorkspaceStateRoute({
               : view === "preferences"
                 ? "Save reusable instructions agents can apply when relevant."
                 : view === "learning"
-                  ? "Choose how governed, source-backed changes are reviewed and applied."
+                  ? "Choose whether agents may turn what they learn into durable rules and preferences, and whether a human reviews first."
                   : "Knowledge, rules, guides, review, and learning - with scope and delivery kept explicit."
         }
         actions={
