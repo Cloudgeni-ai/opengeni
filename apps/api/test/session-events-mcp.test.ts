@@ -1,10 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   appendSessionEvents,
   bootstrapWorkspace,
   createDb,
   createSession,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
+  type AccessGrant,
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -13,11 +17,18 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { Hono } from "hono";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { registerSessionRoutes } from "../src/routes/sessions";
+
+const REST_DELEGATION_SECRET = "session-events-mcp-rest-secret";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
 let mcp: unknown;
+let restApp: Hono;
+let restAuthorization: string;
+let grant: AccessGrant;
 let workspaceId: string;
 let sessionId: string;
 
@@ -52,7 +63,7 @@ beforeAll(async () => {
     workspaceName: "Session event MCP workspace",
     subjectId: `session-events-mcp-subject-${suffix}`,
   });
-  const grant = access.workspaceGrants[0]!;
+  grant = access.workspaceGrants[0]!;
   workspaceId = grant.workspaceId;
   const session = await createSession(client.db, {
     accountId: grant.accountId,
@@ -68,21 +79,22 @@ beforeAll(async () => {
   sessionId = session.id;
 
   const noop = async () => undefined;
+  const workflowClient = {
+    signalUserMessage: noop,
+    wakeSessionWorkflow: noop,
+    requestSessionWorkflowWakeDispatch: noop,
+    signalApprovalDecision: noop,
+    signalSessionControl: noop,
+    syncScheduledTask: noop,
+    deleteScheduledTaskSchedule: noop,
+    triggerScheduledTask: noop,
+  } as unknown as SessionWorkflowClient;
   mcp = buildOpenGeniMcpServer(
     {
       settings: testSettings({ databaseUrl: shared.appUrl }),
       db: client.db,
       bus: new MemoryEventBus(),
-      workflowClient: {
-        signalUserMessage: noop,
-        wakeSessionWorkflow: noop,
-        requestSessionWorkflowWakeDispatch: noop,
-        signalApprovalDecision: noop,
-        signalSessionControl: noop,
-        syncScheduledTask: noop,
-        deleteScheduledTaskSchedule: noop,
-        triggerScheduledTask: noop,
-      } as unknown as SessionWorkflowClient,
+      workflowClient,
       objectStorage: null,
       githubStateSecret: "test",
       documentIndexer: { indexDocument: noop },
@@ -90,6 +102,31 @@ beforeAll(async () => {
     } as unknown as ApiRouteDeps,
     grant,
   );
+  // The REST events API the browser composer uses to reconcile a Send; it must
+  // keep every stored row while the MCP monitoring read applies its boundary.
+  restApp = new Hono();
+  registerSessionRoutes(restApp, {
+    settings: testSettings({
+      databaseUrl: shared.appUrl,
+      productAccessMode: "managed",
+      delegationSecret: REST_DELEGATION_SECRET,
+    }),
+    db: client.db,
+    bus: new MemoryEventBus(),
+    workflowClient,
+    objectStorage: null,
+    githubStateSecret: "test",
+    documentIndexer: { indexDocument: noop },
+    getDocumentServices: () => ({}) as never,
+  } as unknown as ApiRouteDeps);
+  restAuthorization = `Bearer ${await signDelegatedAccessToken(REST_DELEGATION_SECRET, {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+    permissions: ["sessions:read"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3_600,
+  })}`;
 
   await appendSessionEvents(client.db, workspaceId, sessionId, [
     ...Array.from({ length: 40 }, () => ({
@@ -234,6 +271,105 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
         payloadMode: "summary",
       }),
     ).rejects.toThrow("Session not found");
+  });
+
+  test("monitoring omits a queued human prompt that forensic reads and REST keep exact", async () => {
+    const queued = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "queued prompt fixture",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const queuedText = "private prompt waiting behind the queue";
+    const accepted = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      workspaceId,
+      grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: queued.id,
+            subjectId: grant.subjectId,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: queuedText,
+            resources: [],
+            reasoningEffortFallback: "low",
+            source: "user",
+          }),
+        ),
+    );
+
+    const monitoring = await callMcpTool<{ events: Array<{ id: string; type: string }> }>(
+      "session_events",
+      { sessionId: queued.id, direction: "before", limit: 50 },
+    );
+    expect(JSON.stringify(monitoring)).not.toContain(queuedText);
+    expect(monitoring.events.map((event) => event.type)).toContain("turn.queued");
+    expect(monitoring.events.some((event) => event.id === accepted.acceptedEventId)).toBeFalse();
+
+    const forensic = await callMcpTool<{
+      events: Array<{ id: string; type: string; payload: { text?: string } }>;
+    }>("session_events", {
+      sessionId: queued.id,
+      direction: "before",
+      limit: 50,
+      mode: "forensic",
+      payloadMode: "full",
+    });
+    expect(forensic.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: accepted.acceptedEventId,
+          type: "user.message",
+          payload: expect.objectContaining({ text: queuedText }),
+        }),
+      ]),
+    );
+
+    // REST monitoring mode (the composer's `includeTypes=user.message` Send
+    // reconciliation shape) keeps the exact stored row: the boundary is applied
+    // only by the MCP monitoring read.
+    const rest = await restApp.request(
+      `http://x/v1/workspaces/${workspaceId}/sessions/${queued.id}/events?mode=monitoring&includeTypes=user.message&payloadMode=full&limit=50`,
+      { headers: { authorization: restAuthorization } },
+    );
+    expect(rest.status).toBe(200);
+    expect(rest.headers.get("X-OpenGeni-Event-Mode")).toBe("monitoring");
+    const restBody = (await rest.json()) as Array<{
+      id: string;
+      type: string;
+      payload: { text?: string };
+    }>;
+    expect(restBody).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: accepted.acceptedEventId,
+          type: "user.message",
+          payload: expect.objectContaining({ text: queuedText }),
+        }),
+      ]),
+    );
+
+    const listed = await callMcpTool<{
+      sessions: Array<{
+        id: string;
+        queuedPromptCount: number;
+        latestMessage: { type: string; preview: string | null } | null;
+      }>;
+    }>("sessions_list", { includeLastMessage: true, limit: 100 });
+    expect(listed.sessions.find((session) => session.id === queued.id)).toMatchObject({
+      queuedPromptCount: 1,
+      latestMessage: null,
+    });
   });
 
   test("rejects filters that could displace or exclude an exclusive latest lookup", async () => {

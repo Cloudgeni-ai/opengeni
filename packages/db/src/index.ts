@@ -29642,6 +29642,54 @@ async function readWorkspaceSessionActivityRevision(
 }
 
 /**
+ * Excludes a human/API `user.message` whose accepted turn was never claimed.
+ * Such a prompt was never model input: it is waiting work (represented by
+ * `queuedPromptCount`) or a queue row that reached a terminal state before any
+ * claim (deleted, edited, cancelled), so agent discovery and monitoring must
+ * not present it as conversation. The predicate is `session_turns.started_at
+ * IS NULL`: every claim path (`claimSessionWorkForAttempt` and the
+ * create-and-claim inserts for internal turns) stamps `started_at` in the same
+ * transaction that moves the turn to `running`, and nothing clears it, so it
+ * is exactly "a claim happened" and cannot drift with the status vocabulary.
+ * Once claimed the exact stored row is visible at its original sequence.
+ * Stored events are never rewritten; forensic, SSE, and REST reads never apply
+ * this filter.
+ *
+ * Two consequences are deliberate. An admission-rejected human/API turn
+ * (never claimed, settled `failed`) keeps its prompt hidden from agent
+ * monitoring while its `turn.failed` event stays visible. And a narrow
+ * historical window exists: turns requeued by the removed
+ * `requeuePreemptedTurn` path (Jun 12 - Jul 14 2026) had `started_at` cleared,
+ * so one of those rows that was cancelled before any re-claim is treated as
+ * never claimed and its prompt stays hidden from agent monitoring; forensic
+ * reads still return it. No current writer clears `started_at`.
+ *
+ * The probe is served by the partial index
+ * `session_turns_unclaimed_prompt_trigger_idx` (workspace_id, session_id,
+ * trigger_event_id) WHERE started_at IS NULL (migration 0322); without it the
+ * NOT EXISTS degrades to a hashed SubPlan over every session_turns row of the
+ * workspace per statement. The literal `workspaceId` bound is deliberate next
+ * to the correlated column: when the planner hashes the subplan it keeps the
+ * literal as the index condition, so the build reads only this workspace's
+ * unclaimed rows rather than the whole partial index.
+ */
+function excludeUnclaimedHumanPromptEventFilter(workspaceId: string): SQL {
+  return sql`(
+    ${schema.sessionEvents.type} <> 'user.message'
+    or not exists (
+      select 1
+      from ${schema.sessionTurns} unclaimed_prompt_turn
+      where unclaimed_prompt_turn.workspace_id = ${workspaceId}
+        and unclaimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
+        and unclaimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
+        and unclaimed_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
+        and unclaimed_prompt_turn.source in ('user', 'api')
+        and unclaimed_prompt_turn.started_at is null
+    )
+  )`;
+}
+
+/**
  * Compact-by-construction discovery projection for the first-party
  * `sessions_list` MCP tool. It never selects instructions, resources, tools,
  * MCP metadata, repositories, settings, or full event/history bodies.
@@ -29914,6 +29962,7 @@ export async function listSessionDiscoverySummaries(
                 eq(schema.sessionEvents.workspaceId, workspaceId),
                 inArray(schema.sessionEvents.sessionId, ids),
                 inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
+                excludeUnclaimedHumanPromptEventFilter(workspaceId),
               ),
             )
             .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))
@@ -30350,6 +30399,15 @@ export type ListSessionEventsOptions = {
   includeClasses?: readonly SessionEventSemanticClass[];
   excludeClasses?: readonly SessionEventSemanticClass[];
   defaultExcludeTypes?: readonly SessionEventType[];
+  /**
+   * Agent-monitoring conversation boundary: omit a human/API `user.message`
+   * whose accepted turn was never claimed (`session_turns.started_at IS NULL`),
+   * whether it is still queued or reached a terminal state before any claim.
+   * The row appears at its own sequence once the turn is claimed. Forensic,
+   * SSE, and REST readers leave this unset so the retained event log stays
+   * exact.
+   */
+  excludeUnclaimedHumanPrompts?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
@@ -30451,6 +30509,9 @@ export async function listSessionEventPage(
         eq(schema.sessionEvents.sessionId, sessionId),
         gt(schema.sessionEvents.sequence, after),
       ];
+      if (options.excludeUnclaimedHumanPrompts) {
+        filters.push(excludeUnclaimedHumanPromptEventFilter(workspaceId));
+      }
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
         // null. They remain eligible; explicitly stale/duplicate rows and rows

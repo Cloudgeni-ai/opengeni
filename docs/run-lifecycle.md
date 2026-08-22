@@ -269,6 +269,26 @@ forensics and density profiling therefore run only in a bounded non-serving
 execution class and never in API or turn-worker serving pods. See
 [`deployment.md`](deployment.md) for the reproducible density harness.
 
+Compact agent discovery keeps that queue boundary intact. `queuedPromptCount`
+reports waiting human/API work, while `sessions_list` `includeLastMessage` and
+the MCP `session_events` monitoring read omit a human/API `user.message` whose
+accepted turn was never claimed, so an orchestrator cannot mistake a waiting or
+pre-claim-terminal prompt (deleted, edited, cancelled) for processed
+conversation. The predicate is `session_turns.started_at IS NULL`: every claim
+path stamps `started_at` in the transaction that moves the turn to `running`
+and nothing clears it, so it cannot drift with the status vocabulary. Once the
+turn is claimed the exact stored row appears at its original sequence. Two
+consequences follow: an admission-rejected human/API turn (never claimed,
+settled `failed`) keeps its prompt hidden from agent monitoring while its
+`turn.failed` stays visible, and a turn that the removed worker-death
+preemption requeue (`requeuePreemptedTurn`, Jun 12 - Jul 14 2026) reset to
+`started_at IS NULL` and that was cancelled before any re-claim stays hidden
+there too. The probe is served by the partial index
+`session_turns_unclaimed_prompt_trigger_idx` (migration 0322). The
+filter is agent-monitoring only: REST event pages (which the browser composer
+uses to reconcile an outcome-unknown Send by `clientEventId`), SSE, and forensic
+reads stay byte-identical, and stored events are never rewritten.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
