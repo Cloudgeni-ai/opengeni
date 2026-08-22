@@ -240,3 +240,30 @@ export function hasAccountPermission(
     (grant.permissions.includes(permission) || grant.permissions.includes("account:admin")),
   );
 }
+
+export function canManageOrganizationCompanyProfile(
+  context: AccessContext | null,
+  workspaceId: string,
+): boolean {
+  if (!context || context.mode !== "managed") return false;
+  const workspaceGrant = context.workspaceGrants.find(
+    (candidate) => candidate.workspaceId === workspaceId,
+  );
+  if (
+    !workspaceGrant ||
+    workspaceGrant.subjectId !== context.subjectId ||
+    workspaceGrant.principalKind !== "human_session" ||
+    workspaceGrant.metadata?.delegated === true ||
+    workspaceGrant.serviceInitiator !== undefined ||
+    workspaceGrant.serviceInitiatorContext !== undefined
+  ) {
+    return false;
+  }
+  const matchingAccountGrants = context.accountGrants.filter(
+    (candidate) =>
+      candidate.accountId === workspaceGrant.accountId && candidate.subjectId === context.subjectId,
+  );
+  if (matchingAccountGrants.length !== 1) return false;
+  const accountGrant = matchingAccountGrants[0]!;
+  return accountGrant.role === "owner" || accountGrant.role === "admin";
+}

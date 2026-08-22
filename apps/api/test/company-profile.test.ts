@@ -54,7 +54,7 @@ async function bearer(permissions: Permission[]): Promise<string> {
 }
 
 describe("company-profile API authority", () => {
-  test("requires direct account admin for writes while exposing current history to readers", async () => {
+  test("rejects delegated writes while exposing current history to readers", async () => {
     if (!app) return;
     const body = {
       operationId: crypto.randomUUID(),
@@ -83,7 +83,7 @@ describe("company-profile API authority", () => {
     );
     expect(workspaceAdmin.status).toBe(403);
 
-    const accountAdmin = await app.request(
+    const delegatedAccountAdmin = await app.request(
       `http://x/v1/workspaces/${grant.workspaceId}/company-profile`,
       {
         method: "PUT",
@@ -94,22 +94,16 @@ describe("company-profile API authority", () => {
         body: JSON.stringify(body),
       },
     );
-    expect(accountAdmin.status).toBe(200);
-    const created = (await accountAdmin.json()) as Record<string, any>;
-    expect(created).toMatchObject({
-      revision: { profile: { identity: "CloudGeni builds OpenGeni." } },
-      head: { revisionId: created.revision.id, activationVersion: 1 },
-      event: { type: "activate" },
-    });
+    expect(delegatedAccountAdmin.status).toBe(403);
 
     const read = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/company-profile`, {
       headers: { authorization: await bearer(["workspace:read"]) },
     });
     expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({
-      current: { revisionId: created.revision.id },
-      activeRevision: { id: created.revision.id },
-      revisions: [expect.objectContaining({ id: created.revision.id })],
+      current: null,
+      activeRevision: null,
+      revisions: [],
     });
   });
 });

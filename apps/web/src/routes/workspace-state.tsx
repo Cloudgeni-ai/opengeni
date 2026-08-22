@@ -38,7 +38,7 @@ import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
-import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { canManageOrganizationCompanyProfile, hasWorkspacePermission } from "@/lib/permissions";
 
 import { BrainOverview, type BrainProposalReview } from "./agent-brain-overview";
 import { AgentBrainPrompt } from "./agent-brain-prompt";
@@ -441,13 +441,7 @@ export function CompanyProfileInventory({
 }) {
   const context = useAppContext();
   const { client } = context;
-  const workspaceGrant = context.accessContext.workspaceGrants.find(
-    (grant) => grant.workspaceId === workspaceId,
-  );
-  const canManage = Boolean(
-    workspaceGrant?.accountId &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
+  const canManage = canManageOrganizationCompanyProfile(context.accessContext, workspaceId);
   const currentRevision = inventory.response?.activeRevision ?? null;
   const [identity, setIdentity] = useState("");
   const [mission, setMission] = useState("");
@@ -640,8 +634,8 @@ export function CompanyProfileInventory({
             </form>
           ) : (
             <p className="text-xs text-fg-muted">
-              Only organization owners and admins can edit or activate the company profile. You can
-              still ask OpenGeni to draft a proposal above.
+              Editing, activation, and rollback require a direct organization owner or admin
+              session.
             </p>
           )}
 
