@@ -29678,6 +29678,26 @@ export async function listSessionDiscoverySummaries(
                 eq(schema.sessionEvents.workspaceId, workspaceId),
                 inArray(schema.sessionEvents.sessionId, ids),
                 inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
+                // A human/API prompt is accepted into the durable event log
+                // before its logical turn is claimed. Do not leak that queued
+                // content through the orchestration monitoring projection: an
+                // already-running manager could otherwise read and act on the
+                // prompt while the canonical queue still truthfully retained
+                // it for a later turn. Queue count remains visible; message
+                // content enters discovery once the matching turn leaves
+                // `queued` and owns model-facing history.
+                sql`(
+                  ${schema.sessionEvents.type} <> 'user.message'
+                  or not exists (
+                    select 1
+                    from ${schema.sessionTurns} queued_prompt_turn
+                    where queued_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
+                      and queued_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
+                      and queued_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
+                      and queued_prompt_turn.status = 'queued'
+                      and queued_prompt_turn.source in ('user', 'api')
+                  )
+                )`,
               ),
             )
             .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))

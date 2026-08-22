@@ -798,6 +798,54 @@ describe("clean session control plane", () => {
     expect(exactOnlyPaths.get(third.id)).toBeUndefined();
   });
 
+  test("session discovery withholds queued prompt text until canonical claim", async () => {
+    const { grant, session } = await fixture();
+    await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      { type: "agent.message.completed", payload: { text: "previous claimed response" } },
+    ]);
+    const accepted = await send(
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        subjectId: grant.subjectId,
+      },
+      session.id,
+      "delegate this newly queued issue",
+    );
+
+    const waiting = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(waiting.sessions.find((entry) => entry.id === session.id)).toMatchObject({
+      queuedPromptCount: 1,
+      latestMessage: {
+        type: "agent.message.completed",
+        preview: "previous claimed response",
+      },
+    });
+
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      session.temporalWorkflowId ?? `session-${session.id}`,
+    );
+    expect(claimed?.id).toBe(accepted.turn.id);
+
+    const running = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(running.sessions.find((entry) => entry.id === session.id)).toMatchObject({
+      queuedPromptCount: 0,
+      latestMessage: {
+        type: "user.message",
+        preview: "delegate this newly queued issue",
+      },
+    });
+  });
+
   test("session discovery preserves exact keysets and hands concurrent changes to the next scan", async () => {
     const { grant, session: first } = await fixture();
     const sessions = [first];

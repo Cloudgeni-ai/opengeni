@@ -30,6 +30,7 @@ import {
   sessionStateLabel,
   visualTreeDepth,
 } from "./lib/session-rail";
+import { sessionBranchSummaryKey, upsertSessionBranchChild } from "./lib/session-branch-cache";
 import {
   buildPinnedRailSections,
   buildRailForest,
@@ -340,6 +341,63 @@ describe("rail session grouping", () => {
         treeStats: refreshedStats,
       }).treeStats,
     ).toEqual(refreshedStats);
+  });
+
+  test("branch summaries change when the server reports a newly spawned child", () => {
+    const manager = railSession({
+      id: "manager",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 2,
+        runningDescendants: 2,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const next = {
+      ...manager,
+      treeStats: { ...manager.treeStats!, directChildren: 3, totalDescendants: 3 },
+    };
+
+    expect(sessionBranchSummaryKey(next)).not.toBe(sessionBranchSummaryKey(manager));
+  });
+
+  test("an opened child persists in its parent branch and keeps list-only subtree facts", () => {
+    const cached = railSession({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "idle",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const routeProjection = railSession({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "running",
+    });
+    const pages = new Map([
+      ["manager", { sessions: [cached], nextCursor: null, loading: false, failed: false }],
+    ]);
+
+    const next = upsertSessionBranchChild(pages, routeProjection);
+    expect(next.get("manager")?.sessions).toHaveLength(1);
+    expect(next.get("manager")?.sessions[0]).toMatchObject({
+      id: "worker",
+      parentSessionId: "manager",
+      status: "running",
+      treeStats: cached.treeStats,
+    });
   });
 
   test("visibleForestRows expands only where the set says so", () => {

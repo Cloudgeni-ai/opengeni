@@ -131,6 +131,11 @@ import {
 } from "@/lib/sessions-group";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
+import {
+  sessionBranchSummaryKey,
+  upsertSessionBranchChild,
+  type SessionBranchPage,
+} from "@/lib/session-branch-cache";
 import { cn } from "@/lib/utils";
 import type { Channel, Session } from "@/types";
 
@@ -192,12 +197,7 @@ type PendingPinFocus = {
   target: PinFocusTarget;
   settled: boolean;
 };
-type ChildPageState = {
-  sessions: Session[];
-  nextCursor: string | null;
-  loading: boolean;
-  failed: boolean;
-};
+type ChildPageState = SessionBranchPage;
 
 const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
 
@@ -336,8 +336,12 @@ export function SessionList() {
     () => new Map(),
   );
   const childLoadEpoch = useRef(0);
+  const branchSummaryKeys = useRef(new Map<string, string>());
+  const activeBranchHydration = useRef<string | null>(null);
   useEffect(() => {
     childLoadEpoch.current += 1;
+    branchSummaryKeys.current.clear();
+    activeBranchHydration.current = null;
     setChildPages(new Map());
   }, [rail.workspaceId, hierarchyMode]);
   // Short-lived optimistic projections only. The page returned by the server
@@ -938,6 +942,45 @@ export function SessionList() {
     },
     [context.client, rail.workspaceId],
   );
+  // The active route supplies exact child + ancestor detail even before the
+  // lazy branch query catches up. Commit that projection into the branch cache
+  // and reconcile the complete sibling page once, so leaving the child route
+  // cannot make the row disappear again.
+  useEffect(() => {
+    const active = context.session;
+    if (!hierarchyMode || !active?.parentSessionId) {
+      activeBranchHydration.current = null;
+      return;
+    }
+    setChildPages((current) => upsertSessionBranchChild(current, active));
+    const hydrationKey = `${active.parentSessionId}:${active.id}`;
+    if (activeBranchHydration.current === hydrationKey) return;
+    activeBranchHydration.current = hydrationKey;
+    void loadChildPage(active.parentSessionId);
+  }, [context.session, hierarchyMode, loadChildPage]);
+
+  // Root pages are polled server truth and carry bounded descendant summaries.
+  // When a loaded branch's summary changes (notably directChildren after an
+  // orchestrator spawn), refresh that exact branch instead of retaining its old
+  // child list forever. This preserves root-only pagination and lazy hierarchy
+  // while making newly authorized children durable sidebar state.
+  useEffect(() => {
+    const parentsById = new Map(allSessions.map((session) => [session.id, session]));
+    const loadedParentIds = new Set(childPages.keys());
+    for (const parentId of branchSummaryKeys.current.keys()) {
+      if (!loadedParentIds.has(parentId)) branchSummaryKeys.current.delete(parentId);
+    }
+    for (const [parentId, page] of childPages) {
+      const parent = parentsById.get(parentId);
+      if (!parent) continue;
+      const nextKey = sessionBranchSummaryKey(parent);
+      const previousKey = branchSummaryKeys.current.get(parentId);
+      branchSummaryKeys.current.set(parentId, nextKey);
+      if (previousKey !== undefined && previousKey !== nextKey && !page.loading) {
+        void loadChildPage(parentId);
+      }
+    }
+  }, [allSessions, childPages, loadChildPage]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
@@ -956,7 +999,12 @@ export function SessionList() {
       const node = nodesById.get(sessionId);
       const knownDirectChildren =
         node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
-      if (opening && hierarchyMode && knownDirectChildren > 0 && !childPages.has(sessionId)) {
+      if (
+        opening &&
+        hierarchyMode &&
+        knownDirectChildren > 0 &&
+        (!childPages.has(sessionId) || childPages.get(sessionId)?.failed === true)
+      ) {
         void loadChildPage(sessionId);
       }
     },
