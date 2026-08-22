@@ -127,7 +127,7 @@ export type BuildTurnAgentDeps = {
   >["gitCredentialBindings"];
   sandboxCodemodeToken: string | undefined;
   fileResourceDownloads: SandboxFileDownload[];
-  googleDriveConnectorBindings: readonly AttemptConnectorActionBinding[];
+  attemptConnectorActionBindings: readonly AttemptConnectorActionBinding[];
   connectorActionIdentity: {
     accountId: string;
     workspaceId: string;
@@ -195,7 +195,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     sandboxGitCredentialBindings,
     sandboxCodemodeToken,
     fileResourceDownloads,
-    googleDriveConnectorBindings,
+    attemptConnectorActionBindings,
     connectorActionIdentity,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
@@ -652,7 +652,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         mcpServers: preparedTools.mcpServers,
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
-        attemptConnectorActionBindings: googleDriveConnectorBindings,
+        attemptConnectorActionBindings,
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
         // model call so the model sees the account's real connected sources.

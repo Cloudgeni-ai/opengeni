@@ -25206,7 +25206,7 @@ export type ConnectorActionInvocation = {
   toolName: string;
   arguments: unknown;
   /** Explicit per-session MCP approval, rather than a connector-policy decision. */
-  approvalMode?: "session_mcp";
+  approvalMode?: "session_mcp" | "connector_write";
 };
 
 export type PrepareConnectorActionApprovalResult =
@@ -25433,7 +25433,7 @@ function normalizedConnectorActionInvocation(
   toolName: string;
   policyActionSelector: string;
   arguments: unknown;
-  approvalMode: "connector" | "session_mcp";
+  approvalMode: "connector" | "session_mcp" | "connector_write";
 } {
   const approvalId = boundedConnectorActionText(
     invocation.approvalId,
@@ -25459,7 +25459,11 @@ function normalizedConnectorActionInvocation(
       )
     : null;
   const approvalMode = invocation.approvalMode ?? "connector";
-  if (approvalMode !== "connector" && approvalMode !== "session_mcp") {
+  if (
+    approvalMode !== "connector" &&
+    approvalMode !== "session_mcp" &&
+    approvalMode !== "connector_write"
+  ) {
     throw new Error("connector approval mode is unsupported");
   }
   if (approvalMode === "session_mcp" && !connectionId?.startsWith("session-mcp:")) {
@@ -25486,6 +25490,16 @@ function resolvedSessionMcpApproval(
     decision: "ask",
     actionName,
   };
+}
+
+function resolvedConnectorWriteApproval(
+  resolved: ResolvedConnectorActionPolicy,
+  approvalMode: "connector" | "connector_write",
+  actionName: string,
+): ResolvedConnectorActionPolicy {
+  return approvalMode === "connector_write" && !resolved.managed
+    ? resolvedSessionMcpApproval(actionName)
+    : resolved;
 }
 
 function durableConnectorActionInvocation(
@@ -25936,12 +25950,16 @@ export async function prepareConnectorActionApproval(
         const resolved =
           normalized.approvalMode === "session_mcp"
             ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-            : resolveConnectorActionPolicy(snapshot, {
-                connectionId: normalized.connectionId!,
-                serverId: normalized.serverId,
-                toolName: normalized.toolName,
-                actionName: normalized.policyActionSelector,
-              });
+            : resolvedConnectorWriteApproval(
+                resolveConnectorActionPolicy(snapshot, {
+                  connectionId: normalized.connectionId!,
+                  serverId: normalized.serverId,
+                  toolName: normalized.toolName,
+                  actionName: normalized.policyActionSelector,
+                }),
+                normalized.approvalMode,
+                normalized.policyActionSelector,
+              );
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
@@ -26020,12 +26038,16 @@ export async function beginConnectorActionExecution(
           const resolved =
             normalized.approvalMode === "session_mcp"
               ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-              : resolveConnectorActionPolicy(snapshot, {
-                  connectionId: normalized.connectionId!,
-                  serverId: normalized.serverId,
-                  toolName: normalized.toolName,
-                  actionName: normalized.policyActionSelector,
-                });
+              : resolvedConnectorWriteApproval(
+                  resolveConnectorActionPolicy(snapshot, {
+                    connectionId: normalized.connectionId!,
+                    serverId: normalized.serverId,
+                    toolName: normalized.toolName,
+                    actionName: normalized.policyActionSelector,
+                  }),
+                  normalized.approvalMode,
+                  normalized.policyActionSelector,
+                );
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,

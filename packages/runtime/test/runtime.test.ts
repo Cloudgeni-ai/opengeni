@@ -2284,6 +2284,116 @@ describe("runtime event normalization", () => {
       }
     });
 
+    test("attempt-local connector bindings preserve unmanaged read execution", async () => {
+      const executions: Record<string, unknown>[] = [];
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "github_app", toolName: "repository_get" },
+            modelName: "github_app__repository_get",
+            inputSchema: {
+              type: "object",
+              properties: { repository: { type: "string" } },
+              required: ["repository"],
+              additionalProperties: false,
+            },
+            source: "mcp",
+            approval: "policy",
+            execute: async (args) => {
+              if (args.repository === "fail-before-provider") {
+                return {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "provider was not called",
+                      _meta: { testConnectorOutcome: "not_executed" },
+                    },
+                  ],
+                  _meta: { testConnectorOutcome: "not_executed" },
+                };
+              }
+              executions.push(args);
+              return { content: [{ type: "text", text: "repository" }] };
+            },
+          },
+        ],
+      });
+      let managed = false;
+      const completed: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () =>
+          managed
+            ? { managed: true, decision: "allow" }
+            : { managed: false, decision: "unmanaged" },
+        begin: async () =>
+          managed
+            ? { allowed: true, managed: true, requestId: "request-read" }
+            : { allowed: true, managed: false },
+        complete: async ({ outcome }) => {
+          completed.push(outcome);
+        },
+      };
+      const agent = buildOpenGeniAgent(testSettings(), [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+        attemptConnectorActionBindings: [
+          {
+            modelName: "github_app__repository_get",
+            resultOutcome: (output) => {
+              const row = output as { _meta?: { testConnectorOutcome?: unknown } };
+              return row._meta?.testConnectorOutcome === "not_executed" ? "not_executed" : null;
+            },
+            call: (approvalId, arguments_) => ({
+              approvalId,
+              connectionId: "github-app:71",
+              serverId: "github_app",
+              toolName: "repository_get",
+              arguments: arguments_,
+            }),
+          },
+        ],
+      });
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "github_app__repository_get",
+        );
+        if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+        expect(
+          await tool.needsApproval(
+            new RunContext(),
+            { repository: "Cloudgeni-ai/opengeni" },
+            "call-read",
+          ),
+        ).toBe(false);
+        expect(
+          await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ repository: "Cloudgeni-ai/opengeni" }),
+            { toolCall: { callId: "call-read" } } as any,
+          ),
+        ).toBeDefined();
+        expect(executions).toEqual([{ repository: "Cloudgeni-ai/opengeni" }]);
+        expect(completed).toEqual([]);
+        managed = true;
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ repository: "fail-before-provider" }), {
+            toolCall: { callId: "call-not-executed" },
+          } as any),
+        ).rejects.toThrow("Attempt connector action was not executed");
+        expect(completed).toEqual(["not_executed"]);
+      } finally {
+        await prepared.close();
+      }
+    });
+
     test("legacy approved MCP execution is durably admitted once and replay is denied", async () => {
       const mcp = startTestMcpServer();
       const serverConfig = {

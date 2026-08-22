@@ -127,6 +127,14 @@ the agent to GitHub tools instead. The standalone consumer remains default-off
 with personal GitHub OAuth; GitHub App and Connected Machine credential paths
 are unchanged.
 
-GitHub API tools and agent-created inheritance, child/goal propagation, and
-recovery remain separately audited dependent phases. Agent-created personal
-GitHub use therefore still fails closed instead of silently dropping authority.
+The default-off GitHub API bridge (`OPENGENI_GITHUB_REST_MCP_ENABLED`) consumes
+that same frozen repository authority without exposing the broad OAuth token.
+It revalidates the exact accepted connection/grant generation, selection head,
+repository identity, and current read/write permission before each provider
+request. `github_personal__*` tools are always attributed to the connected user;
+the separate `github_app__*` namespace acts as the OpenGeni bot. Tool arguments
+cannot choose either actor or a repository outside the accepted resource set.
+Writes use the attempt-frozen connector Allow/Ask/Block policy, default to Ask
+when no explicit policy exists, and are never replayed after an ambiguous
+outcome. Agent-created inheritance, child/goal propagation, and recovery remain
+a separately audited dependent phase and continue to fail closed.

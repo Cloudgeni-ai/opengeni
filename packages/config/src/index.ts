@@ -1210,6 +1210,8 @@ const SettingsSchema = z.object({
   githubAppId: z.string().optional(),
   githubClientId: z.string().optional(),
   githubClientSecret: z.string().optional(),
+  /** Default-off rollout for the in-process GitHub repository API tool surface. */
+  githubRestMcpEnabled: EnvBoolean.default(false),
   githubPersonalOauthEnabled: EnvBoolean.default(false),
   githubPersonalOauthClientId: z.string().optional(),
   githubPersonalOauthClientSecret: z.string().optional(),
@@ -2578,6 +2580,7 @@ export function getSettings(): Settings {
     githubAppId: optional("OPENGENI_GITHUB_APP_ID"),
     githubClientId: optional("OPENGENI_GITHUB_CLIENT_ID"),
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
+    githubRestMcpEnabled: optional("OPENGENI_GITHUB_REST_MCP_ENABLED"),
     githubPersonalOauthEnabled: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED"),
     githubPersonalOauthClientId: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID"),
     githubPersonalOauthClientSecret: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET"),

@@ -393,14 +393,17 @@ describe("personal GitHub OAuth settings", () => {
     OPENGENI_INTEGRATIONS_ENABLED: "true",
     OPENGENI_INTEGRATIONS_STATE_SECRET: "oauth-state-secret",
     OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+    OPENGENI_GITHUB_REST_MCP_ENABLED: "true",
     OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
     OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "personal-client-staging",
     OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "personal-client-secret",
   };
 
   test("is disabled by default and loads a separate managed client when enabled", () => {
+    expect(withEnv({}, () => getSettings()).githubRestMcpEnabled).toBe(false);
     expect(withEnv({}, () => getSettings()).githubPersonalOauthEnabled).toBe(false);
     expect(withEnv(enabled, () => getSettings())).toMatchObject({
+      githubRestMcpEnabled: true,
       githubPersonalOauthEnabled: true,
       githubPersonalOauthClientId: "personal-client-staging",
       githubPersonalOauthClientSecret: "personal-client-secret",

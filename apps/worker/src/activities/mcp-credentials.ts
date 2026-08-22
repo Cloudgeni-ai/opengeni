@@ -43,7 +43,16 @@ export function connectionTokenResolverForTurn(input: {
   return async (request) => {
     const acceptedDelegation = input.turn.personalConnectionDelegations.find(
       (delegation) =>
-        (delegation.connectionType === undefined || delegation.connectionType === "mcp") &&
+        (delegation.connectionType === undefined ||
+          delegation.connectionType === "mcp" ||
+          (delegation.connectionType === "github_personal" &&
+            delegation.serverId === "github:personal" &&
+            request.serverId === "github:personal" &&
+            request.connectionRef.provider === "github" &&
+            request.connectionRef.kind === "oauth2" &&
+            request.connectionRef.providerDomain === "github.com" &&
+            request.credentialTarget === "http_api" &&
+            isGitHubApiDestination(request.destinationUrl))) &&
         delegation.serverId === request.serverId &&
         delegation.connectionId === request.connectionRef.connectionId,
     );
@@ -170,4 +179,19 @@ export function connectionTokenResolverForTurn(input: {
     });
     return withProviderRequestAuthorization(result);
   };
+}
+
+function isGitHubApiDestination(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.origin === "https://api.github.com" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
 }
