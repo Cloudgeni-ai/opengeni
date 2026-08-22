@@ -271,11 +271,14 @@ execution class and never in API or turn-worker serving pods. See
 
 Compact session discovery keeps that queue boundary intact. `queuedPromptCount`
 reports waiting human/API work, but `includeLastMessage` excludes the matching
-`user.message` content until its logical turn leaves `queued`. An already-running
-orchestrator therefore cannot consume a future prompt from a monitoring preview
-while the canonical queue still retains it for later claim. Monitoring-mode
-`session_events` reads share this boundary so they cannot bypass compact
-discovery; forensic full-event reads intentionally retain exact queue evidence.
+`user.message` content until its logical turn durably emits `turn.started` after
+admission. A delete, Queue Edit, cancellation, or other pre-start terminal
+transition therefore never exposes that prompt through monitoring. Event pages
+permanently omit the earlier trigger sequence and project the claimed message at
+the immutable `turn.started` sequence (`claimedUserMessage` on ordinary tails;
+filtered `user.message` reads map that boundary to the message projection), so a
+claim cannot move newly eligible content behind an issued keyset cursor. Forensic
+full-event reads intentionally retain the exact original queue evidence.
 
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used

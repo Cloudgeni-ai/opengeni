@@ -213,10 +213,14 @@ Human session-list pages are bounded independently of event/history storage: ord
 
 Agent discovery preserves the prompt-claim boundary: compact `queuedPromptCount`
 may report waiting human/API work, but `includeLastMessage` omits a `user.message`
-while its matching turn is still `queued`. Monitoring therefore cannot feed a
-future prompt into an already-running orchestrator before canonical claim. The
-same filter applies to monitoring-mode session-event pages; forensic full-event
-reads remain the exact durable audit surface, including queued prompt rows.
+until its matching turn has a durable `turn.started` event. Pre-start delete,
+Queue Edit, cancellation, and other terminal transitions never reveal the prompt.
+Monitoring event pages permanently exclude the original pre-start sequence and
+surface the content from the immutable start sequence, keeping forward/backward
+keysets stable across claim; ordinary tails attach `claimedUserMessage` to
+`turn.started`, while a filtered `user.message` read maps that same boundary to a
+message projection. Forensic full-event reads remain the exact durable audit
+surface, including the original queued prompt row.
 
 Workspace-level knowledge is a separate store again: `knowledge_memories` holds curated and agent-written, workspace-scoped memory records. Workspace Memory V1 makes the agent/product lane **active by default** through one deterministic write gate (`saveWorkspaceMemory`): preserve accepted text exactly, apply exact/near dedup, enforce the active-record cap, optionally supersede, then persist. The older `proposed → approved/rejected` lifecycle remains for the curated docs-MCP lane (`memory_propose` and human review); agent-visible memory is `active ∪ approved`. Corrections retire records as `superseded` or `archived`, and pinned records rank first in the per-turn working set. Usage counters (`usage_count`, `last_used_at`) are bumped on memory search and feed ranking/decay work.
 

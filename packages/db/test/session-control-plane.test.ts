@@ -74,6 +74,7 @@ import {
   submitHumanPromptInTransaction,
   upsertConnectorActionPolicy,
   deleteSessionQueueItemInTransaction,
+  editQueuedTurnInTransaction,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -821,6 +822,12 @@ describe("clean session control plane", () => {
     );
     expect(runningTurn?.id).toBe(first.turn.id);
     await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      {
+        type: "turn.started",
+        turnId: runningTurn!.id,
+        turnGeneration: runningTurn!.executionGeneration,
+        payload: { triggerEventId: runningTurn!.triggerEventId },
+      },
       { type: "agent.message.completed", payload: { text: "previous claimed response" } },
     ]);
     const accepted = await send(
@@ -854,7 +861,7 @@ describe("clean session control plane", () => {
         limit: 1,
         includeTypes: ["user.message"],
         payloadMode: "summary",
-        excludeQueuedHumanPrompts: true,
+        claimedConversationOnly: true,
       },
     );
     expect(monitoringUserMessages.events[0]?.payload).toMatchObject({
@@ -876,6 +883,22 @@ describe("clean session control plane", () => {
       text: "delegate this newly queued issue",
     });
 
+    const beforeClaimCursor = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        direction: "after",
+        limit: 50,
+        payloadMode: "summary",
+        claimedConversationOnly: true,
+      },
+    );
+    expect(JSON.stringify(beforeClaimCursor.events)).not.toContain(
+      "delegate this newly queued issue",
+    );
+    expect(beforeClaimCursor.nextAfter).not.toBeNull();
+
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: runningTurn!.id,
@@ -894,6 +917,95 @@ describe("clean session control plane", () => {
       workflowId,
     );
     expect(claimed?.id).toBe(accepted.turn.id);
+    const [started] = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      {
+        type: "turn.started",
+        turnId: claimed!.id,
+        turnGeneration: claimed!.executionGeneration,
+        payload: { triggerEventId: claimed!.triggerEventId },
+      },
+    ]);
+    expect(started?.type).toBe("turn.started");
+
+    const caughtUp = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        after: beforeClaimCursor.nextAfter!,
+        direction: "after",
+        limit: 10,
+        includeTypes: ["user.message"],
+        payloadMode: "summary",
+        claimedConversationOnly: true,
+      },
+    );
+    expect(caughtUp.events).toEqual([
+      expect.objectContaining({
+        sequence: started!.sequence,
+        type: "user.message",
+        payload: expect.objectContaining({ text: "delegate this newly queued issue" }),
+      }),
+    ]);
+
+    const ordinaryTail = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        after: beforeClaimCursor.nextAfter!,
+        direction: "after",
+        limit: 10,
+        payloadMode: "summary",
+        claimedConversationOnly: true,
+      },
+    );
+    expect(ordinaryTail.events).toEqual([
+      expect.objectContaining({
+        sequence: started!.sequence,
+        type: "turn.started",
+        payload: expect.objectContaining({
+          claimedUserMessage: expect.objectContaining({
+            eventId: accepted.event.id,
+            payload: expect.objectContaining({ text: "delegate this newly queued issue" }),
+          }),
+        }),
+      }),
+    ]);
+
+    const explicitlyExcluded = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        after: beforeClaimCursor.nextAfter!,
+        direction: "after",
+        limit: 10,
+        includeTypes: ["turn.started"],
+        excludeTypes: ["user.message"],
+        payloadMode: "summary",
+        claimedConversationOnly: true,
+      },
+    );
+    expect(JSON.stringify(explicitlyExcluded.events)).not.toContain(
+      "delegate this newly queued issue",
+    );
+
+    const oldBackwardWindow = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        before: beforeClaimCursor.nextAfter!,
+        direction: "before",
+        limit: 50,
+        payloadMode: "summary",
+        claimedConversationOnly: true,
+      },
+    );
+    expect(JSON.stringify(oldBackwardWindow.events)).not.toContain(
+      "delegate this newly queued issue",
+    );
 
     const running = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
       limit: 10,
@@ -906,6 +1018,91 @@ describe("clean session control plane", () => {
         preview: "delegate this newly queued issue",
       },
     });
+  });
+
+  test("pre-start queue terminal states never expose human prompt content to monitoring", async () => {
+    const { grant, session } = await fixture();
+    const deleted = await send(grant, session.id, "private deleted queue prompt");
+    const edited = await send(grant, session.id, "private edited queue prompt");
+    const cancelled = await send(grant, session.id, "private cancelled queue prompt");
+
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        deleteSessionQueueItemInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: deleted.turn.id,
+          expectedTurnVersion: deleted.turn.version,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          reason: "privacy regression delete",
+        }),
+      ),
+    );
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            turnId: edited.turn.id,
+            subjectId: grant.subjectId,
+            expectedTurnVersion: edited.turn.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+    await controlSession(grant, session.id, "cancel");
+    expect(await getSessionTurn(client.db, grant.workspaceId!, deleted.turn.id)).toMatchObject({
+      status: "cancelled",
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, edited.turn.id)).toMatchObject({
+      status: "withdrawn_for_edit",
+    });
+    expect(await getSessionTurn(client.db, grant.workspaceId!, cancelled.turn.id)).toMatchObject({
+      status: "cancelled",
+    });
+
+    const discovery = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(discovery.sessions.find((entry) => entry.id === session.id)?.latestMessage).toBeNull();
+
+    const monitoring = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        direction: "before",
+        limit: 100,
+        payloadMode: "full",
+        claimedConversationOnly: true,
+      },
+    );
+    const monitoringJson = JSON.stringify(monitoring.events);
+    expect(monitoringJson).not.toContain("private deleted queue prompt");
+    expect(monitoringJson).not.toContain("private edited queue prompt");
+    expect(monitoringJson).not.toContain("private cancelled queue prompt");
+
+    const forensic = await listSessionEventPage(client.db, grant.workspaceId!, session.id, {
+      direction: "before",
+      limit: 100,
+      includeTypes: ["user.message"],
+      payloadMode: "full",
+    });
+    const forensicJson = JSON.stringify(forensic.events);
+    expect(forensicJson).toContain("private deleted queue prompt");
+    expect(forensicJson).toContain("private edited queue prompt");
+    expect(forensicJson).toContain("private cancelled queue prompt");
   });
 
   test("session discovery preserves exact keysets and hands concurrent changes to the next scan", async () => {
