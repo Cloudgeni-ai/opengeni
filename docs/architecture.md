@@ -967,11 +967,16 @@ A thin control-plane Hono app: durable state lives in Postgres, agent turns run 
 
 Personal GitHub OAuth is a separate managed-deployment user-authority adapter in
 `apps/api/src/routes/personal-github.ts` and
-`apps/api/src/integrations/personal-github.ts`. It uses a dedicated
+`apps/api/src/integrations/personal-github.ts`, with bounded live repository
+discovery in `apps/api/src/integrations/personal-github-repositories.ts`. It uses a dedicated
 environment-specific OAuth App, verifies the immutable numeric GitHub user,
 requests V1 `repo`, and persists one encrypted user-owned Connection. It never
-substitutes for the workspace GitHub App and does not by itself grant repository
-execution. See [`personal-github.md`](personal-github.md).
+substitutes for the workspace GitHub App. Repository selection persists only a
+FORCE-RLS owner-scoped allowlist behind connection-generation and
+selection-generation CAS; the private catalog is never stored. This phase does
+not yet admit those selections into turns, scheduled tasks, or runs and does
+not by itself grant repository execution. See
+[`personal-github.md`](personal-github.md).
 
 Browser/Computer controller and viewer reachability are separate. Docker sandboxes
 join the configured API network, and server-side browserd traffic resolves to the
@@ -1553,7 +1558,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | Company Brain accepted-turn context selection / recovery                    | `packages/db/src/company-brain-context-selection.ts`, `packages/db/src/company-brain-context-selection-schema.ts`, `packages/db/drizzle/0259_company_brain_context_selection_receipts.sql`, `apps/worker/src/activities/agent-turn/governance-model.ts`                                                                                    | [`hierarchical-memory.md`](hierarchical-memory.md), [`run-lifecycle.md`](run-lifecycle.md)       |
 | Company Brain routing / root-task-tree notes / governed workspace proposals  | Task notes: `packages/contracts/src/task-notes.ts`, `packages/db/src/task-notes.ts`, `packages/db/drizzle/0239_task_tree_notes.sql`, `apps/api/src/mcp/server.ts`. Governed proposals/promotion: `packages/contracts/src/company-brain-governed-writes.ts`, `packages/core/src/domain/company-brain-governed-writes.ts`, `packages/db/src/company-brain-governed-writes.ts`, `packages/db/drizzle/0255_company_brain_governed_write_proposals.sql`, `packages/db/drizzle/0260_task_note_knowledge_promotion.sql`, `packages/db/drizzle/0261_preference_knowledge_proposal_actor_binding.sql` | [`company-brain-write-routing.md`](company-brain-write-routing.md)                 |
 | Governed-learning evaluation and activation | `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, `packages/db/drizzle/0268_governed_learning_decision_receipts.sql`. Controller: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, `packages/db/drizzle/0269_governed_learning_activation_controller.sql` | [`workspace-learning-policy.md`](workspace-learning-policy.md) |
-| GitHub App / personal GitHub OAuth                                          | `packages/github/src/index.ts`, `apps/api/src/routes/github.ts`, `apps/api/src/routes/personal-github.ts`, `apps/api/src/integrations/personal-github.ts`                                                                                                     | [`github-app.md`](github-app.md), [`personal-github.md`](personal-github.md)       |
+| GitHub App / personal GitHub OAuth                                          | `packages/github/src/index.ts`, `apps/api/src/routes/github.ts`, `apps/api/src/routes/personal-github.ts`, `apps/api/src/integrations/personal-github.ts`, `apps/api/src/integrations/personal-github-repositories.ts`                                                                     | [`github-app.md`](github-app.md), [`personal-github.md`](personal-github.md)       |
 | The published SDK/React surface                                             | `packages/sdk/src/index.ts`, `packages/react/src/index.ts`                                                                                                                                                                                                  | `.changeset/config.json`                                                           |
 | Public realtime controller / React composer experience                     | `packages/sdk/src/realtime.ts`, `packages/react/src/realtime.ts`, `packages/react/src/realtime/`; `apps/web` is consumer-only                                                                                                                               | `packages/sdk/README.md`, `packages/react/README.md`                               |
 | Editable spreadsheet/presentation/document artifacts                        | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/`, `packages/db/src/editable-artifacts.ts`, `apps/api/src/routes/editable-artifacts.ts`, `apps/api/src/mcp/editable-artifacts.ts`, `packages/codemode/src/artifacts.ts`, `packages/sdk/src/editable-artifact-*`, `packages/react/src/components/artifacts/`; `apps/web` stays consumer-only | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |

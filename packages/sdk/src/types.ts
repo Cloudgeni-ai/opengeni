@@ -703,6 +703,77 @@ export type PersonalGitHubDisconnectRequest = {
   idempotencyKey: string;
 };
 
+export type PersonalGitHubRepositoryAccess = "read" | "write";
+
+export type PersonalGitHubRepositoryPermissions = {
+  pull: boolean;
+  push: boolean;
+  admin: boolean;
+  maintain: boolean;
+  triage: boolean;
+};
+
+export type PersonalGitHubRepository = {
+  repositoryId: string;
+  fullName: string;
+  canonicalUrl: string;
+  defaultBranch: string;
+  visibility: "public" | "private" | "internal";
+  private: boolean;
+  archived: boolean;
+  disabled: boolean;
+  permissions: PersonalGitHubRepositoryPermissions;
+};
+
+export type PersonalGitHubSelectedRepository = PersonalGitHubRepository & {
+  selectedAccess: PersonalGitHubRepositoryAccess;
+  selectionGeneration: number;
+  selectedAt: string;
+  lastVerifiedAt: string;
+};
+
+export type PersonalGitHubRepositorySelectionState = {
+  connectionAuthorityGeneration: number;
+  credentialBindingId: string;
+  providerPrincipalId: string;
+  selectionGeneration: number;
+  repositories: PersonalGitHubSelectedRepository[];
+};
+
+export type PersonalGitHubRepositoryCatalogItem = PersonalGitHubRepository & {
+  selectedAccess: PersonalGitHubRepositoryAccess | null;
+};
+
+export type ListPersonalGitHubRepositoriesOptions = {
+  cursor?: number | undefined;
+  limit?: number | undefined;
+};
+
+export type ListPersonalGitHubRepositoriesResponse = {
+  repositories: PersonalGitHubRepositoryCatalogItem[];
+  nextCursor: number | null;
+  selection: PersonalGitHubRepositorySelectionState;
+};
+
+export type PersonalGitHubRepositorySelectionInput = {
+  repositoryId: string;
+  fullName: string;
+  access: PersonalGitHubRepositoryAccess;
+};
+
+export type ReplacePersonalGitHubRepositorySelectionsRequest = {
+  expectedConnectionAuthorityGeneration: number;
+  expectedSelectionGeneration: number;
+  idempotencyKey: string;
+  repositories: PersonalGitHubRepositorySelectionInput[];
+};
+
+export type VerifyPersonalGitHubRepositorySelectionsRequest = {
+  expectedConnectionAuthorityGeneration: number;
+  expectedSelectionGeneration: number;
+  idempotencyKey: string;
+};
+
 export type OpenGeniSlackBotInstallRequest = {
   /** Existing OpenGeni Slack bot connection to reinstall in place. */
   connectionId?: string | undefined;

@@ -141,6 +141,15 @@ const CONNECTION_AUTHORITY_ROUTINES = [
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
 ] as const;
+const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES = [
+  "get_self_personal_github_repository_selection(uuid, uuid, text, uuid)",
+  "mutate_self_personal_github_repository_selection(uuid, uuid, text, uuid, bigint, bigint, text, jsonb, boolean)",
+] as const;
+const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES = [
+  "personal_github_repository_selection_heads",
+  "personal_github_repository_selection_operations",
+  "personal_github_repository_selections",
+] as const;
 const SCHEDULED_PERSONAL_RESOURCE_ROUTINES = [
   "freeze_scheduled_task_personal_resources(uuid, uuid, uuid, bigint)",
   "clone_scheduled_task_personal_resource_authority(uuid, uuid, uuid, bigint, bigint)",
@@ -360,6 +369,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE,
   ...VARIABLE_SET_AUTHORITY_ROUTINES,
   ...CONNECTION_AUTHORITY_ROUTINES,
+  ...PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES,
   ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
   ...SCOPED_COMPUTE_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
@@ -546,6 +556,9 @@ export const FORCE_RLS_TABLES = [
   "pack_installation_components",
   "pack_installations",
   "personal_document_once_consumption_receipts",
+  "personal_github_repository_selection_heads",
+  "personal_github_repository_selection_operations",
+  "personal_github_repository_selections",
   "personal_resource_once_consumption_receipts",
   "preference_registry_events",
   "preference_registry_preferences",
@@ -988,6 +1001,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "personal_document_once_consumption_receipts",
+  "personal_github_repository_selection_heads",
+  "personal_github_repository_selection_operations",
+  "personal_github_repository_selections",
   "personal_resource_once_consumption_receipts",
   "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
@@ -1934,6 +1950,25 @@ export function evaluateRuntimeDatabasePosture(
         violations.push(
           `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
         );
+      }
+    } else if (
+      (PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
+      const authorityTables = PERSONAL_GITHUB_REPOSITORY_AUTHORITY_TABLES.map((tableName) =>
+        tableByName.get(tableName),
+      ).filter((table): table is RuntimeTablePosture => table !== undefined);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityOwners.size > 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} personal GitHub repository authority table owners do not match`,
+        );
+      } else {
+        const authorityOwner = authorityTables[0]?.owner ?? targetSchemaOwner;
+        if (authorityOwner && routine.owner !== authorityOwner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match personal GitHub repository authority owner ${authorityOwner}`,
+          );
+        }
       }
     } else if ((PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityOwner = tableByName.get("documents")?.owner ?? targetSchemaOwner;

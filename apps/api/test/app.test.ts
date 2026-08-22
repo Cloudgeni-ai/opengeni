@@ -547,6 +547,12 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/terminal/pty/resize`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/terminal/pty/:action",
     );
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/connections/connection-1/github/repositories`),
+    ).toBe("/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories");
+    expect(
+      routeLabel(`/v1/workspaces/${workspace}/connections/connection-1/github/repositories/verify`),
+    ).toBe("/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify");
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );

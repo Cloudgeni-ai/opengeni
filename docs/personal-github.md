@@ -37,11 +37,29 @@ subject-owned `Connection`. A reconnect is CAS-fenced to the same Connection and
 GitHub user. A different GitHub account never overwrites the existing row.
 
 `repo` is broad GitHub-account authority: it includes public and private
-repositories available to the user and permits repository writes. The product
-repository picker introduced by the dependent repository-authority phase is an
-additional OpenGeni allowlist; it does not narrow the OAuth grant held by
-GitHub. Runtime execution must therefore remain behind exact selected-repository
-authority and the normal Ask/Allow/Block action policy.
+repositories available to the user and permits repository writes. OpenGeni's
+repository picker is an additional allowlist; it does not narrow the OAuth
+grant held by GitHub. Runtime execution must therefore remain behind exact
+selected-repository authority and the normal Ask/Allow/Block action policy.
+
+Repository discovery is live and owner-only. The API uses only fixed
+`api.github.com` endpoints, follows no redirects, bounds response bytes and
+repository counts, derives canonical GitHub URLs from validated full names,
+and persists only selected repository projections. It never persists the
+private repository catalog. Repository IDs cross JSON as positive digit
+strings and persist as Postgres `bigint`, so IDs larger than JavaScript's safe
+integer range remain exact.
+
+Each connection has a monotonic selection head and immutable per-row selection
+generation. Full replacement and verification are fenced by both the current
+connection authority generation and selection generation. Reconnect or
+disconnect invalidates stale callers; a selection generation advances only
+when repository identity or selected read/write authority changes. Verification
+may refresh bounded repository facts without broadening selected access or
+advancing that generation. Owner/account/workspace checks, FORCE RLS, lifecycle
+functions, and idempotency receipts protect writes; the application role has no
+direct table DML. The credential binding UUID is evidence only and never grants
+repository authority.
 
 ## Token custody and lifecycle
 
@@ -64,7 +82,18 @@ The lifecycle routes are:
 - `DELETE /v1/workspaces/:workspaceId/connections/:connectionId`
 - `GET /v1/integrations/github-personal/oauth/callback`
 
+The owner-only repository-authority routes are:
+
+- `GET /v1/workspaces/:workspaceId/connections/:connectionId/github/repositories`
+- `PUT /v1/workspaces/:workspaceId/connections/:connectionId/github/repositories`
+- `POST /v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify`
+
 Generic Connection create/update rejects `github.com` OAuth credentials and
-the reserved personal-GitHub metadata role. The current phase does not enumerate
-or select repositories, expose the token to a sandbox, add Git transport, or
-register GitHub API tools; those are dependent authority/broker phases.
+the reserved personal-GitHub metadata role. This repository-authority phase is
+deliberately inert for agent execution: it does not yet freeze selection
+snapshots into accepted turns, follow-ups, scheduled tasks, or runs; expose the
+token to a sandbox; add Git transport; or register GitHub API tools. Those
+admission, inheritance/recovery, broker, and runtime surfaces are separately
+audited dependent phases. Until they land, selecting a repository grants no
+runtime capability and unsupported agent-created use must fail rather than
+silently dropping authority.
