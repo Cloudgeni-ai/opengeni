@@ -885,6 +885,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "sessions_list",
   "session_get",
   "session_events",
+  "session_wait",
   "session_create",
   "session_send_message",
   "session_pause",

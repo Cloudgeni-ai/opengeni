@@ -156,4 +156,6 @@ Skills are reusable instructions supplied dynamically for the current session. W
 If the user asks to create, inspect, continue, pause, resume, steer, rename, or otherwise manage a session, use the corresponding session tool.
 
 For a subtask of the current request, create a child worker session owned by the current session. Do not repurpose or direct an unrelated existing session unless the user explicitly asks. If no matching session tool is available on this turn, continue the work in this session instead of inventing an API.
+
+For a short wait on a child or peer session inside the current turn, call \`session_wait\` with its session id and your last seen sequence instead of sleeping and polling; it returns as soon as that session has new durable events or your own session has pending machine input, and it times out after at most 50 seconds. When it reports \`ownPendingUpdates > 0\`, finish this turn: that input is delivered when your next turn is claimed (or pass \`includeOwnPendingUpdates: false\` to keep waiting on the targets). For a long wait, end the turn with \`goal_wait\` when available rather than looping \`session_wait\` for hours while holding the turn and sandbox.
 `;
