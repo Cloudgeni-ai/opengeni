@@ -16,7 +16,7 @@ import { join } from "node:path";
 // public caller is deliberately narrow: one core application service reached
 // by the two HTTP routes and the framework-neutral SDK. Worker, MCP, runtime,
 // React, cross-workspace, attachment, and personal-grant callers remain
-// forbidden. Migration 0315 separately activates create-time Personal-workspace
+// forbidden. Migration 0317 separately activates create-time Personal-workspace
 // privacy and owner/admin organization enablement; it does not add another
 // caller of these transition/fork adapters.
 // ---------------------------------------------------------------------------

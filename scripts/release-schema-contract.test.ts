@@ -151,8 +151,8 @@ describe("release schema contract", () => {
       "0315_personal_github_repository_selection.sql",
       "0313_private_child_session_authority.sql",
       "0314_unregistered_organization_invitations.sql",
-      "0315_human_confirmed_activation_resumed_generation.sql",
-      "0316_organization_private_session_enablement.sql",
+      "0316_human_confirmed_activation_resumed_generation.sql",
+      "0317_organization_private_session_enablement.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

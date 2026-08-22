@@ -115,7 +115,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   authority document says otherwise. Session RLS is active product authority:
   migration 0225 activated owner derivation, the capability-fenced direct-write
   trigger, and visibility-aware reads; migration 0311 added atomic private
-  creation; migration 0316 makes a managed human's Personal workspace create
+  creation; migration 0317 makes a managed human's Personal workspace create
   private sessions automatically and adds a separate owner/admin organization
   setting for Only-me chats in shared workspaces. That setting never grants
   session creation: after enablement, the ordinary workspace grant must still
