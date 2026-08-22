@@ -46,8 +46,8 @@ CREATE TABLE company_profile_agent_proposal_receipts (
     FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT company_profile_agent_proposals_session_fk
-    FOREIGN KEY (account_id, workspace_id, session_id)
-    REFERENCES sessions(account_id, workspace_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, session_id)
+    REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT company_profile_agent_proposals_turn_fk
     FOREIGN KEY (account_id, workspace_id, session_id, turn_id)
     REFERENCES session_turns(account_id, workspace_id, session_id, id) ON DELETE CASCADE,
@@ -116,8 +116,8 @@ CREATE TABLE company_profile_agent_confirmation_receipts (
     FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT company_profile_agent_confirmations_session_fk
-    FOREIGN KEY (account_id, workspace_id, session_id)
-    REFERENCES sessions(account_id, workspace_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, session_id)
+    REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT company_profile_agent_confirmations_turn_fk
     FOREIGN KEY (account_id, workspace_id, session_id, turn_id)
     REFERENCES session_turns(account_id, workspace_id, session_id, id) ON DELETE CASCADE,
