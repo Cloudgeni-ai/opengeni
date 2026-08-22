@@ -68,6 +68,7 @@ import {
 } from "./slack-bot";
 import {
   normalizeResources,
+  personalGitHubRepositoryResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
@@ -703,6 +704,12 @@ export async function validatedScheduledTaskUpdate(input: {
       }
     }
   } else if (input.payload.connectionAuthorities.length === 0) {
+    if (personalGitHubRepositoryResources(nextAgentConfig.resources).length > 0) {
+      throw new HTTPException(409, {
+        message:
+          "personal GitHub repository resources cannot be retained without connectionAuthorities",
+      });
+    }
     update.personalConnectionDelegations = [];
   } else {
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(

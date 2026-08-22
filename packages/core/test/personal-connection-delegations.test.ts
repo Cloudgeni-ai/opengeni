@@ -648,6 +648,22 @@ describe("personal MCP connection delegation", () => {
       ).rejects.toThrow(
         "material changes to a personal GitHub-authorized task require explicit connectionAuthorities",
       );
+      await expect(
+        validatedScheduledTaskUpdate({
+          settings: testSettings({ githubPersonalOauthEnabled: true }),
+          db: client.db,
+          objectStorage: null,
+          grant: {
+            ...originGrant,
+            workspaceId: target!.id,
+            principalKind: "human_session",
+          },
+          existing: task,
+          payload: { connectionAuthorities: [] },
+        }),
+      ).rejects.toThrow(
+        "personal GitHub repository resources cannot be retained without connectionAuthorities",
+      );
 
       await replacePersonalGitHubRepositorySelections(client.db, {
         accountId: originGrant.accountId,
