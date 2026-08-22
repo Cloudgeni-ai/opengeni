@@ -57,7 +57,8 @@ export function createSharedActivityServices(
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
         entitlements: dependencies.entitlements ?? null,
         connectionCredentials:
-          dependencies.connectionCredentials ?? createStandaloneConnectionCredentialsPort(settings, db),
+          dependencies.connectionCredentials ??
+          createStandaloneConnectionCredentialsPort(settings, db),
         personalGitHubCredentials:
           dependencies.personalGitHubCredentials ?? buildPersonalGitHubGitCredentials(db, settings),
       };
