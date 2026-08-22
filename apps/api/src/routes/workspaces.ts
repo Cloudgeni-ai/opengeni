@@ -56,6 +56,7 @@ import {
   controlHumanWorkspace,
   resolveMemberSubjectId,
 } from "@opengeni/core";
+import { workspaceControlBusyHttpError } from "../http/api-error";
 import { boundedLimit } from "../http/common";
 import { sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
@@ -313,13 +314,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid workspace inference-control request" });
     }
-    return c.json(
-      await controlHumanWorkspace(
-        { db: deps.db, bus: deps.bus, workflowClient: deps.workflowClient },
-        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-        parsed.data,
-      ),
-    );
+    try {
+      return c.json(
+        await controlHumanWorkspace(
+          { db: deps.db, bus: deps.bus, workflowClient: deps.workflowClient },
+          { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+          parsed.data,
+        ),
+      );
+    } catch (error) {
+      const busy = workspaceControlBusyHttpError(error);
+      if (busy) throw busy;
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/control-events", async (c) => {

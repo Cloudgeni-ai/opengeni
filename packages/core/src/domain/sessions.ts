@@ -97,6 +97,8 @@ import {
   SessionCreateIdempotencyConflictError,
   PersonalResourceAttachmentAcceptanceError,
   sessionTenancyProductActivated,
+  WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
+  WorkspaceControlBusyError,
   type SessionCommandActor,
   type NewSessionDraftSnapshot,
 } from "@opengeni/db";
@@ -1284,10 +1286,16 @@ export async function postUserMessageTurn(input: {
                   }
                 : {}),
               mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+              controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
             }),
         ),
     );
   } catch (error) {
+    if (error instanceof WorkspaceControlBusyError) {
+      // Bounded control-prefix wait expired before any write; the request may
+      // be retried. The API layer renders the retryable 503 envelope.
+      throw error;
+    }
     if (error instanceof PersonalResourceAttachmentAcceptanceError) {
       throw new HTTPException(
         error.kind === "invalid" ? 422 : error.kind === "forbidden" ? 403 : 409,

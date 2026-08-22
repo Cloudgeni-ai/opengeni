@@ -150,6 +150,7 @@ import {
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
+  WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
   SessionTenancyAccessError,
   SessionTenancyConflictError,
   SessionTenancyInvalidRequestError,
@@ -266,7 +267,7 @@ import {
   WorkspaceCaptureManifestCache,
 } from "./workspace-capture";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
-import { ApiHttpError } from "../http/api-error";
+import { ApiHttpError, workspaceControlBusyHttpError } from "../http/api-error";
 
 type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
 
@@ -1426,6 +1427,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             realtimeId,
             ownerSubjectId: grant.subjectId,
             ...parsed.data,
+            controlLockTimeoutMs: WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS,
           }),
         );
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
@@ -3995,6 +3997,8 @@ function codexRealtimeHttpFailure(error: CodexRealtimeBrokerError): {
 
 function sessionRealtimeHttpError(error: unknown): HTTPException {
   if (error instanceof HTTPException) return error;
+  const busy = workspaceControlBusyHttpError(error);
+  if (busy) return busy;
   if (error instanceof SessionRealtimeConflictError) {
     return new HTTPException(error.code === "REALTIME_NOT_FOUND" ? 404 : 409, {
       message: error.message,
@@ -4568,6 +4572,8 @@ function zodErrorFields(error: ZodError): string {
 }
 
 function commandConflictResponse(c: Context, error: unknown): Response {
+  const busy = workspaceControlBusyHttpError(error);
+  if (busy) throw busy;
   if (error instanceof QueueCommandConflictError) {
     return c.json({ code: error.code, message: error.message, current: error.current }, 409);
   }

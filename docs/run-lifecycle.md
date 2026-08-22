@@ -613,11 +613,32 @@ existing recovery projection because its receipt can mark a crash after memory
 was saved but before the original event publish. Only genuinely unresolved
 execution gets one explicit `interrupted / outcome unknown` closure.
 
-Claim, interruption, and event-writing settlement share one lock order:
-`workspace_inference_controls FOR SHARE` when the write is control-aware, then
-the actual `workspaces` row `FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`,
-UUID-ordered exact turns `FOR UPDATE`, and UUID-ordered exact attempts
-`FOR UPDATE`. Generic audit/title appends skip the control row but use the same
+Claim, interruption, and event-writing settlement share one lock order: the
+workspace-control advisory lock plus `workspace_inference_controls FOR SHARE`
+when the write is control-aware, then the actual `workspaces` row
+`FOR KEY SHARE`, UUID-ordered sessions `FOR NO KEY UPDATE`, UUID-ordered exact
+turns `FOR UPDATE`, and UUID-ordered exact attempts `FOR UPDATE`.
+`lockWorkspaceInferenceControl` takes
+`pg_advisory_xact_lock[_shared](hashtextextended('workspace-control:<id>', 0))`
+in the same mode before the row lock. The row lock alone is unfair: PostgreSQL
+lets a new `FOR SHARE` join a share-locked tuple without queueing behind an
+already waiting `FOR UPDATE`, so with many sessions continuously claiming,
+settling, and appending, a Pause/Resume could wait for hours while every
+HTTP caller gave up and left its backend parked with a pinned snapshot. The
+heavyweight advisory queue is FIFO, so a mutator waits only for the holders that
+preceded it and sharers resume right after it commits. Only genuine control
+mutations (Pause/Resume/Cancel, workspace Pause/Resume, auto-resume, settings
+narrowing, quiescent tree deletion) take the exclusive prefix. Send, Steer,
+queued Steer, and realtime ledger sync use
+`lockWorkspaceInferenceControlForAdmission`: the shared prefix while the target
+branch is active (it still excludes every control mutation, so the observed
+state cannot change inside the transaction), escalating to the exclusive prefix
+for a paused branch only after rolling back a savepoint, because an in-place
+upgrade deadlocks as soon as two sharers escalate together. Request-scoped API
+mutations pass `WORKSPACE_CONTROL_REQUEST_LOCK_TIMEOUT_MS`; exceeding it fails
+with the typed retryable `WorkspaceControlBusyError` (HTTP 503, outcome known)
+before any write. Worker settlement and claims never pass a bound. Generic
+audit/title appends skip the control row but use the same
 workspace-key-share prefix. Retained-screenshot prepare takes that same prefix
 before insert so its turn/attempt FK checks cannot invert against event writers;
 retry only that idempotent prepare transaction on `40P01`/`40001`. Event inserts also touch the workspace through their
