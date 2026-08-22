@@ -1,5 +1,84 @@
 # @opengeni/worker-bundle
 
+## 0.21.0
+
+### Minor Changes
+
+- fbc760e: Add the first-party `goal_wait` MCP tool and a durable goal continuation hold.
+  An orchestrator whose active goal depends on child sessions or an external
+  event records a bounded hold (reason plus mandatory deadline, at most 7 days)
+  with a `goal.held` timeline fact instead of busy-polling. The continuation
+  materializer returns `held` while the declaring turn is still the latest
+  finished turn and the deadline is ahead: it never consumes the goal wake
+  revision and re-arms a delayed workflow wake at the deadline on every idle
+  evaluation. Pending machine input wins with `queue`, and any newer finished
+  turn, a passed deadline, or a human/API/agent goal mutation clears the hold.
+  The goal projection reports a current hold as `blocked` / `held_for_input`
+  with `nextAttemptAt` at the deadline (rolling migration 0317).
+- 650d6f9: Add an optional OpenSandbox Kubernetes sandbox backend with exact ID-addressed
+  resume, renewable provider TTL, portable workspace archives, private server
+  proxy support, pinned upstream deployment artifacts, and Azure sandbox-pool
+  capacity isolation. Existing backend defaults, including Modal, remain
+  unchanged unless `opensandbox` is selected explicitly.
+- 29a44c2: Spill oversized model-visible tool results to a workspace File instead of failing the tool or stuffing huge JSON into history. Codemode keeps the 16 MiB journal cap.
+
+### Patch Changes
+
+- cc2fa1b: Keep a live sandbox turn holder alive through a provider-deadline rotation: the resume-side holder-liveness loop releases only when the holder itself is gone or its attempt is superseded (`heartbeatLeaseHolderStatus` separates holder liveness from lease extension), the turn-side rotation checkpoint reinstates its exact lost holder at the same epoch/instance before the warm capture, mutation admission under a requested rotation reports `rotation_in_progress` instead of `lease_fenced` and starts that checkpoint, `write_stdin` to a retained PTY renders admission faults as the tool result instead of failing the turn, and `sandbox.box.terminated` carries the drain reason.
+- a55f122: Recover a managed-home session's Connected-Machine-to-home route change as a safe same-logical-turn handoff. The worker durably checkpoints completed model/tool truth, closes only unresolved tool calls, and continues in a fresh home-primary attempt instead of failing the session, while preserving the no-phantom-home and no-ambiguous-replay guarantees.
+- 72736ef: Take the canonical turn/attempt lock prefix before retaining a screenshot, retry that idempotent prepare on deadlock, and keep leftover persistence failures from failing the tool.
+- 5b509be: Advertise cwd-relative sandbox file paths to the model, and return the SDK execCommand banner (exit code + stdout/stderr) from Connected Machines.
+- Updated dependencies [7d15265]
+- Updated dependencies [3e1ad07]
+- Updated dependencies [e57ce11]
+- Updated dependencies [438e476]
+- Updated dependencies [3825727]
+- Updated dependencies [1cd0eb0]
+- Updated dependencies [ebb3669]
+- Updated dependencies [dc8c73f]
+- Updated dependencies [3999dd5]
+- Updated dependencies [9b4d5d5]
+- Updated dependencies [492fb71]
+- Updated dependencies [66593eb]
+- Updated dependencies [fbc760e]
+- Updated dependencies [650d6f9]
+- Updated dependencies [cc2fa1b]
+- Updated dependencies [e9ff652]
+- Updated dependencies [3141b5d]
+- Updated dependencies [650d6f9]
+- Updated dependencies [fe54954]
+- Updated dependencies [8cb165d]
+- Updated dependencies [f7497fd]
+- Updated dependencies [ff011e6]
+- Updated dependencies [ba0be3d]
+- Updated dependencies [fba437f]
+- Updated dependencies [9530e19]
+- Updated dependencies [d8ba09d]
+- Updated dependencies [f51adf8]
+- Updated dependencies [009b947]
+- Updated dependencies [72736ef]
+- Updated dependencies [5b509be]
+- Updated dependencies [6909443]
+- Updated dependencies [c7cafb1]
+- Updated dependencies [5a651c8]
+- Updated dependencies [29a44c2]
+- Updated dependencies [c83c590]
+- Updated dependencies [48b9f09]
+- Updated dependencies [3b6b30e]
+  - @opengeni/runtime@1.2.0
+  - @opengeni/contracts@2.1.0
+  - @opengeni/db@3.0.0
+  - @opengeni/core@2.0.0
+  - @opengeni/config@0.18.0
+  - @opengeni/codex@0.2.18
+  - @opengeni/github@0.5.0
+  - @opengeni/capabilities@0.3.0
+  - @opengeni/codemode@0.4.10
+  - @opengeni/documents@0.6.7
+  - @opengeni/events@0.3.121
+  - @opengeni/observability@0.8.1
+  - @opengeni/storage@0.2.103
+
 ## 0.20.13
 
 ### Patch Changes

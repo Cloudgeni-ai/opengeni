@@ -1,5 +1,119 @@
 # @opengeni/core
 
+## 2.0.0
+
+### Major Changes
+
+- fba437f: Resolve a managed human's personal-workspace authority in the connection grant layer on top of the session-surface prerequisite's canonical workspace-authority resolver.
+
+  A managed human's personal workspace deliberately has no `workspace_memberships` row (migration 0219 raises on one); the owner's access is the `organization_memberships.personal_workspace_id` pointer. `getWorkspaceGrant` is a bare membership join, so every seam using it as a "does this subject still hold workspace authority here" predicate denied the one human who always belongs. In their own personal workspace, `freezePersonalConnectionDelegations` returned no delegations at all and Google Drive publication resolved no target. Those seams now use the pointer-aware resolver.
+
+  The landed session-surface prerequisite renamed the public database oracle to `namedSubjectHasLiveWorkspaceAuthority`, extracted the canonical in-scope authority rule, and declared the one required `@opengeni/db` major. This change consumes that landed API rather than declaring the same database break again. The named-subject wrapper continues to restore the caller's prior `opengeni.subject_id`; calling it on a transaction handle must never redefine who the rest of that transaction runs as.
+
+  **BREAKING (`@opengeni/core`):** `PersonalConnectionDelegationSource`'s `subject` variant now requires `accountId` — the personal-workspace pointer lives on an organization membership, so the account is part of the question. `personalConnectionDelegationSourceForGrant` supplies it.
+
+  **BREAKING behaviour change (`@opengeni/core`):** a delegated/bearer grant (`metadata.delegated === true`) now yields no personal-connection delegations **in any workspace**, including ordinary shared workspaces where it previously worked through a real membership row. A delegated payload's `subjectId` and `workspaceId` are signed token fields with no database row behind them, so treating that subject as authority to borrow a user's private provider credentials is not a boundary worth holding — in a shared workspace any more than a personal one. Embedding hosts minting user-facing delegated tokens lose personal X/Reddit/Atlassian/Google Drive delegation for those sessions; workspace-owned connections are unaffected. See `docs/embedding.md`.
+
+### Minor Changes
+
+- 3e1ad07: Add turn-atomic personal Variable Set and Rig attachments for create, Send, and
+  Steer, including logical-turn once receipts, recovery-safe snapshots, warning
+  acknowledgement, and SDK contracts.
+- dc8c73f: Add professional organization administration with canonical rename and a
+  Personal-safe shared-workspace access inventory, explicit Organization /
+  Workspace / Only-me scope at Rig and Variable Set creation, and activation-gated
+  atomic private visibility when creating sessions.
+- 650d6f9: Add an optional OpenSandbox Kubernetes sandbox backend with exact ID-addressed
+  resume, renewable provider TTL, portable workspace archives, private server
+  proxy support, pinned upstream deployment artifacts, and Azure sandbox-pool
+  capacity isolation. Existing backend defaults, including Modal, remain
+  unchanged unless `opensandbox` is selected explicitly.
+- f7497fd: Add a disabled-by-default, user-owned personal GitHub OAuth lifecycle with
+  separate deployment credentials, signed PKCE state, encrypted token custody,
+  verified GitHub identity, typed SDK routes, reconnect fencing, and idempotent
+  disconnect.
+- ba0be3d: Add activation-gated owner management for personal-resource session and standing grants, with kind-derived actions and permissions, exact session authority epochs, route-workspace-fenced revocation, RFC3339 lifecycle timestamps, bounded keyset pages, complete credential-free delegation receipts, FORCE-RLS-safe expiry and invalid-action settlement, and SDK methods that intentionally exclude standalone `once` and custom expiry.
+- c7cafb1: Activate owner-only session visibility changes and same-workspace private forks
+  through the public API and SDK after per-organization tenancy activation.
+
+  Expose activation-gated session tenancy metadata, typed quiescence and
+  idempotency conflicts, exact durable event fanout, and explicit retry fences.
+
+### Patch Changes
+
+- 438e476: Add explicit anonymous OpenAI-compatible model providers with credential-free
+  transport, external billing attribution, catalog readiness, and an External
+  picker rail while preserving older client parsing by classifying the route from
+  existing billing metadata instead of widening closed client enums. Anonymous
+  providers reject all configured request headers and query parameters, and the
+  runtime strips credential-like headers as a defense in depth. Document the
+  temporary OpenCode Zen free-preview configuration.
+  Generic Chat Completions routes also reject an `unknown` finish reason before
+  accepting a terminal response, so the same accepted turn recovers from durable
+  history without executing tools from ambiguous output.
+- 3825727: Normalize legacy or malformed workspace-membership permissions before member listing and authorization, without restoring any obsolete authority.
+- 9530e19: Let a managed human use the session surface inside their own personal workspace, without widening the owner-only exception to anyone else.
+
+  A managed human's personal workspace deliberately has no `workspace_memberships` row (migration 0219 raises on one) — their access is the `organization_memberships.personal_workspace_id` pointer. Three session seams fenced on a bare membership probe and therefore denied the one human who always belongs: `GET /v1/workspaces/:id/sessions` returned **403** so the workspace looked empty, `PUT …/sessions/:id/pin` returned **403**, and `PUT …/new-session-draft` returned **403**.
+
+  `subjectHasLiveWorkspaceAuthorityInScope` (`packages/db/src/workspace-authority.ts`) is now the single implementation of the corrected rule. It refuses to set `opengeni.subject_id`, which makes the arbitrary-subject oracle shape unrepresentable at these seams and keeps the authority read inside the caller's transaction and advisory fence.
+
+  **The authorization is not that resolver.** Neither it nor the exported `namedSubjectHasLiveWorkspaceAuthority` establishes who the caller is — both answer "does subject X hold authority here". The one thing that authorizes the exception is `AccessGrantAuthorization.canonicalManagedHumanSession`, stamped only inside the branch of `resolveAccessContext` that verified a Better Auth cookie. Inspecting the grant would not do: a delegated bearer chooses its own `principalKind`, `metadata.delegated`, `serviceInitiator`, and `subjectId`. Bearer/delegated principals, API keys, service initiators, same-organization co-members, organization admins and owners, and account administrators all fail closed, as does any authentication path added later.
+
+  The public helper is renamed `subjectHasLiveWorkspaceAuthority` → `namedSubjectHasLiveWorkspaceAuthority`, and it now restores `opengeni.subject_id` after probing (`withRlsContext` restores account/workspace but not subject, so the probed subject leaked out of the savepoint). This changeset declares the required `@opengeni/db` **major** at the first PR that lands the breaking rename; the companion connection-authority change retains its own `@opengeni/core` major for its separate public break.
+
+- d8ba09d: Make private children inherit their parent's visibility through an exact live-attempt capability, expose effective tool policy in session monitoring, keep late child results from restarting settled parents, and preserve private-owner authority on internal-update turns.
+- 48b9f09: Allow organization administrators to invite an email before registration, bind
+  the invitation only after exact Better Auth email verification, and apply its
+  initial shared-workspace access when the invited user joins without creating a
+  redundant fallback organization.
+- 3b6b30e: Make the workspace control prefix fair and bounded: `lockWorkspaceInferenceControl` takes a FIFO transaction advisory lock before the row lock so Pause/Resume cannot be starved by continuous shared claim/settlement/append traffic, Send/Steer/queued Steer/realtime sync hold the prefix shared while the target branch is active and escalate through a savepoint only for a paused branch, and request-scoped API mutations fail with a typed retryable `WorkspaceControlBusyError` (HTTP 503) instead of parking a pooled connection and snapshot when the prefix stays busy.
+- Updated dependencies [7d15265]
+- Updated dependencies [3e1ad07]
+- Updated dependencies [e57ce11]
+- Updated dependencies [438e476]
+- Updated dependencies [3825727]
+- Updated dependencies [1cd0eb0]
+- Updated dependencies [ebb3669]
+- Updated dependencies [dc8c73f]
+- Updated dependencies [3999dd5]
+- Updated dependencies [9b4d5d5]
+- Updated dependencies [492fb71]
+- Updated dependencies [66593eb]
+- Updated dependencies [fbc760e]
+- Updated dependencies [650d6f9]
+- Updated dependencies [cc2fa1b]
+- Updated dependencies [e9ff652]
+- Updated dependencies [3141b5d]
+- Updated dependencies [650d6f9]
+- Updated dependencies [fe54954]
+- Updated dependencies [8cb165d]
+- Updated dependencies [f7497fd]
+- Updated dependencies [ff011e6]
+- Updated dependencies [ba0be3d]
+- Updated dependencies [9530e19]
+- Updated dependencies [d8ba09d]
+- Updated dependencies [f51adf8]
+- Updated dependencies [009b947]
+- Updated dependencies [72736ef]
+- Updated dependencies [5b509be]
+- Updated dependencies [6909443]
+- Updated dependencies [c7cafb1]
+- Updated dependencies [5a651c8]
+- Updated dependencies [29a44c2]
+- Updated dependencies [c83c590]
+- Updated dependencies [48b9f09]
+- Updated dependencies [3b6b30e]
+  - @opengeni/runtime@1.2.0
+  - @opengeni/contracts@2.1.0
+  - @opengeni/db@3.0.0
+  - @opengeni/config@0.18.0
+  - @opengeni/codex@0.2.18
+  - @opengeni/documents@0.6.7
+  - @opengeni/events@0.3.121
+  - @opengeni/observability@0.8.1
+  - @opengeni/storage@0.2.103
+
 ## 1.5.1
 
 ### Patch Changes

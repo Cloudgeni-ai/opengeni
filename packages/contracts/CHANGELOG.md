@@ -1,5 +1,76 @@
 # @opengeni/contracts
 
+## 2.1.0
+
+### Minor Changes
+
+- 3e1ad07: Add turn-atomic personal Variable Set and Rig attachments for create, Send, and
+  Steer, including logical-turn once receipts, recovery-safe snapshots, warning
+  acknowledgement, and SDK contracts.
+- 438e476: Add explicit anonymous OpenAI-compatible model providers with credential-free
+  transport, external billing attribution, catalog readiness, and an External
+  picker rail while preserving older client parsing by classifying the route from
+  existing billing metadata instead of widening closed client enums. Anonymous
+  providers reject all configured request headers and query parameters, and the
+  runtime strips credential-like headers as a defense in depth. Document the
+  temporary OpenCode Zen free-preview configuration.
+  Generic Chat Completions routes also reject an `unknown` finish reason before
+  accepting a terminal response, so the same accepted turn recovers from durable
+  history without executing tools from ambiguous output.
+- ebb3669: Add the agent-facing `company_profile_propose` first-party MCP tool over a new `proposeCompanyProfile` seam: an exact agent attempt records one inactive organization company-profile proposal (durable-learning provenance, `agent-attempt:<attemptId>` source) that an organization account admin reviews and activates from Company Brain → Company profile & goals, which now lists pending proposals with their content.
+- dc8c73f: Add professional organization administration with canonical rename and a
+  Personal-safe shared-workspace access inventory, explicit Organization /
+  Workspace / Only-me scope at Rig and Variable Set creation, and activation-gated
+  atomic private visibility when creating sessions.
+- fbc760e: Add the first-party `goal_wait` MCP tool and a durable goal continuation hold.
+  An orchestrator whose active goal depends on child sessions or an external
+  event records a bounded hold (reason plus mandatory deadline, at most 7 days)
+  with a `goal.held` timeline fact instead of busy-polling. The continuation
+  materializer returns `held` while the declaring turn is still the latest
+  finished turn and the deadline is ahead: it never consumes the goal wake
+  revision and re-arms a delayed workflow wake at the deadline on every idle
+  evaluation. Pending machine input wins with `queue`, and any newer finished
+  turn, a passed deadline, or a human/API/agent goal mutation clears the hold.
+  The goal projection reports a current hold as `blocked` / `held_for_input`
+  with `nextAttemptAt` at the deadline (rolling migration 0317).
+- 650d6f9: Add an optional OpenSandbox Kubernetes sandbox backend with exact ID-addressed
+  resume, renewable provider TTL, portable workspace archives, private server
+  proxy support, pinned upstream deployment artifacts, and Azure sandbox-pool
+  capacity isolation. Existing backend defaults, including Modal, remain
+  unchanged unless `opensandbox` is selected explicitly.
+- fe54954: Add an authorized, quiescence-fenced API and SDK operation for permanently deleting a root session tree.
+- f7497fd: Add a disabled-by-default, user-owned personal GitHub OAuth lifecycle with
+  separate deployment credentials, signed PKCE state, encrypted token custody,
+  verified GitHub identity, typed SDK routes, reconnect fencing, and idempotent
+  disconnect.
+- ff011e6: Add bounded owner-only personal GitHub repository discovery, immutable selected-repository
+  authority storage, full-replacement and verification APIs, typed SDK methods, and exact
+  accepted-turn/scheduled-task authority snapshots for explicitly bound repository resources.
+  The dedicated `connectionType: "github_personal"` resource discriminator preserves existing
+  host-opaque Git credential bindings without reclassifying them as personal OAuth authority.
+  Runtime Git and GitHub API execution remain unavailable until their separately audited broker
+  and provider-consumer phases land.
+- ba0be3d: Add activation-gated owner management for personal-resource session and standing grants, with kind-derived actions and permissions, exact session authority epochs, route-workspace-fenced revocation, RFC3339 lifecycle timestamps, bounded keyset pages, complete credential-free delegation receipts, FORCE-RLS-safe expiry and invalid-action settlement, and SDK methods that intentionally exclude standalone `once` and custom expiry.
+- c7cafb1: Activate owner-only session visibility changes and same-workspace private forks
+  through the public API and SDK after per-organization tenancy activation.
+
+  Expose activation-gated session tenancy metadata, typed quiescence and
+  idempotency conflicts, exact durable event fanout, and explicit retry fences.
+
+- 5a651c8: Add the blocking first-party `session_wait` MCP tool so an agent can wait for new durable events on child or peer sessions, or for its own pending machine input, in one bounded call instead of sleeping and polling `session_events`/`session_get`/`sessions_list`.
+- 29a44c2: Spill oversized model-visible tool results to a workspace File instead of failing the tool or stuffing huge JSON into history. Codemode keeps the 16 MiB journal cap.
+- 48b9f09: Allow organization administrators to invite an email before registration, bind
+  the invitation only after exact Better Auth email verification, and apply its
+  initial shared-workspace access when the invited user joins without creating a
+  redundant fallback organization.
+
+### Patch Changes
+
+- 9b4d5d5: Create Stripe invoices for prepaid-credit Checkout payments and expose an authorized Stripe Customer Portal session for invoices and payment information.
+- 492fb71: Allow foreground session readers to acknowledge an exact rendered event sequence so later unseen events remain unread.
+- 650d6f9: Route OpenSandbox browser and computer streams through the API frame-proxy so the workbench can show live JPEG/RFB when the lifecycle proxy cannot carry browserd WebSocket grants.
+- 5b509be: Advertise cwd-relative sandbox file paths to the model, and return the SDK execCommand banner (exit code + stdout/stderr) from Connected Machines.
+
 ## 2.0.0
 
 ### Major Changes
