@@ -74,6 +74,7 @@ import {
 import { selectXaiTurnCapacity } from "./xai-capacity";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
+import { resolveTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { buildTurnAgent } from "./agent-build";
 
 /** Lifecycle orchestrator: claim → capacity → governance → sandbox → tools → stream. */
@@ -841,8 +842,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         workspaceRefs,
       });
       const {
-        turnResources,
-        runtimeResources,
+        turnResources: claimedTurnResources,
+        runtimeResources: claimedRuntimeResources,
         mcpAvailabilityNote,
         turnTools,
         connectionScope,
@@ -868,6 +869,46 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxCreationBackend,
         effectiveRunCredentialBackend,
       } = sandboxRoute;
+
+      // A bare github.com repository URI (API caller, older session, or an
+      // agent-spawned child inheriting its parent's resources) resolves to
+      // the workspace's GitHub App binding here, before credential minting
+      // and the runtime clone plan derive binding ids from the same resource
+      // set. A Connected Machine receives no platform Git credential, so its
+      // resources stay exactly as stored. Resolution never fails the turn;
+      // an unusable bound repository stays bare and is reported visibly.
+      const gitHubRepositoryBindings =
+        activeSandboxBackend === "selfhosted"
+          ? null
+          : await waitForTurnOperation(
+              resolveTurnGitHubRepositoryBindings({
+                db,
+                settings: runSettings,
+                workspaceId: input.workspaceId,
+                resources: claimedTurnResources,
+              }).catch((error: unknown) => {
+                observability.warn("GitHub repository binding resolution skipped", {
+                  errorClass: error instanceof Error ? error.name : "Error",
+                  errorCode: "github_repository_binding_resolution_failed",
+                  origin: "worker",
+                });
+                return null;
+              }),
+              cancellationSignal,
+              undefined,
+            );
+      const turnResources = gitHubRepositoryBindings?.resources ?? claimedTurnResources;
+      const runtimeResources =
+        gitHubRepositoryBindings?.apply(claimedRuntimeResources) ?? claimedRuntimeResources;
+      if (gitHubRepositoryBindings && gitHubRepositoryBindings.warnings.length > 0) {
+        await eventing.publish!(
+          gitHubRepositoryBindings.warnings.map((payload) => ({
+            type: "credential.auth_needed" as const,
+            payload,
+          })),
+          true,
+        );
+      }
 
       const runCredentials = await prepareRunCredentials({
         input,

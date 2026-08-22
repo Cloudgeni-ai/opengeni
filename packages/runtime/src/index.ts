@@ -8574,6 +8574,33 @@ function gitCredentialTokenWriterCommandLines(
   ];
 }
 
+const GIT_PROVIDER_TOKEN_SEED_REFERENCES: Record<GitCredentialProvider, string> = {
+  github: "${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}",
+  gitlab: "${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}",
+  azure_devops: "${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}",
+};
+
+/**
+ * Setup-only: a turn that carries no binding and no seed for a provider must
+ * not inherit the provider alias file (`$HOME/.opengeni/git-token`,
+ * `git-credentials/github-token`, ...) that an earlier or sibling turn on a
+ * shared box wrote. That stale token would authenticate this turn's clone,
+ * push, and `gh` calls until it expired mid-turn. Renewal commands reuse the
+ * token writer alone and never run this, so a sibling binding refresh cannot
+ * remove another provider's current alias.
+ */
+function staleGitProviderTokenRemovalCommandLines(
+  bindings: GitCredentialBindingSeed[] = [],
+): string[] {
+  const boundProviders = new Set(bindings.map((binding) => binding.provider));
+  return (Object.keys(GIT_PROVIDER_TOKEN_SEED_REFERENCES) as GitCredentialProvider[])
+    .filter((provider) => !boundProviders.has(provider))
+    .map(
+      (provider) =>
+        `[ -n "${GIT_PROVIDER_TOKEN_SEED_REFERENCES[provider]}" ] || remove_git_provider_token ${provider}`,
+    );
+}
+
 function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
   return [
     'git_http_broker_config="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/http-broker.gitconfig"',
@@ -8674,6 +8701,7 @@ function gitCredentialHelperCommandLines(
     .map(([provider]) => provider);
   return [
     ...gitCredentialTokenWriterCommandLines(bindings, stagedSeeds),
+    ...staleGitProviderTokenRemovalCommandLines(bindings),
     ...gitCredentialBindingInventoryCommandLines(resources, bindings),
     // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
     // runs. Renewal updates only token files and deliberately leaves these

@@ -63,7 +63,13 @@ Rules that hold across the table:
   aliases exist only for a single direct binding. Renewal atomically replaces
   each binding file, so a multi-day turn sees current credentials without model
   action or manifest mutation and a failed sibling refresh cannot overwrite it;
-  broker route changes require a newer admitted turn.
+  broker route changes require a newer admitted turn. Setup on a shared box
+  also removes a provider alias file this turn neither binds nor seeds, so a
+  turn without a GitHub credential never inherits a sibling turn's expiring
+  token; renewal commands keep their binding-only scope. Every repository in a
+  bound GitHub App allowlist, public or private, receives a scoped installation
+  token; an unbound public repository is cloned anonymously and is read-only
+  (see [`github-app.md`](github-app.md)).
 - **The perimeter is not identity.** The deployment access key admits ordinary
   callers and deployment-only surfaces. A cryptographically valid first-party
   delegated bearer may instead enter `/v1`; the normal access resolver still

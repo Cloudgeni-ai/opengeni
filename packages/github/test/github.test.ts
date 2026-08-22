@@ -4,6 +4,7 @@ import {
   buildGitHubAppManifest,
   authorizeGitHubAppUser,
   authorizeGitHubInstallationBinding,
+  createGitHubAppInstallationRepositoryLookup,
   createGitHubAppInstallationTokenWithExpiry,
   createGitHubAppInstallationTokenWithSigningSettings,
   createSignedState,
@@ -594,3 +595,82 @@ async function withAuthorityGitHub(
     globalThis.fetch = originalFetch;
   }
 }
+
+describe("GitHub App installation repository lookup", () => {
+  const signingSettings = () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    return {
+      githubAppId: "12345",
+      githubClientId: "client",
+      githubClientSecret: "secret",
+      githubAppSlug: "opengeni",
+      githubAppPrivateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    } as any;
+  };
+
+  test("mints one server-side installation token per installation and resolves repositories by name", async () => {
+    const requests: Array<{ method: string; url: string; authorization: string | null }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : {}));
+      requests.push({
+        method: init?.method ?? "GET",
+        url,
+        authorization: headers.get("authorization"),
+      });
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json(
+          { token: "ghs_lookup", expires_at: "2026-07-14T11:00:00Z" },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/repos/acme/app")) {
+        return Response.json({
+          id: 456,
+          full_name: "acme/app",
+          name: "app",
+          private: false,
+          html_url: "https://github.com/acme/app",
+          clone_url: "https://github.com/acme/app.git",
+          default_branch: "main",
+          owner: { login: "acme", type: "Organization" },
+        });
+      }
+      if (url.endsWith("/repos/acme/missing")) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      return Response.json({ message: "Forbidden" }, { status: 403 });
+    }) as typeof fetch;
+    try {
+      const lookup = createGitHubAppInstallationRepositoryLookup(signingSettings());
+      await expect(
+        lookup({ installationId: 123, owner: "acme", name: "app" }),
+      ).resolves.toMatchObject({ id: 456, installationId: 123, fullName: "acme/app" });
+      await expect(
+        lookup({ installationId: 123, owner: "acme", name: "missing" }),
+      ).resolves.toBeNull();
+      await expect(
+        lookup({ installationId: 123, owner: "acme", name: "forbidden" }),
+      ).rejects.toThrow("GitHub API 403");
+      // Path-shaped names never reach GitHub.
+      await expect(
+        lookup({ installationId: 123, owner: "acme", name: "../app" }),
+      ).resolves.toBeNull();
+      expect(requests.filter((request) => request.method === "POST")).toHaveLength(1);
+      expect(
+        requests
+          .filter((request) => request.method === "GET")
+          .map((request) => request.authorization),
+      ).toEqual(["Bearer ghs_lookup", "Bearer ghs_lookup", "Bearer ghs_lookup"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("refuses to build a lookup without GitHub App credentials", () => {
+    expect(() => createGitHubAppInstallationRepositoryLookup({ githubAppId: "1" } as any)).toThrow(
+      "GitHub App is not configured",
+    );
+  });
+});

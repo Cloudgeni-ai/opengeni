@@ -63,6 +63,7 @@ import {
   effortOptionsFor,
   enabledWorkspaceCapabilityMcpServers,
   gitHubRepositoryResource,
+  isRepositoryResourceForGitHubRepo,
   initialReasoningEffort,
   installedApiIntegrationMcpServers,
   labelEffort,
@@ -2035,14 +2036,61 @@ describe("GitHub repository resources", () => {
     ).toThrow("Duplicate repository mount path");
   });
 
-  test("uses normal git resources for public GitHub App repositories", () => {
+  test("keeps installation metadata for bound public GitHub App repositories", () => {
+    // A public repository in the workspace allowlist receives the same scoped
+    // installation token as a private one; without the ids the worker mints
+    // nothing and the agent can clone but never push or use gh.
     expect(gitHubRepositoryResource(githubRepository({ private: false }), "main")).toEqual({
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
       provider: "github",
       mountPath: "repos/github.com/example/public",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
     });
+  });
+
+  test("builds bound public catalog selections with ids and manual URLs without", () => {
+    const publicRepo = githubRepository({ private: false });
+    const resources = buildResources(
+      [{ id: 1, url: "https://github.com/acme/unbound.git", ref: "main" }],
+      [publicRepo],
+      new Set([publicRepo.id]),
+      { [publicRepo.id]: "develop" },
+    );
+    expect(resources).toEqual([
+      {
+        kind: "repository",
+        uri: "https://github.com/example/public.git",
+        ref: "develop",
+        mountPath: "repos/github.com/example/public",
+        provider: "github",
+        githubRepositoryId: 456,
+        githubInstallationId: 123,
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/unbound.git",
+        ref: "main",
+        mountPath: "repos/github.com/acme/unbound.git",
+      },
+    ]);
+    // The picker recognizes the bound public selection by identity and still
+    // matches a pre-existing bare resource for the same public repository by URI.
+    expect(isRepositoryResourceForGitHubRepo(resources[0] as any, publicRepo)).toBe(true);
+    expect(
+      isRepositoryResourceForGitHubRepo(
+        { kind: "repository", uri: "https://github.com/example/public.git", ref: "main" },
+        publicRepo,
+      ),
+    ).toBe(true);
+    expect(
+      isRepositoryResourceForGitHubRepo(
+        { kind: "repository", uri: "https://github.com/example/public.git", ref: "main" },
+        githubRepository({ private: true }),
+      ),
+    ).toBe(false);
   });
 
   test("keeps installation metadata for private GitHub App repositories", () => {

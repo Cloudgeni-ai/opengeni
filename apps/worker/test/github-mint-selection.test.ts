@@ -68,4 +68,18 @@ describe("gitHubTokenMintSelection", () => {
       { installationId: 124, repositoryIds: [789] },
     ]);
   });
+
+  test("a bare github-provider URI mints nothing until binding resolution stamps its ids", () => {
+    // Turn-time resolution (agent-turn/github-repository-bindings.ts) stamps
+    // githubInstallationId/githubRepositoryId onto a bound repository; the
+    // mint extraction itself keeps its exact id-only semantics so an unbound
+    // public repository stays an anonymous clone.
+    const bare = repo({ uri: "https://github.com/acme/public.git", provider: "github" });
+    expect(gitHubTokenMintSelections([bare])).toEqual([]);
+    expect(
+      gitHubTokenMintSelections([
+        { ...bare, githubInstallationId: 123, githubRepositoryId: 456 } as ResourceRef,
+      ]),
+    ).toEqual([{ installationId: 123, repositoryIds: [456] }]);
+  });
 });

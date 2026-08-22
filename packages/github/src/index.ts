@@ -741,6 +741,90 @@ export async function listGitHubAppRepositoriesWithSigningSettings(
   return repositories;
 }
 
+export type GitHubAppInstallationRepositoryLookupInput = {
+  installationId: number;
+  owner: string;
+  name: string;
+};
+
+export type GitHubAppInstallationRepositoryLookup = (
+  input: GitHubAppInstallationRepositoryLookupInput,
+) => Promise<GitHubRepository | null>;
+
+/**
+ * Resolve one `owner/name` repository through an exact App installation and
+ * return GitHub's stable repository identity, or null when that installation
+ * cannot see the repository. The server-side lookup token never leaves the
+ * caller and grants nothing by itself: the workspace allowlist decides whether
+ * the returned id may mint a sandbox-bound token.
+ */
+export async function getGitHubAppInstallationRepository(
+  settings: Settings,
+  input: GitHubAppInstallationRepositoryLookupInput,
+): Promise<GitHubRepository | null> {
+  return await createGitHubAppInstallationRepositoryLookup(settings)(input);
+}
+
+/**
+ * One lookup client that reuses a server-side installation token per
+ * installation for its lifetime (one worker turn), so several bare repository
+ * URIs from the same installation cost one mint plus one read each.
+ */
+export function createGitHubAppInstallationRepositoryLookup(
+  settings: Settings,
+): GitHubAppInstallationRepositoryLookup {
+  const missing = githubAppMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
+  const tokens = new Map<number, Promise<GitHubAppInstallationToken>>();
+  const installationToken = (installationId: number): Promise<GitHubAppInstallationToken> => {
+    let pending = tokens.get(installationId);
+    if (!pending) {
+      pending = createGitHubAppJwt(settings).then((jwt) =>
+        createInstallationToken(jwt, { installationId }),
+      );
+      pending.catch(() => tokens.delete(installationId));
+      tokens.set(installationId, pending);
+    }
+    return pending;
+  };
+  return async (input) => {
+    const owner = input.owner.trim();
+    const name = input.name.trim();
+    if (
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u.test(owner) ||
+      !/^[A-Za-z0-9._-]+$/u.test(name)
+    ) {
+      return null;
+    }
+    const token = await installationToken(input.installationId);
+    const response = await fetch(
+      `${githubApiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`,
+      {
+        headers: githubHeaders(token.token),
+        signal: AbortSignal.timeout(githubTokenMintTimeoutMs),
+      },
+    );
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      throw new GitHubAppApiError(await githubErrorMessage(response), response.status);
+    }
+    const payload = await response.json();
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new GitHubAppApiError("GitHub returned an invalid repository payload");
+    }
+    const record = payload as Record<string, unknown>;
+    const account =
+      record.owner && typeof record.owner === "object" && !Array.isArray(record.owner)
+        ? (record.owner as Record<string, unknown>)
+        : {};
+    return repositoryFromPayload(record, input.installationId, account);
+  };
+}
+
 export async function createGitHubAppInstallationToken(
   settings: Settings,
   input: {
