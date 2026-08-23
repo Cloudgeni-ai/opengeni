@@ -3787,6 +3787,12 @@ export async function prepareAgentTools(
       }),
     );
   }
+  const exposesDeferredPreparation = deferNonEager && deferredEntries.length > 0;
+  const closePublishedServers = async (): Promise<void> => {
+    await localToolServer?.close().catch(() => undefined);
+    await connectedEagerBestEffort?.close().catch(() => undefined);
+    await connectedEagerRequired?.close().catch(() => undefined);
+  };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
     try {
@@ -3847,11 +3853,15 @@ export async function prepareAgentTools(
         codexConnectorNamespaces,
       };
     } catch (error) {
-      await localToolServer?.close().catch(() => undefined);
+      // In deferred mode the eager and in-process servers have already been
+      // published to the Agent. The provisional PreparedAgentTools below owns
+      // them until turn finalization; a background preparation failure may
+      // clean up only resources acquired by that deferred preparation.
+      if (!exposesDeferredPreparation) {
+        await closePublishedServers();
+      }
       await connectedDeferredBestEffort?.close().catch(() => undefined);
       await connectedDeferredRequired?.close().catch(() => undefined);
-      await connectedEagerBestEffort?.close().catch(() => undefined);
-      await connectedEagerRequired?.close().catch(() => undefined);
       throw error;
     }
   };
@@ -3873,13 +3883,27 @@ export async function prepareAgentTools(
     },
   );
   void ready.catch(() => undefined);
-  await Promise.all(
-    [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
-      async (server) => {
-        if (server instanceof PrefixedMcpServer) await server.freezeTools();
-      },
-    ),
-  );
+  try {
+    await Promise.all(
+      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
+        async (server) => {
+          if (server instanceof PrefixedMcpServer) await server.freezeTools();
+        },
+      ),
+    );
+  } catch (error) {
+    // Publication did not complete, so no caller can own these resources.
+    // Join the bounded deferred preparation and let its complete owner close
+    // every server when available; if preparation itself failed, it already
+    // released deferred resources and this scope still owns eager/local ones.
+    const fullyPrepared = await ready.catch(() => null);
+    if (fullyPrepared) {
+      await fullyPrepared.close().catch(() => undefined);
+    } else {
+      await closePublishedServers();
+    }
+    throw error;
+  }
 
   const deferredServers = deferredEntries.map(
     (entry) =>
@@ -3903,7 +3927,17 @@ export async function prepareAgentTools(
     attemptToolEnvironment: null,
     resolvedMcpConnectionIds,
     close: async () => {
-      const prepared = await ready;
+      let prepared: PreparedAgentTools;
+      try {
+        prepared = await ready;
+      } catch (error) {
+        // completePreparation already released any deferred resources. The
+        // provisional owner must still release the eager and in-process
+        // servers that remained live so the Agent could observe the original
+        // preparation failure instead of a synthetic "server is closed" race.
+        await closePublishedServers();
+        throw error;
+      }
       await prepared.close();
     },
     codexConnectorNamespaces,
