@@ -2271,6 +2271,7 @@ describe("agent goal_wait continuation hold", () => {
       wakeRevision: 1,
       observedRevision: 0,
       nextAttemptAt: held.untilAt,
+      holdReason: "waiting for two child sessions to report",
     });
   });
 

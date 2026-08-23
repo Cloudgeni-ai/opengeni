@@ -1,5 +1,6 @@
 import { CalendarClockIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
 
+import { formatWaitingSince } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { RailAggregateStatus } from "@/lib/sessions-group";
 
@@ -56,6 +57,13 @@ export function RailTrailingMetadata({
 }) {
   const hasStatusMarker = summary.kind !== "neutral";
   const hasRelativeTime = Boolean(relativeTime);
+  // How long the longest-waiting session behind a "needs you" marker has been
+  // blocked on a human. A collapsed parent with a child parked for ten hours
+  // must say so, not hide it behind a dot.
+  const waitingFor =
+    summary.kind === "needs_attention" && summary.attentionSince
+      ? formatWaitingSince(summary.attentionSince)
+      : "";
   if (!scheduled && !hasStatusMarker && !hasRelativeTime) return null;
   return (
     <span data-session-row-metadata className="inline-flex shrink-0 items-center justify-end gap-1">
@@ -64,6 +72,15 @@ export function RailTrailingMetadata({
           aria-label="Scheduled task"
           className="size-3.5 shrink-0 text-fg-subtle"
         />
+      ) : null}
+      {waitingFor ? (
+        <span
+          data-session-row-waiting
+          title={summary.label}
+          className="shrink-0 whitespace-nowrap text-2xs tabular-nums text-status-waiting"
+        >
+          {waitingFor}
+        </span>
       ) : null}
       {hasStatusMarker ? (
         <span className="flex size-3 items-center justify-center" title={summary.label}>

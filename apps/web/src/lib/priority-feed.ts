@@ -112,16 +112,25 @@ export function buildPriorityFeed(sessions: Session[], now: Date = new Date()): 
       // above, so this branch is exactly requires_action or attention
       // descendants; the rail badge counts the same predicate.
       const waitingAgents = attentionDescendants + (session.status === "requires_action" ? 1 : 0);
+      // "… for 10 h": how long the longest-waiting blocked agent has been
+      // parked on a human, from the server's requires_action timestamps.
+      const blockedSince =
+        session.status === "requires_action"
+          ? session.requiresActionSince
+          : session.treeStats?.attentionSince;
+      const blockedFor = blockedSince
+        ? ` for ${formatAgentMinutes(minutesSince(blockedSince, now))}`
+        : "";
       blocked.push({
         session,
         tier: "blocked",
         rank: null,
         reason:
           session.status === "requires_action"
-            ? reason
+            ? `${reason}${blockedFor}`
             : `${attentionDescendants} spawned agent${
                 attentionDescendants === 1 ? " needs" : "s need"
-              } you`,
+              } you${blockedFor}`,
         waitingMinutes,
         waitingAgents,
         costMinutes: waitingMinutes * waitingAgents,

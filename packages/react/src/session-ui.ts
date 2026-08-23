@@ -24,7 +24,12 @@ export type {
 } from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
-export { SessionChrome, sessionChromeGoalPillState } from "./components/session-chrome";
+export {
+  SessionChrome,
+  sessionChromeGoalPillExplanation,
+  sessionChromeGoalPillLabel,
+  sessionChromeGoalPillState,
+} from "./components/session-chrome";
 export type {
   SessionChromeAgentsSignal,
   SessionChromeProps,

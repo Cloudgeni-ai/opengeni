@@ -277,3 +277,76 @@ describe("creatorInitials", () => {
     expect(hue).toBeLessThan(360);
   });
 });
+
+describe("summarizeRailNodes waiting duration", () => {
+  const NOW = new Date("2026-08-22T12:00:00.000Z");
+  const hoursAgo = (hours: number) => new Date(NOW.getTime() - hours * 3_600_000).toISOString();
+
+  test("says how long the longest-waiting hidden descendant has needed input", () => {
+    const forest = buildRailForest([
+      session({
+        id: "root",
+        status: "idle",
+        treeStats: {
+          directChildren: 3,
+          totalDescendants: 3,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 2,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+          attentionSince: hoursAgo(10),
+          truncated: false,
+        },
+      }),
+    ]);
+    expect(summarizeRailNodes(forest.running, new Map(), NOW)).toEqual({
+      kind: "needs_attention",
+      count: 2,
+      total: 4,
+      label: "2 need you · 10h",
+      attentionSince: hoursAgo(10),
+    });
+  });
+
+  test("takes the earliest wait across the node's own turn and its descendants", () => {
+    const forest = buildRailForest([
+      session({
+        id: "root",
+        status: "requires_action",
+        requiresActionSince: hoursAgo(2),
+        treeStats: {
+          directChildren: 1,
+          totalDescendants: 1,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 1,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+          attentionSince: hoursAgo(26),
+          truncated: false,
+        },
+      }),
+      session({
+        id: "other-root",
+        status: "requires_action",
+        requiresActionSince: hoursAgo(5),
+      }),
+    ]);
+    const nodes = [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
+    expect(summarizeRailNodes(nodes, new Map(), NOW)).toMatchObject({
+      kind: "needs_attention",
+      count: 3,
+      label: "3 need you · 26h",
+      attentionSince: hoursAgo(26),
+    });
+  });
+
+  test("keeps the plain label when no server reported a waiting timestamp", () => {
+    const forest = buildRailForest([session({ id: "root", status: "requires_action" })]);
+    const nodes = [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
+    const summary = summarizeRailNodes(nodes, new Map(), NOW);
+    expect(summary.label).toBe("1 needs you");
+    expect("attentionSince" in summary).toBe(false);
+  });
+});

@@ -1,12 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   createDb,
   createSession,
   getSessionLineage,
   getSessionRootId,
   listSessions,
+  withWorkspaceSessionActivityRls,
   type Database,
   type DbClient,
 } from "../src/index";
@@ -171,9 +173,31 @@ describe("session lineage", () => {
       parentSessionId: root.id,
     }).catch(() => null);
 
+    // The grandchild is parked on a human: its lineage node says since when.
+    const waitingSince = new Date(Date.now() - 10 * 3_600_000);
+    waitingSince.setMilliseconds(0);
+    await withWorkspaceSessionActivityRls(db, workspaceId, async (scoped) => {
+      await scoped.execute(sql`
+        update sessions set status = 'requires_action' where id = ${grandchild.id}`);
+      await scoped.execute(sql`
+        insert into session_turns (
+          id, account_id, workspace_id, session_id, trigger_event_id,
+          temporal_workflow_id, status, position, prompt, model,
+          reasoning_effort, sandbox_backend, resources, tools, metadata,
+          execution_generation, updated_at
+        ) values (
+          ${crypto.randomUUID()}, ${accountId}, ${workspaceId}, ${grandchild.id},
+          ${crypto.randomUUID()}, ${`wf-${grandchild.id}`}, 'requires_action',
+          2, 'waiting prompt', 'gpt', 'medium', 'none', '[]'::jsonb, '[]'::jsonb,
+          '{}'::jsonb, 1, ${waitingSince.toISOString()}::timestamptz
+        )`);
+    });
+
     const lineage = await getSessionLineage(db, workspaceId, child.id);
     expect(lineage?.ancestors.map((s) => s.id)).toEqual([root.id]);
     expect(lineage?.children.map((n) => n.session.id)).toEqual([grandchild.id]);
+    expect(lineage?.children[0]?.session.requiresActionSince).toBe(waitingSince.toISOString());
+    expect(lineage?.ancestors[0]?.requiresActionSince).toBeNull();
     expect(lineage?.truncated).toBe(false);
     expect(await getSessionRootId(db, workspaceId, child.id)).toBe(root.id);
     expect(await getSessionRootId(db, workspaceId, grandchild.id)).toBe(root.id);

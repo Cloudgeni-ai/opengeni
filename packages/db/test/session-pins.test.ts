@@ -222,6 +222,28 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       updated_at = now()
       where id in (${child.id}, ${grandchild.id})`,
     );
+    // The grandchild's one open requires_action turn (the database allows a
+    // single current inference turn per session) entered that state ten
+    // hours ago; that moment is the descendant wait the parent surfaces.
+    const waitingSince = new Date(Date.now() - 10 * 3_600_000);
+    waitingSince.setMilliseconds(0);
+    const waitingTurnId = crypto.randomUUID();
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model,
+        reasoning_effort, sandbox_backend, resources, tools, metadata,
+        execution_generation, updated_at
+      ) values (
+        ${waitingTurnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${grandchild.id},
+        ${crypto.randomUUID()}, ${`wf-${waitingTurnId}`}, 'requires_action',
+        2, 'waiting prompt', 'test-model',
+        'medium', 'none', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb, 1,
+        ${waitingSince.toISOString()}::timestamptz
+      )`,
+    );
 
     const roots = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
@@ -237,9 +259,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       failedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
+      attentionSince: waitingSince.toISOString(),
       truncated: false,
     });
     expect(roots.sessions.some((row) => row.id === child.id)).toBe(false);
+    // The root itself is not waiting, so its own field is null.
+    expect(roots.sessions.find((row) => row.id === root.id)?.requiresActionSince).toBeNull();
 
     const children = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
@@ -256,8 +281,18 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       failedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
+      attentionSince: waitingSince.toISOString(),
       truncated: false,
     });
+
+    // The waiting session's own list row carries when its turn entered
+    // requires_action, and a session without such a turn reports null.
+    const grandchildren = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      parentSessionId: child.id,
+    });
+    expect(grandchildren.sessions[0]?.requiresActionSince).toBe(waitingSince.toISOString());
+    expect(children.sessions[0]?.requiresActionSince).toBeNull();
   });
 
   test("counts effective pauses and excludes paused descendants from active totals", async () => {
@@ -440,6 +475,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       failedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
+      attentionSince: null,
       truncated: true,
     });
     expect(stats.get(deepIds[0]!)).toEqual({
@@ -452,6 +488,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       failedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
+      attentionSince: null,
       truncated: true,
     });
     expect(stats.get(wideRoot.id)).toEqual({
@@ -464,6 +501,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       failedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
+      attentionSince: null,
       truncated: true,
     });
   }, 180_000);
@@ -560,6 +598,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       failedDescendants: 0,
       unreadDescendants: 0,
       activelyWorkingDescendants: 0,
+      attentionSince: null,
       truncated: true,
     });
   }, 60_000);

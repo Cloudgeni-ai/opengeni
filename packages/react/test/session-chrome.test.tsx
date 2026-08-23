@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 
-import { SessionChrome, sessionChromeGoalPillState } from "../src/components/session-chrome";
+import {
+  SessionChrome,
+  sessionChromeGoalPillExplanation,
+  sessionChromeGoalPillLabel,
+  sessionChromeGoalPillState,
+} from "../src/components/session-chrome";
+import { formatClockTime } from "../src/lib/format";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
@@ -657,5 +663,109 @@ describe("SessionChrome", () => {
     expect(body).not.toBeNull();
     expect(body?.style.maxHeight).toBe("var(--og-session-chrome-panel-max-height)");
     expect(body?.className).toContain("overflow-y-auto");
+  });
+});
+
+describe("SessionChrome goal pill reasons", () => {
+  const paused = (pausedReason: string | null) =>
+    goal({
+      status: "paused",
+      pausedReason,
+      continuation: {
+        state: "inactive",
+        reason: "goal_inactive",
+        wakeRevision: 1,
+        observedRevision: 1,
+        nextAttemptAt: null,
+        lastError: null,
+      },
+    });
+
+  test("spells out why a goal is paused", () => {
+    expect(sessionChromeGoalPillLabel("paused", paused("max_auto_continuations").goal)).toBe(
+      "Paused · cap",
+    );
+    expect(sessionChromeGoalPillLabel("paused", paused("limits").goal)).toBe("Paused · budget");
+    expect(sessionChromeGoalPillLabel("paused", paused("user_pause").goal)).toBe(
+      "Paused · manually",
+    );
+    expect(sessionChromeGoalPillLabel("paused", paused("api").goal)).toBe("Paused · manually");
+    expect(sessionChromeGoalPillLabel("paused", paused("agent").goal)).toBe("Paused · agent");
+    // Unknown/legacy reasons and missing records keep the bare label.
+    expect(sessionChromeGoalPillLabel("paused", paused("something_else").goal)).toBe("Paused");
+    expect(sessionChromeGoalPillLabel("paused", paused(null).goal)).toBe("Paused");
+    expect(sessionChromeGoalPillLabel("paused", null)).toBe("Paused");
+    expect(sessionChromeGoalPillLabel("pursuing", goal().goal)).toBe("Pursuing");
+    expect(
+      sessionChromeGoalPillExplanation("paused", paused("max_auto_continuations").goal),
+    ).toContain("continuation cap");
+    expect(sessionChromeGoalPillExplanation("paused", paused("limits").goal)).toContain("limits");
+    expect(sessionChromeGoalPillExplanation("paused", paused("agent").goal)).toContain(
+      "human decision",
+    );
+    expect(sessionChromeGoalPillExplanation("pursuing", goal().goal)).toBeNull();
+  });
+
+  test("explains idle backoff as the next goal check time", () => {
+    const record = goal({
+      continuation: {
+        state: "scheduled",
+        reason: "backoff_pending",
+        wakeRevision: 2,
+        observedRevision: 1,
+        nextAttemptAt: "2026-08-22T14:05:00.000Z",
+        lastError: null,
+      },
+    }).goal;
+    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Scheduled");
+    expect(sessionChromeGoalPillExplanation("scheduled", record)).toBe(
+      `Next goal check at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
+    );
+  });
+
+  test("explains an agent goal_wait hold with its reason and deadline", () => {
+    const record = goal({
+      continuation: {
+        state: "blocked",
+        reason: "held_for_input",
+        wakeRevision: 2,
+        observedRevision: 1,
+        nextAttemptAt: "2026-08-22T18:00:00.000Z",
+        lastError: null,
+        holdReason: "waiting for two child sessions to report",
+      },
+    }).goal;
+    expect(sessionChromeGoalPillLabel("held", record)).toBe("Held");
+    const explanation = sessionChromeGoalPillExplanation("held", record);
+    expect(explanation).toContain("Waiting for input: waiting for two child sessions to report");
+    expect(explanation).toContain(`until ${formatClockTime("2026-08-22T18:00:00.000Z")}`);
+    // Older servers omit holdReason; the hold still explains itself.
+    const legacy = goal({
+      continuation: { ...record!.continuation!, holdReason: undefined },
+    }).goal;
+    expect(sessionChromeGoalPillExplanation("held", legacy)).toContain("Waiting for input until");
+  });
+
+  test("renders the pause reason on the chip and in the panel", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer()}
+        goal={paused("max_auto_continuations")}
+      />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="goal"]',
+    );
+    expect(chip?.textContent).toContain("Paused · cap");
+    expect(chip?.getAttribute("title")).toContain("continuation cap");
+    await act(async () => {
+      chip?.click();
+    });
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="goal"]');
+    expect(panel?.textContent).toContain("Paused · cap");
+    expect(
+      panel?.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
+    ).toContain("New input");
   });
 });

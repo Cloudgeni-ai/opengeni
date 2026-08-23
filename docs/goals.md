@@ -292,8 +292,9 @@ recovery of the same turn, not creation or charging of another continuation.
   `continuation` projection from one repeatable-read Postgres snapshot
   (`sessions:read`; 404 when the session has no goal). The projection reports
   `inactive`, `scheduled`, `running`, `blocked`, or `invariant_broken`, with a
-  typed reason, wake/observed revisions, optional next-attempt time, and the
-  latest workflow-wake error. Clients must not infer autonomy from goal/session
+  typed reason, wake/observed revisions, optional next-attempt time, the
+  latest workflow-wake error, and (for `held_for_input`) the agent's stated
+  `holdReason` so a human sees why the goal is waiting and until when. Clients must not infer autonomy from goal/session
   status alone: `running` is reserved for a live goal-owned turn and alone
   means "Pursuing". A live human/API or system turn blocks autonomous
   continuation; recovering or queued work is scheduled. Pause, approval,

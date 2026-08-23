@@ -21,6 +21,7 @@ import { BotIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { STATUS_META, StatusDot, type StatusTone } from "@/components/ui/status-dot";
+import { formatWaitingSince } from "@/lib/format";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,6 +33,33 @@ import { cn } from "@/lib/utils";
 /** Children (depth 0) plus one level of grandchildren (depth 1) — the tree goes
     exactly one level deeper, so a depth-1 row never draws its own expander. */
 const MAX_DEPTH = 1;
+
+/**
+ * The loud trailing word for a row a manager must act on. A child waiting on a
+ * human also says for HOW LONG ("Needs you · 10h", from the server's
+ * `requiresActionSince`), so a parked child is visible at a glance and the row
+ * links straight to where the human answers. Null for calm rows.
+ */
+export function subagentAttentionHint(
+  session: Pick<SessionSummary, "status" | "requiresActionSince">,
+  paused: boolean,
+  now: Date = new Date(),
+): { word: string; waitingFor: string; title?: string } | null {
+  if (session.status === "failed") return { word: "Failed", waitingFor: "" };
+  if (session.status === "requires_action") {
+    const since = session.requiresActionSince ?? null;
+    const waitingFor = since ? formatWaitingSince(since, now) : "";
+    return {
+      word: `Needs you${waitingFor ? ` · ${waitingFor}` : ""}`,
+      waitingFor,
+      ...(since
+        ? { title: `Waiting for your input since ${new Date(since).toLocaleString()}` }
+        : {}),
+    };
+  }
+  if (paused) return { word: "Paused", waitingFor: "" };
+  return null;
+}
 
 /** Map a session lifecycle status onto the six-tone status language. */
 export function sessionStatusTone(status: SessionStatus): StatusTone {
@@ -110,16 +138,12 @@ function SubagentRow({
   // time), and turns loud ONLY for the two rows a manager must act on: a failed
   // agent and one waiting on you spell the word out in their own status tone, so
   // they don't hide behind a color dot in a long list.
-  const attentionWord =
-    node.session.status === "failed"
-      ? "Failed"
-      : node.session.status === "requires_action"
-        ? "Needs you"
-        : paused
-          ? "Paused"
-          : null;
+  const attention = subagentAttentionHint(node.session, paused);
+  const attentionWord = attention?.word ?? null;
   const hint = attentionWord ?? formatRelativeTime(node.session.updatedAt);
   const hintClass = attentionWord ? cn(STATUS_META[tone].text, "font-medium") : "text-fg-subtle";
+  const hintTitle = attention?.title;
+  const waitingFor = attention?.waitingFor ?? "";
 
   return (
     <li>
@@ -160,7 +184,13 @@ function SubagentRow({
           <StatusDot tone={tone} pulse={live} className="size-1.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{title}</span>
           {hint ? (
-            <span className={cn("shrink-0 text-2xs tabular-nums", hintClass)}>{hint}</span>
+            <span
+              className={cn("shrink-0 text-2xs tabular-nums", hintClass)}
+              title={hintTitle}
+              data-subagent-waiting={waitingFor || undefined}
+            >
+              {hint}
+            </span>
           ) : null}
         </Link>
       </div>
