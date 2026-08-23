@@ -28,6 +28,10 @@ import {
   type Database,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
+import {
+  adoptManagedSessionBackgroundCommand,
+  settleSessionBackgroundCommandForRetainedProcess,
+} from "@opengeni/db/session-background-commands";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
   isProviderSandboxGoneDuringRoutedOperation,
@@ -316,6 +320,14 @@ export function wrapChannelABoxWithRouting(
               routeEpoch: exactAdmission.routeEpoch,
             },
           });
+          await adoptManagedSessionBackgroundCommand(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sessionId: ids.sessionId,
+            commandId: retainedProcess.id,
+            retainedProcessId: retainedProcess.id,
+            command: op,
+          });
           return;
         }
         await verifyDirectWorkspaceMutationSettlement(db, {
@@ -427,6 +439,15 @@ export function wrapChannelABoxWithRouting(
           exitCode: proof.exitCode,
           reason: proof.reason,
           idleGraceMs: settings.sandboxIdleGraceMs,
+        });
+        await settleSessionBackgroundCommandForRetainedProcess(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: ids.sessionId,
+          retainedProcessId: process.id,
+          outcome: proof.outcome,
+          exitCode: proof.exitCode,
+          reason: proof.reason,
         });
       }
     : undefined;

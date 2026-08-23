@@ -35,6 +35,10 @@ import {
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
+import {
+  adoptManagedSessionBackgroundCommand,
+  settleSessionBackgroundCommandForRetainedProcess,
+} from "@opengeni/db/session-background-commands";
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
@@ -522,6 +526,14 @@ function afterPersistableHomeMutation(
             routeEpoch: exactAdmission.routeEpoch,
           },
         });
+        await adoptManagedSessionBackgroundCommand(services.db, {
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: ids.sessionId,
+          commandId: retainedProcess.id,
+          retainedProcessId: retainedProcess.id,
+          command: op,
+        });
       } catch (error) {
         if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
         const durable = error.process;
@@ -671,6 +683,15 @@ function settleRetainedProcessForTurn(
       exitCode: proof.exitCode,
       reason: proof.reason,
       idleGraceMs: services.settings.sandboxIdleGraceMs,
+    });
+    await settleSessionBackgroundCommandForRetainedProcess(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      retainedProcessId: process.id,
+      outcome: proof.outcome,
+      exitCode: proof.exitCode,
+      reason: proof.reason,
     });
   };
 }

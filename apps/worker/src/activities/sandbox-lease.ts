@@ -61,6 +61,7 @@ import {
   type SandboxRetainedProcess,
   type LeaseSnapshot,
 } from "@opengeni/db";
+import { settleSessionBackgroundCommandForRetainedProcess } from "@opengeni/db/session-background-commands";
 import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import {
@@ -279,6 +280,7 @@ export type RetainedProcessProbeFn = (
   settings: ActivityServices["settings"],
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
+  mode?: "observe" | "cancel",
 ) => Promise<RetainedProcessProbeResult>;
 
 export type HistoricalModalSandboxLifecycleProbeFn = typeof inspectModalSandboxLifecycle;
@@ -1111,7 +1113,12 @@ async function reconcileTerminalRetainedProcesses(
           }
         } else {
           try {
-            observation = await probe(settings, lease!, process);
+            observation = await probe(
+              settings,
+              lease!,
+              process,
+              claim.ownerState === "background_stopping" ? "cancel" : "observe",
+            );
           } catch (error) {
             observability.warn("sandbox reaper: retained-process provider probe failed", {
               processId: process.id,
@@ -1190,6 +1197,15 @@ async function reconcileTerminalRetainedProcesses(
         exitCode: proof.exitCode,
         reason: proof.reason,
         idleGraceMs: settings.sandboxIdleGraceMs,
+      });
+      await settleSessionBackgroundCommandForRetainedProcess(db, {
+        accountId: process.accountId,
+        workspaceId: process.workspaceId,
+        sessionId: process.sessionId,
+        retainedProcessId: process.id,
+        outcome: proof.outcome,
+        exitCode: proof.exitCode,
+        reason: proof.reason,
       });
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
@@ -1285,6 +1301,7 @@ export async function probeRetainedProcessAtProvider(
   settings: ActivityServices["settings"],
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
+  mode: "observe" | "cancel" = "observe",
 ): Promise<RetainedProcessProbeResult> {
   if (
     lease.id !== process.leaseId ||
@@ -1419,7 +1436,7 @@ export async function probeRetainedProcessAtProvider(
     result = await withRetainedProcessProbeTimeout(
       session.writeStdin({
         sessionId: process.providerSessionId,
-        chars: "",
+        chars: mode === "cancel" ? "\u0003" : "",
         yieldTimeMs: 1_000,
         maxOutputTokens: 2_000,
       }),

@@ -42412,7 +42412,8 @@ export async function getRetainedProcess(
 }
 
 /** Claim a bounded, oldest-due batch of active retained processes whose exact
- * owner attempt is closed (or whose direct request already returned). Claim
+ * owner attempt is closed, whose direct request returned, or whose lifecycle
+ * was explicitly transferred to a session background command. Claim
  * expiry only recovers coordination after worker death; it is never provider
  * exit proof. Rows that settle between the global claim and scoped read are
  * deliberately omitted. */
@@ -57054,6 +57055,12 @@ export async function reconcileSessionAttemptQuiescence(
                         and process.session_id = attempt.session_id
                         and process.id = admission.actor_id
                         and process.owner_attempt_id = attempt.id
+                        and not exists (
+                          select 1
+                          from session_background_commands command
+                          where command.retained_process_id = process.id
+                            and command.state in ('running', 'stopping')
+                        )
                     )
                   )
                 )
@@ -57066,6 +57073,12 @@ export async function reconcileSessionAttemptQuiescence(
                 and process.session_id = attempt.session_id
                 and process.owner_attempt_id = attempt.id
                 and process.state = 'active'
+                and not exists (
+                  select 1
+                  from session_background_commands command
+                  where command.retained_process_id = process.id
+                    and command.state in ('running', 'stopping')
+                )
             )
           ) as writer_pending
         from session_turn_attempts attempt

@@ -8674,6 +8674,61 @@ export const sandboxRetainedProcesses = pgTable(
   }),
 );
 
+export const sessionBackgroundCommands = pgTable(
+  "session_background_commands",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    provider: text("provider", { enum: ["managed", "connected_machine"] }).notNull(),
+    state: text("state", { enum: ["running", "stopping", "exited", "lost"] })
+      .notNull()
+      .default("running"),
+    retainedProcessId: uuid("retained_process_id"),
+    enrollmentId: uuid("enrollment_id"),
+    connectionInstanceId: uuid("connection_instance_id"),
+    opId: text("op_id"),
+    commandPreview: text("command_preview").notNull().default(""),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+    cancelRequestedBy: text("cancel_requested_by"),
+    exitCode: integer("exit_code"),
+    settlementReason: text("settlement_reason"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_background_commands_workspace_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_background_commands_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    retainedProcess: foreignKey({
+      name: "session_background_commands_process_fk",
+      columns: [table.retainedProcessId],
+      foreignColumns: [sandboxRetainedProcesses.id],
+    }).onDelete("restrict"),
+    managedProcess: uniqueIndex("session_background_commands_process_uq")
+      .on(table.retainedProcessId)
+      .where(sql`${table.retainedProcessId} is not null`),
+    connectedOp: uniqueIndex("session_background_commands_connected_op_uq")
+      .on(table.workspaceId, table.enrollmentId, table.connectionInstanceId, table.opId)
+      .where(sql`${table.provider} = 'connected_machine'`),
+    activeSession: index("session_background_commands_active_session_idx")
+      .on(table.workspaceId, table.sessionId, table.state, table.startedAt, table.id)
+      .where(sql`${table.state} in ('running', 'stopping')`),
+    stopping: index("session_background_commands_stopping_idx")
+      .on(table.cancelRequestedAt, table.id)
+      .where(sql`${table.state} = 'stopping'`),
+  }),
+);
+
 // The recording lifecycle states (P4.3). Exported so the activity + the query
 // layer share one source of truth for the §3.1 state machine.
 export const sessionRecordingStateValues = [

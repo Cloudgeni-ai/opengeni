@@ -29,6 +29,11 @@ import {
   type SandboxRetainedProcess,
   type SandboxRetainedProcessIdentity,
 } from "@opengeni/db";
+import {
+  adoptManagedSessionBackgroundCommand,
+  listSessionBackgroundCommands,
+  requestSessionBackgroundCommandCancellation,
+} from "@opengeni/db/session-background-commands";
 import { createObservability, type Observability } from "@opengeni/observability";
 import {
   classifyRetainedProcessPollResult,
@@ -471,6 +476,55 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("session-owned cancellation is interrupted and settled with the process", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    await adoptManagedSessionBackgroundCommand(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      commandId: fixture.process.id,
+      retainedProcessId: fixture.process.id,
+      command: "bun test --watch",
+    });
+    const cancellation = await requestSessionBackgroundCommandCancellation(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      commandId: fixture.process.id,
+      subjectId: "user:test-owner",
+    });
+    expect(cancellation).toMatchObject({ accepted: true, command: { state: "stopping" } });
+
+    let observedMode: "observe" | "cancel" | undefined;
+    await runReaper(async (_settings, _lease, process, mode) => {
+      expect(process.id).toBe(fixture.process.id);
+      observedMode = mode;
+      return {
+        status: "proved",
+        proof: { outcome: "exited", exitCode: 130, reason: "provider_exit_banner" },
+      };
+    });
+
+    expect(observedMode).toBe("cancel");
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "exited",
+      processExitCode: 130,
+      processHolders: 0,
+    });
+    const commands = await listSessionBackgroundCommands(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+    });
+    expect(commands[0]).toMatchObject({
+      id: fixture.process.id,
+      state: "exited",
+      exitCode: 130,
+      settlementReason: "provider_exit_banner",
+    });
+  });
+
   test("classifies only exact provider exit/loss banners and defers running or malformed output", () => {
     expect(
       classifyRetainedProcessPollResult(
