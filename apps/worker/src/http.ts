@@ -118,12 +118,22 @@ export function dbReadyCheck(
   db: Database,
   posture?: RuntimeDatabasePostureOptions,
 ): () => Promise<void> {
-  return async () => {
-    if (posture) {
-      await assertRuntimeDatabasePosture(db, posture);
-      return;
-    }
-    await db.execute(dbSql`select 1`);
+  let inFlight: Promise<void> | undefined;
+  return () => {
+    // The HTTP timeout cannot cancel a driver query. Reuse an outstanding
+    // attempt so repeated kubelet probes cannot queue an unbounded tail behind
+    // one slow or disconnected database connection.
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      if (posture) {
+        await assertRuntimeDatabasePosture(db, posture);
+        return;
+      }
+      await db.execute(dbSql`select 1`);
+    })().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }
 
