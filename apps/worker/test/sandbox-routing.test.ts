@@ -98,8 +98,8 @@ function busWithAgent(
   bus.subscribeRequests(
     subjectFor(workspaceId, agentId, connectionInstanceId),
     async (payload, subject) => {
-      onRequest?.();
       const req = ControlRequest.decode(payload);
+      if (req.op?.$case === "opStart") onRequest?.();
       const res = await stream.controlRpc.request(subject, req, {
         timeoutMs: 0,
       });
