@@ -37,7 +37,7 @@ export type SandboxFilesProps = {
    * surface the ordinary file-view error instead of changing files silently. */
   initialSelectedPath?: string | null | undefined;
   onSelectedPathChange?: ((path: string | null) => void) | undefined;
-  /** A guarded diff path routed here by the parent workspace. */
+  /** A deliberate file-open path routed here by the parent workspace. */
   requestedPath?: string | undefined;
   /** 1-based line to reveal after `requestedPath` opens. */
   requestedLine?: number | null | undefined;
@@ -92,6 +92,10 @@ export function SandboxFiles({
   // opening a file never lands you in a stale dirty editor for a different path.
   const [editMode, setEditMode] = useState(false);
   const [focusLine, setFocusLine] = useState<number | null>(null);
+  const [treeRevealRequest, setTreeRevealRequest] = useState<{
+    path: string;
+    requestId: string | number;
+  } | null>(null);
   const [liveRequestedPath, setLiveRequestedPath] = useState<string | null>(null);
   const [viewReloadRevision, setViewReloadRevision] = useState(0);
   const pendingRequestRef = useRef<string | number | null>(null);
@@ -102,6 +106,7 @@ export function SandboxFiles({
     if (!requestedPath || requestKey === null) {
       pendingRequestRef.current = null;
       handledRequestRef.current = null;
+      setTreeRevealRequest(null);
       return;
     }
     if (handledRequestRef.current === requestKey) {
@@ -109,6 +114,7 @@ export function SandboxFiles({
     }
     if (!requestedPathReady) {
       pendingRequestRef.current = requestKey;
+      setTreeRevealRequest(null);
       return;
     }
     handledRequestRef.current = requestKey;
@@ -117,6 +123,7 @@ export function SandboxFiles({
     onSelectedPathChange?.(requestedPath);
     setEditMode(false);
     setFocusLine(requestedLine != null && requestedLine > 0 ? requestedLine : null);
+    setTreeRevealRequest({ path: requestedPath, requestId: requestKey });
   }, [onSelectedPathChange, requestKey, requestedLine, requestedPath, requestedPathReady]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
@@ -177,6 +184,7 @@ export function SandboxFiles({
       onSelectedPathChange?.(path);
       setEditMode(false);
       setFocusLine(null);
+      setTreeRevealRequest(null);
       setLiveRequestedPath(null);
       setViewReloadRevision(0);
     },
@@ -282,6 +290,12 @@ export function SandboxFiles({
           <FileBrowser
             result={files}
             selectedPath={selected ?? undefined}
+            {...(treeRevealRequest
+              ? {
+                  revealPath: treeRevealRequest.path,
+                  revealPathRequestId: treeRevealRequest.requestId,
+                }
+              : {})}
             onSelectFile={selectFile}
             editable={editable}
             emptyState="This directory is empty"

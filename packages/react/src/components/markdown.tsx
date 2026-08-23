@@ -10,7 +10,11 @@ import {
   type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
-import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type Components,
+  type UrlTransform,
+} from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "../lib/cn";
 import { tableElementToTsv } from "../lib/clipboard";
@@ -48,13 +52,13 @@ export type MarkdownProps = {
    */
   streaming?: boolean | undefined;
   /**
-   * Resolve a session-local workspace file link. Path-only links download the
-   * current sandbox bytes; a positive `line` opens Files at that line.
+   * Open a session-local file link in the host's Files surface. The path is the
+   * exact decoded `sandbox:` payload; `line`, when present, is 1-based.
    */
   onSandboxFile?: ((path: string, line?: number) => void | Promise<void>) | undefined;
 };
 
-/** Workspace-relative file plus optional 1-based line from a markdown href. */
+/** Exact target path plus optional 1-based line from a markdown href. */
 export type SandboxFileLocation = {
   path: string;
   line: number | null;
@@ -186,13 +190,19 @@ const baseComponents: Components = {
       {children}
     </td>
   ),
-  img: ({ alt, ...props }) => (
-    <img
-      alt={alt ?? ""}
-      className="my-3 max-w-full rounded-og-md border border-og-border"
-      {...props}
-    />
-  ),
+  img: ({ alt, src, ...props }) =>
+    src ? (
+      <img
+        alt={alt ?? ""}
+        src={src}
+        className="my-3 max-w-full rounded-og-md border border-og-border"
+        {...props}
+      />
+    ) : alt ? (
+      <span className="text-og-fg-subtle" aria-disabled="true">
+        {alt}
+      </span>
+    ) : null,
 };
 
 const MARKDOWN_LINK_CLASS =
@@ -208,6 +218,21 @@ function markdownComponents(onSandboxFile: MarkdownProps["onSandboxFile"]): Comp
           <SandboxMarkdownLink location={location} onSandboxFile={onSandboxFile}>
             {children}
           </SandboxMarkdownLink>
+        );
+      }
+      if (isSandboxHref(href) || !href) {
+        return (
+          <span
+            className="break-words font-medium text-og-fg-subtle underline decoration-dotted underline-offset-2"
+            aria-disabled="true"
+            title={
+              isSandboxHref(href)
+                ? "This sandbox file reference is invalid"
+                : "This link is unavailable"
+            }
+          >
+            {children}
+          </span>
         );
       }
       return (
@@ -236,7 +261,6 @@ function SandboxMarkdownLink({
 }) {
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const { path, line } = location;
-  const opensAtLine = line !== null;
   if (!onSandboxFile) {
     return (
       <span
@@ -248,20 +272,17 @@ function SandboxMarkdownLink({
       </span>
     );
   }
-  const idleTitle = opensAtLine ? `Open ${path} at line ${line}` : `Download ${path}`;
+  const idleTitle = line !== null ? `Open ${path} at line ${line}` : `Open ${path}`;
   return (
     <button
       type="button"
-      className={cn(MARKDOWN_LINK_CLASS, "cursor-pointer disabled:cursor-wait disabled:opacity-70")}
+      className={cn(
+        MARKDOWN_LINK_CLASS,
+        "inline-flex min-h-7 cursor-pointer items-center disabled:cursor-wait disabled:opacity-70 pointer-coarse:min-h-11",
+      )}
       disabled={state === "loading"}
       aria-busy={state === "loading"}
-      title={
-        state === "error"
-          ? opensAtLine
-            ? "Couldn't open this file. Select to retry."
-            : "Download failed. Select to retry."
-          : idleTitle
-      }
+      title={state === "error" ? "Couldn't open this file. Select to retry." : idleTitle}
       onClick={() => {
         setState("loading");
         void Promise.resolve(onSandboxFile(path, line ?? undefined)).then(
@@ -271,50 +292,58 @@ function SandboxMarkdownLink({
       }}
     >
       {children}
-      {state === "loading"
-        ? opensAtLine
-          ? " (opening…)"
-          : " (preparing…)"
-        : state === "error"
-          ? " (retry)"
-          : null}
+      {state === "loading" ? " (opening…)" : state === "error" ? " (retry)" : null}
     </button>
   );
 }
 
-const WORKSPACE_FILE_HREF = /^(?:sandbox:)?\/workspace\/([^?#]+)$/u;
-const TRAILING_LINE = /:([1-9][0-9]*)$/u;
+const SANDBOX_SCHEME = "sandbox:";
+const LEGACY_WORKSPACE_PREFIX = "/workspace/";
+const TRAILING_LINE = /:([0-9]+)$/u;
+const TRAILING_INVALID_LINE = /:-(?:[0-9]+)$|:[0-9]+-[0-9]+$/u;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
 
-/** Parse `sandbox:/workspace/...` or `/workspace/...`, with optional `:line`. */
+function isSandboxHref(href: string | undefined): boolean {
+  return href?.startsWith(SANDBOX_SCHEME) ?? false;
+}
+
+/**
+ * Parse an OpenGeni `sandbox:` application href (plus the historical bare
+ * `/workspace/...` form). The decoded path is intentionally opaque here:
+ * target selection, path policy, and filesystem authority belong to the
+ * session-aware host and its FileSystem boundary.
+ */
 export function sandboxFileLocationFromHref(href: string | undefined): SandboxFileLocation | null {
   if (!href) return null;
-  const match = WORKSPACE_FILE_HREF.exec(href);
-  if (!match?.[1]) return null;
-  const lineMatch = TRAILING_LINE.exec(match[1]);
-  const encodedPath = lineMatch ? match[1].slice(0, -lineMatch[0].length) : match[1];
+  const encodedLocation = isSandboxHref(href)
+    ? href.slice(SANDBOX_SCHEME.length)
+    : href.startsWith(LEGACY_WORKSPACE_PREFIX)
+      ? href
+      : null;
+  if (!encodedLocation || encodedLocation.includes("?") || encodedLocation.includes("#")) {
+    return null;
+  }
+  if (TRAILING_INVALID_LINE.test(encodedLocation)) return null;
+  const lineMatch = TRAILING_LINE.exec(encodedLocation);
+  const encodedPath = lineMatch ? encodedLocation.slice(0, -lineMatch[0].length) : encodedLocation;
   const line = lineMatch?.[1] ? Number(lineMatch[1]) : null;
+  if (line !== null && (!Number.isSafeInteger(line) || line < 1)) return null;
   if (!encodedPath) return null;
   try {
     const path = decodeURIComponent(encodedPath);
-    const segments = path.split("/");
-    return path &&
-      !path.includes("\0") &&
-      segments.every((segment) => segment && segment !== "." && segment !== "..")
-      ? { path, line }
-      : null;
+    return path && !CONTROL_CHARACTER.test(path) ? { path, line } : null;
   } catch {
     return null;
   }
 }
 
-/** Return the workspace-relative path for a supported sandbox-link href. */
+/** Return the exact decoded path for a supported sandbox-link href. */
 export function sandboxFilePathFromHref(href: string | undefined): string | null {
   return sandboxFileLocationFromHref(href)?.path ?? null;
 }
 
-function markdownUrlTransform(url: string): string {
-  return sandboxFileLocationFromHref(url) !== null ? url : defaultUrlTransform(url);
-}
+const markdownUrlTransform: UrlTransform = (url, key, node) =>
+  key === "href" && node.tagName === "a" && isSandboxHref(url) ? url : defaultUrlTransform(url);
 
 /** How long after the stream ends the reveal pipeline stays for trailing animations. */
 /** Trailing ink window after stream end — keep ≥ {@link INK_FADE_MS}. */

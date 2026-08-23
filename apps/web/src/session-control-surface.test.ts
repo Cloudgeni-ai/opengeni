@@ -25,6 +25,12 @@ describe("session control surface architecture", () => {
     expect(route).toContain("loadRetainedScreenshot={loadRetainedScreenshot}");
   });
 
+  test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
+    const route = await source("routes/session.tsx");
+    expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");
+    expect(route).not.toContain("downloadSandboxFileArtifact");
+  });
+
   test("has no second Agents home in the header or dock", async () => {
     const [header, lineage, route] = await Promise.all([
       source("components/rail/session-header.tsx"),
