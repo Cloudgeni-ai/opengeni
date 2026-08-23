@@ -13,7 +13,7 @@ import {
   slackDeliveryTextsCoalesce,
   slackEventInboxEntry,
   slackInteractionRoutePolicy,
-  slackInvocationTaskText,
+  slackInvocationModelContext,
   slackReactionInboxEntry,
   slackReactionTaskText,
   SLACK_DELIVERY_EVENT_TYPES,
@@ -367,30 +367,32 @@ describe("Slack event classification and safe projection", () => {
     ).toMatchObject({ triggerKind: "thread_reply", hasFiles: true });
   });
 
-  test("keeps a maximum-size mention plus context inside the Slack input budget", () => {
-    const prompt = slackInvocationTaskText(
-      {
-        slackMessageTs: "1.2",
-        slackUserId: "U1",
-        text: `<@U_OPEN_GENI> ${"x".repeat(8_000)}`,
-      },
-      {
-        kind: "channel",
-        nextCursor: "more",
-        messages: [
-          {
-            timestamp: "1.1",
-            userId: "U1",
-            botId: "",
-            threadTimestamp: "",
-            text: "preceding context",
-            files: [],
-          },
-        ],
-      },
-    );
+  test("keeps bounded nearby context inside the Slack input budget", () => {
+    const prompt = slackInvocationModelContext("1.2", {
+      kind: "channel",
+      nextCursor: "more",
+      messages: [
+        {
+          timestamp: "1.1",
+          userId: "U1",
+          botId: "",
+          threadTimestamp: "",
+          text: "preceding context",
+          files: [],
+        },
+        {
+          timestamp: "1.2",
+          userId: "U1",
+          botId: "",
+          threadTimestamp: "",
+          text: `<@U_OPEN_GENI> ${"x".repeat(8_000)}`,
+          files: [],
+        },
+      ],
+    });
     expect(prompt.length).toBeLessThanOrEqual(8_000);
-    expect(prompt).toContain("The exact Slack invocation was truncated");
+    expect(prompt).not.toContain("<@U_OPEN_GENI>");
+    expect(prompt).toContain("preceding context");
     expect(prompt).toContain("Only bounded nearby channel context was provided.");
   });
 
