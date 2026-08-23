@@ -186,6 +186,14 @@ export const WORKSPACE_CONTROL_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS",
 ];
 
+/** Child lifecycle notices rollout flag (API + both workers). Default off in
+ * @opengeni/config; a valueEnv passthrough emitted only when set. Enable only
+ * once the whole fleet runs an image that understands the new
+ * `session_system_updates` kinds (an old worker throws on an unknown kind). */
+export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
+];
+
 /** Optional remote-browser authorities and launch policy. These remain API
  * runtime secrets/settings; browserd receives only a per-session private
  * transport envelope over its placement-local control channel. */
@@ -2484,6 +2492,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of WORKSPACE_CONTROL_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {

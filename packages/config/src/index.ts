@@ -474,6 +474,15 @@ const SettingsSchema = z.object({
     .int()
     .positive()
     .default(DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS),
+  // Child lifecycle notices: a child session's requires_action freeze, its
+  // resolution, a direct Pause, a provider-capacity wait, and goal progress
+  // become typed `session_system_updates` rows for the parent (in addition to
+  // `child_terminal_result`). Rolling hazard: a pre-notice worker throws on an
+  // unknown update kind, so enable only once the whole fleet runs an image
+  // that understands the new kinds. Default off. The API and both workers
+  // install the validated value into @opengeni/db once at boot.
+  // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
+  childLifecycleNoticesEnabled: EnvBoolean.default(false),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -2324,6 +2333,7 @@ export function getSettings(): Settings {
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
     goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
+    childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),

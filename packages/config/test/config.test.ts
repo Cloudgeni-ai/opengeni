@@ -114,6 +114,18 @@ describe("browser analytics configuration", () => {
     expect(settings.analyticsReoClientId).toBeUndefined();
   });
 
+  test("child lifecycle notices default off and parse the rollout flag", () => {
+    expect(getSettings().childLifecycleNoticesEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true" }, () => getSettings())
+        .childLifecycleNoticesEnabled,
+    ).toBe(true);
+    expect(
+      withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "false" }, () => getSettings())
+        .childLifecycleNoticesEnabled,
+    ).toBe(false);
+  });
+
   test("parses public provider identifiers without treating them as credentials", () => {
     const settings = withEnv(
       {

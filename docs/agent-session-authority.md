@@ -25,13 +25,25 @@ widen a cross-session projection from exact-target to whole-root.
 
 | Target relative to caller | Read | Message (`session.append`) | Mutate/control |
 | --- | --- | --- | --- |
-| Self | Yes | Yes | Session-local operations; an agent cannot Steer itself |
+| Self | Yes | Yes | Session-local operations; an agent cannot Steer itself; tool approvals are never agent-decidable |
 | Immediate child, parent, sibling, skipped generation, or unrelated root | Yes, subject to private/host checks | Yes, subject to private/host checks | Yes, subject to ordinary permissions and private/host checks |
 | Slack-private session outside the caller's root | No | No | No |
 | `user_private` session whose owner is not the initiating human | No | No | No |
 
 Goal tools remain self-only. Compact `sessions_list` discovery still requires a
-live attempt. Production sessions stay `workspace_shared` until visibility
+live attempt.
+
+Structured human input versus tool approvals: a live attempt holding
+`sessions:control` may answer (or skip, when allowed) another session's
+pending structured human-input request through `session_human_input_respond`
+(`session.human_input.write`); the answer is recorded as
+`respondedBy: agent_attempt:<attemptId>` and resumes that session's blocked
+turn exactly like a human answer. A pending tool approval
+(`session.approval.write`) is denied to every agent attempt on every surface,
+including a child the caller spawned, and an embedding-host port cannot widen
+that. The parent learns that a child is blocked through the
+`child_requires_action` notice (see
+[`durable-agent-inputs.md`](durable-agent-inputs.md)). Production sessions stay `workspace_shared` until visibility
 lifecycle is wired; that separate tenancy activation must keep intersecting
 these private/host checks rather than replacing them.
 

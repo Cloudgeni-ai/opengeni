@@ -310,6 +310,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         objectStorage,
         observability,
         entitlements,
+        wakeSessionWorkflow,
         cancellationSignal,
         activityContext,
         dispatchId,

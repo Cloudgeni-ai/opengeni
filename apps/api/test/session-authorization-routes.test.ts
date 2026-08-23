@@ -15,6 +15,8 @@ import {
   getActiveSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEvents,
+  applySessionTurnSettlement,
+  getSessionHumanInputRequest,
   mutateSessionControlInTransaction,
   withWorkspaceSessionActivityRls,
   type DbClient,
@@ -1016,6 +1018,171 @@ describe("embedding host session authorization routes", () => {
         sessionId: target.id,
       },
     ]);
+  });
+
+  test("lets a live agent answer a child's human-input request but never decide a tool approval", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const noop = async () => undefined;
+    // Live caller attempt on the root.
+    const started = await initializeSessionStartAtomically(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.root.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: null,
+    });
+    if (!started.turn) throw new Error("test caller did not create an initial turn");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+      sessionId: value.root.id,
+      workflowId: `session-${value.root.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("test caller was not claimed");
+    // Freeze a structured human-input request on the child.
+    const childStarted = await initializeSessionStartAtomically(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.child.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: null,
+    });
+    if (!childStarted.turn) throw new Error("child did not create an initial turn");
+    const childAttemptId = crypto.randomUUID();
+    const childClaim = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+      sessionId: value.child.id,
+      workflowId: `session-${value.child.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: childAttemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (childClaim.action !== "claimed") throw new Error("child turn was not claimed");
+    const requestId = crypto.randomUUID();
+    const questions = [
+      {
+        id: "env",
+        kind: "single_select" as const,
+        prompt: "Which environment?",
+        options: [
+          { id: "staging", label: "Staging" },
+          { id: "production", label: "Production" },
+        ],
+        required: true,
+        allowOther: false,
+      },
+    ];
+    const frozen = await applySessionTurnSettlement(client.db, value.grant.workspaceId, {
+      sessionId: value.child.id,
+      turnId: childClaim.turn.id,
+      triggerEventId: childClaim.turn.triggerEventId,
+      attemptId: childAttemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: childClaim.turn.id,
+      runState: {
+        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
+        pendingApprovals: [{ id: "tool-call-1", rawItem: { name: "write_file" } }],
+        humanInputRequests: [
+          {
+            id: requestId,
+            toolCallId: "human-call-1",
+            questions,
+            allowSkip: false,
+            expiresAt: null,
+          },
+        ],
+      },
+      events: [
+        {
+          type: "session.humanInput.requested",
+          payload: {
+            request: { id: requestId, questions, allowSkip: false, expiresAt: null },
+          },
+        },
+        { type: "session.requiresAction", payload: { approvals: [{ id: "tool-call-1" }] } },
+        { type: "session.status.changed", payload: { status: "requires_action" } },
+      ],
+    });
+    expect(frozen.action).toBe("settled");
+
+    const mcpDeps = {
+      settings: testSettings(),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        wakeSessionWorkflow: noop,
+        requestSessionWorkflowWakeDispatch: noop,
+        signalApprovalDecision: noop,
+      } as unknown as SessionWorkflowClient,
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: noop },
+      getDocumentServices: () => ({}) as never,
+    } as unknown as ApiRouteDeps;
+    const agentGrant = {
+      ...value.grant,
+      permissions: ["workspace:read", "sessions:read", "sessions:control"],
+      metadata: {
+        sessionId: value.root.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+        firstPartyMcpTools: ["session_human_input_respond"],
+      },
+    };
+    const server = buildOpenGeniMcpServer(mcpDeps, agentGrant);
+
+    // Tool approvals remain human-only for agent attempts, on every surface.
+    await expect(
+      requireSessionAuthorization(mcpDeps, agentGrant, {
+        sessionId: value.child.id,
+        operation: "session.approval.write",
+        surface: "first_party_mcp",
+      }),
+    ).rejects.toThrow("Session not found or access denied");
+    // ...while structured human input may be answered by the live attempt.
+    await expect(
+      requireSessionAuthorization(mcpDeps, agentGrant, {
+        sessionId: value.child.id,
+        operation: "session.human_input.write",
+        surface: "first_party_mcp",
+      }),
+    ).resolves.toBeTruthy();
+
+    const answered = await callMcpTool<McpMutationReceiptType>(
+      server,
+      "session_human_input_respond",
+      {
+        sessionId: value.child.id,
+        requestId,
+        response: { outcome: "answered", answers: [{ questionId: "env", values: ["staging"] }] },
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(answered.resource).toMatchObject({
+      type: "session_human_input_request",
+      id: requestId,
+      state: "answered",
+    });
+    const request = await getSessionHumanInputRequest(
+      client.db,
+      value.grant.workspaceId,
+      value.child.id,
+      requestId,
+    );
+    expect(request).toMatchObject({
+      status: "answered",
+      respondedBy: `agent_attempt:${attemptId}`,
+    });
+    const events = await listSessionEvents(client.db, value.grant.workspaceId, value.child.id);
+    expect(events.some((event) => event.type === "user.humanInputResponse")).toBe(true);
   });
 
   test("lets a live agent address peer sessions while host policy can only narrow", async () => {

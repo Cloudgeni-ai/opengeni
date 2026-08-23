@@ -44,6 +44,7 @@ import {
   TASK_NOTE_MAX_LIFETIME_DAYS,
   TASK_NOTE_REASON_MAX_BYTES,
   TASK_NOTE_TEXT_MAX_BYTES,
+  SubmitHumanInputResponseRequest,
 } from "@opengeni/contracts";
 import {
   countVariableSets,
@@ -102,6 +103,8 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  acceptSessionHumanInputResponse,
+  HumanInputResponseValidationError,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
@@ -464,6 +467,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   session_pause: { allOf: ["sessions:control"] },
   session_resume: { allOf: ["sessions:control"] },
   session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
+  // A live attempt may answer another session's structured human-input
+  // request (never a tool approval, which stays human-only).
+  session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
   set_other_session_title: { allOf: ["sessions:control"] },
   interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -4648,6 +4654,85 @@ function registerWorkspaceOrchestrationTools(
                 stoppingPreviousAttempt: result.interruptionCount > 0,
               },
               updateId: result.updateId,
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
+        },
+      );
+
+      server.registerTool(
+        "session_human_input_respond",
+        {
+          description:
+            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId. Use it only when you actually know the answer; otherwise report the exact blocker to the user. Tool approvals are decided by humans only and cannot be answered here. The response is recorded as an agent-attempt answer and resumes that session's blocked turn.",
+          inputSchema: {
+            sessionId: z4.string().uuid(),
+            requestId: z4.string().uuid(),
+            response: z4.unknown(),
+            idempotencyKey: z4.string().uuid(),
+          },
+        },
+        async ({ sessionId, requestId, response, idempotencyKey }) => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.human_input.write");
+          const context = exactAgentCommandContext(grant, callerSessionId, "first_party_mcp");
+          const parsedResponse = SubmitHumanInputResponseRequest.parse(response);
+          let accepted: Awaited<ReturnType<typeof acceptSessionHumanInputResponse>>;
+          try {
+            accepted = await acceptSessionHumanInputResponse(deps.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId,
+              requestId,
+              response: parsedResponse,
+              respondedBy: `agent_attempt:${context.callerAttemptId}`,
+              respondedByKind: "agent_attempt",
+              clientEventId: idempotencyKey,
+            });
+          } catch (error) {
+            if (error instanceof HumanInputResponseValidationError) {
+              throw new Error(`human-input response rejected: ${error.message}`, { cause: error });
+            }
+            throw error;
+          }
+          if (accepted.action === "not_found") {
+            throw new Error("human-input request not found");
+          }
+          await publishDurableSessionEvents(
+            deps.bus,
+            grant.workspaceId,
+            sessionId,
+            accepted.events,
+          );
+          if (accepted.workflowWakeRevision !== null) {
+            await deps.workflowClient.signalApprovalDecision({
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId,
+              eventId: accepted.events[0]?.id ?? requestId,
+              workflowId: `session-${sessionId}`,
+              workflowWakeRevision: accepted.workflowWakeRevision,
+            });
+          }
+          if (accepted.action === "conflict") {
+            throw new Error(`human-input request is ${accepted.request.status}`);
+          }
+          return json(
+            mcpMutationReceipt({
+              operation: "session_human_input_respond",
+              committed: true,
+              outcome: accepted.events.length === 0 ? "replayed" : "updated",
+              changed: accepted.events.length > 0,
+              resource: {
+                type: "session_human_input_request",
+                id: requestId,
+                state: accepted.request.status,
+              },
+              relatedResources: [{ type: "session", id: sessionId }],
+              timestamp: accepted.request.respondedAt ?? new Date().toISOString(),
+              idempotency: {
+                status: accepted.events.length === 0 ? "replayed" : "applied",
+              },
+              facts: { outcome: accepted.request.response?.outcome ?? null },
               nextAction: { tool: "session_get", arguments: { sessionId } },
             }),
           );

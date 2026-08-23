@@ -32,11 +32,65 @@ so an older goal or lifecycle notice cannot override the replacement direction.
 Pending machine input also wakes a held orchestrator. An active goal whose
 latest turn declared a `goal_wait` hold (see [`goals.md`](goals.md)) does not
 materialize a goal continuation at idle, but a pending `session_system_updates`
-row (a child result, agent message, or schedule) still makes the session
-runnable: the idle evaluation returns `queue` instead of `held`, the next claim
-delivers the batch, and that delivering turn retires the hold because it is a
-newer finished turn. The hold only suppresses the synthesized continuation
-between real inputs and the hold deadline.
+row of an `immediate` wake class (a child result, agent message, schedule, or
+`child_requires_action`) still makes the session runnable: the idle evaluation
+returns `queue` instead of `held`, the next claim delivers the batch, and that
+delivering turn retires the hold because it is a newer finished turn. The hold
+only suppresses the synthesized continuation between real inputs and the hold
+deadline. `deferred` rows (see below) do not end a current hold; they are
+delivered when it ends or an immediate input arrives. Without a current hold any
+pending row makes the session runnable.
+
+## Wake classes and child lifecycle notices
+
+Every kind has one wake class in `SESSION_SYSTEM_UPDATE_WAKE_CLASS`
+(`@opengeni/contracts`). `immediate` kinds (every pre-existing kind plus
+`child_requires_action`) register a workflow wake in the same commit as the
+pending row, may resume a goal paused only by its continuation ceiling, and end a
+`goal_wait` hold at the next idle evaluation. `deferred` kinds insert only the
+durable pending row and its `system.update.pending` event; the next claim
+delivers them coalesced, `session_wait` reports them without ending the wait
+(`ownPendingImmediateUpdates` vs `ownPendingDeferredUpdateKinds`), and they
+never resume a goal by themselves.
+
+A child session reports its lifecycle to its parent through typed notices, each
+produced inside the child's own lifecycle transaction as one dedupe-keyed
+`session_system_update_outbox` row (the worker delivers it; the reaper retries a
+committed row after a crash) under the child-lifecycle lock prefix (control
+FOR SHARE, workspace FOR KEY SHARE, UUID-ordered child + parent sessions FOR NO
+KEY UPDATE, exact turn/attempt), never as a direct insert into the parent's
+rows:
+
+| Kind | Class | Produced by | Dedupe |
+| --- | --- | --- | --- |
+| `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary (unchanged) | `child-completion:<child>:...` |
+| `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
+| `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
+| `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
+| `child_waiting_capacity` | deferred | a Codex or xAI capacity waiter armed on the child | `child-waiting-capacity:<child>:<waiter>` |
+| `child_progress` | deferred | the child's agent `goal_progress`; a newer note supersedes an older still-pending one | `child-progress:<child>:<receipt>` |
+
+Delivery into the parent happens through `addSessionSystemUpdateWithSourceMutation`:
+a `child_requires_action_resolved` for one exact (child, turn, generation)
+marks the still-pending `child_requires_action` of that boundary `superseded`
+(one accepted response advances the boundary; a later re-freeze is a new
+generation and a new notice), a newer `child_progress` supersedes the older
+pending one, and the parent timeline records `system.update.cancelled` with
+`reason: superseded_by_resolution | superseded_by_newer_progress`. Like child
+results, no child notice may autonomously wake a parent whose goal is not
+active or that has already failed.
+
+The five new kinds are produced only while
+`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default off): a worker from
+before these kinds existed throws on an unknown kind, so enable the flag only
+once the whole fleet runs an image that understands them. Delivery and
+consumption of an already committed notice never read the flag.
+
+A live agent attempt may answer a child's blocking human-input request with the
+first-party `session_human_input_respond` tool (`sessions:control`,
+`session.human_input.write`); tool approvals (`session.approval.write`) are
+denied to every agent attempt and remain a human decision. See
+[`agent-session-authority.md`](agent-session-authority.md).
 
 ## Queue and timeline
 

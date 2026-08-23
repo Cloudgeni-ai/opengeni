@@ -1781,6 +1781,11 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "agent_steer_instruction",
     "child_terminal_result",
     "media_generation_result",
+    "child_requires_action",
+    "child_requires_action_resolved",
+    "child_paused",
+    "child_waiting_capacity",
+    "child_progress",
   ]);
   const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
     "success",

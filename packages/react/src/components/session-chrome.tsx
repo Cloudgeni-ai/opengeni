@@ -276,6 +276,16 @@ function pendingKindLabel(kind: SessionPendingInputPreview["kind"]): string {
   switch (kind) {
     case "child_terminal_result":
       return "Child result";
+    case "child_requires_action":
+      return "Child needs input";
+    case "child_requires_action_resolved":
+      return "Child unblocked";
+    case "child_paused":
+      return "Child paused";
+    case "child_waiting_capacity":
+      return "Child waiting";
+    case "child_progress":
+      return "Child progress";
     case "agent_steer_instruction":
       return "Steer";
     case "scheduled_occurrence":

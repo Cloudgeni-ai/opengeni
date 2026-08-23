@@ -84,6 +84,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     goalMaxAutoContinuations: 20,
     goalIdleBackoffMs: DEFAULT_GOAL_IDLE_BACKOFF_MS,
     goalIdleBackoffMaxMs: DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+    childLifecycleNoticesEnabled: false,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
     contextCompactionThresholdRatio: 0.9,

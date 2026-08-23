@@ -8,11 +8,13 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   claimPendingSessionSystemUpdateOutbox,
   claimPendingSessionWorkflowWakes,
+  childRequiresActionDedupeKey,
   getSessionSystemUpdateOutboxByDedupeKey,
   getOrCreateSessionSystemUpdateOutbox,
   markSessionWorkflowWakeFailed,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   markSessionSystemUpdateOutboxFailed,
+  sessionSystemUpdateOutboxKindPayload,
   type Database,
   type SessionSystemUpdateOutboxDelivery,
 } from "@opengeni/db";
@@ -103,6 +105,43 @@ export async function notifyParentOfChildIdle(
 }
 
 /**
+ * Deliver one exact child-lifecycle outbox row already committed by the
+ * child's own lifecycle transaction (turn failure, requires_action freeze,
+ * ...). This layer deliberately cannot create or rewrite the row: the
+ * producing transaction is the sole owner of its payload and lineage, and the
+ * global reconciler remains the recovery path if immediate delivery fails.
+ */
+export async function deliverChildLifecycleOutboxToParent(
+  svc: NotifyServices,
+  workspaceId: string,
+  childSessionId: string,
+  dedupeKey: string,
+  options: { requireRow?: boolean } = {},
+): Promise<void> {
+  try {
+    const child = await getSession(svc.db, workspaceId, childSessionId);
+    if (!child || !child.parentSessionId) return;
+    const outbox = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
+      accountId: child.accountId,
+      workspaceId,
+      dedupeKey,
+    });
+    if (!outbox) {
+      if (options.requireRow === false) return;
+      throw new Error(`Committed child-lifecycle outbox disappeared: ${dedupeKey}`);
+    }
+    if (outbox.status === "delivered") return;
+    await deliverParentSystemUpdateOutbox(svc, outbox);
+  } catch (error) {
+    svc.observability.error("Failed to deliver committed child-lifecycle notice", {
+      childSessionId,
+      dedupeKey,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
  * Deliver the exact failure row already committed by turn settlement. This
  * layer deliberately cannot create or rewrite the row: the settlement
  * transaction is the sole owner of the failed turn id, payload, and lineage.
@@ -113,29 +152,39 @@ export async function deliverFailedChildTurnToParent(
   childSessionId: string,
   turnId: string,
 ): Promise<void> {
-  try {
-    const child = await getSession(svc.db, workspaceId, childSessionId);
-    if (!child || !child.parentSessionId) return;
-    const dedupeKey = `child-completion:${childSessionId}:turn:${turnId}`;
-    const outbox = await getSessionSystemUpdateOutboxByDedupeKey(svc.db, {
-      accountId: child.accountId,
-      workspaceId,
-      dedupeKey,
-    });
-    if (!outbox) {
-      throw new Error(`Committed failed-child outbox disappeared: ${dedupeKey}`);
-    }
-    if (outbox.status === "delivered") return;
-    await deliverParentSystemUpdateOutbox(svc, outbox);
-  } catch (error) {
-    // Settlement already committed the retryable outbox row. The global
-    // reconciler remains the recovery path if immediate delivery fails.
-    svc.observability.error("Failed to deliver committed child-turn failure", {
+  await deliverChildLifecycleOutboxToParent(
+    svc,
+    workspaceId,
+    childSessionId,
+    `child-completion:${childSessionId}:turn:${turnId}`,
+  );
+}
+
+/**
+ * Deliver the child_requires_action notice a requires_action settlement
+ * committed for this exact (child, turn, generation). When the rollout flag is
+ * off no row exists and this is a no-op; the reaper covers crashes after commit.
+ */
+export async function deliverChildRequiresActionToParent(
+  svc: NotifyServices,
+  workspaceId: string,
+  childSessionId: string,
+  input: { turnId: string; turnGeneration: number },
+): Promise<void> {
+  if (!svc.settings.childLifecycleNoticesEnabled) return;
+  await deliverChildLifecycleOutboxToParent(
+    svc,
+    workspaceId,
+    childSessionId,
+    childRequiresActionDedupeKey({
       childSessionId,
-      turnId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+      turnId: input.turnId,
+      turnGeneration: input.turnGeneration,
+    }),
+    // A requires_action freeze without any human-input/approval request (or a
+    // child without a parent) commits no row; that is not an error.
+    { requireRow: false },
+  );
 }
 
 async function deliverParentSystemUpdateOutbox(
@@ -149,12 +198,11 @@ async function deliverParentSystemUpdateOutbox(
         accountId: outbox.accountId,
         workspaceId: outbox.workspaceId,
         sessionId: outbox.targetSessionId,
-        kind: outbox.kind,
+        ...sessionSystemUpdateOutboxKindPayload(outbox),
         classification: outbox.classification,
         sourceId: outbox.sourceId,
         dedupeKey: outbox.dedupeKey,
         summary: outbox.summary,
-        payload: outbox.payload,
         lineage: outbox.lineage,
         personalConnectionDelegations: outbox.personalConnectionDelegations,
         xaiProviderAccountAuthoritySnapshot: outbox.xaiProviderAccountAuthoritySnapshot,
@@ -181,10 +229,12 @@ async function deliverParentSystemUpdateOutbox(
         wakeRevision: result.workflowWakeRevision,
       });
     }
-    svc.observability.info("Woke parent session on worker completion", {
+    svc.observability.info("Delivered child lifecycle notice to parent session", {
       childSessionId: outbox.sourceSessionId,
       parentSessionId: outbox.targetSessionId,
+      kind: outbox.kind,
       dedupeKey: outbox.dedupeKey,
+      woke: result.shouldWake,
     });
   } catch (error) {
     await markSessionSystemUpdateOutboxFailed(

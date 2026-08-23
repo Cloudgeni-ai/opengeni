@@ -154,7 +154,13 @@ The locked decision applies these rules:
    schedule) also wins with `queue`: it is delivered by the next claim rather
    than shadowed by a synthesized continuation, and because peek and
    materialization serialize on the session lock, input that lands between
-   them cannot be missed.
+   them cannot be missed. Against a CURRENT `goal_wait` hold (rule 3) only an
+   `immediate`-class pending row wins; `deferred` child lifecycle notices
+   (`child_requires_action_resolved`, `child_paused`,
+   `child_waiting_capacity`, `child_progress`) leave the hold in place and are
+   delivered when it ends or an immediate input arrives
+   (`peekSessionWork` mirrors this and reports `idle`). See
+   [`durable-agent-inputs.md`](durable-agent-inputs.md) for the wake classes.
 3. An agent-declared `goal_wait` hold is honored only while its declaring turn
    is still the latest finished turn and `now < continuation_hold_until`. The
    materializer then returns `held`: it does not advance
@@ -373,3 +379,4 @@ arguments is rejected as `IDEMPOTENCY_KEY_REUSED`.
 | `OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS` | _(unset - no cap)_ | Optional hard ceiling on consecutive no-input continuation turns per goal arming. Unset by default, so a run can legitimately span days. When set, it is a ceiling that a per-goal `maxAutoContinuations` can only lower; reaching it pauses the goal until new external input resumes it. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MS` | `3000,30000,120000,300000` | Comma-separated pacing delays (ms) before the n-th consecutive no-input continuation, measured from when the previous continuation turn finished; the last entry repeats. Not a cap: any new input wakes the session immediately. |
 | `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` | `600000` | Upper bound on every idle-backoff delay; schedule entries above it are rejected at boot. |
+| `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` | `false` | Produce the child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity`, `child_progress`) for parent sessions. Enable only after the whole fleet runs an image that understands the new kinds. The goal-continuation prompt teaches the orchestrator what each notice means and, when `session_human_input_respond` is in its effective first-party selection, that it may answer a worker's blocking question itself. |

@@ -3,6 +3,7 @@ import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import {
+  deliverChildRequiresActionToParent,
   reconcilePendingParentSystemUpdates,
   reconcilePendingSessionWorkflowWakes,
   type NotifyServices,
@@ -66,4 +67,34 @@ test("child-terminal reconciliation always checks its durable outbox", async () 
   );
   expect(result).toEqual({ claimed: 0, delivered: 0, failed: 0 });
   expect(claimPendingSessionSystemUpdateOutbox).toHaveBeenCalledWith({} as Database, 17);
+});
+
+test("child requires_action delivery is inert while the rollout flag is off", async () => {
+  const error = mock(() => undefined);
+  // No database access may happen: a thrown `db` call would surface as an
+  // observability error, which the disabled path never reaches.
+  const db = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error("database must not be touched while notices are disabled");
+      },
+    },
+  ) as Database;
+  await deliverChildRequiresActionToParent(
+    {
+      db,
+      bus: { publish: async () => undefined } as unknown as EventBus,
+      settings: { childLifecycleNoticesEnabled: false } as Settings,
+      observability: {
+        info: () => undefined,
+        error,
+      } as unknown as NotifyServices["observability"],
+      wakeSessionWorkflow: null,
+    },
+    "22222222-2222-4222-8222-222222222222",
+    "33333333-3333-4333-8333-333333333333",
+    { turnId: "44444444-4444-4444-8444-444444444444", turnGeneration: 1 },
+  );
+  expect(error).not.toHaveBeenCalled();
 });

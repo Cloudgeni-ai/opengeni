@@ -2765,6 +2765,7 @@ export type FirstPartyMcpToolName =
   | "session_pause"
   | "session_resume"
   | "session_steer"
+  | "session_human_input_respond"
   | "set_other_session_title"
   | "interaction_discover"
   | "browser_open"
@@ -4232,7 +4233,12 @@ export type SessionSystemUpdateKind =
   | "agent_message"
   | "agent_steer_instruction"
   | "child_terminal_result"
-  | "media_generation_result";
+  | "media_generation_result"
+  | "child_requires_action"
+  | "child_requires_action_resolved"
+  | "child_paused"
+  | "child_waiting_capacity"
+  | "child_progress";
 
 export type SessionSystemUpdateState =
   | "pending"
