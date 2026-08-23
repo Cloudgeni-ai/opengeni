@@ -3799,18 +3799,21 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       visibility: "workspace",
       slack_thread_ts: "1720000000.000001",
     });
-    const [initialMessage] = await shared!.admin<{ text: string }[]>`
-      select event.payload ->> 'text' as text
+    const [initialMessage] = await shared!.admin<{ text: string; model_context: string | null }[]>`
+      select
+        event.payload ->> 'text' as text,
+        event.payload ->> 'modelContext' as model_context
       from session_events event
       where event.workspace_id = ${value.owner.workspaceId}
         and event.session_id = ${route!.session_id}
         and event.type = 'user.message'
       order by event.sequence asc
       limit 1`;
-    expect(initialMessage!.text).toContain(
+    expect(initialMessage!.text).toBe(`<@${value.botUserId}> Can check this out?`);
+    expect(initialMessage!.model_context).toContain(
       "Do we support Google Drive integration in OpenGeni currently?",
     );
-    expect(initialMessage!.text).toContain("Can check this out?");
+    expect(initialMessage!.model_context).not.toContain("Can check this out?");
 
     expect(
       (
@@ -3874,8 +3877,10 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ).toBe(200);
     await drainAll(value.deps);
 
-    const [initialMessage] = await shared!.admin<{ text: string }[]>`
-      select event.payload ->> 'text' as text
+    const [initialMessage] = await shared!.admin<{ text: string; model_context: string | null }[]>`
+      select
+        event.payload ->> 'text' as text,
+        event.payload ->> 'modelContext' as model_context
       from session_events event
       join slack_interactions interaction
         on interaction.workspace_id = event.workspace_id
@@ -3884,7 +3889,12 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         and event.type = 'user.message'
       order by event.sequence asc
       limit 1`;
-    expect(initialMessage!.text).toContain("What deployment is currently running in production?");
+    expect(initialMessage!.text).toBe(`<@${value.botUserId}> Can you answer this question?`);
+    expect(initialMessage!.model_context).toContain(
+      "What deployment is currently running in production?",
+    );
+    expect(initialMessage!.model_context).not.toContain("Can you answer this question?");
+    expect(initialMessage!.model_context).toContain("exact accepted Slack invocation");
     expect(value.slack.calls).toContainEqual(
       expect.objectContaining({
         method: "conversations.history",
@@ -3936,17 +3946,22 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
     const [route] = await interactions(value.owner.workspaceId);
     const [session] = await shared!.admin<
-      { resources: Array<{ kind: string; mountPath: string }>; initial_message: string }[]
+      {
+        resources: Array<{ kind: string; mountPath: string }>;
+        initial_message: string;
+        initial_model_context: string | null;
+      }[]
     >`
-      select resources, initial_message
+      select resources, initial_message, initial_model_context
       from sessions
       where workspace_id = ${value.owner.workspaceId}
         and id = ${route!.session_id}`;
     expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-incident.png",
     ]);
-    expect(session!.initial_message).toContain("(file-only Slack invocation)");
-    expect(session!.initial_message).toContain("Imported invocation attachments");
+    expect(session!.initial_message).toBe("(file-only Slack invocation)");
+    expect(session!.initial_model_context).toContain("Imported invocation attachments");
+    expect(session!.initial_model_context).toContain("attachments/slack/01-incident.png");
     expect(objectStore.objects.size).toBe(1);
     expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
   });
@@ -4006,9 +4021,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
     const [route] = await interactions(value.owner.workspaceId);
     const [session] = await shared!.admin<
-      { resources: Array<{ kind: string; mountPath: string }>; initial_message: string }[]
+      {
+        resources: Array<{ kind: string; mountPath: string }>;
+        initial_message: string;
+        initial_model_context: string | null;
+      }[]
     >`
-      select resources, initial_message
+      select resources, initial_message, initial_model_context
       from sessions
       where workspace_id = ${value.owner.workspaceId}
         and id = ${route!.session_id}`;
@@ -4016,8 +4035,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(session!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-private-incident.png",
     ]);
-    expect(session!.initial_message).toContain("(file-only Slack invocation)");
-    expect(session!.initial_message).toContain("Imported invocation attachments");
+    expect(session!.initial_message).toBe("(file-only Slack invocation)");
+    expect(session!.initial_model_context).toContain("Imported invocation attachments");
+    expect(session!.initial_model_context).toContain("attachments/slack/01-private-incident.png");
     expect(objectStore.objects.size).toBe(1);
     expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
   });
@@ -4118,9 +4138,16 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
     const [route] = await interactions(value.owner.workspaceId);
     const messages = await shared!.admin<
-      { text: string; resources: Array<{ mountPath: string }> }[]
+      {
+        text: string;
+        model_context: string | null;
+        resources: Array<{ mountPath: string }>;
+      }[]
     >`
-      select payload ->> 'text' as text, payload -> 'resources' as resources
+      select
+        payload ->> 'text' as text,
+        payload ->> 'modelContext' as model_context,
+        payload -> 'resources' as resources
       from session_events
       where workspace_id = ${value.owner.workspaceId}
         and session_id = ${route!.session_id}
@@ -4133,9 +4160,11 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(messages[1]!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/02-follow-up-context.webp",
     ]);
-    expect(messages[1]!.text).toContain("Compare it with this follow-up");
-    expect(messages[1]!.text).toContain("attachments/slack/02-follow-up-context.webp");
-    expect(messages[1]!.text).not.toContain("initial-context.png");
+    expect(messages[0]!.text).toBe("Inspect the initial screenshot");
+    expect(messages[0]!.model_context).toContain("attachments/slack/01-initial-context.png");
+    expect(messages[1]!.text).toBe("Compare it with this follow-up");
+    expect(messages[1]!.model_context).toContain("attachments/slack/02-follow-up-context.webp");
+    expect(messages[1]!.model_context).not.toContain("initial-context.png");
     expect(objectStore.objects.size).toBe(2);
     expect(value.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(2);
   });
@@ -5253,16 +5282,21 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(allowed.slack.posts.at(-1)!.text).toContain("Results stay private");
     expect(allowed.slack.posts.some((post) => post.channel === allowedChannel)).toBe(false);
     const [allowedSession] = await shared!.admin<
-      { resources: Array<{ kind: string; mountPath: string }>; initial_message: string }[]
+      {
+        resources: Array<{ kind: string; mountPath: string }>;
+        initial_message: string;
+        initial_model_context: string | null;
+      }[]
     >`
-      select resources, initial_message
+      select resources, initial_message, initial_model_context
       from sessions
       where workspace_id = ${allowed.owner.workspaceId}
         and id = ${allowedRoutes[0]!.session_id}`;
     expect(allowedSession!.resources.map((resource) => resource.mountPath)).toEqual([
       "attachments/slack/01-partner-incident.png",
     ]);
-    expect(allowedSession!.initial_message).toContain("Imported invocation attachments");
+    expect(allowedSession!.initial_message).toBe(`<@${allowed.botUserId}> investigate privately`);
+    expect(allowedSession!.initial_model_context).toContain("Imported invocation attachments");
     expect(allowed.slack.calls.filter((call) => call.method === "files.info")).toHaveLength(1);
     expect(objectStore.objects.size).toBe(1);
 
