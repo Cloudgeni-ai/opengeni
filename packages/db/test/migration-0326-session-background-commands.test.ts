@@ -27,6 +27,9 @@ describe("migration 0326 session background commands", () => {
     expect(sql).toContain("FORCE ROW LEVEL SECURITY");
     expect(sql).toContain("session_visibility_isolation");
     expect(sql).toContain("settle_background_command_from_retained_process");
+    expect(sql).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.settle_background_command_from_retained_process()",
+    );
     expect(sql).toContain("claim_connected_machine_background_commands");
     expect(sql).toContain("reconcile_proof_outcome");
     expect(sql).toContain("REVOKE ALL ON FUNCTION");
@@ -102,5 +105,13 @@ describe("migration 0326 session background commands", () => {
         'EXECUTE'
       ) as allowed`;
     expect(publicPrivilege?.allowed).toBe(false);
+
+    const [triggerPublicPrivilege] = await shared.admin<Array<{ allowed: boolean }>>`
+      select has_function_privilege(
+        'public',
+        'opengeni_private.settle_background_command_from_retained_process()',
+        'EXECUTE'
+      ) as allowed`;
+    expect(triggerPublicPrivilege?.allowed).toBe(false);
   });
 });

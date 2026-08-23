@@ -212,6 +212,9 @@ ON sandbox_retained_processes
 FOR EACH ROW
 EXECUTE FUNCTION opengeni_private.settle_background_command_from_retained_process();
 
+REVOKE ALL ON FUNCTION opengeni_private.settle_background_command_from_retained_process()
+  FROM PUBLIC;
+
 -- Background-owned managed processes remain eligible for exact polling even
 -- while their launch attempt is open/closed independently. Stopping state is
 -- projected through owner_state so the reaper can issue one exact cancellation
