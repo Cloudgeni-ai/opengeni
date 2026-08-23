@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { type ControlRequest, type ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
-  ControlRequest,
-  ControlResponse,
-  ErrorCode,
-  type ExecResponse,
-} from "@opengeni/agent-proto";
-import { type ControlRpc } from "@opengeni/runtime/sandbox";
+  FakeOpRunner,
+  type FakeOpScript,
+  InMemoryOpStreamTransport,
+  type ControlRpc,
+} from "@opengeni/runtime/sandbox";
 import {
   executeRunOnSelfhostedMachine,
   type RunOnOp,
@@ -22,26 +22,35 @@ type ExecPlan = {
   exitCode: number | null;
   stdout?: string;
   stderr?: string;
-  transportLoss?: boolean;
+  healAfterLiveLoss?: boolean;
+  failureCode?: "OP_OVERFLOW" | "OP_SPOOL_IO" | "OP_PIPE_IO";
+  failureDetail?: Record<string, string>;
   sideEffect?: boolean;
 };
 
 /**
  * A deterministic in-memory Connected Machine runner. Duration is logical, not
  * wall-clock time: a plan longer than ExecRequest.timeoutMs returns the exact
- * typed deadline-kill response the Rust runner produces and suppresses the
- * planned side effect. It also simulates the monolithic transport's output cap
- * and a post-dispatch transport loss without a real broker or machine.
+ * typed deadline-kill outcome the Rust runner produces and suppresses the
+ * planned side effect. Exec always uses the production op-stream protocol;
+ * request/reply remains only for non-exec control operations such as fsRead.
  */
 class InMemoryMachineRunner implements ControlRpc {
   readonly requests: Array<{ req: ControlRequest; wireTimeoutMs: number }> = [];
+  readonly transport = new InMemoryOpStreamTransport();
+  readonly opStream = { transport: this.transport };
+  readonly opRunner: FakeOpRunner;
   executions = 0;
   completedSideEffects = 0;
 
-  constructor(
-    private readonly plans: Record<string, ExecPlan>,
-    private readonly outputCapBytes = 1_048_576,
-  ) {}
+  constructor(private readonly plans: Record<string, ExecPlan>) {
+    this.opRunner = new FakeOpRunner({
+      transport: this.transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      defaultScript: (exec) => this.scriptExec(exec),
+    });
+  }
 
   async request(
     _subject: string,
@@ -60,88 +69,51 @@ class InMemoryMachineRunner implements ControlRpc {
         },
       };
     }
-    if (op?.$case !== "exec") {
-      return {
-        requestId: req.requestId,
-        error: {
-          code: ErrorCode.ERROR_CODE_UNSUPPORTED,
-          message: "test runner supports exec and fsRead only",
-          retryable: false,
-          detail: {},
-        },
-      };
-    }
+    return await this.opRunner.request(_subject, req, opts);
+  }
 
+  private scriptExec(exec: { command: string[]; timeoutMs: number }): FakeOpScript {
     this.executions += 1;
-    const command = op.exec.command.join(" ");
+    const command = exec.command.join(" ");
     const plan = this.plans[command];
     if (!plan) {
       throw new Error(`missing test plan for ${command}`);
     }
-    if (plan.transportLoss) {
+    const frames: FakeOpScript["frames"] = [
+      ...(plan.stdout ? [{ channel: "stdout" as const, bytes: plan.stdout }] : []),
+      ...(plan.stderr ? [{ channel: "stderr" as const, bytes: plan.stderr }] : []),
+    ];
+    if (plan.durationMs > exec.timeoutMs) {
       return {
-        requestId: req.requestId,
-        error: {
-          code: ErrorCode.ERROR_CODE_TIMEOUT,
-          message: "machine link was lost after dispatch; execution outcome is unknown",
-          retryable: true,
-          detail: {},
+        frames,
+        exit: {
+          exitCode: -1,
+          timedOut: true,
+          durationMs: String(exec.timeoutMs),
         },
       };
-    }
-
-    const stdout = encoder.encode(plan.stdout ?? "");
-    const stderr = encoder.encode(plan.stderr ?? "");
-    const encodedBytes = stdout.length + stderr.length;
-    if (encodedBytes > this.outputCapBytes) {
-      return {
-        requestId: req.requestId,
-        error: {
-          code: ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE,
-          message: "reply exceeded the runner output cap",
-          retryable: false,
-          detail: {
-            op: "exec",
-            encoded_bytes: String(encodedBytes),
-            max_payload: String(this.outputCapBytes),
-          },
-        },
-      };
-    }
-
-    if (plan.durationMs > op.exec.timeoutMs) {
-      return this.execResponse(req, {
-        // The generated proto surface represents this as int32, while the live
-        // Rust deadline-kill response is intentionally decoded as null by the
-        // structural session contract. Keep the fake at that public boundary.
-        exitCode: null,
-        stdout,
-        stderr,
-        timedOut: true,
-        durationMs: String(op.exec.timeoutMs),
-      });
     }
     if (plan.sideEffect) {
       this.completedSideEffects += 1;
     }
-    return this.execResponse(req, {
-      exitCode: plan.exitCode,
-      stdout,
-      stderr,
-      timedOut: false,
-      durationMs: String(plan.durationMs),
-    });
-  }
-
-  private execResponse(
-    req: ControlRequest,
-    result: Omit<ExecResponse, "exitCode"> & { exitCode: number | null },
-  ): ControlResponse {
     return {
-      requestId: req.requestId,
-      result: {
-        $case: "exec",
-        exec: result as ExecResponse,
+      frames,
+      ...(plan.healAfterLiveLoss
+        ? {
+            live: true,
+            dropLiveSeqs: new Set(frames.map((_, index) => index + 1)),
+          }
+        : {}),
+      exit: {
+        exitCode: plan.exitCode ?? -1,
+        timedOut: false,
+        durationMs: String(plan.durationMs),
+        ...(plan.failureCode
+          ? {
+              failureCode: plan.failureCode,
+              failureDetail: plan.failureDetail ?? {},
+            }
+          : {}),
       },
     };
   }
@@ -158,6 +130,7 @@ async function run(
       workspaceId: WORKSPACE,
       agentId: AGENT,
       controlRpc: runner,
+      opStream: runner.opStream,
       relay: { host: "relay.test", tls: true },
       controlTimeoutMs: timeouts.controlTimeoutMs ?? 30_000,
       execTimeoutMs: timeouts.execTimeoutMs ?? 120_000,
@@ -219,13 +192,15 @@ describe("run_on Connected Machine exec receipts", () => {
       {
         ...base,
         controlRpc: supported,
+        opStream: supported.opStream,
         operationResourcePolicySupported: true,
       },
       TARGET,
       { kind: "exec", cmd: "true" },
     );
     expect(accepted.ok).toBe(true);
-    expect(supported.requests[0]?.req.resourcePolicy?.memoryMaxBytes).toBe("1073741824");
+    const policyStart = supported.requests.find(({ req }) => req.op?.$case === "opStart");
+    expect(policyStart?.req.resourcePolicy?.memoryMaxBytes).toBe("1073741824");
 
     const incapable = new InMemoryMachineRunner({ true: { durationMs: 1, exitCode: 0 } });
     const rejected = await executeRunOnSelfhostedMachine(
@@ -253,10 +228,7 @@ describe("run_on Connected Machine exec receipts", () => {
 
     await run(runner, { kind: "exec", cmd: "inspect" }, {}, environment);
 
-    const request = runner.requests[0]?.req;
-    expect(request?.op?.$case).toBe("exec");
-    if (request?.op?.$case !== "exec") throw new Error("expected exec request");
-    expect(request.op.exec.env).toEqual(environment);
+    expect(runner.opRunner.starts[0]?.exec.env).toEqual(environment);
     expect(environment).toEqual({
       OPENGENI_CODEMODE_URL: "https://control.example/v1/workspaces/test/codemode",
       OPENGENI_CODEMODE_TOKEN: "attempt-bearer",
@@ -299,15 +271,17 @@ describe("run_on Connected Machine exec receipts", () => {
 
     const exec = await run(runner, { kind: "exec", cmd: "build" });
     expect(exec.deadlineMs).toBe(120_000);
-    const execRequest = runner.requests[0];
-    expect(execRequest?.req.op?.$case).toBe("exec");
-    if (execRequest?.req.op?.$case !== "exec") throw new Error("expected exec request");
-    expect(execRequest.req.op.exec.timeoutMs).toBe(120_000);
-    expect(execRequest.wireTimeoutMs).toBe(125_000);
+    const execRequest = runner.requests.find(({ req }) => req.op?.$case === "opStart");
+    if (execRequest?.req.op?.$case !== "opStart") throw new Error("expected OpStart request");
+    if (execRequest.req.op.opStart.op?.$case !== "exec") {
+      throw new Error("expected op-stream exec request");
+    }
+    expect(execRequest.req.op.opStart.op.exec.timeoutMs).toBe(120_000);
+    expect(execRequest.wireTimeoutMs).toBe(30_000);
 
     const read = await run(runner, { kind: "read", path: "/tmp/result" });
     expect(read).toMatchObject({ kind: "read", ok: true, content: "machine-file" });
-    const readRequest = runner.requests[1];
+    const readRequest = runner.requests.find(({ req }) => req.op?.$case === "fsRead");
     expect(readRequest?.req.op?.$case).toBe("fsRead");
     expect(readRequest?.wireTimeoutMs).toBe(30_000);
   });
@@ -326,7 +300,7 @@ describe("run_on Connected Machine exec receipts", () => {
     expect(result).toMatchObject({
       kind: "exec",
       ok: false,
-      exitCode: null,
+      exitCode: -1,
       timedOut: true,
       deadlineMs: 120_000,
       stdout: "partial\n",
@@ -337,54 +311,62 @@ describe("run_on Connected Machine exec receipts", () => {
     expect(runner.completedSideEffects).toBe(0);
   });
 
-  test("transport loss is failed as ambiguous and the exec is not duplicated", async () => {
+  test("live stream loss heals from runner retention and the exec is not duplicated", async () => {
     const runner = new InMemoryMachineRunner({
-      ambiguous: { durationMs: 1, exitCode: 0, transportLoss: true },
-    });
-
-    const result = await run(runner, { kind: "exec", cmd: "ambiguous" });
-    expect(result).toMatchObject({
-      kind: "exec",
-      ok: false,
-      deadlineMs: 120_000,
-    });
-    expect(result.timedOut).toBeUndefined();
-    expect(result.reason).toMatch(/lost after dispatch|outcome is unknown/i);
-    expect(runner.executions).toBe(1);
-    expect(runner.requests).toHaveLength(1);
-  });
-
-  test("a non-timeout null exit is failed instead of reported ok:true", async () => {
-    const runner = new InMemoryMachineRunner({
-      nullExit: { durationMs: 1, exitCode: null, stdout: "orphaned status\n" },
-    });
-
-    const result = await run(runner, { kind: "exec", cmd: "nullExit" });
-    expect(result).toMatchObject({
-      kind: "exec",
-      ok: false,
-      exitCode: null,
-      timedOut: false,
-      deadlineMs: 120_000,
-      reason: "machine returned no terminal exit code",
-    });
-    expect(runner.executions).toBe(1);
-  });
-
-  test("output over the monolithic transport cap fails typed and is not duplicated", async () => {
-    const runner = new InMemoryMachineRunner(
-      {
-        capped: { durationMs: 1, exitCode: 0, stdout: "123456789" },
+      healed: {
+        durationMs: 1,
+        exitCode: 0,
+        stdout: "recovered\n",
+        healAfterLiveLoss: true,
       },
-      8,
-    );
+    });
+
+    const result = await run(runner, { kind: "exec", cmd: "healed" });
+    expect(result).toMatchObject({
+      kind: "exec",
+      ok: true,
+      deadlineMs: 120_000,
+      stdout: "recovered\n",
+    });
+    expect(runner.executions).toBe(1);
+    expect(runner.opRunner.runs.size).toBe(1);
+  });
+
+  test("a runner capture failure is typed and never reported ok:true", async () => {
+    const runner = new InMemoryMachineRunner({
+      captureFailure: {
+        durationMs: 1,
+        exitCode: 0,
+        failureCode: "OP_PIPE_IO",
+        failureDetail: { stream: "stdout" },
+      },
+    });
+
+    const result = await run(runner, { kind: "exec", cmd: "captureFailure" });
+    expect(result).toMatchObject({
+      kind: "exec",
+      ok: false,
+      deadlineMs: 120_000,
+    });
+    expect(result.reason).toContain("OP_PIPE_IO");
+    expect(runner.executions).toBe(1);
+  });
+
+  test("runner retention overflow fails typed and is not duplicated", async () => {
+    const runner = new InMemoryMachineRunner({
+      capped: {
+        durationMs: 1,
+        exitCode: 0,
+        failureCode: "OP_OVERFLOW",
+        failureDetail: { retained_bytes: "9", retained_limit_bytes: "8" },
+      },
+    });
 
     const result = await run(runner, { kind: "exec", cmd: "capped" });
     expect(result).toMatchObject({ kind: "exec", ok: false, deadlineMs: 120_000 });
-    expect(result.reason).toContain("9 bytes");
-    expect(result.reason).toContain("8-byte");
+    expect(result.reason).toContain("more output than the machine link can retain");
     expect(result.reason).toContain("/tmp/out.log");
     expect(runner.executions).toBe(1);
-    expect(runner.requests).toHaveLength(1);
+    expect(runner.opRunner.runs.size).toBe(1);
   });
 });

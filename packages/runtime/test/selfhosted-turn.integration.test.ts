@@ -29,6 +29,7 @@ import { ModalSandboxClient } from "@openai/agents-extensions/sandbox/modal";
 import { buildOpenGeniAgent, runAgentStream, createSandboxClientForBackend } from "../src/index";
 import { RoutingSandboxSession } from "../src/sandbox/routing/routing-session";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
+import { createMockSelfhostedOpStream } from "../src/sandbox/selfhosted/op-testing";
 import { MockAgentResponder } from "../src/sandbox/selfhosted/testing";
 
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
@@ -78,10 +79,17 @@ async function runPinnedToVmTurn(
 
   // The selfhosted machine the session is pinned to. The agent IS the box; exec
   // routes over NATS to the MockAgentResponder (a virtual fs + exec).
+  const responder = opts.responder ?? new MockAgentResponder({ hostname: "vm2" });
+  const stream = createMockSelfhostedOpStream({
+    responder,
+    workspaceId: WS,
+    agentId: "enroll-1",
+  });
   const self = new SelfhostedSession({
     workspaceId: WS,
     agentId: "enroll-1",
-    controlRpc: opts.responder ?? new MockAgentResponder({ hostname: "vm2" }),
+    controlRpc: stream.controlRpc,
+    opStream: stream.opStream,
     relay: RELAY,
     environment: ENV,
   });
@@ -199,10 +207,16 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
         };
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder,
+      workspaceId: WS,
+      agentId: "enroll-1",
+    });
     const self = new SelfhostedSession({
       workspaceId: WS,
       agentId: "enroll-1",
-      controlRpc: responder,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: RELAY,
       environment: {
         OPENGENI_CODEMODE_URL: "https://app.opengeni.example/v1/workspaces/ws/mcp",

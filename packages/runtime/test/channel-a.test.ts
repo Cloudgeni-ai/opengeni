@@ -35,6 +35,7 @@ import {
   ChannelANotFoundError,
   ChannelAConflictError,
   ChannelAUnavailableError,
+  createMockSelfhostedOpStream,
   MockAgentResponder,
   SelfhostedSession,
   parsePorcelainV2,
@@ -1324,10 +1325,16 @@ describe("Workspace file import (Connected Machine private staging)", () => {
         throw execStartFailure;
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: "11111111-1111-1111-1111-111111111111",
+      agentId: "agent-private-import",
+    });
     const session = new SelfhostedSession({
       workspaceId: "11111111-1111-1111-1111-111111111111",
       agentId: "agent-private-import",
-      controlRpc: mock,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: { host: "relay.test", port: 443, tls: true },
       workingDir: "/home/u/project",
     });
@@ -1344,7 +1351,7 @@ describe("Workspace file import (Connected Machine private staging)", () => {
         sha256: "a".repeat(64),
         source: { url: privateUrl, expiresAt: "2030-01-02T03:04:05.000Z" },
       }),
-    ).rejects.toBe(execStartFailure);
+    ).rejects.toThrow(execStartFailure.message);
 
     const privateWrite = mock.requests
       .map(({ req }) => req.op)
@@ -1360,12 +1367,7 @@ describe("Workspace file import (Connected Machine private staging)", () => {
       ),
     ).toBeTrue();
     expect(
-      mock.requests
-        .filter(({ req }) => req.op?.$case === "exec")
-        .some(
-          ({ req }) =>
-            req.op?.$case === "exec" && req.op.exec.command.join(" ").includes(privateUrl),
-        ),
+      stream.runner.starts.some(({ exec }) => exec.command.join(" ").includes(privateUrl)),
     ).toBeFalse();
   });
 });
@@ -2518,10 +2520,16 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         };
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: WS,
+      agentId: AGENT,
+    });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
-      controlRpc: mock,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: RELAY,
       workingDir: "/home/u/proj",
     });
@@ -2554,10 +2562,16 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         };
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: WS,
+      agentId: AGENT,
+    });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
-      controlRpc: mock,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: RELAY,
       workingDir: "/home/u/proj",
     });
@@ -2575,14 +2589,14 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
     expect(seen).toEqual([{ command: "pwd && ls -la", cwd: "/home/u/proj/sub" }]);
   });
 
-  test("selfhosted ptyOpen preserves virtual cwd before the session maps it", async () => {
+  test("selfhosted ptyOpen preserves virtual cwd and remains non-interactive", async () => {
     let seenCwd: string | undefined;
     const mock = new MockAgentResponder({
       exec: (req) => {
         seenCwd = req.cwd;
         expect(req.command).toEqual(["/bin/bash"]);
         return {
-          exitCode: null,
+          exitCode: 0,
           stdout: new TextEncoder().encode("root@machine:/home/u/proj/sub# "),
           stderr: new Uint8Array(0),
           timedOut: false,
@@ -2590,10 +2604,16 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         };
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: WS,
+      agentId: AGENT,
+    });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
-      controlRpc: mock,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: RELAY,
       workingDir: "/home/u/proj",
     });
@@ -2606,6 +2626,7 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
 
     expect(opened.response.ptyId).toBe("pty-selfhosted");
     expect(opened.response.supportsInput).toBe(false);
+    expect(opened.execSessionId).toBeNull();
     expect(seenCwd).toBe("/home/u/proj/sub");
   });
 

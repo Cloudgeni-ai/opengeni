@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-  type ControlRpc,
+  createMockSelfhostedOpStream,
   MockAgentResponder,
   SandboxChannelAService,
   SelfhostedSandboxClient,
@@ -18,11 +18,17 @@ const WS = "22222222-2222-2222-2222-222222222222";
 const AGENT = "agent-int";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 
-function buildClient(rpc: ControlRpc): SelfhostedSandboxClient {
+function buildClient(responder: MockAgentResponder): SelfhostedSandboxClient {
+  const stream = createMockSelfhostedOpStream({
+    responder,
+    workspaceId: WS,
+    agentId: AGENT,
+  });
   return new SelfhostedSandboxClient({
     workspaceId: WS,
     relay: RELAY,
-    controlRpcFactory: () => rpc,
+    controlRpcFactory: () => stream.controlRpc,
+    opStream: stream.opStream,
   });
 }
 

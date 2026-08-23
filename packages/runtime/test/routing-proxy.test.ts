@@ -28,6 +28,7 @@ import {
   makeActiveBackendResolver,
   ActiveBackendUnresolvableError,
   swapTargetEstablishability,
+  createMockSelfhostedOpStream,
   MockAgentResponder,
   type ActivePointer,
   type RoutableBackendSession,
@@ -53,6 +54,23 @@ const resolveSelfhostedConnection = async () => ({
   operationResourcePolicySupported: true,
   operationCpuQuotaSupported: true,
 });
+
+function mockSelfhostedRoute(responder: MockAgentResponder) {
+  const stream = createMockSelfhostedOpStream({
+    responder,
+    workspaceId: WS,
+    agentId: "enroll-1",
+    connectionInstanceId,
+  });
+  return {
+    controlRpcFactory: () => stream.controlRpc,
+    resolveSelfhostedConnection: async () => ({
+      ...(await resolveSelfhostedConnection()),
+      opStream: stream.opStream,
+    }),
+    runner: stream.runner,
+  };
+}
 
 /** A trivial in-memory backend whose exec echoes its `tag` so a test can assert
  *  which backend an op landed on. Optionally fences a configured epoch. */
@@ -1781,13 +1799,14 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
 
   test("selfhosted target -> a SelfhostedSession bound to the enrollment agentId, fenced under active_epoch", async () => {
     const mock = new MockAgentResponder({ hostname: "the-laptop" });
+    const route = mockSelfhostedRoute(mock);
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
-      resolveSelfhostedConnection,
-      controlRpcFactory: () => mock,
+      resolveSelfhostedConnection: route.resolveSelfhostedConnection,
+      controlRpcFactory: route.controlRpcFactory,
       relay: RELAY,
     });
     const r = await resolve({ activeSandboxId: "sbx-self", activeEpoch: 7 });
@@ -1837,14 +1856,15 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
 
   test("the resolver threads renewed transient values only into selfhosted exec", async () => {
     const mock = new MockAgentResponder();
+    const route = mockSelfhostedRoute(mock);
     let token = "first";
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: new FakeBackend("group-modal"),
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
-      resolveSelfhostedConnection,
-      controlRpcFactory: () => mock,
+      resolveSelfhostedConnection: route.resolveSelfhostedConnection,
+      controlRpcFactory: route.controlRpcFactory,
       relay: RELAY,
       transientExecEnvironment: () => ({ OPENGENI_CODEMODE_TOKEN: token }),
     });
@@ -1857,13 +1877,8 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     token = "second";
     await session.exec({ cmd: "second" });
 
-    const first = mock.requests[0]?.req.op;
-    const second = mock.requests[1]?.req.op;
-    if (first?.$case !== "exec" || second?.$case !== "exec") {
-      throw new Error("expected exec requests");
-    }
-    expect(first.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "first" });
-    expect(second.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "second" });
+    expect(route.runner.starts[0]?.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "first" });
+    expect(route.runner.starts[1]?.exec.env).toEqual({ OPENGENI_CODEMODE_TOKEN: "second" });
     expect(JSON.stringify(await session.serializeSessionState())).not.toContain("second");
   });
 
@@ -1966,14 +1981,15 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
   test("end-to-end: proxy + real resolver, swap Modal->selfhosted lands the op on the laptop", async () => {
     const groupModal = new FakeBackend("group-modal");
     const laptop = new MockAgentResponder({ hostname: "laptop-99" });
+    const route = mockSelfhostedRoute(laptop);
     const ptr = mutablePointer();
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
       defaultBackend: groupModal,
       defaultKind: "modal",
       getSandbox: async (id) => sandboxes[id] ?? null,
-      resolveSelfhostedConnection,
-      controlRpcFactory: () => laptop,
+      resolveSelfhostedConnection: route.resolveSelfhostedConnection,
+      controlRpcFactory: route.controlRpcFactory,
       relay: RELAY,
     });
     const proxy = new RoutingSandboxSession({
@@ -1999,6 +2015,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
   test("(Shape 3) swap Modal-home → machine → clear back to null re-lands on the EXISTING group box, never the cached machine session", async () => {
     const groupModal = new FakeBackend("group-modal");
     const laptop = new MockAgentResponder({ hostname: "laptop-1" });
+    const route = mockSelfhostedRoute(laptop);
     const ptr = mutablePointer(); // null start == the established Modal group box (home)
     const resolve = makeActiveBackendResolver({
       workspaceId: WS,
@@ -2008,8 +2025,8 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
         id === "sbx-self"
           ? { id, kind: "selfhosted", name: "laptop", enrollmentId: "enroll-1" }
           : null,
-      resolveSelfhostedConnection,
-      controlRpcFactory: () => laptop,
+      resolveSelfhostedConnection: route.resolveSelfhostedConnection,
+      controlRpcFactory: route.controlRpcFactory,
       relay: RELAY,
     });
     const proxy = new RoutingSandboxSession({

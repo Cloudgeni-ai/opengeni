@@ -24,6 +24,7 @@ import {
   ControlResponse,
   ErrorCode,
   type ExecRequest,
+  type ExecResponse,
   OpAck,
   OpChannel,
   OpFrame,
@@ -480,6 +481,52 @@ export class FakeOpRunner implements ControlRpc {
       highestGeneration: 0n,
     };
   }
+}
+
+export function createMockSelfhostedOpStream(input: {
+  responder: ControlRpc & { runExec(exec: ExecRequest): Promise<ExecResponse> };
+  workspaceId: string;
+  agentId: string;
+  connectionInstanceId?: string;
+}) {
+  const transport = new InMemoryOpStreamTransport();
+  const runner = new FakeOpRunner({
+    transport,
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
+    defaultScript: async (exec) => {
+      const response = await input.responder.runExec(exec);
+      return {
+        frames: [
+          ...(response.stdout.length > 0
+            ? [{ channel: "stdout" as const, bytes: response.stdout }]
+            : []),
+          ...(response.stderr.length > 0
+            ? [{ channel: "stderr" as const, bytes: response.stderr }]
+            : []),
+        ],
+        exit: {
+          exitCode: response.exitCode,
+          timedOut: response.timedOut,
+          durationMs: response.durationMs,
+        },
+      };
+    },
+  });
+  const controlRpc: ControlRpc = {
+    request: async (subject, request, opts) => {
+      const gate = await input.responder.request(subject, request, opts);
+      if (gate.error?.code !== ErrorCode.ERROR_CODE_UNSUPPORTED) return gate;
+      return await runner.request(subject, request, opts);
+    },
+  };
+  return {
+    controlRpc,
+    opStream: { transport },
+    runner,
+    transport,
+  };
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {

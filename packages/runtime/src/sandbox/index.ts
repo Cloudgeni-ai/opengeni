@@ -518,6 +518,12 @@ export {
   type MockAgentResponderOptions,
   type MockExecHandler,
 } from "./selfhosted/testing";
+export {
+  createMockSelfhostedOpStream,
+  FakeOpRunner,
+  type FakeOpScript,
+  InMemoryOpStreamTransport,
+} from "./selfhosted/op-testing";
 
 // The hot-swap routing proxy (M7): ONE stable session-shaped object the SDK binds
 // to, which re-reads the per-session active pointer per op and dispatches to the
