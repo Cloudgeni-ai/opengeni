@@ -150,7 +150,12 @@ describe("remember MCP tools", () => {
 
   test("the tool description states the prompt cost and the shape of a durable rule", () => {
     const description = harness().configs.get("remember")?.description ?? "";
-    expect(description).toContain("prompt text prepended to every session in this workspace");
+    expect(description).toContain(
+      "composed verbatim into the prompt of every session it applies to",
+    );
+    // Accurate about reach and about the shared standing ceiling.
+    expect(description).toContain("every session bound to the role for a role rule");
+    expect(description).toContain("At most three rules compose at once");
     expect(description).toContain(
       `under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
     );
@@ -161,6 +166,8 @@ describe("remember MCP tools", () => {
     expect(description).toContain(
       `Keep a lane=preference under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
     );
+    // Honest about why a preference gets more room, not less.
+    expect(description).toContain("retrieval cost rather than standing prompt cost");
   });
 
   test("an over-budget prompt-composed lane is refused before anything durable is written", async () => {

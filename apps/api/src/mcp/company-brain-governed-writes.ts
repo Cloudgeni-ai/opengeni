@@ -125,7 +125,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content. " +
-        `Once a human activates the draft, those bytes are prompt text in every session in this workspace, so promote only a short imperative note of at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters; write a fresh short note rather than promoting a long working note. ` +
+        `Once a human activates the draft, those bytes are composed verbatim into the prompt of every session the target applies to, so a note over ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters is rejected here rather than truncated: write a fresh short imperative note instead of promoting a long working note. ` +
         "The frozen learning policy records a decision receipt, but mandatory policy still requires human activation even under Automatic; this never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
@@ -150,7 +150,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Atomically promote one still-active note from this exact root task tree into a workspace preference proposal. The note bytes remain exact evidence and full proposal content. " +
-        `The title and description you supply become prompt text in every session in this workspace, so write them as one short imperative statement and promote only a note of at most ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ` +
+        `The title and description you supply are what gets composed into every session prompt, so write them as one short imperative statement; the note content is retrieved on demand and a note over ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters is rejected here rather than truncated. ` +
         "Under Suggest the proposal waits for human review; under Automatic an eligible decision is activated through the preference lifecycle and remains undoable. This never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
@@ -186,7 +186,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Materialize an evidence-backed inactive workspace instruction-policy draft. " +
-        `Once a human activates it, this content is prompt text in every session in this workspace, so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
+        `Once a human activates it, this content is composed verbatim into the prompt of every session the target applies to (every session in this workspace for a global charter or policy, every session bound to the role for a role policy), so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
         "The frozen learning policy records a decision receipt, but this tool cannot activate mandatory behavior, including when learning mode is Automatic; a human must activate the draft.",
       inputSchema: {
         ...evidence,
@@ -220,7 +220,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Materialize an evidence-backed workspace preference proposal. " +
-        `Its title and description are prompt text in every session in this workspace and the content is retrieved on demand, so keep the content under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
+        `Its short title and description are what get composed into every session prompt; the content is retrieved on demand, so its length is retrieval cost rather than standing prompt cost. Keep the content under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
         "Under Suggest it stays inactive for human review; under Automatic an eligible decision is activated through the governed preference lifecycle with an undoable receipt. It never creates mandatory authority.",
       inputSchema: {
         ...evidence,

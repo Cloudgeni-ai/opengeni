@@ -273,26 +273,39 @@ handles without copying private full preference content.
 ## Agent-authored budgets and style
 
 An active policy revision is composed verbatim into the prompt of every session
-in the workspace, for as long as it stays active, so its length is a permanent
-per-turn cost rather than a one-time one. Agents are bad at judging that cost on
-their own: asked for "always track work in Linear", a model will happily author a
-five-step numbered procedure. The budget is therefore explicit and enforced,
-separately from the human editor limit:
+it applies to, for as long as it stays active. A global charter or global policy
+applies to every session in the workspace; a role policy applies to every session
+bound to that role. At most three entries compose at once (charter, global
+policy, matching role policy), so the standing ceiling the agent budget implies
+is three times the per-entry cap. Either way the length is a permanent per-turn
+cost rather than a one-time one, and agents are bad at judging that on their own:
+asked for "always track work in Linear", a model will happily author a five-step
+numbered procedure. The budget is therefore explicit and enforced, separately
+from the human editor limit:
 
 | Author | Surface | Limit |
 | --- | --- | --- |
-| Agent | `remember` lane `instruction_policy`, `instruction_policy_propose` | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
-| Agent | `remember` lane `preference`, `preference_propose` | `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS` (1,200) |
+| Agent | `remember` lane `instruction_policy`, `instruction_policy_propose`, `task_note_promote_instruction_policy` | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
+| Agent | `remember` lane `preference`, `preference_propose`, `task_note_promote_preference` | `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS` (1,200) |
 | Human | Workspace State editor, HTTP/SDK policy routes | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144) |
 
 The constants and the actionable rejection messages live in
-[`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts)
-and are enforced by the request contracts, so every caller of those agent
-surfaces gets the same bound. The human limit is deliberately unchanged:
-somebody editing a charter in the UI is making a deliberate, visible choice, and
-lowering their limit would reject text they had already typed. Existing stored
-revisions are never rewritten, and a legacy import stays byte-identical; only new
-agent writes are bounded.
+[`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts).
+The direct proposal surfaces are bounded by the request contracts. Task-note
+promotion is bounded in
+[`packages/db/src/company-brain-governed-writes.ts`](../packages/db/src/company-brain-governed-writes.ts)
+instead, because there the content is the note rather than a request field: a
+note is bounded only by `TASK_NOTE_TEXT_MAX_BYTES` and promotion lands in exactly
+the same destination materialization as a direct proposal, so without a check
+there the note would be a way around the cap. The promotion is rejected rather
+than truncated, before any evidence, claim, or proposal row is written; the note
+bytes stay exact evidence, and a convergent replay of a promotion that was
+already accepted is not re-checked.
+
+The human limit is deliberately unchanged: somebody editing a charter in the UI
+is making a deliberate, visible choice, and lowering their limit would reject
+text they had already typed. Existing stored revisions are never rewritten, and a
+legacy import stays byte-identical; only new agent writes are bounded.
 
 The style rule the tool descriptions state, and the one to keep in prose and
 prompts consistent with:
@@ -303,10 +316,12 @@ prompts consistent with:
 - prefer several small rules over one long one, each a separate revision;
 - keep procedure in a Document or Skill and have the rule reference it.
 
-A preference is cheaper than a rule but not free: its title and description
-descriptors are prompt-composed in every session while its full content stays
-behind the exact attempt's retrieval handle, which is why its budget is larger
-but still far below the human registry limit. The Knowledge lane keeps the wider
+A preference is bounded for a different reason, and the wording matters because
+the naive one is wrong: shortening a preference's content does **not** shrink any
+prompt. Only its short title and description descriptors are composed; the full
+content stays behind the exact attempt's retrieval handle. Its length is
+therefore retrieval cost rather than standing prompt cost, which is why it gets
+more room than a rule rather than less. The Knowledge lane keeps the wider
 `REMEMBER_CONTENT_MAX_CHARS` (4,000) ceiling because it is retrieval evidence and
 never joins the always-composed prefix.
 

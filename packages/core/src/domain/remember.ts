@@ -197,9 +197,14 @@ const REMEMBER_LABEL_MAX_CHARS = 128;
 /**
  * What saving this costs, shown on the confirmation card so a human can judge
  * the length before agreeing. A mandatory rule is composed into the prompt of
- * every session in the workspace; a preference contributes its descriptor to
- * that prompt and keeps its content behind on-demand retrieval; knowledge is
- * retrieval evidence and never joins the always-composed prefix.
+ * every session it applies to; a preference contributes only its short
+ * descriptor to that prompt and keeps its content behind on-demand retrieval;
+ * knowledge is retrieval evidence and never joins the always-composed prefix.
+ *
+ * `HumanInputForm` renders a single question's `label` as the card heading and
+ * its `prompt` as the sub-text, so this stays a title with a parenthetical
+ * rather than a sentence: the question the human answers has to keep reading as
+ * the heading of the card.
  *
  * This deliberately lives on `label` rather than `helpText`: migrations 0272 /
  * 0274 / 0284 / 0293 / 0316 byte-verify the reconstructed `prompt`, `helpText`,
@@ -210,14 +215,18 @@ const REMEMBER_LABEL_MAX_CHARS = 128;
 export function rememberConfirmationLabel(input: {
   lane: RememberLane;
   contentChars: number;
+  /** Role-scoped rules compose only for sessions bound to that role. */
+  policyScope?: "global" | "role" | undefined;
 }): string {
   const cost =
     input.lane === "instruction_policy"
-      ? "added to every session prompt in this workspace"
+      ? input.policyScope === "role"
+        ? "in every prompt for this role"
+        : "in every session prompt"
       : input.lane === "preference"
-        ? "summary in every session prompt, full text on demand"
-        : "retrieved when relevant, not always in the prompt";
-  return `Remember - ${input.contentChars} characters, ${cost}`.slice(0, REMEMBER_LABEL_MAX_CHARS);
+        ? "summary in every prompt"
+        : "retrieved when relevant";
+  return `Remember (${input.contentChars} chars, ${cost})`.slice(0, REMEMBER_LABEL_MAX_CHARS);
 }
 
 /**
@@ -242,6 +251,7 @@ function humanInputPrompt(request: RememberRequest, targetId: string) {
         label: rememberConfirmationLabel({
           lane: request.lane,
           contentChars: Array.from(request.content).length,
+          policyScope: request.lane === "instruction_policy" ? request.target.scope : undefined,
         }),
         helpText: Array.from(request.content).slice(0, 2_000).join(""),
         options: [

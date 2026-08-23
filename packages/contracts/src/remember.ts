@@ -12,7 +12,6 @@ import {
 import { GovernedLearningActivationDestination } from "./governed-learning-activation";
 import { HumanInputQuestion } from "./index";
 import {
-  PREFERENCE_REGISTRY_CONTENT_MAX_CHARS,
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
   PreferenceRegistryStableKey,
@@ -58,9 +57,10 @@ export const RememberRequest = z.discriminatedUnion("lane", [
     .object({
       ...rememberBase,
       lane: z.literal("preference"),
-      // The descriptor pair is prompt-composed in every session and the full
-      // content is retrieved on demand, so an agent-authored preference is
-      // bounded well below the human registry limit.
+      // Only the short title/description descriptors are prompt-composed; the
+      // content is retrieved on demand, so this length is retrieval cost rather
+      // than standing prompt cost, and gets more room than a rule rather than
+      // less.
       content: z
         .string()
         .trim()
@@ -77,18 +77,14 @@ export const RememberRequest = z.discriminatedUnion("lane", [
         .min(1)
         .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
     })
-    .strict()
-    .refine((value) => value.content.length <= PREFERENCE_REGISTRY_CONTENT_MAX_CHARS, {
-      message: "preference content exceeds the registry limit",
-      path: ["content"],
-    }),
+    .strict(),
   z
     .object({
       ...rememberBase,
       lane: z.literal("instruction_policy"),
       // A mandatory rule is composed verbatim into the prompt of every session
-      // in the workspace, for as long as it stays active, so this is the
-      // tightest agent budget in the Company Brain.
+      // it applies to, for as long as it stays active, so this is the tightest
+      // agent budget in the Company Brain.
       content: z
         .string()
         .trim()

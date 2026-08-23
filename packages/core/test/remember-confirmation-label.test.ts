@@ -10,22 +10,42 @@ import { rememberConfirmationLabel } from "@opengeni/core";
  */
 describe("remember confirmation label", () => {
   test("a mandatory rule says it lands in every session prompt, with its length", () => {
-    const label = rememberConfirmationLabel({ lane: "instruction_policy", contentChars: 1_912 });
-    expect(label).toBe(
-      "Remember - 1912 characters, added to every session prompt in this workspace",
+    expect(rememberConfirmationLabel({ lane: "instruction_policy", contentChars: 1_912 })).toBe(
+      "Remember (1912 chars, in every session prompt)",
     );
+  });
+
+  test("a role-scoped rule does not overstate its reach", () => {
+    expect(
+      rememberConfirmationLabel({
+        lane: "instruction_policy",
+        contentChars: 240,
+        policyScope: "role",
+      }),
+    ).toBe("Remember (240 chars, in every prompt for this role)");
   });
 
   test("a preference is honest that only its summary is always composed", () => {
     expect(rememberConfirmationLabel({ lane: "preference", contentChars: 240 })).toBe(
-      "Remember - 240 characters, summary in every session prompt, full text on demand",
+      "Remember (240 chars, summary in every prompt)",
     );
   });
 
   test("knowledge is honest that it is retrieval, not standing prompt text", () => {
     expect(rememberConfirmationLabel({ lane: "knowledge", contentChars: 64 })).toBe(
-      "Remember - 64 characters, retrieved when relevant, not always in the prompt",
+      "Remember (64 chars, retrieved when relevant)",
     );
+  });
+
+  test("reads as a card heading, because that is where the form renders it", () => {
+    // `HumanInputForm` uses a single question's label as the title and its
+    // prompt as the sub-text, so a sentence here would demote the question.
+    for (const lane of ["instruction_policy", "preference", "knowledge"] as const) {
+      const label = rememberConfirmationLabel({ lane, contentChars: 612 });
+      expect(label.startsWith("Remember (")).toBe(true);
+      expect(label.endsWith(")")).toBe(true);
+      expect(label.length).toBeLessThanOrEqual(56);
+    }
   });
 
   test("stays inside the human-input label bound for every lane and length", () => {

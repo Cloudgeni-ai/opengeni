@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import {
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
   CompanyBrainGovernedWriteAttempt,
   CompanyBrainGovernedWriteReceipt,
   CompanyBrainGovernedWriteRequest,
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
+  agentAuthoredDurableTextTooLongMessage,
   type CompanyBrainGovernedWriteReceipt as CompanyBrainGovernedWriteReceiptType,
   type CompanyBrainGovernedWriteRequest as CompanyBrainGovernedWriteRequestType,
   type ScopedKnowledgeActor,
@@ -801,6 +804,40 @@ function identityRequest(request: CompanyBrainGovernedWriteRequestType): unknown
   return rest;
 }
 
+/**
+ * Task-note promotion lands in exactly the same destination materialization as
+ * a direct `propose_instruction_policy` / `propose_preference`, so the
+ * agent-authored prompt budget has to be enforced here too. Without it the note
+ * (bounded only by `TASK_NOTE_TEXT_MAX_BYTES`) is a way to write a long
+ * procedure into an always-composed rule through the back door.
+ *
+ * The note bytes stay exact evidence: this rejects the promotion rather than
+ * truncating or rewriting anything, and it runs before any evidence, claim, or
+ * proposal row is written. A convergent replay of a promotion that was already
+ * accepted is deliberately not re-checked, so stored rows are never invalidated
+ * after the fact.
+ */
+function assertAgentAuthoredPromotionBudget(
+  request: CompanyBrainGovernedWriteRequestType,
+  noteText: string,
+): void {
+  const kind =
+    request.kind === "promote_task_note_instruction_policy"
+      ? ("instruction_policy" as const)
+      : request.kind === "promote_task_note_preference"
+        ? ("preference" as const)
+        : null;
+  if (kind === null) return;
+  const maxChars =
+    kind === "instruction_policy"
+      ? AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS
+      : AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS;
+  if (noteText.length <= maxChars) return;
+  throw new CompanyBrainGovernedWriteInvalidOperationError(
+    agentAuthoredDurableTextTooLongMessage({ kind, actualChars: noteText.length }),
+  );
+}
+
 function isInstructionPolicyProposal(
   request: CompanyBrainGovernedWriteRequestType,
 ): request is InstructionPolicyProposalRequest {
@@ -1012,6 +1049,7 @@ export async function writeCompanyBrainGovernedProposal(
               "Task-note promotion source did not preserve exact attempt authority",
             );
           }
+          assertAgentAuthoredPromotionBudget(request, prelockedSource.noteText);
           materialization = await materializeTaskNoteKnowledge(scopedDb, {
             authority,
             request,

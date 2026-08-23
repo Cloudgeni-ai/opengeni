@@ -2,20 +2,31 @@
  * Budgets and authoring style for durable text an **agent** writes on a user's
  * behalf.
  *
- * A workspace instruction policy is composed verbatim into the prompt of every
- * session in the workspace, for as long as it stays active, so its length is a
- * permanent per-turn cost rather than a one-time one. A preference is cheaper:
- * only its title and description descriptors are prompt-visible, while the full
- * content is retrieved on demand behind the exact attempt's retrieval handle.
- * Knowledge is cheaper still: it is retrieval evidence and never joins the
- * always-composed prefix.
+ * The budget follows the cost, and the cost differs per destination:
+ *
+ * - A workspace instruction policy is composed verbatim into the prompt of
+ *   every session it applies to, for as long as it stays active. A global
+ *   charter or global policy applies to every session in the workspace; a role
+ *   policy applies to every session bound to that role. At most three entries
+ *   compose at once (charter, global policy, matching role policy), so the
+ *   standing ceiling this budget implies is three times the per-entry cap.
+ * - A preference is cheaper and in a different way: only its short title and
+ *   description descriptors are prompt-composed, while the full content is
+ *   retrieved on demand behind the exact attempt's retrieval handle. Its length
+ *   is therefore retrieval cost, not standing prompt cost, which is why it gets
+ *   more room rather than less.
+ * - A company profile is the largest always-on surface: every field is
+ *   mandatory prompt context in every session across the whole organization.
+ * - Knowledge is retrieval evidence and never joins the always-composed prefix.
  *
  * These caps deliberately bind only agent-authored writes. The human-facing
  * limits (`WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS`,
- * `PREFERENCE_REGISTRY_CONTENT_MAX_CHARS`) are unchanged: a person editing a
- * charter in Workspace State is making a deliberate, visible choice, and
- * lowering their limit would reject text they already typed. Existing stored
- * revisions are never rewritten; only new agent writes are bounded.
+ * `PREFERENCE_REGISTRY_CONTENT_MAX_CHARS`, `COMPANY_PROFILE_SCALAR_MAX_CHARS`,
+ * `COMPANY_PROFILE_ENTRY_MAX_CHARS`, `COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES`)
+ * are unchanged: a person editing in the UI is making a deliberate, visible
+ * choice, and lowering their limit would reject text they already typed.
+ * Existing stored revisions are never rewritten; only new agent writes are
+ * bounded.
  */
 
 /** One imperative rule, in 1-3 sentences, fits comfortably under this. */
@@ -24,17 +35,53 @@ export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS = 600;
 /** Retrieved on demand rather than always composed, so a little more room. */
 export const AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS = 1_200;
 
+/** `identity` and `mission`: a couple of sentences, not a positioning document. */
+export const AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS = 400;
+
+/** One product, customer, goal, or constraint: a phrase or a single sentence. */
+export const AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS = 200;
+
+/** Whole canonical profile, mandatory in every session across the organization. */
+export const AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES = 4_096;
+
 export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE =
-  `A workspace rule is injected into every session prompt. Keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} ` +
-  "characters: one rule, imperative, no numbered procedure. Split unrelated rules into separate entries.";
+  "A workspace rule is composed verbatim into the prompt of every session it applies to (every session " +
+  "for a global charter or policy, every session bound to the role for a role policy), for as long as it " +
+  `stays active. Keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters: one rule, ` +
+  "imperative, no numbered procedure. Split unrelated rules into separate entries.";
 
 export const AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE =
-  `A workspace preference is durable Company Brain content and its descriptor is injected into every session prompt. Keep it under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} ` +
-  "characters: state the preference plainly, no numbered procedure and no examples. Put procedure in a Document or Skill and reference it instead.";
+  "A workspace preference is durable Company Brain content that agents retrieve on demand, so its length is " +
+  "retrieval cost rather than standing prompt cost: only its short title and description are composed into " +
+  `every session prompt. Keep it under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters: state the ` +
+  "preference plainly, no numbered procedure and no examples. Put procedure in a Document or Skill and " +
+  "reference it instead.";
+
+export const AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE =
+  "Every company-profile field is mandatory prompt context in every session across the organization. Keep " +
+  `identity and mission under ${AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS} characters each, each list ` +
+  `entry under ${AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS}, and the whole profile under ` +
+  `${AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES} UTF-8 bytes: one concise statement per field, no ` +
+  "numbered procedure and no marketing copy. Longer source material belongs in organization Documents and is " +
+  "retrieved as evidence.";
 
 /**
- * The shape rule the model reads on every tool that authors durable text.
- * Kept as one sentence-per-clause string so tool descriptions stay consistent.
+ * Lane-agnostic guidance for the one `remember` content field, whose schema
+ * bound has to admit the widest lane. Without it an over-long rule would be
+ * refused with a generic "expected length <= 4000" that points at the wrong
+ * number entirely.
+ */
+export const AGENT_AUTHORED_REMEMBER_CONTENT_TOO_LONG_MESSAGE =
+  "Remembered content is bounded by where it lands: a mandatory workspace rule at most " +
+  `${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters because it is composed into every ` +
+  `session prompt it applies to, a preference at most ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS}, a ` +
+  "Knowledge fact at most 4000. Write one imperative statement in 1-3 sentences, split unrelated entries, and " +
+  "keep procedure in a Document or Skill that the entry references.";
+
+/**
+ * The shape rule the model reads on every tool that authors a durable *rule or
+ * preference*. Deliberately not reused for the company profile, which is a
+ * descriptive profile rather than an instruction and needs its own wording.
  */
 export const AGENT_AUTHORED_DURABLE_TEXT_STYLE =
   "Durable text is prompt cost, not a place to be thorough: write one imperative statement in 1-3 sentences, " +

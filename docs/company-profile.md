@@ -123,17 +123,27 @@ bytes. Longer source material belongs in organization-authority Documents/RAG
 and is retrieved as evidence; it is never copied wholesale into this profile or
 the mandatory prompt.
 
-Those numbers are hard bounds, not a target. Every field here is mandatory prompt
-context in every session for the whole organization, so a good profile sits far
-below them: identity and mission at most a couple of sentences each, and each
-list entry a phrase or a single sentence. No numbered procedure, no marketing
-copy, no rationale essay, no restating of platform defaults. The bounds are the
-same whether a human or an agent authors the revision, because every field is
-already scoped to a concise role rather than left open-ended, and lowering them
-would reject profiles a human had already typed. The agent-authoring surface
-states this shape rule in the `company_profile_propose` tool description; the
-equivalent rule for workspace rules and preferences, where the agent budget is
-tighter than the human one, is in
+Those numbers are the human ceiling, not a target, and this is the largest
+always-on prompt surface in the product: every field is mandatory context in
+every session across the whole organization. An **agent** author is therefore
+bounded much more tightly, through `AgentAuthoredCompanyProfileContent`:
+
+| Field | Agent bound | Human bound |
+| --- | --- | --- |
+| `identity`, `mission` | 400 characters each | 2,048 characters each |
+| each list entry | 200 characters | 1,024 characters |
+| whole canonical profile | 4,096 UTF-8 bytes | 28,672 UTF-8 bytes |
+
+Entry counts are unchanged at 16 per list, so the whole-profile byte ceiling is
+what stops sixteen individually legal entries becoming standing prompt weight.
+The human `account:admin` route keeps `CompanyProfileContent` and the wider
+bounds, for the same reason as workspace rules: a person filling this in is
+making a deliberate, visible choice, and lowering their limit would reject a
+profile they had already typed. Existing revisions are never rewritten.
+
+Either way a good profile is one plain descriptive statement per field: no
+numbered procedure, no marketing copy, no rationale essay, no restating of
+platform defaults. The equivalent rule for workspace rules and preferences is in
 [`workspace-instruction-policies.md`](workspace-instruction-policies.md).
 
 ## Revisions, activation, audit, and rollback
@@ -221,12 +231,15 @@ is hashed. The proposal appends one inactive revision with `agent_admin`
 provenance and returns the exact structured-human-input payload. It never changes
 the head or activation events.
 
-The tool description states the authoring style, because a model left to itself
-writes an essay into a field that is then prepended to every prompt in the
-organization: each field is one concise statement, identity and mission at most a
-couple of sentences, list entries a phrase or a single sentence, no numbered
-procedure and no rationale. The bounds in "Bounded structured content" above are
-the hard ceiling, not the target.
+Proposal input is validated against `AgentAuthoredCompanyProfileContent` rather
+than `CompanyProfileContent`, so the agent bounds in "Bounded structured content"
+above apply here and not on the manual `account:admin` route. The tool
+description states both those bounds and the authoring style, because a model
+left to itself writes an essay into a field that is then prepended to every
+prompt in the organization: one concise descriptive statement per field, no
+numbered procedure and no marketing copy. The style clause used for workspace
+rules is deliberately not reused here; a profile is descriptive, not an
+instruction, so "write one imperative rule" would be the wrong shape.
 
 The returned question's `helpText` binds the revision number and content
 SHA-256 and renders a readable summary of the proposed identity, mission,

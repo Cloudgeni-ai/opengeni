@@ -1,9 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
+  AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS,
+  AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS,
   AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
   AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
   AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+  AgentAuthoredCompanyProfileContent,
+  COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
+  COMPANY_PROFILE_ENTRY_MAX_CHARS,
+  COMPANY_PROFILE_SCALAR_MAX_CHARS,
+  CompanyProfileContent,
   PREFERENCE_REGISTRY_CONTENT_MAX_CHARS,
   ProposeWorkspaceInstructionPolicyRequest,
   ProposeWorkspacePreferenceRequest,
@@ -52,8 +60,12 @@ describe("agent-authored durable-text budgets", () => {
     );
     expect(result.success).toBe(false);
     expect(contentIssue(result)).toBe(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE);
+    // Accurate about reach: a role policy composes only for its own sessions.
     expect(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE).toContain(
-      "injected into every session prompt",
+      "every session it applies to",
+    );
+    expect(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE).toContain(
+      "every session bound to the role for a role policy",
     );
     expect(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE).toContain(
       `under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
@@ -88,6 +100,15 @@ describe("agent-authored durable-text budgets", () => {
     expect(contentIssue(result)).toBe(AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE);
     expect(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS).toBeGreaterThan(
       AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+    );
+    // The honest reason for the larger budget: shortening `content` does not
+    // shrink the prompt, because only the descriptor pair is composed.
+    expect(AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE).toContain("retrieve on demand");
+    expect(AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE).toContain(
+      "retrieval cost rather than standing prompt cost",
+    );
+    expect(AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE).not.toContain(
+      "its descriptor is injected",
     );
   });
 
@@ -157,9 +178,78 @@ describe("agent-authored durable-text budgets", () => {
     ).toBe(false);
   });
 
+  test("the company profile is bounded for an agent and unchanged for a human", () => {
+    const profile = (identity: string) => ({
+      identity,
+      mission: null,
+      products: [],
+      customers: [],
+      goals: [],
+      constraints: [],
+    });
+    const concise = "We build managed agents that do long-running infrastructure work.";
+    expect(AgentAuthoredCompanyProfileContent.safeParse(profile(concise)).success).toBe(true);
+
+    const essay = "x".repeat(AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS + 1);
+    const rejected = AgentAuthoredCompanyProfileContent.safeParse(profile(essay));
+    expect(rejected.success).toBe(false);
+    expect(rejected.success ? "" : rejected.error.issues[0]!.message).toContain(
+      "mandatory prompt context in every session across the organization",
+    );
+    // The same profile still passes the human `account:admin` contract.
+    expect(CompanyProfileContent.safeParse(profile(essay)).success).toBe(true);
+
+    const longEntry = {
+      identity: concise,
+      mission: null,
+      products: [
+        {
+          key: "flagship",
+          content: "y".repeat(AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS + 1),
+        },
+      ],
+      customers: [],
+      goals: [],
+      constraints: [],
+    };
+    expect(AgentAuthoredCompanyProfileContent.safeParse(longEntry).success).toBe(false);
+    expect(CompanyProfileContent.safeParse(longEntry).success).toBe(true);
+
+    const manyEntries = {
+      identity: null,
+      mission: null,
+      products: [],
+      customers: [],
+      goals: Array.from({ length: 16 }, (_, index) => ({
+        key: `goal-${index}`,
+        content: "z".repeat(AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS),
+      })),
+      constraints: Array.from({ length: 16 }, (_, index) => ({
+        key: `constraint-${index}`,
+        content: "w".repeat(AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS),
+      })),
+    };
+    // Each entry is legal on its own; the whole-profile byte ceiling is what
+    // stops sixteen of them becoming standing prompt weight.
+    expect(AgentAuthoredCompanyProfileContent.safeParse(manyEntries).success).toBe(false);
+    expect(CompanyProfileContent.safeParse(manyEntries).success).toBe(true);
+  });
+
   test("human editor limits are untouched", () => {
     expect(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS).toBe(262_144);
     expect(PREFERENCE_REGISTRY_CONTENT_MAX_CHARS).toBe(262_144);
+    expect(COMPANY_PROFILE_SCALAR_MAX_CHARS).toBe(2_048);
+    expect(COMPANY_PROFILE_ENTRY_MAX_CHARS).toBe(1_024);
+    expect(COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES).toBe(28_672);
+    expect(AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS).toBeLessThan(
+      COMPANY_PROFILE_SCALAR_MAX_CHARS,
+    );
+    expect(AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS).toBeLessThan(
+      COMPANY_PROFILE_ENTRY_MAX_CHARS,
+    );
+    expect(AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES).toBeLessThan(
+      COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
+    );
     expect(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS).toBeLessThan(
       WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
     );
