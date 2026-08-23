@@ -66059,6 +66059,7 @@ export * from "./browser-auth";
 export * from "./browser-downloads";
 export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
+export * from "./interaction-placement-loss";
 export * from "./canonical-human-identities";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";

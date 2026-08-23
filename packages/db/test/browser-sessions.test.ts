@@ -1319,7 +1319,7 @@ describe("durable BrowserSession lifecycle", () => {
         and operation_id = ${abandonedOperationId}`;
     expect(settledOperation).toEqual({
       state: "outcome_unknown",
-      error_code: "controller_transition_expired",
+      error_code: "outcome_unknown",
       error_retryable: false,
     });
     const [abandonedHolderCount] = await shared!.admin<{ count: number }[]>`
@@ -1380,7 +1380,7 @@ describe("durable BrowserSession lifecycle", () => {
         and operation_id = ${computerOperationId}`;
     expect(computerOperation).toEqual({
       state: "outcome_unknown",
-      error_code: "controller_transition_expired",
+      error_code: "outcome_unknown",
       error_retryable: false,
     });
     const [computerHolderCount] = await shared!.admin<{ count: number }[]>`

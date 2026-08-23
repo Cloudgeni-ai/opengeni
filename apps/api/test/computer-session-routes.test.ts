@@ -106,6 +106,26 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain('operation === "computer.end" && expectedPlacementInstanceId');
   });
 
+  test("retires a stale Connected Machine placement instead of advertising a retryable 409", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withComputerPlacement"),
+      source.indexOf("async function withActiveComputerController"),
+    );
+    const active = source.slice(
+      source.indexOf("async function withActiveComputerController"),
+      source.indexOf("async function ensureInteractionHolder"),
+    );
+    expect(placement).toContain("throwComputerSourcePlacementChanged");
+    expect(active).toContain("terminalizeStaleConnectedInteractionPlacement");
+    expect(active.indexOf("terminalizeStaleConnectedInteractionPlacement")).toBeLessThan(
+      active.indexOf('sourcePlacementChangedApiError("computer_session")'),
+    );
+    expect(source).toContain('interactionFailureCode: "source_placement_changed"');
+    expect(source).toContain('interactionLifecycle: "lost"');
+    expect(source).toContain("retryable: false");
+  });
+
   test("dispatches lifecycle authority before physical mutation and preserves unknown outcomes", async () => {
     const source = await readFile(routeUrl, "utf8");
     const create = source.slice(
