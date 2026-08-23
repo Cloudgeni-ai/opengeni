@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationUrl = new URL("../drizzle/0326_session_background_commands.sql", import.meta.url);
 
@@ -25,9 +26,14 @@ describe("migration 0326 session background commands", () => {
     expect(sql).toContain("session_background_commands_active_session_idx");
     expect(sql).toContain("FORCE ROW LEVEL SECURITY");
     expect(sql).toContain("settle_background_command_from_retained_process");
+    expect(sql).toContain("claim_connected_machine_background_commands");
+    expect(sql).toContain("reconcile_proof_outcome");
+    expect(sql).toContain("REVOKE ALL ON FUNCTION");
     expect(sql).toContain("command.state = 'stopping'");
     expect(sql).toContain("'background_stopping'");
     expect(sql).not.toMatch(/\bUPDATE\s+session_background_commands\b/iu);
+    expect(FORCE_RLS_TABLES).toContain("session_background_commands");
+    expect(RUNTIME_FULL_DML_TABLES).toContain("session_background_commands");
   });
 
   test("installs the table, checks, indexes, policies, and command-aware claim function", async () => {
@@ -44,6 +50,7 @@ describe("migration 0326 session background commands", () => {
     const names = new Set(constraints.map((row) => row.conname));
     expect(names).toContain("session_background_commands_provider_identity_check");
     expect(names).toContain("session_background_commands_lifecycle_check");
+    expect(names).toContain("session_background_commands_reconcile_check");
 
     const indexes = await shared.admin<Array<{ indexname: string }>>`
       select indexname from pg_indexes where tablename = 'session_background_commands'`;
@@ -66,5 +73,24 @@ describe("migration 0326 session background commands", () => {
       ) as definition`;
     expect(claim?.definition).toContain("session_background_commands");
     expect(claim?.definition).toContain("background_stopping");
+
+    const [connectedClaim] = await shared.admin<
+      Array<{ security_definer: boolean; definition: string }>
+    >`
+      select prosecdef as security_definer, pg_get_functiondef(oid) as definition
+      from pg_proc
+      where oid = 'opengeni_private.claim_connected_machine_background_commands(uuid,integer,bigint)'::regprocedure`;
+    expect(connectedClaim?.security_definer).toBe(true);
+    expect(connectedClaim?.definition).toContain("FOR UPDATE OF command SKIP LOCKED");
+    expect(connectedClaim?.definition).toContain("connection_instance_id");
+    expect(connectedClaim?.definition).toContain("reconcile_proof_observed_at");
+
+    const [publicPrivilege] = await shared.admin<Array<{ allowed: boolean }>>`
+      select has_function_privilege(
+        'public',
+        'opengeni_private.claim_connected_machine_background_commands(uuid,integer,bigint)',
+        'EXECUTE'
+      ) as allowed`;
+    expect(publicPrivilege?.allowed).toBe(false);
   });
 });

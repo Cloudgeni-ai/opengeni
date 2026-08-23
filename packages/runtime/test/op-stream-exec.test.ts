@@ -17,6 +17,7 @@ import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-c
 
 const WORKSPACE = "ws-1";
 const AGENT = "agent-1";
+const CONNECTION_INSTANCE = "connection-test";
 
 function buildRig(
   opts: {
@@ -24,15 +25,42 @@ function buildRig(
     execTimeoutMs?: number;
     windowBytes?: number;
     memoryMaxBytes?: number;
+    controlWorkspaceId?: string;
+    connectionInstanceId?: string;
+    adoptBackgroundCommand?: (input: {
+      controlWorkspaceId: string;
+      enrollmentId: string;
+      connectionInstanceId: string;
+      opId: string;
+      command: string;
+    }) => Promise<{ commandId: string }>;
+    settleBackgroundCommand?: (input: {
+      commandId: string;
+      controlWorkspaceId: string;
+      enrollmentId: string;
+      connectionInstanceId: string;
+      opId: string;
+      outcome: "exited" | "lost";
+      exitCode: number | null;
+      reason: string;
+    }) => Promise<void>;
   } = {},
 ) {
+  const connectionInstanceId = opts.connectionInstanceId ?? CONNECTION_INSTANCE;
   const transport = new InMemoryOpStreamTransport();
-  const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
+  const runner = new FakeOpRunner({
+    transport,
+    workspaceId: opts.controlWorkspaceId ?? WORKSPACE,
+    agentId: AGENT,
+    connectionInstanceId,
+  });
   const observations: SelfhostedOpObservation[] = [];
   const requests: ControlRequest[] = [];
   const session = new SelfhostedSession({
     workspaceId: WORKSPACE,
+    ...(opts.controlWorkspaceId ? { controlWorkspaceId: opts.controlWorkspaceId } : {}),
     agentId: AGENT,
+    connectionInstanceId,
     controlRpc: {
       request: async (subject, request, requestOpts) => {
         requests.push(request);
@@ -44,6 +72,10 @@ function buildRig(
     execTimeoutMs: opts.execTimeoutMs ?? 5_000,
     retryClock: { sleep: async () => {}, jitter: () => 0.5 },
     onOp: (observation) => observations.push(observation),
+    ...(opts.adoptBackgroundCommand ? { adoptBackgroundCommand: opts.adoptBackgroundCommand } : {}),
+    ...(opts.settleBackgroundCommand
+      ? { settleBackgroundCommand: opts.settleBackgroundCommand }
+      : {}),
     ...(opts.memoryMaxBytes !== undefined
       ? {
           operationResourcePolicy: { memoryMaxBytes: opts.memoryMaxBytes },
@@ -63,6 +95,140 @@ function buildRig(
 }
 
 describe("op-stream exec (fake runner)", () => {
+  test("execCommand durably adopts a live command before returning its exact locator", async () => {
+    const adoptions: Array<{
+      controlWorkspaceId: string;
+      enrollmentId: string;
+      connectionInstanceId: string;
+      opId: string;
+      command: string;
+    }> = [];
+    const commandId = "11111111-1111-4111-8111-111111111111";
+    const { runner, session, requests } = buildRig({
+      controlWorkspaceId: "physical-ws",
+      connectionInstanceId: "launch-instance",
+      adoptBackgroundCommand: async (input) => {
+        adoptions.push(input);
+        return { commandId };
+      },
+    });
+    runner.script("call_background:0", {
+      frames: [],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    const result = await runWithToolCallCorrelation("call_background", () =>
+      session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
+    );
+
+    expect(result).toContain(`command ID ${commandId}`);
+    expect(result).toContain("operation call_background:0");
+    expect(adoptions).toEqual([
+      {
+        controlWorkspaceId: "physical-ws",
+        enrollmentId: AGENT,
+        connectionInstanceId: "launch-instance",
+        opId: "call_background:0",
+        command: "sleep 60",
+      },
+    ]);
+    expect(requests[0]?.epoch).toBe(0);
+    expect(runner.runs.get("call_background:0")?.exit.cancelled).toBe(false);
+  });
+
+  test("failed background adoption exact-cancels and never returns a live locator", async () => {
+    const { runner, session } = buildRig({
+      connectionInstanceId: "launch-instance",
+      adoptBackgroundCommand: async () => {
+        throw new Error("database unavailable");
+      },
+    });
+    runner.script("call_adoption_failure:0", {
+      frames: [],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    await expect(
+      runWithToolCallCorrelation("call_adoption_failure", () =>
+        session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
+      ),
+    ).rejects.toThrow("database unavailable");
+    expect(runner.runs.get("call_adoption_failure:0")?.exit.cancelled).toBe(true);
+  });
+
+  test("exit during adoption is fast-settled instead of returned as running", async () => {
+    const settlements: Array<Record<string, unknown>> = [];
+    let session!: SelfhostedSession;
+    const rig = buildRig({
+      connectionInstanceId: "launch-instance",
+      adoptBackgroundCommand: async (input) => {
+        await session.cancelExecCommand(input.opId);
+        return { commandId: "22222222-2222-4222-8222-222222222222" };
+      },
+      settleBackgroundCommand: async (input) => {
+        settlements.push(input);
+      },
+    });
+    session = rig.session;
+    rig.runner.script("call_exit_during_adoption:0", {
+      frames: [],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    const result = await runWithToolCallCorrelation("call_exit_during_adoption", () =>
+      session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
+    );
+
+    expect(result).toContain("Process exited with code -1");
+    expect(result).not.toContain("Command running in background");
+    expect(settlements).toEqual([
+      {
+        commandId: "22222222-2222-4222-8222-222222222222",
+        controlWorkspaceId: WORKSPACE,
+        enrollmentId: AGENT,
+        connectionInstanceId: "launch-instance",
+        opId: "call_exit_during_adoption:0",
+        outcome: "exited",
+        exitCode: -1,
+        reason: "op_exit",
+      },
+    ]);
+  });
+
+  test("fast-settlement failure preserves the terminal result for durable reconciliation", async () => {
+    let session!: SelfhostedSession;
+    const rig = buildRig({
+      connectionInstanceId: "launch-instance",
+      adoptBackgroundCommand: async (input) => {
+        await session.cancelExecCommand(input.opId);
+        return { commandId: "33333333-3333-4333-8333-333333333333" };
+      },
+      settleBackgroundCommand: async () => {
+        throw new Error("database unavailable");
+      },
+    });
+    session = rig.session;
+    rig.runner.script("call_fast_settlement_failure:0", {
+      frames: [],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+
+    const result = await runWithToolCallCorrelation("call_fast_settlement_failure", () =>
+      session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
+    );
+
+    expect(result).toContain("Process exited with code -1");
+    expect(result).not.toContain("database unavailable");
+  });
+
   test("baseline: streams stdout+stderr, byte-exact result, ok observation with replyBytes", async () => {
     const { runner, session, observations } = buildRig();
     runner.script("call_base:0", {
@@ -500,6 +666,7 @@ describe("op-stream exec (fake runner)", () => {
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: responder,
       relay: { host: "relay.test" },
       timeoutMs: 2_000,
@@ -563,7 +730,12 @@ describe("op-stream exec (fake runner)", () => {
 
   test("revocation after a refused OpStart fences the proven-unstarted retry", async () => {
     const transport = new InMemoryOpStreamTransport();
-    const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+    });
     runner.script("call_retry_revoke:0", {
       frames: [{ channel: "stdout", bytes: "must-not-run" }],
       drainingStarts: 1,
@@ -616,7 +788,12 @@ describe("op-stream exec (fake runner)", () => {
 
   test("revocation while the frame subscription is opening fences the initial OpStart", async () => {
     const transport = new InMemoryOpStreamTransport();
-    const runner = new FakeOpRunner({ transport, workspaceId: WORKSPACE, agentId: AGENT });
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: "connection-1",
+    });
     runner.script("call_subscribe_revoke:0", {
       frames: [{ channel: "stdout", bytes: "must-not-run" }],
     });
@@ -680,7 +857,7 @@ describe("op-stream exec (fake runner)", () => {
       transport,
       workspaceId: WORKSPACE,
       agentId: AGENT,
-      fallback,
+      connectionInstanceId: "connection-1",
     });
     runner.script("call_fallback_revoke:0", {
       frames: [],
@@ -746,6 +923,7 @@ describe("op-stream exec (fake runner)", () => {
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: responder,
       relay: { host: "relay.test" },
       timeoutMs: 2_000,
@@ -775,7 +953,7 @@ describe("op-stream exec (fake runner)", () => {
       transport,
       workspaceId: WORKSPACE,
       agentId: AGENT,
-      fallback: responder,
+      connectionInstanceId: "connection-test",
     });
     runner.script("call_old:0", {
       frames: [],
@@ -789,6 +967,7 @@ describe("op-stream exec (fake runner)", () => {
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
       agentId: AGENT,
+      connectionInstanceId: "connection-test",
       controlRpc: runner,
       relay: { host: "relay.test" },
       timeoutMs: 2_000,

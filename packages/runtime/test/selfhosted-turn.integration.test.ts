@@ -34,6 +34,7 @@ import { MockAgentResponder } from "../src/sandbox/selfhosted/testing";
 
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
+const CONNECTION_INSTANCE = "connection-turn";
 // The stable run environment the turn declares (git identity + HOME); the proxy
 // default (group) backend and the selfhosted backend BOTH carry it, so the SDK's
 // per-turn manifest-env delta is empty.
@@ -84,10 +85,12 @@ async function runPinnedToVmTurn(
     responder,
     workspaceId: WS,
     agentId: "enroll-1",
+    connectionInstanceId: CONNECTION_INSTANCE,
   });
   const self = new SelfhostedSession({
     workspaceId: WS,
     agentId: "enroll-1",
+    connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: stream.controlRpc,
     opStream: stream.opStream,
     relay: RELAY,
@@ -211,10 +214,12 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       responder,
       workspaceId: WS,
       agentId: "enroll-1",
+      connectionInstanceId: CONNECTION_INSTANCE,
     });
     const self = new SelfhostedSession({
       workspaceId: WS,
       agentId: "enroll-1",
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: RELAY,
@@ -240,6 +245,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const self = new SelfhostedSession({
       workspaceId: WS,
       agentId: "enroll-1",
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
       relay: RELAY,
       environment: ENV,
@@ -250,6 +256,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const bare = new SelfhostedSession({
       workspaceId: WS,
       agentId: "enroll-1",
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
       relay: RELAY,
     });
@@ -263,6 +270,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const self = new SelfhostedSession({
       workspaceId: WS,
       agentId: "enroll-1",
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
       relay: RELAY,
       environment: ENV,
@@ -282,6 +290,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const self = new SelfhostedSession({
       workspaceId: WS,
       agentId: "enroll-1",
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
     });
@@ -299,6 +308,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const self = new SelfhostedSession({
       workspaceId: WS,
       agentId: "enroll-1",
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
     });

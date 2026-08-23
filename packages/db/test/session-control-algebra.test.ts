@@ -16,6 +16,10 @@ import {
   settleSessionAttemptInterruptions,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
 } from "../src/index";
+import {
+  adoptConnectedMachineSessionBackgroundCommand,
+  listSessionBackgroundCommands,
+} from "../src/session-background-commands";
 import * as schema from "../src/schema";
 
 let shared: SharedTestDatabase;
@@ -92,6 +96,54 @@ async function control(
 }
 
 describe("recursive session control algebra", () => {
+  test("Pause atomically stops adopted commands in the selected subtree; Resume never revives them", async () => {
+    const value = await fixture();
+    for (const [index, sessionId] of [value.root.id, value.child.id].entries()) {
+      await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId,
+        commandId: crypto.randomUUID(),
+        controlWorkspaceId: value.grant.workspaceId!,
+        enrollmentId: crypto.randomUUID(),
+        connectionInstanceId: `launch-instance-${index}`,
+        opId: `background-op-${index}`,
+        command: "sleep 60",
+      });
+    }
+
+    const paused = await control(value, value.root.id, "pause");
+    expect(paused.backgroundCommandCount).toBe(2);
+    expect(paused.control.backgroundCommandSettlement).toEqual({
+      state: "stopping",
+      commandCount: 2,
+    });
+    for (const sessionId of [value.root.id, value.child.id]) {
+      const commands = await listSessionBackgroundCommands(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId,
+      });
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toMatchObject({ state: "stopping" });
+    }
+
+    const resumed = await control(value, value.root.id, "resume");
+    expect(resumed.backgroundCommandCount).toBe(0);
+    expect(resumed.control).toMatchObject({
+      state: "active",
+      backgroundCommandSettlement: { state: "stopping", commandCount: 2 },
+    });
+    for (const sessionId of [value.root.id, value.child.id]) {
+      const commands = await listSessionBackgroundCommands(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId,
+      });
+      expect(commands[0]).toMatchObject({ state: "stopping" });
+    }
+  });
+
   test("a descendant Resume crosses an ancestor Pause and a later ancestor Pause wins", async () => {
     const value = await fixture();
     expect(

@@ -34,6 +34,7 @@ export function useSessionBackgroundCommands(
     enabled,
     pollIntervalMs: options.pollIntervalMs,
   });
+  const refresh = state.refresh;
   const cancel = useCallback(
     async (commandId: string): Promise<void> => {
       if (!sessionId) return;
@@ -41,15 +42,15 @@ export function useSessionBackgroundCommands(
         throw new Error("The configured OpenGeni client does not support background commands");
       }
       await client.cancelSessionBackgroundCommand(workspaceId, sessionId, commandId);
-      await state.refresh();
+      await refresh();
     },
-    [client, workspaceId, sessionId, state.refresh],
+    [client, workspaceId, sessionId, refresh],
   );
   return {
     commands: state.data?.commands ?? [],
     loading: state.loading,
     error: state.error,
-    refresh: state.refresh,
+    refresh,
     cancel,
   };
 }

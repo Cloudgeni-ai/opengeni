@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { type ControlRequest, type ControlResponse, ErrorCode } from "@opengeni/agent-proto";
+import { type ControlRequest, type ControlResponse } from "@opengeni/agent-proto";
 import {
   FakeOpRunner,
   type FakeOpScript,
@@ -16,6 +16,7 @@ const encoder = new TextEncoder();
 const TARGET = "33333333-3333-4333-8333-333333333333";
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const AGENT = "22222222-2222-4222-8222-222222222222";
+const CONNECTION_INSTANCE = "connection-run-on";
 
 type ExecPlan = {
   durationMs: number;
@@ -48,6 +49,7 @@ class InMemoryMachineRunner implements ControlRpc {
       transport: this.transport,
       workspaceId: WORKSPACE,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       defaultScript: (exec) => this.scriptExec(exec),
     });
   }
@@ -129,6 +131,7 @@ async function run(
     {
       workspaceId: WORKSPACE,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: runner,
       opStream: runner.opStream,
       relay: { host: "relay.test", tls: true },
@@ -182,6 +185,7 @@ describe("run_on Connected Machine exec receipts", () => {
     const base = {
       workspaceId: WORKSPACE,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       relay: { host: "relay.test", tls: true } as const,
       controlTimeoutMs: 30_000,
       execTimeoutMs: 120_000,

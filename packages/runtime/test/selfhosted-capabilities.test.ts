@@ -28,6 +28,7 @@ function session(online: boolean): SelfhostedSession {
   return new SelfhostedSession({
     workspaceId: "ws",
     agentId: "a",
+    connectionInstanceId: "connection-capabilities",
     controlRpc: new MockAgentResponder({ online }),
     relay: RELAY,
   });

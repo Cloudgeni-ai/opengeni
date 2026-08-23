@@ -495,10 +495,13 @@ export {
   type OpStreamTransport,
 } from "./selfhosted/op-transport";
 export {
+  cancelSelfhostedOp,
   OP_STREAM_ACK_INTERVAL_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
+  querySelfhostedOp,
+  type ExactSelfhostedOpControlInput,
   type OpStreamExecOutcome,
   type OpStreamJournal,
 } from "./selfhosted/op-stream";

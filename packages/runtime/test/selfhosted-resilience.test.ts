@@ -36,8 +36,7 @@ import {
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
-const encoder = new TextEncoder();
-
+const CONNECTION_INSTANCE = "connection-resilience";
 function controlError(code: ErrorCode): SelfhostedControlError {
   return agentErrorToControlError({ code, message: "", retryable: true, detail: {} });
 }
@@ -265,22 +264,6 @@ function timeoutStep(req: ControlRequest): ControlResponse {
     result: undefined,
   };
 }
-function execOkStep(req: ControlRequest): ControlResponse {
-  return {
-    requestId: req.requestId,
-    error: undefined,
-    result: {
-      $case: "exec",
-      exec: {
-        exitCode: 0,
-        stdout: encoder.encode("ok\n"),
-        stderr: new Uint8Array(0),
-        timedOut: false,
-        durationMs: "1",
-      },
-    },
-  };
-}
 function fsStatOkStep(req: ControlRequest): ControlResponse {
   return {
     requestId: req.requestId,
@@ -296,6 +279,7 @@ function sessionWith(
   return new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: rpc,
     relay: RELAY,
     ...(extra.clock ? { retryClock: extra.clock } : {}),
@@ -315,11 +299,13 @@ function opStreamSessionWith(
     transport,
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     defaultScript: () => script,
   });
   const session = new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: {
       request: async (subject, request, opts) => {
         requests.push(request);

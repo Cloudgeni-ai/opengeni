@@ -326,7 +326,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(rawWrites).toBe(0);
   });
 
-  test("cancellation uses retained-process control routing without a generic write tool", async () => {
+  test("Steer leaves a durably adopted retained process under session ownership", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let processAlive = true;
@@ -384,43 +384,13 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     expect(rawExecs).toBe(1);
     expect(mutations).toBe(0);
-    expect(controlWrites.at(-1)).toMatchObject({ sessionId: 32, chars: "" });
-    expect(helperCommands).toHaveLength(1);
-    const guardedIdentityProbe = helperCommands[0];
-    expect(guardedIdentityProbe).toContain("command kill -TERM");
-    expect(guardedIdentityProbe).toContain("command kill -KILL");
-    expect(guardedIdentityProbe).toContain("/proc/$__opengeni_lookup_pid/cmdline");
-    expect(guardedIdentityProbe).toContain("/proc/$__opengeni_lookup_pid/stat");
-    expect(guardedIdentityProbe).toContain(": > '/tmp/opengeni-turn-shell/");
-    expect(guardedIdentityProbe).toContain(
-      '__opengeni_args="$(__opengeni_process_args "$__opengeni_pid")"',
-    );
-    expect(guardedIdentityProbe).toContain(
-      '__opengeni_live_pgid="$(__opengeni_process_group_id "$__opengeni_pid")"',
-    );
-    const emptyBin = mkdtempSync(join(tmpdir(), "opengeni-inspection-unavailable-"));
-    try {
-      const inspectionFailure = Bun.spawn(["/bin/sh", "-c", guardedIdentityProbe!], {
-        env: { ...process.env, PATH: emptyBin },
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [inspectionStderr, inspectionExitCode] = await Promise.all([
-        new Response(inspectionFailure.stderr).text(),
-        inspectionFailure.exited,
-      ]);
-      expect(inspectionExitCode, inspectionStderr).toBe(76);
-    } finally {
-      rmSync(emptyBin, { recursive: true, force: true });
-    }
-    expect(processAlive).toBe(false);
-    expect(settlementOrder.lastIndexOf("provider-control")).toBeGreaterThan(
-      settlementOrder.indexOf("group-absent"),
-    );
+    expect(controlWrites).toHaveLength(0);
+    expect(helperCommands).toHaveLength(0);
+    expect(settlementOrder).toHaveLength(0);
+    expect(processAlive).toBe(true);
   });
 
-  test("retained cancellation uses one helper round trip before exact settlement", async () => {
+  test("Steer quiesces immediately without waiting on an adopted retained process", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let retained = true;
@@ -451,12 +421,13 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
 
-    expect(helperCalls).toBe(1);
-    expect(settlementCalls).toBe(1);
-    expect(performance.now() - startedAt).toBeLessThan(providerLatencyMs * 3);
+    expect(helperCalls).toBe(0);
+    expect(settlementCalls).toBe(0);
+    expect(retained).toBe(true);
+    expect(performance.now() - startedAt).toBeLessThan(providerLatencyMs);
   });
 
-  test("retained cancellation revalidates authority after inconclusive and live-group retries", async () => {
+  test("Steer never runs process-group retries for an adopted retained process", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let retained = true;
@@ -481,13 +452,8 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     abort.abort(new Error("steered"));
     await controller.waitForQuiescence();
 
-    expect(helperCommands).toHaveLength(3);
-    for (const command of helperCommands) {
-      expect(command).toContain("read -r __opengeni_pid __opengeni_pgid");
-      expect(command).toContain('__opengeni_process_args "$__opengeni_pid"');
-      expect(command).toContain('"$__opengeni_token"');
-      expect(command).toContain('__opengeni_process_group_id "$__opengeni_pid"');
-    }
+    expect(helperCommands).toHaveLength(0);
+    expect(retained).toBe(true);
   });
 
   test("registers a durably promoted process even when stale authority rejects the exec output", async () => {
@@ -768,11 +734,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(session.hasRetainedProcess(35)).toBe(false);
   });
 
-  test("retained-process terminal settlement failure keeps the cancellation fence closed", async () => {
+  test("a retained write that stays running remains session-owned across Steer", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let rawWrites = 0;
-    let allowSettlement = false;
     let controlAttempts = 0;
     const write = functionTool("write_stdin", async () => {
       rawWrites += 1;
@@ -783,7 +748,6 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       writeStdinForProcessMutation: async () => running(33),
       writeStdinForProcessControl: async () => {
         controlAttempts += 1;
-        if (!allowSettlement) throw new Error("durable settlement unavailable");
         return "write_stdin failed: session not found: 33";
       },
     };
@@ -793,13 +757,8 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     await wrappedWrite!.invoke(runContext, JSON.stringify({ session_id: 33, chars: "input" }));
     abort.abort(new Error("steered"));
-    const quiescence = controller.waitForQuiescence();
-    await Bun.sleep(125);
-    expect(await pendingAfterMicrotasks(quiescence)).toBe(true);
-
-    allowSettlement = true;
-    await quiescence;
-    expect(controlAttempts).toBeGreaterThanOrEqual(2);
+    await controller.waitForQuiescence();
+    expect(controlAttempts).toBe(0);
     expect(rawWrites).toBe(0);
   });
 

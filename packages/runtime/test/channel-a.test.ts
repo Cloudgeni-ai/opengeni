@@ -1329,10 +1329,12 @@ describe("Workspace file import (Connected Machine private staging)", () => {
       responder: mock,
       workspaceId: "11111111-1111-1111-1111-111111111111",
       agentId: "agent-private-import",
+      connectionInstanceId: "connection-private-import",
     });
     const session = new SelfhostedSession({
       workspaceId: "11111111-1111-1111-1111-111111111111",
       agentId: "agent-private-import",
+      connectionInstanceId: "connection-private-import",
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: { host: "relay.test", port: 443, tls: true },
@@ -2504,6 +2506,7 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
   const RELAY = { host: "relay.test", port: 443, tls: true } as const;
   const WS = "11111111-1111-1111-1111-111111111111";
   const AGENT = "agent-abc";
+  const CONNECTION_INSTANCE = "connection-channel-a";
 
   test("selfhosted terminalExec preserves virtual '/workspace' so the machine cwd is workingDir", async () => {
     const seen: Array<{ command: string; cwd: string }> = [];
@@ -2524,10 +2527,12 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       responder: mock,
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
     });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: RELAY,
@@ -2566,10 +2571,12 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       responder: mock,
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
     });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: RELAY,
@@ -2608,10 +2615,12 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       responder: mock,
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
     });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: RELAY,

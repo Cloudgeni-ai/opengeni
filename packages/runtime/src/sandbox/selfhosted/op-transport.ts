@@ -14,18 +14,17 @@
 // the existing rpc subject through the existing `ControlRpc`, with its typed
 // offline/timeout synthesis and retry taxonomy.
 
-/** The per-op frame subject (runner→server, fire-and-forget). Production supplies
- * the exact process generation; the legacy branch exists for isolated adapters. */
+/** The per-op frame subject for one exact runner generation. */
 export function opFrameSubject(
   workspaceId: string,
   agentId: string,
   opId: string,
-  connectionInstanceId?: string,
+  connectionInstanceId: string,
 ): string {
-  const prefix = `agent.${workspaceId}.${agentId}`;
-  return connectionInstanceId
-    ? `${prefix}.connection.${connectionInstanceId}.op.${opId}`
-    : `${prefix}.op.${opId}`;
+  if (typeof connectionInstanceId !== "string" || connectionInstanceId.trim().length === 0) {
+    throw new Error("Connected Machine op frames require an exact connection instance");
+  }
+  return `agent.${workspaceId}.${agentId}.connection.${connectionInstanceId}.op.${opId}`;
 }
 
 /** The per-agent ack subject (server→runner, fire-and-forget). Mirrors the
@@ -33,12 +32,12 @@ export function opFrameSubject(
 export function opAckSubject(
   workspaceId: string,
   agentId: string,
-  connectionInstanceId?: string,
+  connectionInstanceId: string,
 ): string {
-  const prefix = `agent.${workspaceId}.${agentId}`;
-  return connectionInstanceId
-    ? `${prefix}.connection.${connectionInstanceId}.ack`
-    : `${prefix}.ack`;
+  if (typeof connectionInstanceId !== "string" || connectionInstanceId.trim().length === 0) {
+    throw new Error("Connected Machine op acknowledgements require an exact connection instance");
+  }
+  return `agent.${workspaceId}.${agentId}.connection.${connectionInstanceId}.ack`;
 }
 
 /** A live subscription handle. `unsubscribe` is idempotent and never throws. */
@@ -93,8 +92,7 @@ export interface NatsOpStreamConnection {
  * The NATS-backed transport. Lazy memoized factory (identical discipline to
  * `NatsControlRpc`): the connection resolves on first use; a null factory
  * result or a dial failure surfaces `OpStreamUnavailableError` — the caller
- * (the session) falls back to the LEGACY exec path rather than failing the op,
- * so a NATS-less boot or a torn bus never strands a turn on a dead transport.
+ * (the session) fails before dispatch; exec has no request/reply downgrade.
  */
 export class NatsOpStreamTransport implements OpStreamTransport {
   private readonly connect: () => Promise<NatsOpStreamConnection | null>;

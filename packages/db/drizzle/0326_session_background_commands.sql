@@ -13,8 +13,9 @@ CREATE TABLE session_background_commands (
   provider text NOT NULL,
   state text NOT NULL DEFAULT 'running',
   retained_process_id uuid,
+  control_workspace_id uuid,
   enrollment_id uuid,
-  connection_instance_id uuid,
+  connection_instance_id text,
   op_id text,
   command_preview text NOT NULL DEFAULT '',
   cancel_requested_at timestamptz,
@@ -23,6 +24,15 @@ CREATE TABLE session_background_commands (
   settlement_reason text,
   started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   settled_at timestamptz,
+  reconcile_after timestamptz NOT NULL DEFAULT clock_timestamp(),
+  reconcile_claim_id uuid,
+  reconcile_claimed_at timestamptz,
+  reconcile_attempts integer NOT NULL DEFAULT 0,
+  last_reconcile_outcome text,
+  reconcile_proof_outcome text,
+  reconcile_proof_exit_code integer,
+  reconcile_proof_reason text,
+  reconcile_proof_observed_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CONSTRAINT session_background_commands_workspace_fk
     FOREIGN KEY (workspace_id, account_id)
@@ -30,6 +40,9 @@ CREATE TABLE session_background_commands (
   CONSTRAINT session_background_commands_session_fk
     FOREIGN KEY (workspace_id, session_id)
     REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
+  CONSTRAINT session_background_commands_control_workspace_fk
+    FOREIGN KEY (control_workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE RESTRICT,
   CONSTRAINT session_background_commands_process_fk
     FOREIGN KEY (retained_process_id)
     REFERENCES sandbox_retained_processes(id) ON DELETE RESTRICT,
@@ -43,14 +56,18 @@ CREATE TABLE session_background_commands (
     (
       provider = 'managed'
       AND retained_process_id IS NOT NULL
+      AND control_workspace_id IS NULL
       AND enrollment_id IS NULL
       AND connection_instance_id IS NULL
       AND op_id IS NULL
     ) OR (
       provider = 'connected_machine'
       AND retained_process_id IS NULL
+      AND control_workspace_id IS NOT NULL
       AND enrollment_id IS NOT NULL
       AND connection_instance_id IS NOT NULL
+      AND octet_length(connection_instance_id) BETWEEN 1 AND 128
+      AND op_id IS NOT NULL
       AND octet_length(op_id) BETWEEN 1 AND 256
     )
   ),
@@ -65,6 +82,7 @@ CREATE TABLE session_background_commands (
     ) OR (
       state = 'stopping'
       AND cancel_requested_at IS NOT NULL
+      AND cancel_requested_by IS NOT NULL
       AND octet_length(btrim(cancel_requested_by)) BETWEEN 1 AND 1024
       AND exit_code IS NULL
       AND settlement_reason IS NULL
@@ -82,6 +100,35 @@ CREATE TABLE session_background_commands (
   ),
   CONSTRAINT session_background_commands_preview_check CHECK (
     octet_length(command_preview) <= 2048
+  ),
+  CONSTRAINT session_background_commands_reconcile_check CHECK (
+    reconcile_attempts >= 0
+    AND (
+      (reconcile_claim_id IS NULL AND reconcile_claimed_at IS NULL)
+      OR (reconcile_claim_id IS NOT NULL AND reconcile_claimed_at IS NOT NULL)
+    )
+    AND (
+      last_reconcile_outcome IS NULL
+      OR octet_length(last_reconcile_outcome) BETWEEN 1 AND 64
+    )
+    AND (
+      (
+        reconcile_proof_outcome IS NULL
+        AND reconcile_proof_exit_code IS NULL
+        AND reconcile_proof_reason IS NULL
+        AND reconcile_proof_observed_at IS NULL
+      ) OR (
+        reconcile_proof_outcome = 'exited'
+        AND reconcile_proof_exit_code IS NOT NULL
+        AND octet_length(btrim(reconcile_proof_reason)) BETWEEN 1 AND 512
+        AND reconcile_proof_observed_at IS NOT NULL
+      ) OR (
+        reconcile_proof_outcome = 'lost'
+        AND reconcile_proof_exit_code IS NULL
+        AND octet_length(btrim(reconcile_proof_reason)) BETWEEN 1 AND 512
+        AND reconcile_proof_observed_at IS NOT NULL
+      )
+    )
   )
 );
 
@@ -90,14 +137,14 @@ CREATE UNIQUE INDEX session_background_commands_process_uq
   WHERE retained_process_id IS NOT NULL;
 CREATE UNIQUE INDEX session_background_commands_connected_op_uq
   ON session_background_commands (
-    workspace_id, enrollment_id, connection_instance_id, op_id
+    control_workspace_id, enrollment_id, connection_instance_id, op_id
   ) WHERE provider = 'connected_machine';
 CREATE INDEX session_background_commands_active_session_idx
   ON session_background_commands (workspace_id, session_id, state, started_at, id)
   WHERE state IN ('running', 'stopping');
 CREATE INDEX session_background_commands_stopping_idx
-  ON session_background_commands (cancel_requested_at, id)
-  WHERE state = 'stopping';
+  ON session_background_commands (reconcile_after, cancel_requested_at, id)
+  WHERE state IN ('running', 'stopping');
 
 ALTER TABLE session_background_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE session_background_commands FORCE ROW LEVEL SECURITY;
@@ -123,6 +170,8 @@ COMMENT ON COLUMN session_background_commands.retained_process_id IS
   'Managed provider link. The retained process preserves immutable launch authority and exact provider identity.';
 COMMENT ON COLUMN session_background_commands.connection_instance_id IS
   'Connected Machine daemon instance admitted at launch; switching the session machine never rewrites it.';
+COMMENT ON COLUMN session_background_commands.control_workspace_id IS
+  'Connected Machine origin workspace used in the exact physical NATS subject; never rewritten from the session workspace.';
 
 DO $settlement_function$
 DECLARE data_schema text := current_schema();
@@ -140,6 +189,9 @@ BEGIN
           exit_code = CASE WHEN NEW.state = 'exited' THEN NEW.exit_code ELSE NULL END,
           settlement_reason = NEW.settlement_reason,
           settled_at = NEW.settled_at,
+          reconcile_claim_id = NULL,
+          reconcile_claimed_at = NULL,
+          last_reconcile_outcome = 'settled_' || NEW.state,
           updated_at = pg_catalog.clock_timestamp()
         WHERE command.retained_process_id = NEW.id
           AND command.state IN ('running', 'stopping');
@@ -291,3 +343,114 @@ BEGIN
   $create$, data_schema);
 END
 $claim_function$;
+
+-- Connected Machine commands are reconciled directly against the immutable
+-- launch locator. Claim expiry recovers a dead reaper only; it is never treated
+-- as provider exit/loss evidence.
+DO $connected_claim_function$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($create$
+    CREATE FUNCTION opengeni_private.claim_connected_machine_background_commands(
+      p_claim_id uuid,
+      p_limit integer,
+      p_claim_ttl_ms bigint
+    )
+    RETURNS TABLE (
+      account_id uuid,
+      workspace_id uuid,
+      session_id uuid,
+      command_id uuid,
+      claim_id uuid,
+      command_state text,
+      control_workspace_id uuid,
+      enrollment_id uuid,
+      connection_instance_id text,
+      op_id text,
+      reconcile_attempts integer,
+      reconcile_proof_outcome text,
+      reconcile_proof_exit_code integer,
+      reconcile_proof_reason text,
+      reconcile_proof_observed_at timestamptz
+    )
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    BEGIN
+      IF p_limit < 1 OR p_limit > 100 THEN
+        RAISE EXCEPTION 'connected-command reconciliation limit must be between 1 and 100'
+          USING ERRCODE = '22023';
+      END IF;
+      IF p_claim_ttl_ms < 0 OR p_claim_ttl_ms > 3600000 THEN
+        RAISE EXCEPTION 'connected-command reconciliation claim TTL is invalid'
+          USING ERRCODE = '22023';
+      END IF;
+
+      RETURN QUERY
+      WITH candidates AS MATERIALIZED (
+        SELECT command.id, command.reconcile_after, command.started_at
+        FROM %1$I.session_background_commands command
+        WHERE command.provider = 'connected_machine'
+          AND command.state IN ('running', 'stopping')
+          AND command.reconcile_after <= pg_catalog.now()
+          AND (
+            command.reconcile_claim_id IS NULL
+            OR command.reconcile_claimed_at <= pg_catalog.now()
+              - pg_catalog.make_interval(secs => p_claim_ttl_ms / 1000.0)
+          )
+        ORDER BY command.reconcile_after, command.started_at, command.id
+        FOR UPDATE OF command SKIP LOCKED
+        LIMIT p_limit
+      ), claimed AS (
+        UPDATE %1$I.session_background_commands command SET
+          reconcile_after = pg_catalog.now()
+            + pg_catalog.make_interval(secs => p_claim_ttl_ms / 1000.0),
+          reconcile_claim_id = p_claim_id,
+          reconcile_claimed_at = pg_catalog.now(),
+          reconcile_attempts = command.reconcile_attempts + 1,
+          last_reconcile_outcome = 'claimed',
+          updated_at = pg_catalog.clock_timestamp()
+        FROM candidates
+        WHERE command.id = candidates.id
+          AND command.provider = 'connected_machine'
+          AND command.state IN ('running', 'stopping')
+        RETURNING command.*, candidates.reconcile_after AS due_at,
+          candidates.started_at AS candidate_started_at
+      )
+      SELECT claimed.account_id,
+        claimed.workspace_id,
+        claimed.session_id,
+        claimed.id,
+        claimed.reconcile_claim_id,
+        claimed.state,
+        claimed.control_workspace_id,
+        claimed.enrollment_id,
+        claimed.connection_instance_id,
+        claimed.op_id,
+        claimed.reconcile_attempts,
+        claimed.reconcile_proof_outcome,
+        claimed.reconcile_proof_exit_code,
+        claimed.reconcile_proof_reason,
+        claimed.reconcile_proof_observed_at
+      FROM claimed
+      ORDER BY claimed.due_at, claimed.candidate_started_at, claimed.id;
+    END;
+    $function$;
+  $create$, data_schema);
+END
+$connected_claim_function$;
+
+REVOKE ALL ON FUNCTION opengeni_private.claim_connected_machine_background_commands(
+  uuid, integer, bigint
+) FROM PUBLIC;
+
+DO $connected_claim_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.claim_connected_machine_background_commands(
+      uuid, integer, bigint
+    ) TO opengeni_app;
+  END IF;
+END
+$connected_claim_grant$;

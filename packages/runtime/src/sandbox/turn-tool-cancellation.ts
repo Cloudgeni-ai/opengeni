@@ -1083,7 +1083,14 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identityValidated: false,
                 cancellation: null,
               };
-              this.shellSessions.set(sessionId, state);
+              // A routing session exposes a retained locator only after both
+              // provider retention and the session-owned background-command
+              // adoption are durable. That commit transfers cancellation
+              // ownership away from this turn, so ordinary completion and
+              // Steer must not drain it.
+              if (state.processSession?.hasRetainedProcess?.(sessionId) !== true) {
+                this.shellSessions.set(sessionId, state);
+              }
               pendingStart?.settle();
               return await this.awaitModelFacingShellResult({
                 state,
@@ -1153,7 +1160,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 // or an ambiguous error must leave the registration fenced.
                 this.shellSessions.delete(sessionId);
               } else if (parseExecBannerSessionId(output) === sessionId) {
-                if (!this.shellSessions.has(sessionId)) {
+                if (
+                  directProcessSession?.hasRetainedProcess?.(sessionId) !== true &&
+                  !this.shellSessions.has(sessionId)
+                ) {
                   this.shellSessions.set(sessionId, {
                     sessionId,
                     markerPath: null,

@@ -16,6 +16,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { Context } from "@temporalio/activity";
+import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
   accrueWarmSeconds,
   adoptLegacyModalCheckpointArtifact,
@@ -61,7 +62,15 @@ import {
   type SandboxRetainedProcess,
   type LeaseSnapshot,
 } from "@opengeni/db";
-import { settleSessionBackgroundCommandForRetainedProcess } from "@opengeni/db/session-background-commands";
+import {
+  claimConnectedMachineSessionBackgroundCommands,
+  deferConnectedMachineBackgroundCommandReconciliation,
+  recordConnectedMachineBackgroundCommandProof,
+  settleClaimedConnectedMachineBackgroundCommand,
+  settleSessionBackgroundCommandForRetainedProcess,
+  type ConnectedMachineBackgroundCommandClaim,
+  type ConnectedMachineBackgroundCommandProof,
+} from "@opengeni/db/session-background-commands";
 import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import {
@@ -71,6 +80,7 @@ import {
   // establishSandboxSessionFromEnvelope in strict resume-only mode so it can
   // reuse the runtime's provider-ready proof without ever cold-restoring.
   captureVerifiedWorkspaceArchive,
+  cancelSelfhostedOp,
   assertConsistentSandboxProviderIdentity,
   createSandboxClientForBackend,
   deleteModalCheckpointSnapshot,
@@ -79,18 +89,22 @@ import {
   inspectModalSandboxLifecycle,
   isExecSessionLostBanner,
   isProviderSandboxNotFoundError,
+  NatsControlRpc,
   parseExecBannerExitCode,
   prepareProviderForTeardownAfterCapture,
   providerWorkspaceCapturePolicy,
   resolveModalCheckpointProviderBindingForLiveSandbox,
   resolveModalCheckpointProviderBinding,
   resolveModalCheckpointProviderBindingForSession,
+  querySelfhostedOp,
   resumeExactSandboxSession,
   sandboxProviderContinuityForState,
   sandboxBackendForSdkBackendId,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxCommandExitCode,
   sandboxCommandStillRunning,
+  SelfhostedControlError,
+  subjectFor,
   sweepModalOrphanSandboxes,
   terminateManagedSandboxSession,
   terminateModalSandboxById,
@@ -99,6 +113,8 @@ import {
   type ModalCheckpointProviderBinding,
   type ProviderWorkspaceCapturePolicy,
   type WorkspaceArchiveDescriptor,
+  type ControlRpc,
+  type NatsRequestConnection,
 } from "@opengeni/runtime/sandbox";
 import {
   SANDBOX_REAPER_ACTIVITY_HEARTBEAT_INTERVAL_MS,
@@ -293,6 +309,8 @@ export type DrainableProviderProbeFn = (
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
+export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
+export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 
 export class SandboxProviderCaptureTimeoutError extends Error {
   readonly name = "SandboxProviderCaptureTimeoutError";
@@ -644,6 +662,12 @@ export function createSandboxLeaseActivities(
       let forceDrained = 0;
       const rotationsRequested = input.rotationsRequested;
       let modalOrphansTerminated = 0;
+
+      // Connected Machine commands are not managed-sandbox lease state. Their
+      // immutable launch locators must reconcile even when managed ownership is
+      // disabled, otherwise an exact runner exit/loss proof can remain stranded.
+      await reconcileConnectedMachineBackgroundCommands(db, settings, observability, service.bus);
+
       if (!settings.sandboxOwnershipEnabled) {
         // Inventory remains useful while provider ownership is intentionally
         // disabled, and this scheduled activity is its single projection owner.
@@ -832,6 +856,30 @@ const CHECKPOINT_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const CHECKPOINT_TOMBSTONE_PRUNE_LIMIT = 500;
 const SANDBOX_MAINTENANCE_ITEM_CONCURRENCY = 8;
 
+type ConnectedCommandReconciliationOutcome =
+  | "claim_failed"
+  | "provider_running"
+  | "provider_offline"
+  | "provider_error"
+  | "proof_exited"
+  | "proof_lost"
+  | "proof_checkpoint_failed"
+  | "settled_exited"
+  | "settled_lost"
+  | "settlement_failed"
+  | "defer_failed";
+
+function recordConnectedCommandReconciliation(
+  observability: ActivityServices["observability"],
+  outcome: ConnectedCommandReconciliationOutcome,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_connected_background_command_reconciliation_total",
+    help: "Exact-locator Connected Machine background-command reconciliation outcomes.",
+    labels: { outcome },
+  });
+}
+
 async function forEachWithConcurrency<T>(
   values: readonly T[],
   concurrency: number,
@@ -975,6 +1023,199 @@ async function adoptLegacyModalCheckpointReceipts(
     }
   });
   return adopted;
+}
+
+/** Reconcile commands only against the immutable physical locator copied at
+ * adoption. A successor enrollment connection is intentionally irrelevant: no
+ * query or cancellation is ever rebound to it. */
+async function reconcileConnectedMachineBackgroundCommands(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  bus: ActivityServices["bus"],
+): Promise<void> {
+  const claimId = crypto.randomUUID();
+  let claims: ConnectedMachineBackgroundCommandClaim[];
+  try {
+    claims = await claimConnectedMachineSessionBackgroundCommands(db, {
+      claimId,
+      limit: CONNECTED_COMMAND_RECONCILIATION_LIMIT,
+      claimTtlMs: CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS,
+    });
+  } catch (error) {
+    recordConnectedCommandReconciliation(observability, "claim_failed");
+    observability.warn("sandbox reaper: connected-command claim failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
+  const controlRpc = new NatsControlRpc(
+    async (): Promise<NatsRequestConnection | null> => bus.getRequestConnection(),
+  );
+  await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
+    let proof = claim.proof;
+    if (!proof) {
+      try {
+        proof = await probeConnectedMachineBackgroundCommand(
+          claim,
+          controlRpc,
+          Math.min(
+            settings.sandboxSelfhostedControlTimeoutMs,
+            RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+          ),
+        );
+        if (!proof) {
+          await deferConnectedCommandClaim(db, settings, observability, claim, "provider_running");
+          return;
+        }
+      } catch (error) {
+        const offline =
+          error instanceof SelfhostedControlError &&
+          (error.agentOffline || error.reason === "agent_reconnecting" || error.draining);
+        if (!offline) {
+          observability.warn("sandbox reaper: connected-command provider probe failed", {
+            commandId: claim.commandId,
+            enrollmentId: claim.enrollmentId,
+            connectionInstanceId: claim.connectionInstanceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        await deferConnectedCommandClaim(
+          db,
+          settings,
+          observability,
+          claim,
+          offline ? "provider_offline" : "provider_error",
+        );
+        return;
+      }
+
+      try {
+        await recordConnectedMachineBackgroundCommandProof(db, { claim, proof });
+        recordConnectedCommandReconciliation(observability, `proof_${proof.outcome}`);
+      } catch (error) {
+        recordConnectedCommandReconciliation(observability, "proof_checkpoint_failed");
+        observability.warn("sandbox reaper: connected-command proof checkpoint failed", {
+          commandId: claim.commandId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+    }
+
+    try {
+      if (!(await settleClaimedConnectedMachineBackgroundCommand(db, { claim }))) {
+        throw new Error("Connected command settlement lost its exact claim or proof");
+      }
+      recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
+    } catch (error) {
+      recordConnectedCommandReconciliation(observability, "settlement_failed");
+      observability.warn("sandbox reaper: connected-command settlement failed", {
+        commandId: claim.commandId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await deferConnectedCommandClaim(db, settings, observability, claim, "settlement_failed");
+    }
+  });
+}
+
+export async function probeConnectedMachineBackgroundCommand(
+  claim: ConnectedMachineBackgroundCommandClaim,
+  controlRpc: ControlRpc,
+  controlTimeoutMs: number,
+  observedAt = new Date(),
+): Promise<ConnectedMachineBackgroundCommandProof | null> {
+  const input = {
+    controlRpc,
+    rpcSubject: subjectFor(
+      claim.controlWorkspaceId,
+      claim.enrollmentId,
+      claim.connectionInstanceId,
+    ),
+    opId: claim.opId,
+    controlTimeoutMs,
+  };
+  const status =
+    claim.state === "stopping" ? await cancelSelfhostedOp(input) : await querySelfhostedOp(input);
+  return connectedCommandProofFromStatus(status, observedAt);
+}
+
+export function connectedCommandProofFromStatus(
+  status: OpStatus,
+  observedAt: Date,
+): ConnectedMachineBackgroundCommandProof | null {
+  switch (status.state) {
+    case OpState.OP_STATE_ACCEPTED:
+    case OpState.OP_STATE_RUNNING:
+      return null;
+    case OpState.OP_STATE_COMPLETE: {
+      const exit = status.exit;
+      if (!exit) {
+        throw new Error("Connected command completed without an exit record");
+      }
+      const failureCode = exit.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
+      const reason = exit.cancelled
+        ? "op_cancelled"
+        : exit.timedOut
+          ? "op_timed_out"
+          : failureCode
+            ? `op_failure_${failureCode}`
+            : "op_exit";
+      return {
+        outcome: "exited",
+        exitCode: exit.exitCode,
+        reason,
+        observedAt,
+      };
+    }
+    case OpState.OP_STATE_LOST:
+      return {
+        outcome: "lost",
+        exitCode: null,
+        reason:
+          status.lostReason === OpLostReason.OP_LOST_REASON_EVICTED
+            ? "op_lost_evicted"
+            : status.lostReason === OpLostReason.OP_LOST_REASON_AGENT_RESTARTED
+              ? "op_lost_agent_restarted"
+              : "op_lost_unspecified",
+        observedAt,
+      };
+    default:
+      throw new Error(`Connected command returned invalid op state ${status.state}`);
+  }
+}
+
+async function deferConnectedCommandClaim(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  claim: ConnectedMachineBackgroundCommandClaim,
+  outcome: "provider_running" | "provider_offline" | "provider_error" | "settlement_failed",
+): Promise<void> {
+  const exponent = Math.min(4, Math.max(0, claim.reconcileAttempts - 1));
+  const retryAfterMs = Math.min(
+    5 * 60_000,
+    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
+  );
+  try {
+    if (
+      !(await deferConnectedMachineBackgroundCommandReconciliation(db, {
+        claim,
+        outcome,
+        retryAfterMs,
+      }))
+    ) {
+      throw new Error("Connected command defer lost its exact claim");
+    }
+    recordConnectedCommandReconciliation(observability, outcome);
+  } catch (error) {
+    recordConnectedCommandReconciliation(observability, "defer_failed");
+    observability.warn("sandbox reaper: connected-command defer failed", {
+      commandId: claim.commandId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function reconcileTerminalRetainedProcesses(

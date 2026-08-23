@@ -22,6 +22,7 @@
 
 import {
   buildSelfhostedBackendSession,
+  type SelfhostedBackgroundCommandAdoption,
   type SelfhostedOpStreamDeps,
   type SelfhostedOperationAdmission,
   type SelfhostedRelayConfig,
@@ -113,6 +114,19 @@ export interface ActiveBackendResolverDeps {
   /** The per-op observer threaded into a selfhosted swap/pin target (out-of-band
    *  telemetry — metrics + machine.* events). Absent ⇒ no-op. */
   selfhostedOnOp?: SelfhostedOpObserver;
+  selfhostedAdoptBackgroundCommand?: (
+    input: SelfhostedBackgroundCommandAdoption,
+  ) => Promise<{ commandId: string }>;
+  selfhostedSettleBackgroundCommand?: (input: {
+    commandId: string;
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+    outcome: "exited" | "lost";
+    exitCode: number | null;
+    reason: string;
+  }) => void | Promise<void>;
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the
    * worker turn threads into the agent's TARGET manifest (and into the group box at
@@ -354,6 +368,12 @@ export function makeActiveBackendResolver(
           ? { execTimeoutMs: deps.selfhostedExecTimeoutMs }
           : {}),
         ...(deps.selfhostedOnOp !== undefined ? { onOp: deps.selfhostedOnOp } : {}),
+        ...(deps.selfhostedAdoptBackgroundCommand !== undefined
+          ? { adoptBackgroundCommand: deps.selfhostedAdoptBackgroundCommand }
+          : {}),
+        ...(deps.selfhostedSettleBackgroundCommand !== undefined
+          ? { settleBackgroundCommand: deps.selfhostedSettleBackgroundCommand }
+          : {}),
         ...(connection.opStream !== undefined ? { opStream: connection.opStream } : {}),
         operationResourcePolicy: connection.operationResourcePolicy,
         operationResourcePolicySupported: connection.operationResourcePolicySupported,

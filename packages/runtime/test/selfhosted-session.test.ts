@@ -17,14 +17,12 @@ import {
   subjectFor,
   timeoutControlResponse,
 } from "../src/sandbox";
-import {
-  FakeOpRunner,
-  InMemoryOpStreamTransport,
-} from "../src/sandbox/selfhosted/op-testing";
+import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
+const CONNECTION_INSTANCE = "22222222-2222-4222-8222-222222222222";
 
 type SessionOverrides = Partial<
   Omit<SelfhostedSessionDeps, "workspaceId" | "agentId" | "controlRpc" | "relay">
@@ -42,6 +40,7 @@ function sessionWith(
       transport,
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: overrides.connectionInstanceId ?? CONNECTION_INSTANCE,
       defaultScript: async (exec) => {
         const response = await rpc.runExec(exec);
         return {
@@ -78,6 +77,7 @@ function sessionWith(
       ...overrides,
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: overrides.connectionInstanceId ?? CONNECTION_INSTANCE,
       controlRpc,
       relay: RELAY,
       epoch: overrides.epoch ?? epoch,
@@ -90,6 +90,7 @@ function sessionWith(
     ...overrides,
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: overrides.connectionInstanceId ?? CONNECTION_INSTANCE,
     controlRpc: rpc,
     relay: RELAY,
     epoch: overrides.epoch ?? epoch,
@@ -109,15 +110,14 @@ function streamedExecRequest(mock: MockAgentResponder, index = 0) {
 }
 
 describe("SelfhostedSession — structural surface over a ControlRpc (mock)", () => {
-  test("legacy isolated callers retain the pre-claim subject shape", () => {
-    expect(subjectFor(WS, AGENT)).toBe(`agent.${WS}.${AGENT}.rpc`);
+  test("live routing addresses the exact claimed daemon instance", () => {
+    expect(subjectFor(WS, AGENT, CONNECTION_INSTANCE)).toBe(
+      `agent.${WS}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`,
+    );
   });
 
-  test("live routing addresses the exact claimed daemon instance", () => {
-    const instanceId = "22222222-2222-4222-8222-222222222222";
-    expect(subjectFor(WS, AGENT, instanceId)).toBe(
-      `agent.${WS}.${AGENT}.connection.${instanceId}.rpc`,
-    );
+  test("live routing rejects an absent connection instance before dispatch", () => {
+    expect(() => subjectFor(WS, AGENT, "")).toThrow("requires an exact connection instance");
   });
 
   test("exec runs through the agent and returns stdout/exitCode", async () => {
@@ -127,7 +127,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(res.exitCode).toBe(0);
     expect(res.stdout.trim()).toBe("echo hi");
     // The request was addressed to the agent subject.
-    expect(mock.requests[0]?.subject).toBe(subjectFor(WS, AGENT));
+    expect(mock.requests[0]?.subject).toBe(subjectFor(WS, AGENT, CONNECTION_INSTANCE));
     expect(mock.requests[0]?.req.op?.$case).toBe("opStart");
   });
 
@@ -293,6 +293,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
       operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
@@ -315,6 +316,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
       operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
@@ -336,6 +338,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
         new SelfhostedSession({
           workspaceId: WS,
           agentId: AGENT,
+          connectionInstanceId: CONNECTION_INSTANCE,
           controlRpc: new MockAgentResponder(),
           relay: RELAY,
           operationResourcePolicy: {
@@ -390,11 +393,12 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(Number(start.opStart.deadlineMs)).toBeLessThanOrEqual(Date.now() + 12_000);
   });
 
-  test("an explicit unbounded deadline never starts on the legacy transport", async () => {
+  test("an explicit unbounded deadline never starts without op-stream", async () => {
     const mock = new MockAgentResponder();
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
       execTimeoutMs: 0,
@@ -591,6 +595,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       relay: RELAY,
       controlRpcFactory: () => mock,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       terminalScopeId,
     });
     const session = await client.resume({ agentId: AGENT });
@@ -611,6 +616,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
       // A command policy on an incapable runner must not disable or rewrite the
@@ -761,6 +767,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const threaded = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
       relay: RELAY,
       environment: { HOME: "/workspace", FOO: "bar" },
@@ -789,6 +796,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
       relay: RELAY,
       environment: env,
@@ -810,6 +818,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       relay: RELAY,
       controlRpcFactory: () => rpc,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       environment: env,
     });
     // Both create() and resume() bind a session whose manifest carries the env.
@@ -963,6 +972,7 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
       workingDir: "/home/u/proj",
@@ -984,6 +994,7 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
       relay: RELAY,
       controlRpcFactory: () => rpc,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       workingDir: "/home/u/proj",
     });
     const resumed = await client.resume({ agentId: AGENT });
@@ -1115,6 +1126,7 @@ describe("SelfhostedSandboxClient — create/resume bind + serialize round-trips
       relay: RELAY,
       controlRpcFactory: () => rpc,
       ...(agentId ? { agentId } : {}),
+      connectionInstanceId: CONNECTION_INSTANCE,
     });
   }
 

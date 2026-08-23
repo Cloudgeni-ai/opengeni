@@ -1,7 +1,7 @@
 // The op-stream EXEC client (op-stream protocol v1.1, server half; PROTOCOL.md
 // + ENGINE-INTEGRATION.md step 6 in .agent/).
 //
-// Replaces the legacy monolithic exec request/reply with sequenced, acked,
+// Replaces monolithic exec request/reply with sequenced, acked,
 // credit-flowed frames when the runner advertises `Capabilities.op_stream` AND
 // the server flag is on. What it buys, in order of importance:
 //
@@ -77,6 +77,11 @@ export const OP_STREAM_SILENCE_TIMEOUT_MS = 30_000;
  *  the client fails it typed (PROTOCOL liveness rule: hold ≤120s, then only a
  *  definitive answer fails the op). */
 export const OP_STREAM_RECONNECT_HOLD_MS = 120_000;
+/** A detached background consumer grants the runner the complete uint64 credit
+ * range. Retention remains bounded by the runner's ring/spool quotas, so a noisy
+ * command reaches the existing typed OP_OVERFLOW terminal instead of stalling
+ * forever merely because the turn that launched it finished. */
+const OP_STREAM_BACKGROUND_CREDIT_BYTES = "18446744073709551615";
 /** The out-of-order stash is a disposable replay optimization, never retained
  *  command output. Bound it in bytes to two live-flow windows per op: a gap that
  *  outgrows that cache drops the cache and heals from the runner's authoritative
@@ -109,9 +114,8 @@ export interface OpStreamJournal {
 export interface OpStreamExecClientDeps {
   workspaceId: string;
   agentId: string;
-  /** Exact live daemon instance. Production always supplies it; omission keeps
-   *  direct protocol tests compatible with the legacy subject shape. */
-  connectionInstanceId?: string;
+  /** Exact live daemon instance pinned at operation admission. */
+  connectionInstanceId: string;
   /** The lease/active epoch every ControlRequest is fenced under. */
   epoch: number;
   /** The rpc request/reply seam (OpStart/OpQuery/OpAttach ride here). */
@@ -139,7 +143,7 @@ export interface OpStreamExecClientDeps {
   revalidateBeforeStartRetry?: () => void | Promise<void>;
 }
 
-/** A completed op-stream exec: the legacy-shaped response plus the healing
+/** A completed op-stream exec: the SDK-facing response plus the healing
  *  telemetry the session folds into its op observation. */
 export interface OpStreamExecOutcome {
   response: ExecResponse;
@@ -150,6 +154,83 @@ export interface OpStreamExecOutcome {
   startRetries: number;
   /** Total reassembled Data payload bytes (the observer's replyBytes). */
   replyBytes: number;
+}
+
+export type OpStreamExecResult =
+  | { status: "completed"; outcome: OpStreamExecOutcome }
+  | {
+      status: "running";
+      opId: string;
+      stdout: Uint8Array;
+      stderr: Uint8Array;
+      heals: number;
+      startRetries: number;
+      replyBytes: number;
+    };
+
+export type OpStreamYieldOptions = {
+  yieldMs: number;
+  /** Durable ownership transfer. It runs while the exact consumer is still
+   * attached; returning a running result is forbidden until this resolves. */
+  onYield: () => void | Promise<void>;
+};
+
+export type ExactSelfhostedOpControlInput = {
+  controlRpc: ControlRpc;
+  rpcSubject: string;
+  opId: string;
+  controlTimeoutMs: number;
+};
+
+async function exactSelfhostedOpControl(
+  input: ExactSelfhostedOpControlInput,
+  operation: "query" | "cancel",
+): Promise<OpStatus> {
+  const requestId = crypto.randomUUID();
+  const response = await input.controlRpc.request(
+    input.rpcSubject,
+    {
+      requestId,
+      // Exact lifecycle control is pinned by subject + op id. It deliberately
+      // bypasses the mutable session-route epoch so a later machine swap cannot
+      // fence observation/cancellation of an already-adopted command.
+      epoch: 0,
+      resourcePolicy: undefined,
+      op:
+        operation === "query"
+          ? { $case: "opQuery", opQuery: { opId: input.opId } }
+          : { $case: "opCancel", opCancel: { opId: input.opId } },
+    },
+    { timeoutMs: input.controlTimeoutMs },
+  );
+  if (response.error || !response.result) {
+    throw agentErrorToControlError(
+      response.error ?? {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: `op-stream ${operation} returned an empty result`,
+        retryable: false,
+        detail: {},
+      },
+      requestId,
+    );
+  }
+  if (response.result.$case !== "opStatus") {
+    throw protocolError(`op-stream ${operation}: unexpected result ${response.result.$case}`);
+  }
+  if (response.result.opStatus.opId !== input.opId) {
+    throw protocolError(`op-stream ${operation}: status identity mismatch for ${input.opId}`);
+  }
+  return response.result.opStatus;
+}
+
+/** Query one durably adopted operation at its immutable physical locator. */
+export async function querySelfhostedOp(input: ExactSelfhostedOpControlInput): Promise<OpStatus> {
+  return await exactSelfhostedOpControl(input, "query");
+}
+
+/** Cancel one durably adopted operation at its immutable physical locator. */
+export async function cancelSelfhostedOp(input: ExactSelfhostedOpControlInput): Promise<OpStatus> {
+  return await exactSelfhostedOpControl(input, "cancel");
 }
 
 /** One op settled but not yet final-acked (awaiting the turn's durable point). */
@@ -227,6 +308,24 @@ export class OpStreamExecClient {
     deadlineMs: number,
     wallMs: number,
   ): Promise<OpStreamExecOutcome> {
+    const result = await this.execWithYield(opId, exec, deadlineMs, wallMs, null);
+    if (result.status !== "completed") {
+      throw protocolError("op-stream terminal exec unexpectedly yielded");
+    }
+    return result.outcome;
+  }
+
+  /** Run an exec that may transfer to durable session ownership after one
+   * bounded model-facing wait. Adoption is inside the live consumer boundary:
+   * a failure cancels the exact op and waits for terminal proof before throwing,
+   * so an outcome-unknown command is never forgotten or replayed. */
+  async execWithYield(
+    opId: string,
+    exec: ExecRequest,
+    deadlineMs: number,
+    wallMs: number,
+    yieldOptions: OpStreamYieldOptions | null,
+  ): Promise<OpStreamExecResult> {
     if (this.inFlight.has(opId)) {
       throw new SelfhostedControlError({
         message: `op-stream exec: duplicate concurrent op id ${opId}`,
@@ -239,9 +338,16 @@ export class OpStreamExecClient {
     try {
       const consumer = new OpConsumer(this.deps, opId, this.generation());
       try {
-        const outcome = await consumer.run(exec, deadlineMs, wallMs);
-        this.settled.push({ opId, exitSeq: outcome.exitSeq, generation: consumer.generation });
-        return outcome.outcome;
+        const result = await consumer.run(exec, deadlineMs, wallMs, yieldOptions);
+        if (result.status === "completed") {
+          this.settled.push({
+            opId,
+            exitSeq: result.exitSeq,
+            generation: consumer.generation,
+          });
+          return { status: "completed", outcome: result.outcome };
+        }
+        return result;
       } finally {
         consumer.teardown();
       }
@@ -347,10 +453,15 @@ class OpConsumer {
     exec: ExecRequest,
     deadlineMs: number,
     wallMs: number,
-  ): Promise<{
-    outcome: OpStreamExecOutcome;
-    exitSeq: string;
-  }> {
+    yieldOptions: OpStreamYieldOptions | null,
+  ): Promise<
+    | {
+        status: "completed";
+        outcome: OpStreamExecOutcome;
+        exitSeq: string;
+      }
+    | Extract<OpStreamExecResult, { status: "running" }>
+  > {
     // Arm the settle promise FIRST: frames can start applying the moment the
     // attach below returns (replay is asynchronous), and a completion that
     // fires before the resolver exists would strand the op on its wall.
@@ -383,9 +494,52 @@ class OpConsumer {
       void this.sendAck();
     }, this.ackIntervalMs);
     const liveness = this.watchLiveness(wallMs);
+    let yieldTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([settled, liveness.wall]);
+      if (yieldOptions && yieldOptions.yieldMs > 0) {
+        const phase = await Promise.race([
+          settled.then(() => "settled" as const),
+          liveness.wall,
+          new Promise<"yield">((resolve) => {
+            yieldTimer = setTimeout(() => resolve("yield"), yieldOptions.yieldMs);
+          }),
+        ]);
+        if (phase === "yield" && this.exitSeq === undefined) {
+          try {
+            await yieldOptions.onYield();
+          } catch (adoptionError) {
+            // The command has started, so the failed durable transfer is an
+            // outcome-unknown mutation. Cancel only this exact idempotent op and
+            // retain the consumer until its terminal frame is physically proven;
+            // never return a live locator and never replay the start.
+            await this.cancelAfterFailedAdoption();
+            await Promise.race([settled, liveness.wall]);
+            throw adoptionError;
+          }
+          // The process may have completed while the durable adoption committed.
+          // In that race return its real terminal result; the caller settles the
+          // just-created command row from the same exact locator.
+          if (this.exitSeq === undefined) {
+            await this.sendBackgroundCredit();
+            const partial = this.snapshotOutput();
+            return {
+              status: "running",
+              opId: this.opId,
+              stdout: partial.stdout,
+              stderr: partial.stderr,
+              heals: this.heals,
+              startRetries,
+              replyBytes: partial.stdout.byteLength + partial.stderr.byteLength,
+            };
+          }
+        }
+      } else {
+        await Promise.race([settled, liveness.wall]);
+      }
     } finally {
+      if (yieldTimer) {
+        clearTimeout(yieldTimer);
+      }
       liveness.stop();
     }
 
@@ -397,6 +551,7 @@ class OpConsumer {
     }
     const { stdout, stderr } = this.assembleAndVerify(exit);
     return {
+      status: "completed",
       outcome: {
         response: {
           exitCode: exit.exitCode,
@@ -410,6 +565,63 @@ class OpConsumer {
         replyBytes: stdout.byteLength + stderr.byteLength,
       },
       exitSeq: exitSeq.toString(),
+    };
+  }
+
+  private async cancelAfterFailedAdoption(): Promise<void> {
+    for (;;) {
+      try {
+        const result = await this.controlOp({
+          $case: "opCancel",
+          opCancel: { opId: this.opId },
+        });
+        if (result.$case !== "opStatus") {
+          throw protocolError(`op-stream cancel: unexpected result ${result.$case}`);
+        }
+        if (result.opStatus.state === OpState.OP_STATE_LOST) {
+          throw lostToControlError(result.opStatus);
+        }
+        await this.attach(0);
+        return;
+      } catch (error) {
+        if (
+          error instanceof SelfhostedControlError &&
+          (error.retryable || error.agentOffline || error.reason === "agent_reconnecting")
+        ) {
+          await this.deps.retryClock.sleep(
+            selfhostedRetryBackoffMs(0, this.deps.retryClock.jitter()),
+          );
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async sendBackgroundCredit(): Promise<void> {
+    const ack = OpAck.encode({
+      opId: this.opId,
+      ackedSeq: "0",
+      creditBytes: OP_STREAM_BACKGROUND_CREDIT_BYTES,
+      final: false,
+      attachGeneration: this.generation,
+    }).finish();
+    try {
+      await this.deps.transport.publish(
+        opAckSubject(this.deps.workspaceId, this.deps.agentId, this.deps.connectionInstanceId),
+        ack,
+      );
+    } catch {
+      // Ownership is already durable. Credit is an optimization repeated by a
+      // later attach/query path; a publish blip must not turn an adopted command
+      // back into an outcome-unknown turn failure.
+    }
+  }
+
+  private snapshotOutput(): { stdout: Uint8Array; stderr: Uint8Array } {
+    return {
+      stdout: concatChunks(this.chunks.stdout),
+      stderr: concatChunks(this.chunks.stderr),
     };
   }
 

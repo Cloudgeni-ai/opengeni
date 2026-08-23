@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "@/types";
 
 import { sessionStateLabel } from "./session-rail";
-import { groupSessionsForRail } from "./sessions-group";
+import { groupSessionsForRail, summarizeRailNodes } from "./sessions-group";
 
 function session(
   id: string,
@@ -25,6 +25,9 @@ describe("session background command rail status", () => {
     const grouped = groupSessionsForRail([idle, active], new Date("2026-08-23T12:00:00.000Z"));
     expect(grouped.running.map((row) => row.id)).toEqual(["active"]);
     expect(sessionStateLabel(active)).toBe("Background command running");
+    expect(
+      summarizeRailNodes([{ session: active, children: [], hasActiveDescendant: false }]),
+    ).toEqual({ kind: "active", count: 1, total: 1, label: "1 working" });
   });
 
   test("stopping takes precedence over the idle turn lifecycle", () => {

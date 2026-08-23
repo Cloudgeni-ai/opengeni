@@ -8,7 +8,7 @@
 //     (provably not executed), while an ambiguous post-send fault is not.
 
 import { describe, expect, test } from "bun:test";
-import { type ControlRequest, type ControlResponse, ErrorCode } from "@opengeni/agent-proto";
+import { type ControlRequest, ErrorCode } from "@opengeni/agent-proto";
 import {
   type ControlRpc,
   FakeOpRunner,
@@ -38,9 +38,8 @@ import {
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
+const CONNECTION_INSTANCE = "connection-fault";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
-const encoder = new TextEncoder();
-
 const ALL_FIELDS = [
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,
@@ -298,6 +297,7 @@ function sessionWithNeverSentStarts(failures: number) {
     transport,
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     defaultScript: () => ({ frames: [{ channel: "stdout", bytes: "ok\n" }] }),
   });
   const requests: ControlRequest[] = [];
@@ -315,6 +315,7 @@ function sessionWithNeverSentStarts(failures: number) {
   const session = new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc,
     opStream: { transport },
     relay: RELAY,

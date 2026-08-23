@@ -18,9 +18,8 @@ import {
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
+const CONNECTION_INSTANCE = "connection-observer";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
-const encoder = new TextEncoder();
-
 type Step = (req: ControlRequest) => ControlResponse;
 class ScriptedRpc implements ControlRpc {
   readonly requests: ControlRequest[] = [];
@@ -41,11 +40,13 @@ function opStreamSessionWith(
     transport,
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     defaultScript: () => script,
   });
   return new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: runner,
     opStream: { transport },
     relay: RELAY,
@@ -152,6 +153,7 @@ describe("SelfhostedOpObserver — one observation per completed op", () => {
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: rpc,
       relay: RELAY,
       retryClock: fakeClock,

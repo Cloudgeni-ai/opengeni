@@ -129,7 +129,7 @@ export interface FakeOpScript {
 }
 
 interface FakeOpRun {
-  connectionInstanceId: string | undefined;
+  connectionInstanceId: string;
   script: FakeOpScript;
   frames: OpFrame[];
   exitSeq: bigint;
@@ -153,7 +153,7 @@ export class FakeOpRunner implements ControlRpc {
   private readonly transport: InMemoryOpStreamTransport;
   private readonly workspaceId: string;
   private readonly agentId: string;
-  private readonly connectionInstanceId: string | undefined;
+  private readonly connectionInstanceId: string;
   private readonly defaultScript:
     | ((exec: ExecRequest, opId: string) => FakeOpScript | Promise<FakeOpScript>)
     | undefined;
@@ -169,7 +169,7 @@ export class FakeOpRunner implements ControlRpc {
     transport: InMemoryOpStreamTransport;
     workspaceId: string;
     agentId: string;
-    connectionInstanceId?: string;
+    connectionInstanceId: string;
     defaultScript?: (exec: ExecRequest, opId: string) => FakeOpScript | Promise<FakeOpScript>;
   }) {
     this.transport = opts.transport;
@@ -213,24 +213,33 @@ export class FakeOpRunner implements ControlRpc {
     req: ControlRequest,
     _opts: { timeoutMs: number },
   ): Promise<ControlResponse> {
+    const connectionInstanceId = connectionInstanceIdFromSubject(subject);
+    if (!connectionInstanceId) {
+      return errorResponse(
+        req.requestId,
+        ErrorCode.ERROR_CODE_PROTOCOL,
+        "request did not address an exact connection instance",
+      );
+    }
     const op = req.op;
     if (!op) {
       return errorResponse(req.requestId, ErrorCode.ERROR_CODE_PROTOCOL, "no op");
     }
     switch (op.$case) {
       case "opStart":
-        return await this.handleStart(req.requestId, op.opStart, subject);
+        return await this.handleStart(req.requestId, op.opStart, connectionInstanceId);
       case "opAttach":
         return this.handleAttach(
           req.requestId,
           op.opAttach.opId,
           BigInt(op.opAttach.fromSeq),
           op.opAttach.attachGeneration,
+          connectionInstanceId,
         );
       case "opQuery":
-        return this.handleQuery(req.requestId, op.opQuery.opId);
+        return this.handleQuery(req.requestId, op.opQuery.opId, connectionInstanceId);
       case "opCancel":
-        return this.handleCancel(req.requestId, op.opCancel.opId);
+        return this.handleCancel(req.requestId, op.opCancel.opId, connectionInstanceId);
       default: {
         return errorResponse(
           req.requestId,
@@ -244,13 +253,20 @@ export class FakeOpRunner implements ControlRpc {
   private async handleStart(
     opId: string,
     start: OpStart,
-    subject: string,
+    connectionInstanceId: string,
   ): Promise<ControlResponse> {
     if (this.cancelledBeforeStart.has(opId)) {
       return startResponse(opId, cancelledStatus(opId), false);
     }
     const existing = this.runs.get(opId);
     if (existing) {
+      if (existing.connectionInstanceId !== connectionInstanceId) {
+        return errorResponse(
+          opId,
+          ErrorCode.ERROR_CODE_FENCED,
+          "operation belongs to a different connection instance",
+        );
+      }
       // IDEMPOTENT BY OP ID: a known op answers its current status and NEVER
       // re-runs (the whole point of B1).
       existing.startCount += 1;
@@ -293,11 +309,7 @@ export class FakeOpRunner implements ControlRpc {
         result: undefined,
       };
     }
-    const run = this.buildRun(
-      opId,
-      this.scripts.get(opId) as FakeOpScript,
-      this.connectionInstanceId ?? connectionInstanceIdFromSubject(subject),
-    );
+    const run = this.buildRun(opId, this.scripts.get(opId) as FakeOpScript, connectionInstanceId);
     run.startCount = 1;
     this.runs.set(opId, run);
     return startResponse(opId, this.statusOf(opId, run));
@@ -308,6 +320,7 @@ export class FakeOpRunner implements ControlRpc {
     opId: string,
     fromSeq: bigint,
     generation: string,
+    connectionInstanceId: string,
   ): ControlResponse {
     if (this.lostOps.has(opId)) {
       return statusOnly(requestId, lostStatus(opId));
@@ -315,6 +328,13 @@ export class FakeOpRunner implements ControlRpc {
     const run = this.runs.get(opId);
     if (!run) {
       return statusOnly(requestId, lostStatus(opId));
+    }
+    if (run.connectionInstanceId !== connectionInstanceId) {
+      return errorResponse(
+        requestId,
+        ErrorCode.ERROR_CODE_FENCED,
+        "operation belongs to a different connection instance",
+      );
     }
     run.attachCount += 1;
     const attachGeneration = BigInt(generation);
@@ -340,7 +360,11 @@ export class FakeOpRunner implements ControlRpc {
     return statusOnly(requestId, this.statusOf(opId, run));
   }
 
-  private handleQuery(requestId: string, opId: string): ControlResponse {
+  private handleQuery(
+    requestId: string,
+    opId: string,
+    connectionInstanceId: string,
+  ): ControlResponse {
     if (this.lostOps.has(opId)) {
       return statusOnly(requestId, lostStatus(opId));
     }
@@ -348,14 +372,32 @@ export class FakeOpRunner implements ControlRpc {
     if (!run) {
       return statusOnly(requestId, lostStatus(opId));
     }
+    if (run.connectionInstanceId !== connectionInstanceId) {
+      return errorResponse(
+        requestId,
+        ErrorCode.ERROR_CODE_FENCED,
+        "operation belongs to a different connection instance",
+      );
+    }
     return statusOnly(requestId, this.statusOf(opId, run));
   }
 
-  private handleCancel(requestId: string, opId: string): ControlResponse {
+  private handleCancel(
+    requestId: string,
+    opId: string,
+    connectionInstanceId: string,
+  ): ControlResponse {
     const run = this.runs.get(opId);
     if (!run) {
       this.cancelledBeforeStart.add(opId);
       return statusOnly(requestId, cancelledStatus(opId));
+    }
+    if (run.connectionInstanceId !== connectionInstanceId) {
+      return errorResponse(
+        requestId,
+        ErrorCode.ERROR_CODE_FENCED,
+        "operation belongs to a different connection instance",
+      );
     }
     if (!run.liveEmitted && run.script.holdUntilCancel) {
       run.exit.exitCode = -1;
@@ -417,11 +459,7 @@ export class FakeOpRunner implements ControlRpc {
     };
   }
 
-  private buildRun(
-    opId: string,
-    script: FakeOpScript,
-    connectionInstanceId: string | undefined,
-  ): FakeOpRun {
+  private buildRun(opId: string, script: FakeOpScript, connectionInstanceId: string): FakeOpRun {
     const frames: OpFrame[] = [];
     const channelBytes: Record<"stdout" | "stderr", Uint8Array[]> = { stdout: [], stderr: [] };
     let seq = 0n;
@@ -487,14 +525,14 @@ export function createMockSelfhostedOpStream(input: {
   responder: ControlRpc & { runExec(exec: ExecRequest): Promise<ExecResponse> };
   workspaceId: string;
   agentId: string;
-  connectionInstanceId?: string;
+  connectionInstanceId: string;
 }) {
   const transport = new InMemoryOpStreamTransport();
   const runner = new FakeOpRunner({
     transport,
     workspaceId: input.workspaceId,
     agentId: input.agentId,
-    ...(input.connectionInstanceId ? { connectionInstanceId: input.connectionInstanceId } : {}),
+    connectionInstanceId: input.connectionInstanceId,
     defaultScript: async (exec) => {
       const response = await input.responder.runExec(exec);
       return {

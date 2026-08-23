@@ -274,11 +274,16 @@ post-spawn fork repair. Daemon-mediated work remains
 subject to the external-daemon boundary above. Commands therefore keep the same
 machine resources and authority as commands launched by an unrestricted local
 agent; the OS scheduler owns contention, while a containment degradation is loud.
-Normal completion, cancellation, timeout, and task abandonment all converge on the
-same cleanup: the process group is killed and reaped, then the runner removes its
-operation leaf. A teardown that races final descendant release waits for the
-kernel's `cgroup.events` `populated 0` notification; it does not retain an empty
-operation cgroup until service restart.
+Normal foreground completion, cancellation, timeout, and task abandonment all
+converge on the same cleanup: the process group is killed and reaped, then the
+runner removes its operation leaf. The Unix group anchor also holds a
+kernel-close death lease on the runner process. If the runner is killed without
+executing Rust destructors, EOF makes the anchor write the operation leaf's
+`cgroup.kill` file, or kill its exact process group where cgroups are unavailable.
+Windows retains the equivalent kill-on-close Job Object guarantee. A teardown
+that races final descendant release waits for the kernel's `cgroup.events`
+`populated 0` notification; it does not retain an empty operation cgroup until
+service restart.
 
 Workspace operators can opt into a per-enrollment command policy from the
 machine detail view or the revision-fenced SDK call:
@@ -342,10 +347,19 @@ than being presented as the requested number.
 Exec duration is unbounded by default. `timeout_ms=0` and op-stream
 `deadline_ms=0` schedule no process kill; a positive
 `OPENGENI_SANDBOX_SELFHOSTED_EXEC_TIMEOUT_MS` is an explicit operator choice.
-Pause/Steer/cancellation still terminates the exact POSIX process group or
-Windows Job Object, including ordinary descendants spawned by a shell. A
-connection blip detaches the stream without killing the command; replay collects
-the retained output after reconnect.
+Foreground attempt-owned exec is terminated by Pause, Steer, terminal
+cancellation, or its explicit deadline, using the exact POSIX process group or
+Windows Job Object and including ordinary descendants spawned by a shell. A
+model-facing exec that outlives its bounded yield is different: before returning
+a background command ID, the worker durably transfers it to the session and
+freezes the physical control workspace, enrollment, connection instance, and op
+ID. Normal turn completion and Steer detach from that adopted command; they do
+not cancel or retarget it. Session/workspace Pause and terminal Cancel atomically
+move adopted commands to `stopping`, after which the global reconciler issues
+`OpCancel` only to that frozen subject. Switching the session's selected machine
+affects future operations only. A connection blip detaches the stream without
+killing the command; replay or exact-instance reconciliation collects its
+terminal result after reconnect.
 The session shell capability also preserves an explicit `exec_command.shell`
 selection: OpenGeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
@@ -353,7 +367,8 @@ ambient default shell. Calls that omit `shell` intentionally retain the
 machine-owned `$SHELL`/`ComSpec` default.
 On Unix a private unreaped group anchor fences the PGID until cleanup has been
 issued, so cancellation cannot signal a recycled group and the requested command
-cannot exit and leave invisible same-group work behind.
+cannot exit and leave invisible same-group work behind. The runner-death lease
+also closes the crash gap where `Drop` cannot run.
 An oversized reply is likewise returned as typed `PAYLOAD_TOO_LARGE`; neither
 backpressure nor a reply-size failure changes the machine's heartbeat state.
 
@@ -387,6 +402,18 @@ already-running or completed op instead of re-running the command. The
 oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
+
+When an exec yields as background work, `session_background_commands` becomes
+the durable lifecycle authority before the tool returns. It stores only a
+bounded command preview plus the immutable launch locator; no later active
+machine pointer is consulted. The sidebar projects `running` or `stopping` from
+that table even while the session turn itself is idle. The global maintenance
+pass runs this reconciliation independently of managed-sandbox ownership: a
+running command receives exact `OpQuery`, a stopping command receives exact
+idempotent `OpCancel`, and only a typed terminal exit/loss is checkpointed as
+proof before settlement. Offline, timeout, malformed, or still-running results
+are deferred. Claim expiry recovers coordination only and never implies process
+death; a successor connection is never queried on the predecessor's behalf.
 
 The server's out-of-order frame stash is only a disposable replay cache, bounded
 in bytes to two negotiated flow windows per operation. Overflow drops that cache

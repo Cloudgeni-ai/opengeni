@@ -1046,18 +1046,25 @@ before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
 authority remain capture blockers until settled.
 
-A yielded process promotes its parent admission to retained state and creates
-the non-TTL process holder in the same transaction before any caller receives a
-live locator. The exact parent admission, process UUID, provider locator, lease
-epoch, provider instance, and route remain pinned across active-pointer movement.
+A yielded managed process promotes its parent admission to retained state and
+creates the non-TTL process holder in the same transaction before any caller
+receives a live locator. The holder keeps the exact temporary sandbox alive after
+the turn ends. A yielded Connected Machine exec instead creates a session-owned
+background-command row before returning; that row freezes the physical control
+workspace, enrollment, connection instance, and op ID. The exact parent
+admission/process UUID/provider locator or Connected Machine locator remains
+pinned across active-pointer movement.
 Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
 cancellation, helper exec, and drain polling are process control: they may prove
 exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
 settles the parent and process holder and closes any matching PTY; duplicate
 identical proof is idempotent, while missing/conflicting proof keeps the fence
-closed. Normal turn finalization invokes this same physical drain for every
-registered yielded shell before workspace capture, independently of whether a
-Pause/Steer quiescence receipt is required. Connected Machines and other
+closed. Normal turn finalization drains only attempt-owned yielded shells before
+workspace capture. Once a command's durable session adoption commits, normal
+completion and Steer detach from it instead of cancelling it. Session/workspace
+Pause and terminal Cancel atomically transition adopted commands to `stopping`;
+provider-specific reconciliation then proves exact exit/loss before settlement.
+Resume never revives a stopping command. Connected Machines and other
 non-persistable routes do not dirty the provisioned cloud-home generation.
 
 If an owner finalizer or worker dies before reaching that settlement, the sole
@@ -1078,6 +1085,15 @@ idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
+
+Connected Machine background commands use the same proof-before-settlement
+discipline without borrowing managed lease identity. The global maintenance pass
+claims oldest-due rows with `SKIP LOCKED`, sends `OpQuery` for `running` or
+idempotent `OpCancel` for `stopping` to the immutable launch subject with epoch
+zero, and checkpoints the typed terminal provider observation before changing
+the lifecycle row. Running, offline, timed-out, malformed, and successor-only
+states remain active/deferred; connection retirement or elapsed time is not
+physical proof and cannot license replay or rebinding.
 
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when

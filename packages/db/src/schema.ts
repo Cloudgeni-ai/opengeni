@@ -8686,8 +8686,9 @@ export const sessionBackgroundCommands = pgTable(
       .notNull()
       .default("running"),
     retainedProcessId: uuid("retained_process_id"),
+    controlWorkspaceId: uuid("control_workspace_id"),
     enrollmentId: uuid("enrollment_id"),
-    connectionInstanceId: uuid("connection_instance_id"),
+    connectionInstanceId: text("connection_instance_id"),
     opId: text("op_id"),
     commandPreview: text("command_preview").notNull().default(""),
     cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
@@ -8696,6 +8697,15 @@ export const sessionBackgroundCommands = pgTable(
     settlementReason: text("settlement_reason"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
+    reconcileClaimId: uuid("reconcile_claim_id"),
+    reconcileClaimedAt: timestamp("reconcile_claimed_at", { withTimezone: true }),
+    reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
+    lastReconcileOutcome: text("last_reconcile_outcome"),
+    reconcileProofOutcome: text("reconcile_proof_outcome", { enum: ["exited", "lost"] }),
+    reconcileProofExitCode: integer("reconcile_proof_exit_code"),
+    reconcileProofReason: text("reconcile_proof_reason"),
+    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -8709,6 +8719,11 @@ export const sessionBackgroundCommands = pgTable(
       columns: [table.workspaceId, table.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
     }).onDelete("cascade"),
+    controlWorkspaceAccount: foreignKey({
+      name: "session_background_commands_control_workspace_fk",
+      columns: [table.controlWorkspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("restrict"),
     retainedProcess: foreignKey({
       name: "session_background_commands_process_fk",
       columns: [table.retainedProcessId],
@@ -8718,14 +8733,104 @@ export const sessionBackgroundCommands = pgTable(
       .on(table.retainedProcessId)
       .where(sql`${table.retainedProcessId} is not null`),
     connectedOp: uniqueIndex("session_background_commands_connected_op_uq")
-      .on(table.workspaceId, table.enrollmentId, table.connectionInstanceId, table.opId)
+      .on(table.controlWorkspaceId, table.enrollmentId, table.connectionInstanceId, table.opId)
       .where(sql`${table.provider} = 'connected_machine'`),
     activeSession: index("session_background_commands_active_session_idx")
       .on(table.workspaceId, table.sessionId, table.state, table.startedAt, table.id)
       .where(sql`${table.state} in ('running', 'stopping')`),
     stopping: index("session_background_commands_stopping_idx")
-      .on(table.cancelRequestedAt, table.id)
-      .where(sql`${table.state} = 'stopping'`),
+      .on(table.reconcileAfter, table.cancelRequestedAt, table.id)
+      .where(sql`${table.state} in ('running', 'stopping')`),
+    providerValid: check(
+      "session_background_commands_provider_check",
+      sql`${table.provider} in ('managed', 'connected_machine')`,
+    ),
+    stateValid: check(
+      "session_background_commands_state_check",
+      sql`${table.state} in ('running', 'stopping', 'exited', 'lost')`,
+    ),
+    providerIdentityValid: check(
+      "session_background_commands_provider_identity_check",
+      sql`(
+          ${table.provider} = 'managed'
+          and ${table.retainedProcessId} is not null
+          and ${table.controlWorkspaceId} is null
+          and ${table.enrollmentId} is null
+          and ${table.connectionInstanceId} is null
+          and ${table.opId} is null
+        ) or (
+          ${table.provider} = 'connected_machine'
+          and ${table.retainedProcessId} is null
+          and ${table.controlWorkspaceId} is not null
+          and ${table.enrollmentId} is not null
+          and ${table.connectionInstanceId} is not null
+          and octet_length(${table.connectionInstanceId}) between 1 and 128
+          and ${table.opId} is not null
+          and octet_length(${table.opId}) between 1 and 256
+        )`,
+    ),
+    lifecycleValid: check(
+      "session_background_commands_lifecycle_check",
+      sql`(
+          ${table.state} = 'running'
+          and ${table.cancelRequestedAt} is null
+          and ${table.cancelRequestedBy} is null
+          and ${table.exitCode} is null
+          and ${table.settlementReason} is null
+          and ${table.settledAt} is null
+        ) or (
+          ${table.state} = 'stopping'
+          and ${table.cancelRequestedAt} is not null
+          and ${table.cancelRequestedBy} is not null
+          and octet_length(btrim(${table.cancelRequestedBy})) between 1 and 1024
+          and ${table.exitCode} is null
+          and ${table.settlementReason} is null
+          and ${table.settledAt} is null
+        ) or (
+          ${table.state} = 'exited'
+          and ${table.settledAt} is not null
+          and octet_length(btrim(${table.settlementReason})) between 1 and 512
+        ) or (
+          ${table.state} = 'lost'
+          and ${table.exitCode} is null
+          and ${table.settledAt} is not null
+          and octet_length(btrim(${table.settlementReason})) between 1 and 512
+        )`,
+    ),
+    previewValid: check(
+      "session_background_commands_preview_check",
+      sql`octet_length(${table.commandPreview}) <= 2048`,
+    ),
+    reconcileValid: check(
+      "session_background_commands_reconcile_check",
+      sql`${table.reconcileAttempts} >= 0
+        and (
+          (${table.reconcileClaimId} is null and ${table.reconcileClaimedAt} is null)
+          or (${table.reconcileClaimId} is not null and ${table.reconcileClaimedAt} is not null)
+        )
+        and (
+          ${table.lastReconcileOutcome} is null
+          or octet_length(${table.lastReconcileOutcome}) between 1 and 64
+        )
+        and (
+          (
+            ${table.reconcileProofOutcome} is null
+            and ${table.reconcileProofExitCode} is null
+            and ${table.reconcileProofReason} is null
+            and ${table.reconcileProofObservedAt} is null
+          ) or (
+            ${table.reconcileProofOutcome} = 'exited'
+            and ${table.reconcileProofExitCode} is not null
+            and octet_length(btrim(${table.reconcileProofReason})) between 1 and 512
+            and ${table.reconcileProofObservedAt} is not null
+          ) or (
+            ${table.reconcileProofOutcome} = 'lost'
+            and ${table.reconcileProofExitCode} is null
+            and octet_length(btrim(${table.reconcileProofReason})) between 1 and 512
+            and ${table.reconcileProofObservedAt} is not null
+          )
+        )`,
+    ),
   }),
 );
 
