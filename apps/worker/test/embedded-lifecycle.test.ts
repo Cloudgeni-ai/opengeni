@@ -615,6 +615,32 @@ describe("embedded worker lifecycle contract", () => {
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
   });
 
+  test("database readiness coalesces overlapping probe attempts", async () => {
+    let executions = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const db = {
+      execute: async () => {
+        executions += 1;
+        if (executions === 1) await blocked;
+        return [];
+      },
+    } as unknown as Database;
+    const check = dbReadyCheck(db);
+
+    const first = check();
+    const second = check();
+    expect(first).toBe(second);
+    expect(executions).toBe(1);
+
+    release();
+    await Promise.all([first, second]);
+    await check();
+    expect(executions).toBe(2);
+  });
+
   test("readiness follows role lifecycle while health stays live during drain", async () => {
     const settings = testSettings();
     const observability = createObservability(settings, { component: "worker-test" });
