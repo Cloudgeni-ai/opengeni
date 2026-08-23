@@ -1,6 +1,8 @@
-# Supported non-HA, single-machine profile. Every process has one replica and
-# shares the host dynamically: no HPA, topology spreading, PDB, CPU quota, or
-# per-pod memory partition. Excess turns remain durable in Temporal.
+# Supported non-HA, single-machine profile. API, web, control, and deps stay
+# one replica. Turn workers are six replicas at a fixed 16 turns each so one
+# Bun event loop cannot admit host-wide concurrency. No HPA, topology
+# spreading, PDB, CPU quota, or per-pod memory partition. Excess turns remain
+# durable in Temporal.
 #
 # Bootstrap in two phases so Postgres/Temporal/NATS/Garage are healthy before the
 # pre-upgrade migration/role/posture gate runs. See docs/deployment.md.
@@ -36,7 +38,7 @@ worker:
     autoscaling:
       enabled: false
   turns:
-    replicaCount: 1
+    replicaCount: 6
     resources: null
     podDisruptionBudget:
       enabled: false
@@ -98,10 +100,10 @@ config:
   OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
   OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
-  # One turn worker expands activity slots while total machine use stays below
-  # these targets. Temporal durably queues excess work above the safety ceiling.
-  OPENGENI_TURN_WORKER_CONCURRENCY_MODE: resource-based
-  OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256"
+  # Several turn-worker processes, each capped at the per-loop default. One
+  # Bun event loop cannot spend whole-machine CPU/RAM; Temporal queues the rest.
+  OPENGENI_TURN_WORKER_CONCURRENCY_MODE: fixed
+  OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "16"
   OPENGENI_TURN_WORKER_TARGET_CPU_USAGE: "0.8"
   OPENGENI_TURN_WORKER_TARGET_MEMORY_USAGE: "0.75"
   # The tuner closes new admission at 75%. The distinct 90% threshold is an

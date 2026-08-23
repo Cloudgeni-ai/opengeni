@@ -112,8 +112,8 @@ spec:
             )
         {{- end }}
         # Node-relative protection cannot rely on a container memory limit: the
-        # single-node profile intentionally leaves the resource-based turn worker
-        # unbounded so Temporal can tune concurrency against real headroom. These
+        # single-node profile omits per-pod memory partitions and uses several
+        # fixed-density turn workers instead of one host-tuned event loop. These
         # records map node-exporter instances onto Kubernetes nodes, then retain
         # alerts only for nodes currently hosting this OpenGeni release.
         - record: opengeni:workload_node:present

@@ -69,10 +69,11 @@ persistent, non-HA profile for running the complete control plane on one
 machine. Kubernetes is used only as the process, restart, volume, and upgrade
 supervisor. It is not an autoscaling or failover layer in this profile.
 
-The profile renders one API, web, control worker, turn worker, relay, Postgres,
-Temporal, NATS, and Garage process. It disables HPAs, disruption budgets, and
-topology spreading. Container resource requests and limits are omitted, so a
-busy role may use otherwise-idle CPU and memory on the machine.
+The profile renders one API, web, control worker, relay, Postgres, Temporal,
+NATS, and Garage process, plus six turn-worker replicas. It disables HPAs,
+disruption budgets, and topology spreading. Container resource requests and
+limits are omitted, so a busy role may use otherwise-idle CPU and memory on
+the machine.
 
 The profile creates four non-preempting Pod priority tiers. Under
 kubelet-managed node pressure, presentation (web and relay) is evicted before
@@ -92,12 +93,14 @@ explicitly and recover after reconnect. `/readyz` remains the complete
 Postgres/NATS/Temporal dependency report, so the outage is still visible to
 operators. Losing Postgres fails both readiness paths.
 
-The one turn worker uses Temporal's resource-based slot tuner. It admits more
-agent turns while whole-machine CPU stays below 80% and memory stays below 75%,
-up to 256 active turns; excess work remains durable in Temporal. This is a
-safety ceiling, not a reservation or a promise that 256 heavy turns fit. The
-ordinary chart default remains a fixed 16 turns per worker so multi-worker
-deployments can scale replicas predictably. Fixed/HPA turn workers use a custom
+Turn workers use a fixed 16 concurrent `runAgentTurn` activities per process.
+A single Bun event loop cannot spend whole-machine CPU or RAM; host-level
+resource-based admission on one replica will pile tens of turns onto that
+loop until `/readyz` misses the kubelet timeout. The profile therefore runs
+six turn-worker replicas (96 host-wide turns, 16 per loop). Temporal load-
+balances `*-turns` across those pollers and durably queues the rest. The
+ordinary chart default for other profiles remains a fixed 16 turns per
+worker so multi-worker deployments can scale replicas predictably. Fixed/HPA turn workers use a custom
 Temporal slot supplier that reserves 100 MiB for the complete physical
 `runAgentTurn` promise lifetime, retains 512 MiB for runtime/native/GC headroom,
 and refuses another poll when either the startup-baseline or current-cgroup
