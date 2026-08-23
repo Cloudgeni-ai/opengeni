@@ -185,14 +185,14 @@ describe("useMachines", () => {
       },
     };
     const hook = await renderHook(
-      (props: { pollIntervalMs?: number }) =>
+      (props: { pollIntervalMs?: number | undefined }) =>
         useMachines({
           client,
           workspaceId: WORKSPACE_ID,
           machinesClient,
           pollIntervalMs: props.pollIntervalMs,
         }),
-      { pollIntervalMs: undefined },
+      {},
     );
     await flush();
     expect(lists).toBe(1);

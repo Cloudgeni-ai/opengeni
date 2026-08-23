@@ -117,7 +117,8 @@ function run(share: Share, force = false): Promise<void> {
   if (!force && share.inFlight) return share.inFlight;
   if (force && share.inFlight) {
     if (share.trailing) return share.trailing;
-    const trailing = share.inFlight
+    let trailing!: Promise<void>;
+    trailing = share.inFlight
       .then(async () => {
         if (!effective(share).enabled) return;
         await run(share);
@@ -128,7 +129,8 @@ function run(share: Share, force = false): Promise<void> {
     share.trailing = trailing;
     return trailing;
   }
-  const promise = runFresh(share).finally(() => {
+  let promise!: Promise<void>;
+  promise = runFresh(share).finally(() => {
     if (share.inFlight === promise) share.inFlight = null;
   });
   share.inFlight = promise;
