@@ -16,6 +16,7 @@ import {
   type EmbeddedBrowserInteractionClientOverride,
   useEmbeddedBrowserInteraction,
 } from "../session-context";
+import { isNonRetryableInteractionError } from "../lib/interaction-errors";
 import { usePageLiveActivity } from "./internal";
 
 export type UseBrowserSessionOptions = EmbeddedBrowserInteractionClientOverride & {
@@ -71,6 +72,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   }>(() => emptyState(browserSessionId, enabled));
   const visible =
     state.browserSessionId === browserSessionId ? state : emptyState(browserSessionId, enabled);
+  const refreshBlocked = isNonRetryableInteractionError(visible.error);
   const selectedTargetIdRef = useRef<string | null>(visible.selectedTargetId);
   selectedTargetIdRef.current = visible.selectedTargetId;
   const observationRef = useRef<{
@@ -198,15 +200,15 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
   }, [browserSessionId, enabled, invalidateRefresh, refresh]);
 
   useEffect(() => {
-    if (!enabled || !pageLive || visible.mutating) return;
+    if (!enabled || !pageLive || visible.mutating || refreshBlocked) return;
     const timer = setInterval(() => {
       if (!requestRef.current.controller) void refresh();
     }, pollIntervalMs);
     return () => clearInterval(timer);
-  }, [enabled, pageLive, pollIntervalMs, refresh, visible.mutating]);
+  }, [enabled, pageLive, pollIntervalMs, refresh, refreshBlocked, visible.mutating]);
 
   useEffect(() => {
-    if (!enabled || !browserSessionId || !pageLive) return;
+    if (!enabled || !browserSessionId || !pageLive || refreshBlocked) return;
     let disposed = false;
     const heartbeat = () => {
       void client.heartbeatBrowserSession(workspaceId, browserSessionId).catch(() => {
@@ -218,7 +220,7 @@ export function useBrowserSession(options: UseBrowserSessionOptions): UseBrowser
       disposed = true;
       clearInterval(timer);
     };
-  }, [browserSessionId, client, enabled, pageLive, refresh, workspaceId]);
+  }, [browserSessionId, client, enabled, pageLive, refresh, refreshBlocked, workspaceId]);
 
   const runMutation = useCallback(
     async <T>(scopeBrowserSessionId: string, operation: () => Promise<T>): Promise<T> => {

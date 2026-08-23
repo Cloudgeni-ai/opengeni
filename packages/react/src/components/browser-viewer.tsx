@@ -68,6 +68,7 @@ import { useSiteAuthConnections } from "../hooks/use-site-auth-connections";
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { formatBytes } from "../lib/format";
+import { isSourcePlacementChangedError } from "../lib/interaction-errors";
 import type { EmbeddedBrowserInteractionClientOverride } from "../session-context";
 import { browserKey, HUMAN_BROWSER_HOME_URL, normalizeBrowserAddress } from "./browser-input";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
@@ -161,6 +162,7 @@ export function BrowserViewer({
     enabled: enabled && profiles.identities.length > 0,
   });
   const createRegistryBrowser = registry.create;
+  const refreshRegistry = registry.refresh;
   const loadProfileRevisions = profiles.revisions;
   const liveSessions = useMemo(
     () => registry.sessions.filter((session) => isLiveBrowser(session)),
@@ -347,6 +349,10 @@ export function BrowserViewer({
     browserSessionId: selection?.sessionId ?? null,
     enabled: enabled && selection !== null && controllerReady,
   });
+  useEffect(() => {
+    if (!isSourcePlacementChangedError(browser.error, "browser_session")) return;
+    void refreshRegistry();
+  }, [browser.error, refreshRegistry]);
   const downloads = useBrowserDownloads({
     ...override,
     browserSessionId: selection?.sessionId ?? null,

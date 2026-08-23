@@ -11,6 +11,8 @@ import {
   ComputerSessionOperationConflictError,
   ComputerSessionStateError,
   createDb,
+  createEnrollment,
+  createSandbox,
   createSession,
   dispatchBrowserSessionOperation,
   dispatchComputerSessionOperation,
@@ -27,6 +29,8 @@ import {
   prepareComputerSessionEnd,
   reapStaleLeaseHolders,
   safeDatabaseErrorFacts,
+  setActiveSandbox,
+  terminalizeStaleConnectedInteractionPlacement,
   touchComputerSessionController,
 } from "../src";
 
@@ -712,4 +716,182 @@ describe("durable ComputerSession lifecycle", () => {
       failureCode: "workspace_force_drained",
     });
   });
+
+  test("terminalizes a task's stale Connected Machine browser and Desktop as one fenced set", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const enrollment = await createEnrollment(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      pubkey: `ed25519:interaction-placement-${crypto.randomUUID()}`,
+      os: "macos",
+      arch: "arm64",
+    });
+    const machine = await createSandbox(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      kind: "selfhosted",
+      name: "Connected Mac",
+      enrollmentId: enrollment.id,
+    });
+    expect(
+      await setActiveSandbox(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        targetSandboxId: machine.id,
+        expectedEpoch: 0,
+      }),
+    ).toMatchObject({ swapped: true });
+
+    const computerOperationId = crypto.randomUUID();
+    const computer = await prepareComputerSessionCreate(client.db, {
+      ...createInput(scope, computerOperationId),
+      placement: { kind: "connected_machine", sandboxId: machine.id },
+    });
+    const computerController = {
+      controllerId: "interaction-controller:connected",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: machine.id,
+    };
+    await dispatchComputerSessionOperation(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      computerSessionId: computer.session.id,
+      controllerGeneration: computerController.controllerGeneration,
+      controller: computerController,
+    });
+    await activateComputerSession(client.db, {
+      ...scope,
+      operationId: computerOperationId,
+      computerSessionId: computer.session.id,
+      controller: computerController,
+      platform: "macos",
+      adapter: "opengeni.macos.v1",
+      seatId: "seat:connected",
+      displayId: "display:connected",
+      capabilities,
+    });
+
+    const browserOperationId = crypto.randomUUID();
+    const browser = await prepareBrowserSessionCreate(client.db, {
+      ...scope,
+      operationId: browserOperationId,
+      associatedSessionId: scope.sessionId,
+      actorSubjectId: scope.subjectId,
+      name: "Connected browser",
+      initialUrl: "https://example.com/",
+      placement: { kind: "connected_machine", sandboxId: machine.id },
+      driverId: "opengeni.cdp.v1",
+      engine: "chrome",
+      headless: false,
+      identityId: null,
+      baseRevisionId: null,
+    });
+    const browserController = {
+      controllerId: "browserd:connected",
+      controllerGeneration: crypto.randomUUID(),
+      placementInstanceId: machine.id,
+    };
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId: browserOperationId,
+      browserSessionId: browser.session.id,
+      controllerGeneration: browserController.controllerGeneration,
+    });
+    await activateBrowserSession(client.db, {
+      ...scope,
+      operationId: browserOperationId,
+      browserSessionId: browser.session.id,
+      controller: browserController,
+      engineVersion: "151.0.0",
+    });
+
+    const endOperationId = crypto.randomUUID();
+    expect(
+      (
+        await prepareComputerSessionEnd(client.db, {
+          ...scope,
+          computerSessionId: computer.session.id,
+          operationId: endOperationId,
+          actorSubjectId: scope.subjectId,
+        })
+      ).session.lifecycle,
+    ).toBe("ending");
+
+    const stillCurrent = await terminalizeStaleConnectedInteractionPlacement(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sourceSessionId: scope.sessionId,
+      connectedSandboxId: machine.id,
+    });
+    expect(stillCurrent).toMatchObject({
+      sourcePlacementChanged: false,
+      changed: false,
+    });
+
+    expect(
+      await setActiveSandbox(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sessionId: scope.sessionId,
+        targetSandboxId: null,
+        expectedEpoch: 1,
+      }),
+    ).toMatchObject({ swapped: true });
+    const reconciled = await terminalizeStaleConnectedInteractionPlacement(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      sourceSessionId: scope.sessionId,
+      connectedSandboxId: machine.id,
+    });
+    expect(reconciled).toMatchObject({
+      sourcePlacementChanged: true,
+      changed: true,
+      browserSessionIds: [browser.session.id],
+      computerSessionIds: [computer.session.id],
+    });
+    expect(
+      await getComputerSession(client.db, {
+        ...scope,
+        computerSessionId: computer.session.id,
+      }),
+    ).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "source_placement_changed",
+    });
+    expect(
+      await prepareComputerSessionEnd(client.db, {
+        ...scope,
+        computerSessionId: computer.session.id,
+        operationId: endOperationId,
+        actorSubjectId: scope.subjectId,
+      }),
+    ).toMatchObject({
+      operation: {
+        state: "outcome_unknown",
+        error: {
+          code: "outcome_unknown",
+          retryable: false,
+        },
+      },
+    });
+    expect(
+      await getBrowserSession(client.db, {
+        ...scope,
+        browserSessionId: browser.session.id,
+      }),
+    ).toMatchObject({
+      lifecycle: "lost",
+      failureCode: "source_placement_changed",
+    });
+    expect(
+      await terminalizeStaleConnectedInteractionPlacement(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        sourceSessionId: scope.sessionId,
+        connectedSandboxId: machine.id,
+      }),
+    ).toMatchObject({ sourcePlacementChanged: true, changed: false });
+  }, 60_000);
 });
