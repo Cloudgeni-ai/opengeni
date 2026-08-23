@@ -195,6 +195,7 @@ import {
   NatsControlRpc,
   negotiateCapabilities,
   negotiateSelfhostedCapabilities,
+  selectBackend,
   SelfhostedSession,
 } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
@@ -3071,6 +3072,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // place (resolveActiveDesktopTransport), covering BOTH swap directions.
     let responseCapabilities = {
       ...capabilities,
+      FileSystem: {
+        ...capabilities.FileSystem,
+        root: selectBackend(
+          (selfhostedActive
+            ? "selfhosted"
+            : activeSandbox?.kind === "modal"
+              ? "modal"
+              : session.sandboxBackend === "selfhosted" &&
+                  settings.sandboxBackend !== "selfhosted" &&
+                  settings.sandboxBackend !== "none"
+                ? settings.sandboxBackend
+                : session.sandboxBackend) as SandboxBackend,
+        ).workspaceRoot,
+      },
       Git: {
         ...capabilities.Git,
         repos: capabilities.Git.available ? repositoryRoots : [],

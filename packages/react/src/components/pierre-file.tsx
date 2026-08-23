@@ -25,7 +25,7 @@ type FileComponent = ComponentType<{
 }>;
 
 export type PierreFileProps = {
-  /** Workspace-relative path (used for the header + language inference). */
+  /** Target path (used for the header + language inference). */
   path: string;
   /** The decoded text contents. */
   contents: string;

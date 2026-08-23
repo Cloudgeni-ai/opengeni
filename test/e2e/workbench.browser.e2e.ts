@@ -875,7 +875,7 @@ describe("workbench browser acceptance", () => {
       });
       const initialUrl = page.url();
 
-      await page.getByTitle("Open apps/api/src/server.ts", { exact: true }).click();
+      await page.getByTitle("Open /workspace/apps/api/src/server.ts", { exact: true }).click();
       expect(page.url()).toBe(initialUrl);
       await expectEventually(async () =>
         (await page.getByRole("tab", { name: "Files" }).getAttribute("aria-selected")) === "true"
@@ -908,7 +908,9 @@ describe("workbench browser acceptance", () => {
       );
       expect(await activeFiles.locator("[data-opengeni-focus-line]").count()).toBe(0);
 
-      await page.getByTitle("Open apps/api/src/server.ts at line 2", { exact: true }).click();
+      await page
+        .getByTitle("Open /workspace/apps/api/src/server.ts at line 2", { exact: true })
+        .click();
       await expectEventually(async () =>
         activeFiles.locator('[data-opengeni-focus-line][data-opengeni-file-line="2"]').count(),
       );

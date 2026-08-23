@@ -954,6 +954,36 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(settlements).toBe(0);
   });
 
+  test("filesystem root follows the exact selected backend", async () => {
+    let kind = "modal";
+    let operations = 0;
+    const modal: RoutableBackendSession = {
+      state: { manifest: { root: "/workspace" } },
+    };
+    const machine: RoutableBackendSession = {
+      state: { manifest: { root: "/workspace" } },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({
+        activeSandboxId: kind === "modal" ? null : "machine",
+        activeEpoch: kind === "modal" ? 0 : 1,
+      }),
+      resolveActiveBackend: async () => ({
+        session: kind === "modal" ? modal : machine,
+        sandboxId: kind === "modal" ? null : "machine",
+        kind,
+      }),
+      onOperation: () => {
+        operations += 1;
+      },
+    });
+
+    expect(await proxy.fileSystemRoot()).toBe("/workspace");
+    kind = "selfhosted";
+    expect(await proxy.fileSystemRoot()).toBe("/");
+    expect(operations).toBe(0);
+  });
+
   test("yielded process mutation, polling, and helpers stay on the exact backend after pointer movement", async () => {
     const ptr = mutablePointer();
     let pointerReads = 0;

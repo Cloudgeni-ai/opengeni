@@ -568,6 +568,11 @@ export function useSandboxWorkspaceTabs(
     // this fence at turn scope also avoids unsafe millisecond gaps between
     // sequential tool calls; rendered state and explicit user actions remain.
     active: filesActive && !turnInFlight,
+    // A deliberate canonical absolute-path open browses in the selected target's
+    // advertised namespace, so the authoritative tree and link share exact paths.
+    ...(requestedFilePath?.startsWith("/") && capabilities?.FileSystem.root
+      ? { rootPath: capabilities.FileSystem.root }
+      : {}),
     repoPaths,
     liveness: liveIoLiveness,
     capture: captureState.capture,

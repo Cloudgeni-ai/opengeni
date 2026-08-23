@@ -583,7 +583,11 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(decorateAt).toBeGreaterThan(credentialAt);
     expect(decorateAt).toBeLessThan(serviceAt);
     expect(channelASeam.slice(decorateAt, serviceAt)).toContain("session.id");
+    expect(channelASeam.slice(decorateAt, serviceAt)).toContain("routingSession.fileSystemRoot()");
     expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain("session: scopedSession");
+    expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain(
+      "workspaceRoot: fileSystemRoot",
+    );
   });
 
   test("the PTY write route adopts the exact durable process identity", () => {
