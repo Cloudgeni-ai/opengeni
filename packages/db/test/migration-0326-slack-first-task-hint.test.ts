@@ -6,10 +6,11 @@ import {
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  claimSlackBotUserLinkFirstTaskHint,
   createConnection,
   createDb,
+  getOrCreateSlackInteraction,
   getSlackBotUserLink,
+  resolveSlackInteractionFirstTaskHint,
   saveSlackBotUserLink,
   type Database,
   type DbClient,
@@ -73,66 +74,89 @@ async function installation(label: string) {
       verifiedAt: new Date().toISOString(),
     },
   });
-  return { accountId: account!.id, workspaceId: workspace!.id, connectionId: connection.id };
+  const target = {
+    accountId: account!.id,
+    workspaceId: workspace!.id,
+    connectionId: connection.id,
+    slackTeamId: `T_${label}`,
+  };
+  const link = async (slackUserId: string, subjectId: string) =>
+    await saveSlackBotUserLink(db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      connectionId: target.connectionId,
+      slackTeamId: target.slackTeamId,
+      slackUserId,
+      subjectId,
+      linkedBySubjectId: subjectId,
+    });
+  const interaction = async (slackUserId: string, channel: string) => {
+    const created = await getOrCreateSlackInteraction(db, {
+      accountId: target.accountId,
+      workspaceId: target.workspaceId,
+      connectionId: target.connectionId,
+      slackTeamId: target.slackTeamId,
+      slackChannelId: channel,
+      slackThreadTs: `${Date.now()}.${Math.floor(Math.random() * 1_000_000)}`,
+      routeKey: `${channel}:${crypto.randomUUID()}`,
+      triggeringProviderEventId: `E_${crypto.randomUUID()}`,
+      initiatingSlackUserId: slackUserId,
+      owningSubjectId: `user:${slackUserId}`,
+      visibility: "workspace",
+    });
+    return created.interaction;
+  };
+  return { ...target, link, interaction };
 }
 
 describe("migration 0326 Slack first-task hint", () => {
-  test("is a rolling additive column with no RLS-blind backfill", async () => {
+  test("is a rolling additive pair of columns with no RLS-blind backfill", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(source).toContain('ADD COLUMN "first_task_hint_interaction_id" uuid');
+    expect(source).toContain('ADD COLUMN "first_task_hint" boolean');
     expect(source).not.toMatch(/\b(?:UPDATE|DELETE|INSERT)\b/u);
     expect(source).not.toContain("NO FORCE ROW LEVEL SECURITY");
   });
 
-  test("keeps the identity link FORCE-RLS and defaults existing rows to unclaimed", async () => {
+  test("keeps both tables FORCE-RLS and defaults existing rows to unresolved", async () => {
     if (!available) return;
-    const [posture] = await shared!.admin<
-      { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
+    for (const table of ["slack_bot_user_links", "slack_interactions"]) {
+      const [posture] = await shared!.admin<
+        { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
+      >`
+        select relrowsecurity, relforcerowsecurity
+        from pg_class
+        where oid = ${table}::regclass`;
+      expect(posture).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+    }
+    const columns = await shared!.admin<
+      { table_name: string; is_nullable: string; column_default: string | null }[]
     >`
-      select relrowsecurity, relforcerowsecurity
-      from pg_class
-      where oid = 'slack_bot_user_links'::regclass`;
-    expect(posture).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
-
-    const [column] = await shared!.admin<{ is_nullable: string; column_default: string | null }[]>`
-      select is_nullable, column_default
+      select table_name, is_nullable, column_default
       from information_schema.columns
-      where table_name = 'slack_bot_user_links'
-        and column_name = 'first_task_hint_interaction_id'`;
-    expect(column).toEqual({ is_nullable: "YES", column_default: null });
+      where (table_name = 'slack_bot_user_links' and column_name = 'first_task_hint_interaction_id')
+         or (table_name = 'slack_interactions' and column_name = 'first_task_hint')
+      order by table_name`;
+    expect([...columns]).toEqual([
+      { table_name: "slack_bot_user_links", is_nullable: "YES", column_default: null },
+      { table_name: "slack_interactions", is_nullable: "YES", column_default: null },
+    ]);
 
-    const target = await installation(`unclaimed-${Date.now()}`);
-    const link = await saveSlackBotUserLink(db, {
-      ...target,
-      slackTeamId: `T_${target.connectionId.slice(0, 8)}`,
-      slackUserId: "U_UNCLAIMED",
-      subjectId: "user:hint-unclaimed",
-      linkedBySubjectId: "user:hint-unclaimed",
-    });
+    const target = await installation(`unresolved-${Date.now()}`);
+    const link = await target.link("U_UNCLAIMED", "user:hint-unclaimed");
     expect(link.firstTaskHintInteractionId).toBeNull();
+    const interaction = await target.interaction("U_UNCLAIMED", "D_UNCLAIMED");
+    expect(interaction.firstTaskHint).toBeNull();
   });
 
-  test("claims the hint exactly once and answers idempotently per interaction", async () => {
+  test("freezes the decision on the interaction and claims it once per identity", async () => {
     if (!available) return;
     const target = await installation(`claim-${Date.now()}`);
-    const slackTeamId = `T_${target.connectionId.slice(0, 8)}`;
-    await saveSlackBotUserLink(db, {
-      ...target,
-      slackTeamId,
-      slackUserId: "U_FIRST",
-      subjectId: "user:hint-first",
-      linkedBySubjectId: "user:hint-first",
-    });
-    await saveSlackBotUserLink(db, {
-      ...target,
-      slackTeamId,
-      slackUserId: "U_SECOND",
-      subjectId: "user:hint-second",
-      linkedBySubjectId: "user:hint-second",
-    });
-    const winner = crypto.randomUUID();
-    const loser = crypto.randomUUID();
+    await target.link("U_FIRST", "user:hint-first");
+    await target.link("U_SECOND", "user:hint-second");
+    const winner = await target.interaction("U_FIRST", "D_FIRST");
+    const later = await target.interaction("U_FIRST", "D_FIRST_LATER");
     const identity = {
       workspaceId: target.workspaceId,
       connectionId: target.connectionId,
@@ -140,76 +164,112 @@ describe("migration 0326 Slack first-task hint", () => {
     };
 
     expect(
-      await claimSlackBotUserLinkFirstTaskHint(db, { ...identity, interactionId: winner }),
+      await resolveSlackInteractionFirstTaskHint(db, { ...identity, interactionId: winner.id }),
     ).toBe(true);
-    // A retry, replica race, or delivery replay of the winning interaction
-    // keeps rendering the same acknowledgement bytes.
+    // The winner replays its frozen answer, so a re-rendered acknowledgement
+    // produces the same bytes for the digest-bound post ledger.
     expect(
-      await claimSlackBotUserLinkFirstTaskHint(db, { ...identity, interactionId: winner }),
+      await resolveSlackInteractionFirstTaskHint(db, { ...identity, interactionId: winner.id }),
     ).toBe(true);
-    // Every later task for that identity is silent forever.
     expect(
-      await claimSlackBotUserLinkFirstTaskHint(db, { ...identity, interactionId: loser }),
+      await resolveSlackInteractionFirstTaskHint(db, { ...identity, interactionId: later.id }),
     ).toBe(false);
 
     // A different Slack identity in the same installation still gets its own.
+    const otherFirst = await target.interaction("U_SECOND", "D_SECOND");
     expect(
-      await claimSlackBotUserLinkFirstTaskHint(db, {
+      await resolveSlackInteractionFirstTaskHint(db, {
         workspaceId: target.workspaceId,
         connectionId: target.connectionId,
         slackUserId: "U_SECOND",
-        interactionId: loser,
+        interactionId: otherFirst.id,
       }),
     ).toBe(true);
 
-    // Re-linking the same Slack identity preserves the spent claim.
-    await saveSlackBotUserLink(db, {
-      ...target,
-      slackTeamId,
-      slackUserId: "U_FIRST",
-      subjectId: "user:hint-first-relinked",
-      linkedBySubjectId: "user:hint-first-relinked",
-    });
-    const relinked = await getSlackBotUserLink(
+    // Unlink plus relink resets the per-identity claim, but it cannot flip an
+    // acknowledgement that already rendered: the frozen fact wins.
+    await shared!.admin`
+      update slack_bot_user_links
+      set first_task_hint_interaction_id = null
+      where workspace_id = ${target.workspaceId} and slack_user_id = 'U_FIRST'`;
+    expect(
+      await resolveSlackInteractionFirstTaskHint(db, { ...identity, interactionId: later.id }),
+    ).toBe(false);
+    expect(
+      await resolveSlackInteractionFirstTaskHint(db, { ...identity, interactionId: winner.id }),
+    ).toBe(true);
+  });
+
+  test("claiming the hint does not look like a re-link", async () => {
+    if (!available) return;
+    const target = await installation(`audit-${Date.now()}`);
+    const link = await target.link("U_AUDIT", "user:hint-audit");
+    const interaction = await target.interaction("U_AUDIT", "D_AUDIT");
+    expect(
+      await resolveSlackInteractionFirstTaskHint(db, {
+        workspaceId: target.workspaceId,
+        connectionId: target.connectionId,
+        slackUserId: "U_AUDIT",
+        interactionId: interaction.id,
+      }),
+    ).toBe(true);
+    const claimed = await getSlackBotUserLink(
       db,
       target.workspaceId,
       target.connectionId,
-      "U_FIRST",
+      "U_AUDIT",
     );
-    expect(relinked?.subjectId).toBe("user:hint-first-relinked");
-    expect(relinked?.firstTaskHintInteractionId).toBe(winner);
+    expect(claimed?.firstTaskHintInteractionId).toBe(interaction.id);
+    expect(claimed?.updatedAt.getTime()).toBe(link.updatedAt.getTime());
+  });
 
-    // An identity with no link row never claims anything.
+  test("an unlinked identity resolves to no hint without claiming anything", async () => {
+    if (!available) return;
+    const target = await installation(`absent-${Date.now()}`);
+    const interaction = await target.interaction("U_ABSENT", "D_ABSENT");
     expect(
-      await claimSlackBotUserLinkFirstTaskHint(db, {
+      await resolveSlackInteractionFirstTaskHint(db, {
         workspaceId: target.workspaceId,
         connectionId: target.connectionId,
         slackUserId: "U_ABSENT",
-        interactionId: crypto.randomUUID(),
+        interactionId: interaction.id,
       }),
     ).toBe(false);
+    const [links] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from slack_bot_user_links
+      where workspace_id = ${target.workspaceId}`;
+    expect(links!.count).toBe(0);
   });
 
-  test("concurrent claims for one identity elect a single winner", async () => {
+  test("a missing interaction row raises instead of guessing", async () => {
+    if (!available) return;
+    const target = await installation(`missing-${Date.now()}`);
+    await target.link("U_MISSING", "user:hint-missing");
+    await expect(
+      resolveSlackInteractionFirstTaskHint(db, {
+        workspaceId: target.workspaceId,
+        connectionId: target.connectionId,
+        slackUserId: "U_MISSING",
+        interactionId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("durable interaction row");
+  });
+
+  test("concurrent resolvers of distinct interactions elect a single winner", async () => {
     if (!available) return;
     const target = await installation(`race-${Date.now()}`);
-    await saveSlackBotUserLink(db, {
-      ...target,
-      slackTeamId: `T_${target.connectionId.slice(0, 8)}`,
-      slackUserId: "U_RACE",
-      subjectId: "user:hint-race",
-      linkedBySubjectId: "user:hint-race",
-    });
-    const identity = {
-      workspaceId: target.workspaceId,
-      connectionId: target.connectionId,
-      slackUserId: "U_RACE",
-    };
+    await target.link("U_RACE", "user:hint-race");
+    const interactions = await Promise.all(
+      Array.from({ length: 6 }, (_, index) => target.interaction("U_RACE", `D_RACE_${index}`)),
+    );
     const outcomes = await Promise.all(
-      Array.from({ length: 6 }, () =>
-        claimSlackBotUserLinkFirstTaskHint(db, {
-          ...identity,
-          interactionId: crypto.randomUUID(),
+      interactions.map((interaction) =>
+        resolveSlackInteractionFirstTaskHint(db, {
+          workspaceId: target.workspaceId,
+          connectionId: target.connectionId,
+          slackUserId: "U_RACE",
+          interactionId: interaction.id,
         }),
       ),
     );

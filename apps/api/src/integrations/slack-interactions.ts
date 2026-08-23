@@ -33,7 +33,6 @@ import {
   bindSlackInteractionSession,
   cancelSlackUserLinkAccessRequest,
   claimSlackAppHomeRefresh,
-  claimSlackBotUserLinkFirstTaskHint,
   claimSlackInteractionDelivery,
   claimSlackInteractionProgressDelivery,
   claimSlackInteractionInbox,
@@ -74,6 +73,7 @@ import {
   releaseSlackInteractionInbox,
   requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
+  resolveSlackInteractionFirstTaskHint,
   saveSlackInteractionInboxReactionCheckpoint,
   saveSlackSharedTaskOrigin,
   settleSlackInteractionInbox,
@@ -1677,7 +1677,18 @@ async function acknowledgeSlackSession(
     : privateHandoff
       ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Results stay private unless a separate authorized publication is approved.`
       : `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)}`;
-  const text = `${started}${await slackFirstTaskHint(deps, interaction, entry)}`;
+  // The post ledger binds this fixed operation id to a digest over the message
+  // text, and this function re-runs on every acknowledgement repair. Resolving
+  // the hint freezes it durably before the post, so a repair renders identical
+  // bytes; a failure here raises into the retryable inbox path rather than
+  // binding the ledger to a hint-less acknowledgement it can never revise.
+  const showHint = await resolveSlackInteractionFirstTaskHint(deps.db, {
+    workspaceId: entry.workspaceId,
+    connectionId: entry.connectionId,
+    slackUserId: entry.slackUserId,
+    interactionId: interaction.id,
+  });
+  const text = `${started}${showHint ? slackFirstTaskHintText(deps) : ""}`;
   const controls = await controlActionBlocks(deps, interaction, {
     messageOperationId: operationId,
     sessionEventSequence: 0,
@@ -1717,39 +1728,16 @@ async function acknowledgeSlackSession(
 }
 
 /**
- * The one-time onboarding sentence appended to a Slack identity's first
+ * The one-time onboarding sentence shown on a Slack identity's first
  * acknowledged task in one installation.
  *
- * The claim is durable and keyed by the exact interaction id, so a retried,
- * replayed, or replica-raced acknowledgement of that same task keeps producing
- * the same bytes while every later task never repeats the prose. Persistence is
- * best effort: a failed claim silently omits the hint rather than blocking the
- * acknowledgement that carries the session link and controls.
+ * Rendering is a pure function of the configured command plus the frozen
+ * `firstTaskHint` fact, so every re-render of the same acknowledgement produces
+ * the same bytes for the digest-bound post ledger.
  */
-async function slackFirstTaskHint(
-  deps: ApiRouteDeps,
-  interaction: SlackInteraction,
-  entry: SlackInteractionInboxEntry,
-): Promise<string> {
-  let claimed = false;
-  try {
-    claimed = await claimSlackBotUserLinkFirstTaskHint(deps.db, {
-      workspaceId: entry.workspaceId,
-      connectionId: entry.connectionId,
-      slackUserId: entry.slackUserId,
-      interactionId: interaction.id,
-    });
-  } catch {
-    return "";
-  }
-  if (!claimed) return "";
-  const command = slackCommandName(deps);
+function slackFirstTaskHintText(deps: ApiRouteDeps): string {
+  const command = deps.settings.slackCommand;
   return `\n\nFirst time here: reply in this thread to continue this task, or reply \`stop\` to stop it. Start a new top-level DM or run \`${command}\` again for a new task. Run \`${command} info\` any time for the full summary.`;
-}
-
-function slackCommandName(deps: ApiRouteDeps): string {
-  const configured = deps.settings.slackCommand?.trim();
-  return configured && /^\/[a-z0-9_-]{1,32}$/i.test(configured) ? configured : "/opengeni";
 }
 
 async function processSlackReactionInboxEntry(
@@ -2508,12 +2496,24 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     sessionId: handle.sessionId,
   });
   const outcome = await executeSlackAction(deps, grant, interaction, handle);
+  // A control click replaces the message it was pressed on. When that message
+  // is this interaction's acknowledgement and this interaction won the one-time
+  // onboarding hint, the update carries the hint forward: otherwise pressing
+  // Status would permanently destroy the only copy of prose a Slack identity is
+  // ever shown. The handle's message operation identifies the acknowledgement
+  // exactly, independent of route rekeying. Later control cards have their own
+  // operation ids, so the hint still appears on exactly one message.
+  const acknowledgementOperationId = deterministicUuid(`slack-ack:${interaction.id}`);
+  const updateText =
+    interaction.firstTaskHint === true && handle.messageOperationId === acknowledgementOperationId
+      ? `${outcome.text}${slackFirstTaskHintText(deps)}`
+      : outcome.text;
   await client.updateMessage({
     operationId: deterministicUuid(`slack-action-update:${handle.id}:${outcome.result}`),
     channelId: entry.slackChannelId,
     timestamp: entry.slackMessageTs,
-    text: outcome.text,
-    blocks: [{ type: "section", text: { type: "mrkdwn", text: outcome.text } }],
+    text: updateText,
+    blocks: [{ type: "section", text: { type: "mrkdwn", text: updateText } }],
   });
   await settleSlackInteractionActionHandles(deps.db, {
     accountId: entry.accountId,
@@ -3732,8 +3732,12 @@ async function slackInfoCommandResponse(
     );
   }
   const workspace = await getWorkspace(deps.db, installation.workspaceId);
-  const command = slackCommandName(deps);
+  const command = deps.settings.slackCommand;
   const botMention = slackBotMention(installation.botUserId);
+  // Every line is gated on the grant that actually authorizes it, so the card
+  // stays a projection of what this caller can do rather than a generic manual.
+  const canControl = hasPermission(grant.permissions, "sessions:control");
+  const canCreate = hasPermission(grant.permissions, "sessions:create");
   const schedules = hasPermission(grant.permissions, "scheduled_tasks:manage")
     ? slackSchedulesUrl(deps, installation.workspaceId)
     : null;
@@ -3745,9 +3749,17 @@ async function slackInfoCommandResponse(
   const lines = [
     "*Working with OpenGeni in Slack*",
     "",
-    "• *Continue a task:* reply in its Slack thread.",
-    "• *Stop a task:* press *Stop* on its card, or reply `stop` in its thread.",
-    `• *Start a new task:* mention ${botMention} in a channel, run \`${command} <task>\`, or send a new top-level direct message.`,
+    ...(canControl
+      ? [
+          "• *Continue a task:* reply in its Slack thread.",
+          "• *Stop a task:* press *Stop* on its card, or reply `stop` in its thread.",
+        ]
+      : []),
+    ...(canCreate
+      ? [
+          `• *Start a new task:* mention ${botMention} in a channel, run \`${command} <task>\`, or send a new top-level direct message.`,
+        ]
+      : []),
     ...(schedules
       ? [
           `• *Make a result recurring:* press *Status* on the task card and open *Make recurring*, or open <${schedules}|Schedules>.`,

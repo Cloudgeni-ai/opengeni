@@ -2278,6 +2278,9 @@ export const slackInteractions = pgTable(
     deliveryRetryAt: timestamp("delivery_retry_at", { withTimezone: true }),
     deliveryLastErrorCode: text("delivery_last_error_code"),
     ackSlackMessageTs: text("ack_slack_message_ts"),
+    // Frozen once: whether this interaction's acknowledgement renders the
+    // one-time onboarding hint. NULL means the decision has not been resolved.
+    firstTaskHint: boolean("first_task_hint"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
