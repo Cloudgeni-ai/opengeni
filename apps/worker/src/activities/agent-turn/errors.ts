@@ -12,6 +12,10 @@ import {
   isMcpTransportConnectivityError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
+import {
+  mcpTransportRequestFailureDiagnostic,
+  type McpTransportRequestFailureDiagnostic,
+} from "@opengeni/runtime/mcp-network";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import { CODEX_USAGE_EXHAUSTED_PCT } from "../codex-rotation";
 import type { CodexAccountStatus } from "@opengeni/db";
@@ -615,6 +619,7 @@ export function agentRunFailurePayload(
   retryOutcome?: string;
   database?: Record<string, string>;
   historyPersistenceStage?: MandatoryHistoryPersistenceStage;
+  mcpTransportDiagnostic?: McpTransportRequestFailureDiagnostic;
 } {
   if (error instanceof MandatoryHistoryPersistenceError) {
     const underlying = isSessionEventPersistenceError(error.cause)
@@ -749,6 +754,7 @@ export function agentRunFailurePayload(
   }
   const mcpTimeout = classifyMcpTransportTimeoutError(error);
   if (mcpTimeout) {
+    const mcpTransportDiagnostic = mcpTransportRequestFailureDiagnostic(error);
     return {
       error:
         "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
@@ -757,15 +763,18 @@ export function agentRunFailurePayload(
       ...(mcpTimeout.detail || mcpTimeout.message
         ? { detail: mcpTimeout.detail ?? mcpTimeout.message }
         : {}),
+      ...(mcpTransportDiagnostic ? { mcpTransportDiagnostic } : {}),
     };
   }
   if (isMcpTransportConnectivityError(error)) {
+    const mcpTransportDiagnostic = mcpTransportRequestFailureDiagnostic(error);
     return {
       error:
         "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
       code: "mcp_transport_unavailable",
       retryable: true,
       detail: message,
+      ...(mcpTransportDiagnostic ? { mcpTransportDiagnostic } : {}),
     };
   }
   if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {

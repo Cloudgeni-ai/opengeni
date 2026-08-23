@@ -17,6 +17,7 @@ import {
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
+  mcpTransportRequestFailureDiagnostic,
 } from "../src/mcp-network";
 
 const testSettings = {
@@ -181,6 +182,118 @@ describe("MCP network and payload boundary", () => {
     expect(seenInit?.redirect).toBe("manual");
     expect(seenInit?.method).toBe("POST");
     expect("dispatcher" in (seenInit ?? {})).toBe(false);
+  });
+
+  test("retains the failed JSON-RPC request phase and exact cause chain without wrapping", async () => {
+    const socketFailure = Object.assign(new Error("connect ECONNREFUSED 10.0.0.8:443"), {
+      code: "ECONNREFUSED",
+    });
+    const source = new TypeError("Unable to connect. Is the computer able to access the url?", {
+      cause: socketFailure,
+    });
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async () => {
+        throw source;
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+
+    let observed: unknown;
+    try {
+      await guarded("https://example.test/mcp", {
+        method: "POST",
+        headers: { authorization: "Bearer transport-secret" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toBe(source);
+    const diagnostic = mcpTransportRequestFailureDiagnostic(observed);
+    expect(diagnostic).toEqual({
+      httpMethod: "POST",
+      rpcMethod: "tools/list",
+      causeChain: [
+        {
+          kind: "error",
+          name: "TypeError",
+          message: "Unable to connect. Is the computer able to access the url?",
+        },
+        {
+          kind: "error",
+          name: "Error",
+          message: "connect ECONNREFUSED 10.0.0.8:443",
+          code: "ECONNREFUSED",
+        },
+      ],
+      causeChainComplete: true,
+    });
+    expect(
+      mcpTransportRequestFailureDiagnostic(new Error("SDK wrapper", { cause: observed })),
+    ).toEqual(diagnostic);
+    expect(JSON.stringify(diagnostic)).not.toContain("transport-secret");
+    expect(JSON.stringify(diagnostic)).not.toContain("example.test");
+  });
+
+  test("records a failed GET transport without inventing a JSON-RPC method", async () => {
+    const source = Object.assign(new Error("temporary DNS failure"), { code: "EAI_AGAIN" });
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async () => {
+        throw source;
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+
+    await expect(guarded("https://example.test/mcp")).rejects.toBe(source);
+    expect(mcpTransportRequestFailureDiagnostic(source)).toEqual({
+      httpMethod: "GET",
+      causeChain: [
+        {
+          kind: "error",
+          name: "Error",
+          message: "temporary DNS failure",
+          code: "EAI_AGAIN",
+        },
+      ],
+      causeChainComplete: true,
+    });
+  });
+
+  test("bounds cyclic transport cause chains and reports the incomplete snapshot", async () => {
+    const source = new Error("cyclic transport failure");
+    source.cause = source;
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async () => {
+        throw source;
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+
+    await expect(guarded("https://example.test/mcp")).rejects.toBe(source);
+    expect(mcpTransportRequestFailureDiagnostic(source)).toEqual({
+      httpMethod: "GET",
+      causeChain: [
+        {
+          kind: "error",
+          name: "Error",
+          message: "cyclic transport failure",
+        },
+      ],
+      causeChainComplete: false,
+    });
   });
 
   test("errors on the first streamed byte past the response ceiling", async () => {
