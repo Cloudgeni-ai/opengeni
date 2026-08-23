@@ -26,8 +26,10 @@ type Share = {
   snapshot: SharedMachinesSnapshot;
   subscribers: Set<Subscriber>;
   timer: ReturnType<typeof setTimeout> | null;
+  disposeTimer: ReturnType<typeof setTimeout> | null;
   abort: AbortController | null;
   inFlight: Promise<void> | null;
+  trailing: Promise<void> | null;
   generation: number;
 };
 
@@ -63,40 +65,17 @@ function latestLoad(share: Share): ((signal?: AbortSignal) => Promise<MachinesRe
   return load;
 }
 
-async function run(share: Share): Promise<void> {
-  const load = latestLoad(share);
-  if (!load) return;
-  if (share.inFlight) return share.inFlight;
-  const ticket = ++share.generation;
-  const abort = new AbortController();
-  share.abort = abort;
-  const promise = (async () => {
-    try {
-      const data = await load(abort.signal);
-      if (ticket !== share.generation || abort.signal.aborted) return;
-      share.snapshot = { data, loading: false, error: null };
-      emit(share);
-    } catch (cause) {
-      if (ticket !== share.generation || abort.signal.aborted) return;
-      share.snapshot = {
-        data: share.snapshot.data,
-        loading: false,
-        error: cause instanceof Error ? cause : new Error(String(cause)),
-      };
-      emit(share);
-    } finally {
-      if (share.abort === abort) share.abort = null;
-      if (share.inFlight === promise) share.inFlight = null;
-    }
-  })();
-  share.inFlight = promise;
-  return promise;
-}
-
 function stopTimer(share: Share): void {
   if (share.timer !== null) {
     clearTimeout(share.timer);
     share.timer = null;
+  }
+}
+
+function cancelDispose(share: Share): void {
+  if (share.disposeTimer !== null) {
+    clearTimeout(share.disposeTimer);
+    share.disposeTimer = null;
   }
 }
 
@@ -108,6 +87,52 @@ function arm(share: Share): void {
     share.timer = null;
     void run(share).finally(() => arm(share));
   }, pollIntervalMs);
+}
+
+async function runFresh(share: Share): Promise<void> {
+  const load = latestLoad(share);
+  if (!load) return;
+  const ticket = ++share.generation;
+  const abort = new AbortController();
+  share.abort = abort;
+  try {
+    const data = await load(abort.signal);
+    if (ticket !== share.generation || abort.signal.aborted) return;
+    share.snapshot = { data, loading: false, error: null };
+    emit(share);
+  } catch (cause) {
+    if (ticket !== share.generation || abort.signal.aborted) return;
+    share.snapshot = {
+      data: share.snapshot.data,
+      loading: false,
+      error: cause instanceof Error ? cause : new Error(String(cause)),
+    };
+    emit(share);
+  } finally {
+    if (share.abort === abort) share.abort = null;
+  }
+}
+
+function run(share: Share, force = false): Promise<void> {
+  if (!force && share.inFlight) return share.inFlight;
+  if (force && share.inFlight) {
+    if (share.trailing) return share.trailing;
+    const trailing = share.inFlight
+      .then(async () => {
+        if (!effective(share).enabled) return;
+        await run(share);
+      })
+      .finally(() => {
+        if (share.trailing === trailing) share.trailing = null;
+      });
+    share.trailing = trailing;
+    return trailing;
+  }
+  const promise = runFresh(share).finally(() => {
+    if (share.inFlight === promise) share.inFlight = null;
+  });
+  share.inFlight = promise;
+  return promise;
 }
 
 function reconcile(share: Share): void {
@@ -124,22 +149,29 @@ function reconcile(share: Share): void {
     }
     return;
   }
-  if (share.snapshot.data === null && !share.snapshot.error) {
-    share.snapshot = { ...share.snapshot, loading: true };
-    emit(share);
+  if (share.snapshot.data !== null || share.snapshot.error) {
+    arm(share);
+    return;
   }
+  share.snapshot = { ...share.snapshot, loading: true };
+  emit(share);
   void run(share).finally(() => arm(share));
 }
 
 function getOrCreate(shareKey: string): Share {
   const existing = shares.get(shareKey);
-  if (existing) return existing;
+  if (existing) {
+    cancelDispose(existing);
+    return existing;
+  }
   const created: Share = {
     snapshot: { data: null, loading: true, error: null },
     subscribers: new Set(),
     timer: null,
+    disposeTimer: null,
     abort: null,
     inFlight: null,
+    trailing: null,
     generation: 0,
   };
   shares.set(shareKey, created);
@@ -149,7 +181,7 @@ function getOrCreate(shareKey: string): Share {
 export async function refreshSharedMachinesList(shareKey: string): Promise<void> {
   const share = shares.get(shareKey);
   if (!share) return;
-  await run(share);
+  await run(share, true);
 }
 
 export function useSharedMachinesList(
@@ -177,14 +209,26 @@ export function useSharedMachinesList(
     reconcile(share);
     return () => {
       share.subscribers.delete(subscriber);
-      if (share.subscribers.size === 0) {
-        share.generation += 1;
-        share.abort?.abort();
-        stopTimer(share);
-        shares.delete(shareKey);
+      if (share.subscribers.size > 0) {
+        reconcile(share);
         return;
       }
-      reconcile(share);
+      // Abort immediately so a session switch does not keep the old GET alive.
+      // Keep the snapshot one tick so a same-key remount (poll-interval change)
+      // does not flash an empty fleet.
+      share.generation += 1;
+      share.abort?.abort();
+      share.abort = null;
+      share.inFlight = null;
+      share.trailing = null;
+      stopTimer(share);
+      cancelDispose(share);
+      share.disposeTimer = setTimeout(() => {
+        share.disposeTimer = null;
+        if (share.subscribers.size === 0 && shares.get(shareKey) === share) {
+          shares.delete(shareKey);
+        }
+      }, 0);
     };
   }, [shareKey, load, options.pollIntervalMs, enabled, pageLive]);
 

@@ -718,11 +718,15 @@ never pull it in.
   plus the `MachineView` / `MachineState` / `MetricSample` view-model types.
 
 ```tsx
-import { MachinesDashboard, useMachines } from "@opengeni/react/machines";
+import {
+  MACHINES_SESSION_POLL_MS,
+  MachinesDashboard,
+  useMachines,
+} from "@opengeni/react/machines";
 
 function Fleet({ sessionId }: { sessionId: string }) {
   const { machines, activeSandboxId, attach, attachingSandboxId, refresh } =
-    useMachines({ sessionId, pollIntervalMs: 5000 });
+    useMachines({ sessionId, pollIntervalMs: MACHINES_SESSION_POLL_MS });
   return (
     <MachinesDashboard
       machines={machines}

@@ -31,14 +31,12 @@ import {
   type EnrollmentRecord,
   type MachineMetricsRow,
 } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
 import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
 import { selfhostedHeartbeatLiveness } from "@opengeni/runtime/sandbox";
 
 export type MachinesServices = {
   db: Database;
   settings: Settings;
-  bus?: EventBus;
 };
 
 const ACTIVE_UPDATE_STATUSES = new Set([
@@ -188,7 +186,8 @@ function enrollmentLiveness(enrollment: EnrollmentRecord) {
  * Resolve the dashboard STATE of a machine. State reflects REACHABILITY + the
  * VIEW plane only: an online machine with no display → `display_unavailable` (no
  * desktop stream, but compute — exec/fs/git/terminal — still works); otherwise
- * the liveness state (online/reconnecting/offline). It deliberately does NOT fold
+ * the liveness state (online/offline; list heartbeat never yields reconnecting).
+ * It deliberately does NOT fold
  * in screen-control consent: a displayed machine can be VIEWED (read-only) and
  * used for compute regardless of `allowScreenControl` — only INPUT (ComputerUse /
  * an interactive stream) needs that consent, which is a per-capability concern

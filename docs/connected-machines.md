@@ -178,8 +178,10 @@ remain visible and attachable.
 
 List `state` is the durable heartbeat cursor (`lastSeenAt`, `wentOfflineAt`),
 not a live ControlRpc ping. A fresh heartbeat is online; a clean goodbye or a
-stale/missing heartbeat is offline. Attach, capability negotiation, and fleet
-tools still ping when they need to know whether a responder is answering now.
+stale/missing heartbeat is offline. The list therefore does not emit
+`reconnecting` (that blip needs a missed live probe). Attach, capability
+negotiation, and fleet tools still ping when they need to know whether a
+responder is answering now.
 
 ```ts
 const res = await client.listMachines(workspaceId, { sessionId });

@@ -16,7 +16,7 @@ import type { MachinesResponse, MachineView, MetricSample } from "../types/machi
 export const MACHINES_DASHBOARD_POLL_MS = 10_000;
 /** Session surfaces share one poll for the same workspace+session. */
 export const MACHINES_SESSION_POLL_MS = 15_000;
-/** Composer polls only after the first load shows a machine. */
+/** Composer polls after the first load shows a machine, or to retry a real error. */
 export const MACHINES_COMPOSER_POLL_MS = 30_000;
 
 const machinesClientIds = new WeakMap<object, number>();

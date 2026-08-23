@@ -88,7 +88,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     // active pointer); absent → the pure workspace dashboard.
     const sessionId = c.req.query("sessionId") ?? null;
     const response = await listMachines(
-      { db, settings, bus },
+      { db, settings },
       {
         accountId: grant.accountId,
         workspaceId,
