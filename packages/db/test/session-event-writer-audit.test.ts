@@ -230,7 +230,8 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   },
   "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
-    inserts: 2,
+    // pending event, producer-side supersession event, goal.resumed
+    inserts: 3,
     contract: "canonical",
   },
   "packages/db/src/index.ts#appendSessionEvents": { inserts: 1, contract: "canonical" },
@@ -348,15 +349,16 @@ const expectedOutboxWriters: Record<
   string,
   { inserts: number; contract: "child_lifecycle" | "owned_child_lifecycle" | "canonical_pair" }
 > = {
-  "packages/db/src/index.ts#settleSessionIdleWithParentOutbox": {
-    inserts: 1,
-    contract: "child_lifecycle",
-  },
-  "packages/db/src/index.ts#enqueueFailedChildOutboxTx": {
+  // The one child -> parent outbox writer in index.ts; every notice kind
+  // (terminal idle/failed, requires_action, resolved, capacity wait, progress)
+  // routes through it under a caller-owned child-lifecycle prefix.
+  "packages/db/src/index.ts#enqueueChildLifecycleNoticeOutboxTx": {
     inserts: 1,
     contract: "owned_child_lifecycle",
   },
-  "packages/db/src/session-control.ts#enqueueCancelledChildOutboxInTransaction": {
+  // The one control-plane child -> parent outbox writer (terminal cancel,
+  // direct Pause, cancelled human-input resolutions).
+  "packages/db/src/session-control.ts#insertChildOutboxRowInTransaction": {
     inserts: 1,
     contract: "owned_child_lifecycle",
   },
@@ -376,6 +378,40 @@ const expectedSharedFailedChildOutboxCallers = [
   "enqueueFailedChildOutboxWithoutTurnTx",
 ];
 const expectedCancelledChildOutboxCallers = ["cancelSessionSubtreeInTransaction"];
+
+/**
+ * Typed child-lifecycle notice wrappers over the one index.ts outbox writer,
+ * and the lifecycle producers that call them. Every producer must take a
+ * canonical lock (the child-lifecycle prefix, or the generic prefix with the
+ * parent included in its UUID-ordered session set) before the first wrapper
+ * call, so the parent row is always held when its outbox row is inserted.
+ */
+const expectedChildLifecycleNoticeWrappers = [
+  "settleSessionIdleWithParentOutbox",
+  "enqueueFailedChildOutboxTx",
+  "enqueueChildRequiresActionOutboxTx",
+  "enqueueChildRequiresActionResolvedOutboxTx",
+  "enqueueChildWaitingCapacityOutboxTx",
+  "enqueueChildProgressOutboxTx",
+];
+const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
+  enqueueChildRequiresActionOutboxTx: ["applySessionTurnSettlement"],
+  enqueueChildRequiresActionResolvedOutboxTx: [
+    "acceptSessionApprovalDecision",
+    "acceptSessionHumanInputResponse",
+    "applySessionTurnSettlement",
+    "failSessionWorkBeforeAttemptClaim",
+  ],
+  enqueueChildWaitingCapacityOutboxTx: ["armCodexCapacityWait", "armXaiCapacityWait"],
+  enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
+};
+const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {
+  enqueueCancelledChildOutboxInTransaction: ["cancelSessionSubtreeInTransaction"],
+  enqueueChildPausedOutboxInTransaction: ["mutateSessionControlInTransaction"],
+  enqueueCancelledChildRequiresActionResolvedOutboxInTransaction: [
+    "cancelSessionSubtreeInTransaction",
+  ],
+};
 
 function productionTypeScriptFiles(): string[] {
   const files: string[] = [];
@@ -933,6 +969,86 @@ describe("session_events writer inventory", () => {
       const firstLock = callPositions(callerNode, "lockSessionEventWriteRows")[0];
       const enqueue = callPositions(callerNode, "enqueueCancelledChildOutboxInTransaction")[0];
       expect(firstLock).toBeLessThan(enqueue!);
+    }
+
+    // Child-lifecycle notices: every typed wrapper routes through the one
+    // index.ts outbox writer exactly once, and every lifecycle producer takes
+    // a canonical lock before its first wrapper call (the parent session row
+    // joins that lock set, so the outbox insert never runs without it).
+    const noticeWriterCallers = new Map<string, Set<string>>();
+    for (const [name, definitions] of functionDefinitions) {
+      const definition = definitions[0];
+      if (!definition) continue;
+      for (const writer of [
+        "enqueueChildLifecycleNoticeOutboxTx",
+        "insertChildOutboxRowInTransaction",
+      ]) {
+        if (name === writer) continue;
+        if (callPositions(definition.functionNode, writer).length > 0) {
+          const callers = noticeWriterCallers.get(writer) ?? new Set<string>();
+          callers.add(name);
+          noticeWriterCallers.set(writer, callers);
+        }
+      }
+    }
+    expect(
+      [...(noticeWriterCallers.get("enqueueChildLifecycleNoticeOutboxTx") ?? [])].sort(),
+    ).toEqual([...expectedChildLifecycleNoticeWrappers].sort());
+    expect(
+      [...(noticeWriterCallers.get("insertChildOutboxRowInTransaction") ?? [])].sort(),
+    ).toEqual(Object.keys(expectedControlPlaneChildOutboxWrappers).sort());
+    for (const wrapper of expectedChildLifecycleNoticeWrappers) {
+      const definitions = functionDefinitions.get(wrapper) ?? [];
+      expect(definitions).toHaveLength(1);
+      expect(
+        callPositions(definitions[0]!.functionNode, "enqueueChildLifecycleNoticeOutboxTx"),
+      ).toHaveLength(1);
+    }
+    for (const [wrapper, expectedProducers] of Object.entries(
+      expectedChildLifecycleNoticeProducers,
+    )) {
+      const producers = [...functionDefinitions]
+        .filter(
+          ([name, definitions]) =>
+            name !== wrapper &&
+            definitions.some(
+              (definition) => callPositions(definition.functionNode, wrapper).length > 0,
+            ),
+        )
+        .map(([name]) => name)
+        .sort();
+      expect(producers).toEqual([...expectedProducers].sort());
+      for (const producer of producers) {
+        const definitions = functionDefinitions.get(producer) ?? [];
+        expect(definitions).toHaveLength(1);
+        const producerNode = definitions[0]!.functionNode;
+        const canonicalLocks = [
+          ...callPositions(producerNode, "lockSessionEventWriteRows"),
+          ...callPositions(producerNode, "lockChildLifecycleOutboxWriteRowsTx"),
+        ].sort((left, right) => left - right);
+        expect(canonicalLocks.length).toBeGreaterThan(0);
+        expect(canonicalLocks[0]).toBeLessThan(Math.min(...callPositions(producerNode, wrapper)));
+      }
+    }
+    for (const [wrapper, expectedProducers] of Object.entries(
+      expectedControlPlaneChildOutboxWrappers,
+    )) {
+      const producers = [...functionDefinitions]
+        .filter(
+          ([name, definitions]) =>
+            name !== wrapper &&
+            definitions.some(
+              (definition) => callPositions(definition.functionNode, wrapper).length > 0,
+            ),
+        )
+        .map(([name]) => name)
+        .sort();
+      expect(producers).toEqual([...expectedProducers].sort());
+      for (const producer of producers) {
+        const producerNode = functionDefinitions.get(producer)![0]!.functionNode;
+        const firstLock = callPositions(producerNode, "lockSessionEventWriteRows")[0];
+        expect(firstLock).toBeLessThan(Math.min(...callPositions(producerNode, wrapper)));
+      }
     }
 
     const turnAttemptFence = functionDefinitions.get("lockTurnAttemptWriteFenceTx") ?? [];

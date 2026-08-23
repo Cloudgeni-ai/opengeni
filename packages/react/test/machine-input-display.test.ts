@@ -31,6 +31,30 @@ describe("machineInputBatchLabel", () => {
     ).toBe("3 agents finished");
   });
 
+  test("labels child lifecycle notices", () => {
+    expect(machineInputBatchLabel([member("child_requires_action")])).toBe("Agent needs input");
+    expect(
+      machineInputBatchLabel([
+        member("child_requires_action", "", "a"),
+        member("child_requires_action", "", "b"),
+      ]),
+    ).toBe("2 agents need input");
+    expect(machineInputBatchLabel([member("child_requires_action_resolved")])).toBe(
+      "Agent unblocked",
+    );
+    expect(machineInputBatchLabel([member("child_paused")])).toBe("Agent paused");
+    expect(machineInputBatchLabel([member("child_waiting_capacity")])).toBe(
+      "Agent waiting for capacity",
+    );
+    expect(machineInputBatchLabel([member("child_progress")])).toBe("Agent progress");
+    expect(
+      machineInputBatchLabel([
+        member("child_requires_action", "", "a"),
+        member("child_progress", "", "b"),
+      ]),
+    ).toBe("2 updates · Agent needs input, Agent progress");
+  });
+
   test("keeps a short mixed-kind label", () => {
     expect(
       machineInputBatchLabel([

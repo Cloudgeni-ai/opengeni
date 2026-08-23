@@ -359,6 +359,85 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
     expect(ignored.ownPendingUpdates).toBe(0);
   }, 30_000);
 
+  test("reports a deferred child notice without ending the wait on it", async () => {
+    const cursor = await lastSequence(childSessionId);
+    const ownSession = await newSession(workspaceId, "deferred-only owner");
+    const deferred = await addSessionSystemUpdate(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: ownSession,
+      kind: "child_progress",
+      classification: "info",
+      sourceId: childSessionId,
+      dedupeKey: `session-wait:${crypto.randomUUID()}`,
+      summary: "Worker progress",
+      payload: {
+        type: "child_progress",
+        childSessionId,
+        goalId: crypto.randomUUID(),
+        objectiveRevision: 1,
+        operationId: crypto.randomUUID(),
+        progressNote: "halfway",
+      },
+    });
+    expect(deferred.added).toBe(true);
+    if (deferred.reason === "added") expect(deferred.shouldWake).toBe(false);
+    const ownServer = buildOpenGeniMcpServer(fakeDeps(bus), {
+      ...grant,
+      metadata: { ...grant.metadata, sessionId: ownSession },
+    });
+    const result = (await callSessionWait(
+      {
+        targets: [{ sessionId: childSessionId, afterSequence: cursor }],
+        maxWaitSeconds: 1,
+      },
+      {},
+      ownServer,
+    )) as SessionWaitResult & {
+      ownPendingImmediateUpdates: number;
+      ownPendingDeferredUpdateKinds: string[];
+    };
+    // A deferred notice is reported but does not end the wait by itself.
+    expect(result.timedOut).toBe(true);
+    expect(result.changed).toEqual([]);
+    expect(result.ownPendingUpdates).toBe(1);
+    expect(result.ownPendingUpdateKinds).toEqual(["child_progress"]);
+    expect(result.ownPendingImmediateUpdates).toBe(0);
+    expect(result.ownPendingDeferredUpdateKinds).toEqual(["child_progress"]);
+
+    const immediate = await addSessionSystemUpdate(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: ownSession,
+      kind: "child_requires_action",
+      classification: "action_required",
+      sourceId: childSessionId,
+      dedupeKey: `session-wait:${crypto.randomUUID()}`,
+      summary: "Worker needs input",
+      payload: {
+        type: "child_requires_action",
+        childSessionId,
+        childTurnId: crypto.randomUUID(),
+        childTurnGeneration: 1,
+        requests: [],
+        truncated: false,
+      },
+    });
+    expect(immediate.added).toBe(true);
+    const woke = (await callSessionWait(
+      {
+        targets: [{ sessionId: childSessionId, afterSequence: cursor }],
+        maxWaitSeconds: SESSION_WAIT_MAX_SECONDS,
+      },
+      {},
+      ownServer,
+    )) as SessionWaitResult & { ownPendingImmediateUpdates: number };
+    expect(woke.timedOut).toBe(false);
+    expect(woke.ownPendingUpdates).toBe(2);
+    expect(woke.ownPendingImmediateUpdates).toBe(1);
+    expect(woke.ownPendingUpdateKinds).toEqual(["child_progress", "child_requires_action"]);
+  }, 30_000);
+
   test("refuses an unauthorized target before subscribing to any live fanout", async () => {
     const before = subscribeCalls;
     await expect(

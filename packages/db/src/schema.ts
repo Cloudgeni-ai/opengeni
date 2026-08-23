@@ -6809,7 +6809,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result', 'media_generation_result')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -6830,6 +6830,11 @@ export const sessionSystemUpdates = pgTable(
       table.state,
       table.createdAt,
     ),
+    // Producer-side supersession / resolution of one child's pending notices
+    // of one kind on the parent (migration 0325).
+    pendingKindSource: index("session_system_updates_pending_kind_source_idx")
+      .on(table.workspaceId, table.sessionId, table.kind, table.sourceId)
+      .where(sql`${table.state} = 'pending'`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
@@ -6896,11 +6901,11 @@ export const sessionSystemUpdateOutbox = pgTable(
   (table) => ({
     kindValid: check(
       "system_update_outbox_kind_check",
-      sql`${table.kind} = 'child_terminal_result'`,
+      sql`${table.kind} in ('child_terminal_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
     ),
     payloadKindValid: check(
       "system_update_outbox_payload_kind_check",
-      sql`${table.payload} ->> 'type' = 'child_terminal_result'`,
+      sql`${table.payload} ->> 'type' = ${table.kind}`,
     ),
     dedupe: uniqueIndex("session_system_update_outbox_dedupe_uq").on(
       table.workspaceId,

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   boundWorkspaceControlEvent,
+  childPausedClassification,
   McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
   type SessionMcpApprovalPolicy,
@@ -11,6 +12,14 @@ import type { Database, SessionActivityDatabase } from "./database";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import * as schema from "./schema";
+import {
+  boundedChildPausedReason,
+  childLifecycleNoticesEnabled,
+  childPausedDedupeKey,
+  childPausedSummary,
+  childRequiresActionResolvedDedupeKey,
+  childRequiresActionResolvedSummary,
+} from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import {
   mirrorSessionRealtimeContextInTransaction,
@@ -2232,25 +2241,55 @@ async function loadCancellationTurnIds(
   return rows.map((row) => row.id);
 }
 
-async function enqueueCancelledChildOutboxInTransaction(
+async function loadParentSessionId(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  const [row] = await db
+    .select({ parentSessionId: schema.sessions.parentSessionId })
+    .from(schema.sessions)
+    .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+    .limit(1);
+  return row?.parentSessionId ?? null;
+}
+
+/**
+ * The one control-plane child -> parent outbox insert (terminal cancellation,
+ * direct Pause, and cancelled human-input resolutions). The caller holds the
+ * canonical prefix with the child and its parent locked UUID-ordered; the
+ * causal parent-turn personal delegation snapshot is copied verbatim.
+ */
+async function insertChildOutboxRowInTransaction(
   db: Database,
   input: {
     workspaceId: string;
-    rootSession: typeof schema.sessions.$inferSelect;
+    childSession: typeof schema.sessions.$inferSelect;
     parentSession: typeof schema.sessions.$inferSelect | null;
+    dedupeKey: string;
+    kind: "child_terminal_result" | "child_paused" | "child_requires_action_resolved";
+    classification: "info" | "action_required";
+    summary: string;
+    payload: Record<string, unknown> & { type: string };
+    lineage?: Record<string, unknown>;
   },
 ): Promise<void> {
-  const parentSessionId = input.rootSession.parentSessionId;
+  const parentSessionId = input.childSession.parentSessionId;
   if (!parentSessionId) return;
   if (!input.parentSession || input.parentSession.id !== parentSessionId) {
     throw new SessionControlInvariantError(
-      `Parent session ${parentSessionId} was not locked with cancellation root ${input.rootSession.id}`,
+      `Parent session ${parentSessionId} was not locked with child ${input.childSession.id}`,
     );
   }
   if (input.parentSession.status === "cancelled") return;
+  if (input.payload.type !== input.kind) {
+    throw new SessionControlInvariantError(
+      `Child outbox ${input.kind} payload discriminator mismatch`,
+    );
+  }
   let personalConnectionDelegations: (typeof schema.sessionTurns.$inferSelect)["personalConnectionDelegations"] =
     [];
-  if (input.rootSession.parentTurnId) {
+  if (input.childSession.parentTurnId) {
     const [parentTurn] = await db
       .select({
         delegations: schema.sessionTurns.personalConnectionDelegations,
@@ -2260,7 +2299,7 @@ async function enqueueCancelledChildOutboxInTransaction(
         and(
           eq(schema.sessionTurns.workspaceId, input.workspaceId),
           eq(schema.sessionTurns.sessionId, parentSessionId),
-          eq(schema.sessionTurns.id, input.rootSession.parentTurnId),
+          eq(schema.sessionTurns.id, input.childSession.parentTurnId),
         ),
       )
       .limit(1);
@@ -2268,7 +2307,7 @@ async function enqueueCancelledChildOutboxInTransaction(
       const parsed = McpPersonalConnectionDelegations.safeParse(parentTurn.delegations);
       if (!parsed.success) {
         throw new SessionControlInvariantError(
-          `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.rootSession.parentTurnId}`,
+          `Invalid personal MCP delegation snapshot at session_turns:${input.workspaceId}:${parentSessionId}:${input.childSession.parentTurnId}`,
         );
       }
       personalConnectionDelegations = parsed.data.map((delegation) => ({
@@ -2282,26 +2321,23 @@ async function enqueueCancelledChildOutboxInTransaction(
       withLosslessContentWriteVersion(
         withLosslessContentWriteVersion(
           {
-            accountId: input.rootSession.accountId,
+            accountId: input.childSession.accountId,
             workspaceId: input.workspaceId,
-            sourceSessionId: input.rootSession.id,
+            sourceSessionId: input.childSession.id,
             targetSessionId: parentSessionId,
-            dedupeKey: `child-completion:${input.rootSession.id}:cancelled`,
-            kind: "child_terminal_result",
-            classification: "info",
-            sourceId: input.rootSession.id,
-            summary: "Child session was terminally cancelled.",
-            payload: {
-              type: "child_terminal_result",
-              childSessionId: input.rootSession.id,
-              status: "cancelled",
-            },
+            dedupeKey: input.dedupeKey,
+            kind: input.kind,
+            classification: input.classification,
+            sourceId: input.childSession.id,
+            summary: input.summary,
+            payload: input.payload,
             lineage: {
-              childSessionId: input.rootSession.id,
+              childSessionId: input.childSession.id,
               parentSessionId,
-              ...(input.rootSession.parentTurnId
-                ? { parentTurnId: input.rootSession.parentTurnId }
+              ...(input.childSession.parentTurnId
+                ? { parentTurnId: input.childSession.parentTurnId }
                 : {}),
+              ...(input.lineage ?? {}),
             },
             personalConnectionDelegations,
           },
@@ -2318,6 +2354,118 @@ async function enqueueCancelledChildOutboxInTransaction(
         schema.sessionSystemUpdateOutbox.dedupeKey,
       ],
     });
+}
+
+async function enqueueCancelledChildOutboxInTransaction(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rootSession: typeof schema.sessions.$inferSelect;
+    parentSession: typeof schema.sessions.$inferSelect | null;
+  },
+): Promise<void> {
+  await insertChildOutboxRowInTransaction(db, {
+    workspaceId: input.workspaceId,
+    childSession: input.rootSession,
+    parentSession: input.parentSession,
+    dedupeKey: `child-completion:${input.rootSession.id}:cancelled`,
+    kind: "child_terminal_result",
+    classification: "info",
+    summary: "Child session was terminally cancelled.",
+    payload: {
+      type: "child_terminal_result",
+      childSessionId: input.rootSession.id,
+      status: "cancelled",
+    },
+  });
+}
+
+/** child_paused notice for a direct Pause of a child; gated by the rollout flag. */
+async function enqueueChildPausedOutboxInTransaction(
+  db: Database,
+  input: {
+    workspaceId: string;
+    childSession: typeof schema.sessions.$inferSelect;
+    parentSession: typeof schema.sessions.$inferSelect;
+    operationId: string;
+    actorKind: "human" | "api" | "agent";
+    reason: string | null;
+  },
+): Promise<void> {
+  if (!childLifecycleNoticesEnabled()) return;
+  const payload = {
+    type: "child_paused" as const,
+    childSessionId: input.childSession.id,
+    operationId: input.operationId,
+    actorKind: input.actorKind,
+    reason: boundedChildPausedReason(input.reason),
+  };
+  await insertChildOutboxRowInTransaction(db, {
+    workspaceId: input.workspaceId,
+    childSession: input.childSession,
+    parentSession: input.parentSession,
+    dedupeKey: childPausedDedupeKey({
+      childSessionId: input.childSession.id,
+      receiptId: input.operationId,
+    }),
+    kind: "child_paused",
+    classification: childPausedClassification(input.actorKind),
+    summary: childPausedSummary(input.childSession.id, payload),
+    payload,
+  });
+}
+
+/**
+ * Terminal cancellation of the selected root's pending human-input rows: each
+ * becomes one child_requires_action_resolved notice for the surviving parent
+ * so its pending child_requires_action can be superseded. Cancelled
+ * descendants do not notify parents inside the same terminal subtree.
+ */
+async function enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rootSession: typeof schema.sessions.$inferSelect;
+    parentSession: typeof schema.sessions.$inferSelect | null;
+    cancelledHumanInputs: ReadonlyArray<{
+      id: string;
+      sessionId: string;
+      turnId: string;
+      turnGeneration: number;
+    }>;
+  },
+): Promise<void> {
+  if (!childLifecycleNoticesEnabled() || !input.parentSession) return;
+  for (const humanInput of input.cancelledHumanInputs) {
+    if (humanInput.sessionId !== input.rootSession.id) continue;
+    const payload = {
+      type: "child_requires_action_resolved" as const,
+      childSessionId: input.rootSession.id,
+      childTurnId: humanInput.turnId,
+      childTurnGeneration: humanInput.turnGeneration,
+      requestId: humanInput.id,
+      approvalId: null,
+      outcome: "cancelled" as const,
+      respondedByKind: "system" as const,
+    };
+    await insertChildOutboxRowInTransaction(db, {
+      workspaceId: input.workspaceId,
+      childSession: input.rootSession,
+      parentSession: input.parentSession,
+      dedupeKey: childRequiresActionResolvedDedupeKey({
+        childSessionId: input.rootSession.id,
+        turnId: humanInput.turnId,
+        turnGeneration: humanInput.turnGeneration,
+        requestId: humanInput.id,
+        approvalId: null,
+      }),
+      kind: "child_requires_action_resolved",
+      classification: "info",
+      summary: childRequiresActionResolvedSummary(input.rootSession.id, payload),
+      payload,
+      lineage: { turnId: humanInput.turnId },
+    });
+  }
 }
 
 async function assertSessionBranchIsNotCancelled(
@@ -2431,6 +2579,7 @@ async function cancelSessionSubtreeInTransaction(
     id: string;
     sessionId: string;
     turnId: string;
+    turnGeneration: number;
     questions: (typeof schema.sessionHumanInputRequests.$inferSelect)["questions"];
   }> = [];
   if (immediatelyCancelledTurnIds.length > 0) {
@@ -2466,6 +2615,7 @@ async function cancelSessionSubtreeInTransaction(
         id: schema.sessionHumanInputRequests.id,
         sessionId: schema.sessionHumanInputRequests.sessionId,
         turnId: schema.sessionHumanInputRequests.turnId,
+        turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
         questions: schema.sessionHumanInputRequests.questions,
       });
     await db
@@ -2669,6 +2819,12 @@ async function cancelSessionSubtreeInTransaction(
     if (session.id === input.rootSessionId) eventIds.unshift(input.rootControlEventId);
     if (eventIds.length > 0) affectedSessionEvents.push({ sessionId: session.id, eventIds });
   }
+  await enqueueCancelledChildRequiresActionResolvedOutboxInTransaction(db, {
+    workspaceId: input.workspaceId,
+    rootSession,
+    parentSession: rootParentSession,
+    cancelledHumanInputs,
+  });
   await enqueueCancelledChildOutboxInTransaction(db, {
     workspaceId: input.workspaceId,
     rootSession,
@@ -2710,6 +2866,14 @@ export async function mutateSessionControlInTransaction(
     input.action === "cancel"
       ? await loadCancellationTurnIds(db, input.workspaceId, cancellationSessionIds)
       : [];
+  // A direct Pause of a child notifies its parent (child_paused) through the
+  // outbox in this same commit, so the parent joins the UUID-ordered session
+  // lock exactly like Cancel locks the root's surviving parent.
+  const pauseParentSessionId =
+    input.action === "pause" && childLifecycleNoticesEnabled()
+      ? await loadParentSessionId(db, input.workspaceId, input.sessionId)
+      : null;
+  const lineageParentSessionId = cancellationSubtree.rootParentSessionId ?? pauseParentSessionId;
   const locks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
@@ -2718,27 +2882,20 @@ export async function mutateSessionControlInTransaction(
         ? [
             input.actor.sessionId,
             ...cancellationSessionIds,
-            ...(cancellationSubtree.rootParentSessionId
-              ? [cancellationSubtree.rootParentSessionId]
-              : []),
+            ...(lineageParentSessionId ? [lineageParentSessionId] : []),
           ]
-        : [
-            ...cancellationSessionIds,
-            ...(cancellationSubtree.rootParentSessionId
-              ? [cancellationSubtree.rootParentSessionId]
-              : []),
-          ],
+        : [...cancellationSessionIds, ...(lineageParentSessionId ? [lineageParentSessionId] : [])],
     turnIds:
       input.actor.type === "agent_attempt"
         ? [input.actor.turnId, ...cancellationTurnIds]
         : cancellationTurnIds,
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
-  if (input.action === "cancel") {
+  if (input.action === "cancel" || pauseParentSessionId !== null) {
     const rootSession = locks.sessions.find((session) => session.id === input.sessionId);
-    if (!rootSession || rootSession.parentSessionId !== cancellationSubtree.rootParentSessionId) {
+    if (!rootSession || rootSession.parentSessionId !== lineageParentSessionId) {
       throw new SessionControlInvariantError(
-        `Session ${input.sessionId} parent changed while establishing cancellation locks`,
+        `Session ${input.sessionId} parent changed while establishing ${input.action} locks`,
       );
     }
   }
@@ -2977,6 +3134,31 @@ export async function mutateSessionControlInTransaction(
           cancelledTurnCount: 0,
           affectedSessionEvents: [{ sessionId: input.sessionId, eventIds: [controlEvent.id] }],
         };
+  if (input.action === "pause" && pauseParentSessionId !== null) {
+    // Direct Pause only (a recursive ancestor pause never reaches this command
+    // for the child), and never when the parent's own live attempt issued it:
+    // that parent already knows. Human/API pauses are action-required for the
+    // parent; an agent pause is informational.
+    const pausedSession = locks.sessions.find((session) => session.id === input.sessionId);
+    const parentSession = locks.sessions.find((session) => session.id === pauseParentSessionId);
+    const issuedByParentAttempt =
+      input.actor.type === "agent_attempt" && input.actor.sessionId === pauseParentSessionId;
+    if (pausedSession && parentSession && !issuedByParentAttempt) {
+      await enqueueChildPausedOutboxInTransaction(db, {
+        workspaceId: input.workspaceId,
+        childSession: pausedSession,
+        parentSession,
+        operationId: reserved.receipt.id,
+        actorKind:
+          input.actor.type === "agent_attempt"
+            ? "agent"
+            : input.actor.type === "service"
+              ? "api"
+              : "human",
+        reason: input.reason ?? null,
+      });
+    }
+  }
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: revision,
     result: {

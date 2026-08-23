@@ -7,6 +7,11 @@ export const MACHINE_INPUT_META: Record<MachineInputMember["kind"], string> = {
   agent_steer_instruction: "Agent direction",
   child_terminal_result: "Agent finished",
   media_generation_result: "Video update",
+  child_requires_action: "Agent needs input",
+  child_requires_action_resolved: "Agent unblocked",
+  child_paused: "Agent paused",
+  child_waiting_capacity: "Agent waiting for capacity",
+  child_progress: "Agent progress",
 };
 
 /**
@@ -35,6 +40,16 @@ export function machineInputBatchLabel(members: readonly MachineInputMember[]): 
         return n === 1 ? "Agent direction" : `${n} agent directions`;
       case "media_generation_result":
         return n === 1 ? "Video ready" : `${n} video updates`;
+      case "child_requires_action":
+        return n === 1 ? "Agent needs input" : `${n} agents need input`;
+      case "child_requires_action_resolved":
+        return n === 1 ? "Agent unblocked" : `${n} agents unblocked`;
+      case "child_paused":
+        return n === 1 ? "Agent paused" : `${n} agents paused`;
+      case "child_waiting_capacity":
+        return n === 1 ? "Agent waiting for capacity" : `${n} agents waiting for capacity`;
+      case "child_progress":
+        return n === 1 ? "Agent progress" : `${n} agent progress notes`;
     }
   }
   const parts = [...counts.entries()].map(([kind, count]) => {

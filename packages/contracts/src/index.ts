@@ -893,6 +893,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_pause",
   "session_resume",
   "session_steer",
+  "session_human_input_respond",
   "set_other_session_title",
   "interaction_discover",
   "browser_open",
@@ -7000,8 +7001,179 @@ export const SessionSystemUpdateKind = z.enum([
   "agent_steer_instruction",
   "child_terminal_result",
   "media_generation_result",
+  "child_requires_action",
+  "child_requires_action_resolved",
+  "child_paused",
+  "child_waiting_capacity",
+  "child_progress",
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
+
+/**
+ * How a newly pending machine input affects an idle receiving session.
+ * `immediate` registers a workflow wake in the same commit (the behaviour of
+ * every pre-existing kind) and ends a `goal_wait` hold at the next idle
+ * evaluation; `deferred` only inserts the durable pending row plus its
+ * `system.update.pending` event and is delivered coalesced with the next claim.
+ */
+export type SessionSystemUpdateWakeClass = "immediate" | "deferred";
+
+export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
+  SessionSystemUpdateKind,
+  SessionSystemUpdateWakeClass
+> = {
+  scheduled_occurrence: "immediate",
+  goal_continuation: "immediate",
+  agent_message: "immediate",
+  agent_steer_instruction: "immediate",
+  child_terminal_result: "immediate",
+  media_generation_result: "immediate",
+  child_requires_action: "immediate",
+  child_requires_action_resolved: "deferred",
+  child_paused: "deferred",
+  child_waiting_capacity: "deferred",
+  child_progress: "deferred",
+};
+
+/**
+ * Kinds a child session's lifecycle produces for its parent. Every one of them
+ * travels through `session_system_update_outbox`, and none of them may
+ * autonomously wake a parent whose goal is not active.
+ */
+export const CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS = [
+  "child_terminal_result",
+  "child_requires_action",
+  "child_requires_action_resolved",
+  "child_paused",
+  "child_waiting_capacity",
+  "child_progress",
+] as const satisfies readonly SessionSystemUpdateKind[];
+export type ChildLifecycleSystemUpdateKind = (typeof CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS)[number];
+
+const CHILD_LIFECYCLE_SYSTEM_UPDATE_KIND_SET: ReadonlySet<string> = new Set(
+  CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS,
+);
+
+export function isChildLifecycleSystemUpdateKind(
+  kind: string,
+): kind is ChildLifecycleSystemUpdateKind {
+  return CHILD_LIFECYCLE_SYSTEM_UPDATE_KIND_SET.has(kind);
+}
+
+/** A child_paused notice requested by a human/API is action-required; an agent pause is informational. */
+export function childPausedClassification(
+  actorKind: "human" | "api" | "agent",
+): "action_required" | "info" {
+  return actorKind === "agent" ? "info" : "action_required";
+}
+
+/** Whole child_requires_action payload bound (UTF-8 JSON bytes). */
+export const CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES = 8 * 1024;
+/** Bounded first-question preview inside a child_requires_action notice. */
+export const CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES = 512;
+export const CHILD_REQUIRES_ACTION_MAX_REQUESTS = 20;
+export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
+export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
+
+const boundedUtf8String = (maxBytes: number) =>
+  z.string().refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
+    message: `must be at most ${maxBytes} UTF-8 bytes`,
+  });
+
+export const ChildRequiresActionRequest = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("human_input"),
+    requestId: z.string().uuid(),
+    questionCount: z.number().int().nonnegative(),
+    firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
+    allowSkip: z.boolean(),
+    expiresAt: z.string().nullable(),
+  }),
+  z.object({
+    kind: z.literal("approval"),
+    approvalId: boundedUtf8String(256),
+    toolName: boundedUtf8String(128).nullable(),
+  }),
+]);
+export type ChildRequiresActionRequest = z.infer<typeof ChildRequiresActionRequest>;
+
+export const ChildRequiresActionPayload = z
+  .object({
+    type: z.literal("child_requires_action"),
+    childSessionId: z.string().uuid(),
+    childTurnId: z.string().uuid(),
+    childTurnGeneration: z.number().int().positive(),
+    requests: z.array(ChildRequiresActionRequest).max(CHILD_REQUIRES_ACTION_MAX_REQUESTS),
+    truncated: z.boolean(),
+  })
+  .passthrough();
+export type ChildRequiresActionPayload = z.infer<typeof ChildRequiresActionPayload>;
+
+export const ChildRequiresActionResolvedOutcome = z.enum([
+  "answered",
+  "skipped",
+  "expired",
+  "cancelled",
+  "approved",
+  "rejected",
+]);
+export type ChildRequiresActionResolvedOutcome = z.infer<typeof ChildRequiresActionResolvedOutcome>;
+
+export const ChildRequiresActionRespondedByKind = z.enum([
+  "human",
+  "api",
+  "agent_attempt",
+  "system",
+]);
+export type ChildRequiresActionRespondedByKind = z.infer<typeof ChildRequiresActionRespondedByKind>;
+
+export const ChildRequiresActionResolvedPayload = z
+  .object({
+    type: z.literal("child_requires_action_resolved"),
+    childSessionId: z.string().uuid(),
+    childTurnId: z.string().uuid(),
+    childTurnGeneration: z.number().int().positive(),
+    requestId: z.string().uuid().nullable(),
+    approvalId: boundedUtf8String(256).nullable(),
+    outcome: ChildRequiresActionResolvedOutcome,
+    respondedByKind: ChildRequiresActionRespondedByKind,
+  })
+  .passthrough();
+export type ChildRequiresActionResolvedPayload = z.infer<typeof ChildRequiresActionResolvedPayload>;
+
+export const ChildPausedPayload = z
+  .object({
+    type: z.literal("child_paused"),
+    childSessionId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    actorKind: z.enum(["human", "api", "agent"]),
+    reason: boundedUtf8String(CHILD_PAUSED_REASON_MAX_BYTES).nullable(),
+  })
+  .passthrough();
+export type ChildPausedPayload = z.infer<typeof ChildPausedPayload>;
+
+export const ChildWaitingCapacityPayload = z
+  .object({
+    type: z.literal("child_waiting_capacity"),
+    childSessionId: z.string().uuid(),
+    childTurnId: z.string().uuid(),
+    provider: z.enum(["codex", "xai"]),
+    nextCheckAt: z.string().nullable(),
+  })
+  .passthrough();
+export type ChildWaitingCapacityPayload = z.infer<typeof ChildWaitingCapacityPayload>;
+
+export const ChildProgressPayload = z
+  .object({
+    type: z.literal("child_progress"),
+    childSessionId: z.string().uuid(),
+    goalId: z.string().uuid(),
+    objectiveRevision: z.number().int().nonnegative(),
+    operationId: z.string().uuid(),
+    progressNote: boundedUtf8String(CHILD_PROGRESS_NOTE_MAX_BYTES),
+  })
+  .passthrough();
+export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
 
 export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
   z
@@ -7045,6 +7217,11 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
     })
     .passthrough(),
   MediaGenerationResult,
+  ChildRequiresActionPayload,
+  ChildRequiresActionResolvedPayload,
+  ChildPausedPayload,
+  ChildWaitingCapacityPayload,
+  ChildProgressPayload,
 ]);
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
 

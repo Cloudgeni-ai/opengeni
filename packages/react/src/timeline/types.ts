@@ -372,7 +372,12 @@ export type MachineInputMember = {
     | "agent_message"
     | "agent_steer_instruction"
     | "child_terminal_result"
-    | "media_generation_result";
+    | "media_generation_result"
+    | "child_requires_action"
+    | "child_requires_action_resolved"
+    | "child_paused"
+    | "child_waiting_capacity"
+    | "child_progress";
   classification: "success" | "failure" | "action_required" | "info";
   sourceId: string;
   summary: string;

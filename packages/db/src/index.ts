@@ -7,6 +7,12 @@ import {
   SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
+  isChildLifecycleSystemUpdateKind,
+  type ChildLifecycleSystemUpdateKind,
+  type ChildRequiresActionResolvedOutcome,
+  type ChildRequiresActionRespondedByKind,
   ModelContextContributionSummaries,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OrganizationMember,
@@ -349,6 +355,19 @@ import {
 } from "./session-realtime-context";
 import * as schema from "./schema";
 import {
+  boundedChildProgressNote,
+  buildChildRequiresActionPayload,
+  childLifecycleNoticesEnabled,
+  childProgressDedupeKey,
+  childProgressSummary,
+  childRequiresActionDedupeKey,
+  childRequiresActionResolvedDedupeKey,
+  childRequiresActionResolvedSummary,
+  childRequiresActionSummary,
+  childWaitingCapacityDedupeKey,
+  childWaitingCapacitySummary,
+} from "./child-lifecycle-notices";
+import {
   autoResumeGoalPausedByCapInTransaction,
   SESSION_GOAL_CAP_PAUSED_REASON,
   SESSION_GOAL_CONTINUATION_EPOCH_RESET,
@@ -378,6 +397,7 @@ import {
 } from "./memory-domain";
 
 export { sql as dbSql } from "drizzle-orm";
+export * from "./child-lifecycle-notices";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -20762,14 +20782,14 @@ export async function armCodexCapacityWait(
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        const locks = await lockSessionEventWriteRows(tx, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
+        // Child-lifecycle prefix: the parent session is locked with the child
+        // so the capacity-wait notice can be enqueued in this same commit.
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          attemptId: input.attemptId,
         });
-        const session = locks.sessions[0];
+        const session = locks.session;
         const turn = locks.turns[0];
         const attempt = locks.attempts[0];
         const effectiveControl = session
@@ -21035,6 +21055,12 @@ export async function armCodexCapacityWait(
         if (!waitingSession) {
           throw new Error("Codex capacity session changed during atomic arm");
         }
+        await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+          turnId: input.turnId,
+          waiterId: waiterRow.id,
+          provider: "codex",
+          nextCheckAt,
+        });
         if (input.leaseFence) {
           await tx.execute(sql`
             delete from codex_credential_leases
@@ -21992,14 +22018,14 @@ export async function armXaiCapacityWait(
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        const locks = await lockSessionEventWriteRows(tx, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
+        // Child-lifecycle prefix: the parent session is locked with the child
+        // so the capacity-wait notice can be enqueued in this same commit.
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          attemptId: input.attemptId,
         });
-        const session = locks.sessions[0];
+        const session = locks.session;
         const turn = locks.turns[0];
         const attempt = locks.attempts[0];
         const effectiveControl = session
@@ -22284,6 +22310,12 @@ export async function armXaiCapacityWait(
           )
           .returning({ id: schema.sessions.id });
         if (!waitingSession) throw new Error("xAI capacity session changed during atomic arm");
+        await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+          turnId: input.turnId,
+          waiterId: waiterRow.id,
+          provider: "xai",
+          nextCheckAt,
+        });
         if (input.leaseFence) {
           await tx
             .delete(schema.xaiCredentialLeases)
@@ -31637,6 +31669,8 @@ export async function acceptSessionHumanInputResponse(
     requestId: string;
     response: unknown;
     respondedBy: string;
+    /** Bounded responder kind for the parent's resolution notice; derived from `respondedBy` when omitted. */
+    respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
     expireOnly?: boolean;
   },
@@ -31646,12 +31680,19 @@ export async function acceptSessionHumanInputResponse(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // The parent (when notices are enabled) joins the same UUID-ordered
+        // session lock so the resolution notice can be enqueued for it here.
+        const sessionIds = await sessionIdsWithParentTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
           controlLock: "none",
-          sessionIds: [input.sessionId],
+          sessionIds,
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
         if (!session) return { action: "not_found" } as const;
         const [request] = await tx
           .select()
@@ -31817,6 +31858,21 @@ export async function acceptSessionHumanInputResponse(
           )
           .returning();
         if (!event) throw new Error("Failed to append human-input response");
+        await enqueueChildRequiresActionResolvedOutboxTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          session,
+          {
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            requestId: request.id,
+            approvalId: null,
+            outcome: response.outcome,
+            respondedByKind: expired
+              ? "system"
+              : childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind),
+          },
+        );
         await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
           accountId: session.accountId,
           workspaceId: input.workspaceId,
@@ -51866,12 +51922,10 @@ export async function recordSessionGoalProgressWithEvent(
   );
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
     withSessionActivitySavepoint(scopedDb, async (tx) => {
-      const locks = await lockSessionEventWriteRows(tx, {
-        workspaceId,
-        controlLock: "share",
-        sessionIds: [sessionId],
-      });
-      const session = locks.sessions[0];
+      // Child-lifecycle prefix: the parent session is locked with the child so
+      // the child_progress notice can be enqueued in this same commit.
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, workspaceId, { sessionId });
+      const session = locks.session;
       if (!locks.control || !locks.workspace || !session) {
         throw new Error(`Session not found: ${sessionId}`);
       }
@@ -51957,6 +52011,12 @@ export async function recordSessionGoalProgressWithEvent(
         .update(schema.sessions)
         .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
         .where(eq(schema.sessions.id, sessionId));
+      await enqueueChildProgressOutboxTx(tx, workspaceId, session, {
+        goalId: goal.id,
+        objectiveRevision: goal.objectiveRevision,
+        operationId: reserved.receipt.id,
+        progressNote: input.progressNote,
+      });
       await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
         result: { goal, eventId: event.id },
       });
@@ -52842,24 +52902,25 @@ export async function materializeGoalContinuation(
 
         // Pending machine input (a child result, agent message, schedule, ...)
         // is real model input that the next claim delivers. It wins over a
-        // synthesized continuation and over any agent-declared hold, and it
-        // closes the peek/materialize race because both serialize on the
-        // session lock. Mirror `peekSessionWork`: after a failed context
-        // compaction ordinary pending input is inert until newer truth, so do
-        // not spin the workflow on it here either.
-        const [pendingMachineInput] = await tx
-          .select({ id: schema.sessionSystemUpdates.id })
-          .from(schema.sessionSystemUpdates)
-          .where(
-            and(
-              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-              eq(schema.sessionSystemUpdates.state, "pending"),
-            ),
-          )
-          .limit(1);
+        // synthesized continuation, and it closes the peek/materialize race
+        // because both serialize on the session lock. Mirror `peekSessionWork`:
+        // after a failed context compaction ordinary pending input is inert
+        // until newer truth, so do not spin the workflow on it here either.
+        // Against a CURRENT agent-declared `goal_wait` hold only an
+        // `immediate`-class input wins; `deferred` child notices (resolution,
+        // pause, capacity wait, progress) leave the hold in place and are
+        // delivered when it ends or an immediate input arrives.
+        const pendingMachineInput = await pendingSystemUpdateWakeClassesTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+        );
+        const hold = await goalContinuationHoldStateTx(tx, input.workspaceId, input.sessionId, {
+          continuationHoldTurnId: goalRead.continuationHoldTurnId,
+          continuationHoldUntil: goalRead.continuationHoldUntil,
+        });
         if (
-          pendingMachineInput &&
+          (pendingMachineInput.immediate || (pendingMachineInput.deferred && !hold.current)) &&
           !(await latestFinishedTurnHasFailureCodeTx(
             tx,
             input.workspaceId,
@@ -52875,35 +52936,8 @@ export async function materializeGoalContinuation(
         // the agent's own stated deadline (the streak keeps counting after).
         let holdDeadlinePassed = false;
         if (goalRead.continuationHoldTurnId && goalRead.continuationHoldUntil) {
-          // Newest finished truth by finish time, the same notion the
-          // evaluator and the idle backoff use: a human turn queued after
-          // internal turns has a low position yet is the newer truth that
-          // retires the hold.
-          const [latestFinishedTurn] = await tx
-            .select({ id: schema.sessionTurns.id })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.sessionId, input.sessionId),
-                sql`${schema.sessionTurns.finishedAt} is not null`,
-              ),
-            )
-            .orderBy(
-              desc(schema.sessionTurns.finishedAt),
-              desc(schema.sessionTurns.position),
-              desc(schema.sessionTurns.createdAt),
-            )
-            .limit(1);
           const holdUntil = goalRead.continuationHoldUntil;
-          // Compare against the transaction's database clock: the wake-outbox
-          // dispatcher fires on DB `now()`, so a worker clock ahead of or
-          // behind Postgres cannot re-hold past the deadline or re-wake early.
-          const dbNow = await transactionNow(tx);
-          if (
-            latestFinishedTurn?.id === goalRead.continuationHoldTurnId &&
-            holdUntil.getTime() > dbNow.getTime()
-          ) {
+          if (hold.current) {
             // The declaring turn is still the newest finished truth and its
             // deadline has not passed: leave the obligation armed (the wake
             // revision stays unconsumed so a crash cannot lose it) and make
@@ -52931,7 +52965,7 @@ export async function materializeGoalContinuation(
           // A newer turn finished after the hold was declared, or the deadline
           // passed: retire the hold in this same transaction and continue
           // exactly as before.
-          holdDeadlinePassed = holdUntil.getTime() <= dbNow.getTime();
+          holdDeadlinePassed = hold.deadlinePassed;
           await tx
             .update(schema.sessionGoals)
             .set({ ...SESSION_GOAL_HOLD_CLEARED, updatedAt: new Date() })
@@ -54595,7 +54629,25 @@ export async function claimSessionWorkForAttempt(
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
+          const unrecognizedUpdateIds: string[] = [];
           for (const update of updates) {
+            // A kind or payload this image cannot parse is a bounded, visible
+            // condition, never an endless re-peek: mark that one row failed
+            // and record `unrecognized_kind` on the timeline; the rest of the
+            // batch is claimed normally.
+            if (
+              !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
+              !SessionSystemUpdatePayload.safeParse(
+                fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+              ).success
+            ) {
+              await tx
+                .update(schema.sessionSystemUpdates)
+                .set({ state: "failed" })
+                .where(eq(schema.sessionSystemUpdates.id, update.id));
+              unrecognizedUpdateIds.push(update.id);
+              continue;
+            }
             const scheduledAuthorityDenial = update.scheduledTaskRunId
               ? await validateScheduledTargetExecutionAtClaim(tx as unknown as Database, {
                   accountId,
@@ -54744,6 +54796,25 @@ export async function claimSessionWorkForAttempt(
                 occurredAt,
               });
             }
+            if (unrecognizedUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: unrecognizedUpdateIds,
+                  count: unrecognizedUpdateIds.length,
+                  reason: "unrecognized_kind",
+                },
+                occurredAt,
+              });
+            }
             return {
               count: 0,
               lastSequence: sequence,
@@ -54858,6 +54929,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: authorityRejectedUpdateIds,
                 count: authorityRejectedUpdateIds.length,
                 reason: "stale_execution_authority",
+              },
+              occurredAt,
+            });
+          }
+          if (unrecognizedUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: unrecognizedUpdateIds,
+                count: unrecognizedUpdateIds.length,
+                reason: "unrecognized_kind",
               },
               occurredAt,
             });
@@ -57695,6 +57785,76 @@ async function queuedSteerHasUnquiescedPredecessor(
 }
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
+/**
+ * Which wake classes are represented among a session's pending machine inputs.
+ * `immediate` kinds make the session runnable even against a current
+ * `goal_wait` hold; `deferred` child notices only do so without one.
+ */
+async function pendingSystemUpdateWakeClassesTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ immediate: boolean; deferred: boolean }> {
+  const rows = await db
+    .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+      ),
+    );
+  let immediate = false;
+  let deferred = false;
+  for (const row of rows) {
+    const wakeClass =
+      SESSION_SYSTEM_UPDATE_WAKE_CLASS[row.kind as SessionSystemUpdateKind] ?? "immediate";
+    if (wakeClass === "deferred") deferred = true;
+    else immediate = true;
+  }
+  return { immediate, deferred };
+}
+
+/**
+ * Whether an agent-declared `goal_wait` hold is current: its declaring turn is
+ * still the newest finished turn (by finish time, the notion every evaluator
+ * shares) and its deadline is still ahead of the database clock (the clock the
+ * wake-outbox dispatcher fires on).
+ */
+async function goalContinuationHoldStateTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  goal: { continuationHoldTurnId: string | null; continuationHoldUntil: Date | null },
+): Promise<{ current: boolean; deadlinePassed: boolean }> {
+  if (!goal.continuationHoldTurnId || !goal.continuationHoldUntil) {
+    return { current: false, deadlinePassed: false };
+  }
+  const [latestFinishedTurn] = await db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        sql`${schema.sessionTurns.finishedAt} is not null`,
+      ),
+    )
+    .orderBy(
+      desc(schema.sessionTurns.finishedAt),
+      desc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.createdAt),
+    )
+    .limit(1);
+  const dbNow = await transactionNow(db);
+  const deadlinePassed = goal.continuationHoldUntil.getTime() <= dbNow.getTime();
+  return {
+    current: latestFinishedTurn?.id === goal.continuationHoldTurnId && !deadlinePassed,
+    deadlinePassed,
+  };
+}
+
 export async function peekSessionWork(
   db: Database,
   workspaceId: string,
@@ -57984,7 +58144,31 @@ export async function peekSessionWork(
         "context_compaction_failed",
       ))
     ) {
-      return { kind: "runnable" };
+      // Mirror the materializer: against a current agent-declared `goal_wait`
+      // hold only immediate-class pending input makes the session runnable;
+      // deferred child notices leave it idle (held) until the hold ends or an
+      // immediate input arrives.
+      const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
+      if (wakeClasses.immediate) return { kind: "runnable" };
+      const [goal] = await scopedDb
+        .select({
+          status: schema.sessionGoals.status,
+          continuationHoldTurnId: schema.sessionGoals.continuationHoldTurnId,
+          continuationHoldUntil: schema.sessionGoals.continuationHoldUntil,
+        })
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+      const hold =
+        goal?.status === "active"
+          ? await goalContinuationHoldStateTx(scopedDb, workspaceId, sessionId, goal)
+          : { current: false, deadlinePassed: false };
+      return hold.current ? { kind: "idle" } : { kind: "runnable" };
     }
     const [pendingAgentSteer] = await scopedDb
       .select({ id: schema.sessionSystemUpdates.id })
@@ -58248,7 +58432,7 @@ export async function failSessionWorkBeforeAttemptClaim(
           );
           sequence = closedTools.sequence;
           closedToolEvents = closedTools.events;
-          await tx
+          const cancelledHumanInputs = await tx
             .update(schema.sessionHumanInputRequests)
             .set({
               status: "cancelled",
@@ -58264,7 +58448,29 @@ export async function failSessionWorkBeforeAttemptClaim(
                 eq(schema.sessionHumanInputRequests.turnId, turn.id),
                 eq(schema.sessionHumanInputRequests.status, "pending"),
               ),
+            )
+            .returning({
+              id: schema.sessionHumanInputRequests.id,
+              turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
+            });
+          // The child's blocked boundary died with the turn: resolve each
+          // request for the parent (locked by the child-lifecycle prefix
+          // above) so its pending child_requires_action can be superseded.
+          for (const request of cancelledHumanInputs) {
+            await enqueueChildRequiresActionResolvedOutboxTx(
+              tx as unknown as Database,
+              workspaceId,
+              session,
+              {
+                turnId: turn.id,
+                turnGeneration: request.turnGeneration,
+                requestId: request.id,
+                approvalId: null,
+                outcome: "cancelled",
+                respondedByKind: "system",
+              },
             );
+          }
         }
         await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
           accountId: session.accountId,
@@ -58601,105 +58807,17 @@ export async function settleSessionIdleWithParentOutbox(
         } as const;
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
-      const personalConnectionDelegations = session.parentTurnId
-        ? personalConnectionDelegationsForSameSessionSuccessor(
-            await personalConnectionDelegationsForTurnInTransaction(
-              tx as unknown as Database,
-              workspaceId,
-              session.parentSessionId,
-              session.parentTurnId,
-            ),
-            session.parentSessionId,
-          )
-        : [];
-      const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
-        ? await xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-            tx as unknown as Database,
-            workspaceId,
-            session.parentSessionId,
-            session.parentTurnId,
-          )
-        : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-      const [parentTurn] = session.parentTurnId
-        ? await tx
-            .select({
-              initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-              initiatorKind: schema.sessionTurns.initiatorKind,
-              initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, workspaceId),
-                eq(schema.sessionTurns.sessionId, session.parentSessionId),
-                eq(schema.sessionTurns.id, session.parentTurnId),
-              ),
-            )
-            .limit(1)
-        : [];
-      const xaiAuthoritySubjectId =
-        xaiProviderAccountAuthoritySnapshot.scope === "user"
-          ? (parentTurn?.initiatingHumanSubjectId ??
-            (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-          : null;
-      if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-        throw new Error("Child idle outbox lost its parent xAI authority subject");
-      }
-      const connectionAuthoritySubjectId =
-        parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-      if (
-        personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
-        !connectionAuthoritySubjectId
-      ) {
-        throw new Error("Child idle outbox lost its parent connection authority subject");
-      }
-      await tx
-        .insert(schema.sessionSystemUpdateOutbox)
-        .values(
-          withLosslessContentWriteVersion(
-            withLosslessContentWriteVersion(
-              {
-                accountId: session.accountId,
-                workspaceId,
-                sourceSessionId: session.id,
-                targetSessionId: session.parentSessionId,
-                dedupeKey,
-                kind: "child_terminal_result",
-                classification: "success",
-                sourceId: session.id,
-                summary: "Child session reached a terminal idle boundary.",
-                payload: {
-                  type: "child_terminal_result",
-                  childSessionId: session.id,
-                  status: "idle",
-                },
-                lineage: {
-                  childSessionId: session.id,
-                  parentSessionId: session.parentSessionId,
-                  ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-                  ...(connectionAuthoritySubjectId &&
-                  personalConnectionDelegations.some((delegation) => delegation.userDelegation)
-                    ? { connectionAuthoritySubjectId }
-                    : {}),
-                  ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
-                },
-                personalConnectionDelegations,
-                xaiProviderAccountAuthoritySnapshot,
-              },
-              "summary",
-              "summaryCodecVersion",
-            ),
-            "payload",
-            "payloadCodecVersion",
-          ),
-        )
-        .onConflictDoNothing({
-          target: [
-            schema.sessionSystemUpdateOutbox.workspaceId,
-            schema.sessionSystemUpdateOutbox.dedupeKey,
-          ],
-        });
+      await enqueueChildLifecycleNoticeOutboxTx(tx as unknown as Database, workspaceId, session, {
+        dedupeKey,
+        kind: "child_terminal_result",
+        classification: "success",
+        summary: "Child session reached a terminal idle boundary.",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: session.id,
+          status: "idle",
+        },
+      });
       return {
         action: "settled",
         changed: events.length > 0,
@@ -59300,16 +59418,43 @@ export async function applySessionTurnSettlement(
         : []),
     ...(input.compactionRequestFailure ? ["session.context.compaction.skipped"] : []),
     ...(input.turnStatus === "failed" ? ["child_terminal_result"] : []),
+    ...(input.turnStatus === "requires_action" ? ["child_requires_action"] : []),
   ];
   const persistence = {
     stage: "session_lifecycle_outbox.settle_turn",
     eventTypes,
     maxAttempts: 3,
   };
+  const terminalTurn = isTerminalSessionTurnStatus(input.turnStatus);
   return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+    // A terminal settlement cancels the turn's still-pending human-input rows.
+    // Their parent resolution notices need the parent locked with the child,
+    // so peek (unlocked) for such rows first; they are created only by this
+    // same turn's earlier requires_action settlement, which the session lock
+    // serialized before this attempt.
+    const terminalHumanInputNotices =
+      terminalTurn &&
+      input.turnStatus !== "failed" &&
+      childLifecycleNoticesEnabled() &&
+      (
+        await scopedDb
+          .select({ id: schema.sessionHumanInputRequests.id })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+            ),
+          )
+          .limit(1)
+      ).length > 0;
     return await scopedDb.transaction(async (tx) => {
       const locks =
-        input.turnStatus === "failed"
+        input.turnStatus === "failed" ||
+        input.turnStatus === "requires_action" ||
+        terminalHumanInputNotices
           ? await lockChildLifecycleOutboxWriteRowsTx(tx as unknown as Database, workspaceId, {
               sessionId: input.sessionId,
               turnId: input.turnId,
@@ -59507,6 +59652,16 @@ export async function applySessionTurnSettlement(
             originatingAttemptId: input.attemptId,
           });
         }
+        // The child is now blocked on a human. Tell its parent through the
+        // durable outbox (the worker delivers it): one row per exact
+        // (child, turn, generation), so a same-generation re-freeze after an
+        // activity retry dedupes and a later generation is a new notice.
+        await enqueueChildRequiresActionOutboxTx(tx as unknown as Database, workspaceId, session, {
+          turnId: input.turnId,
+          turnGeneration: turn.executionGeneration,
+          humanInputRequests,
+          pendingApprovals: input.runState.pendingApprovals,
+        });
       }
 
       let recordingEvent: AppendEventInput | null = null;
@@ -59706,8 +59861,27 @@ export async function applySessionTurnSettlement(
             .returning({
               id: schema.sessionHumanInputRequests.id,
               questions: schema.sessionHumanInputRequests.questions,
+              turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
             })
         : [];
+      for (const request of terminalHumanInputRows) {
+        // The child's blocked boundary is gone with the turn: its parent's
+        // still-pending child_requires_action notice is stale. Lock prefix:
+        // the terminal peek above already chose the child-lifecycle lock.
+        await enqueueChildRequiresActionResolvedOutboxTx(
+          tx as unknown as Database,
+          workspaceId,
+          session,
+          {
+            turnId: input.turnId,
+            turnGeneration: request.turnGeneration,
+            requestId: request.id,
+            approvalId: null,
+            outcome: "cancelled",
+            respondedByKind: "system",
+          },
+        );
+      }
       const terminalHumanInputEvents: AppendEventInput[] = terminalHumanInputRows.map(
         (request) => ({
           type: "user.humanInputResponse",
@@ -61620,16 +61794,27 @@ function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): str
   return null;
 }
 
-async function enqueueFailedChildOutboxTx(
+type ChildOutboxSession = Pick<
+  typeof schema.sessions.$inferSelect,
+  "id" | "accountId" | "parentSessionId" | "parentTurnId"
+>;
+
+/**
+ * The exact private authority a child lifecycle notice copies from its causal
+ * parent turn: same-session-successor personal connection delegations, the
+ * parent's xAI provider authority snapshot, and the bounded subject lineage the
+ * parent's claim later revalidates. Every child -> parent outbox producer uses
+ * this one resolution so the notice kinds cannot drift in authority.
+ */
+async function parentOutboxAuthorityTx(
   tx: Database,
   workspaceId: string,
-  session: Pick<
-    typeof schema.sessions.$inferSelect,
-    "id" | "accountId" | "parentSessionId" | "parentTurnId"
-  >,
-  input: { turnId: string | null; dedupeKey: string },
-): Promise<void> {
-  if (!session.parentSessionId) return;
+  session: ChildOutboxSession & { parentSessionId: string },
+): Promise<{
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  lineage: Record<string, unknown>;
+}> {
   const personalConnectionDelegations = session.parentTurnId
     ? personalConnectionDelegationsForSameSessionSuccessor(
         await personalConnectionDelegationsForTurnInTransaction(
@@ -61672,18 +61857,69 @@ async function enqueueFailedChildOutboxTx(
         (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
       : null;
   if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-    throw new Error("Failed child outbox lost its parent xAI authority subject");
+    throw new Error("Child lifecycle outbox lost its parent xAI authority subject");
   }
   const connectionAuthoritySubjectId =
     parentTurn?.initiatingHumanSubjectId ??
     (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-  if (
-    personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
-    !connectionAuthoritySubjectId
-  ) {
-    throw new Error("Failed child outbox lost its parent connection authority subject");
+  const hasUserDelegation = personalConnectionDelegations.some(
+    (delegation) => delegation.userDelegation,
+  );
+  if (hasUserDelegation && !connectionAuthoritySubjectId) {
+    throw new Error("Child lifecycle outbox lost its parent connection authority subject");
   }
-  await tx
+  return {
+    personalConnectionDelegations,
+    xaiProviderAccountAuthoritySnapshot,
+    lineage: {
+      childSessionId: session.id,
+      parentSessionId: session.parentSessionId,
+      ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
+      ...(connectionAuthoritySubjectId && hasUserDelegation
+        ? { connectionAuthoritySubjectId }
+        : {}),
+      ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
+    },
+  };
+}
+
+type ChildLifecycleOutboxPayload = Extract<
+  SessionSystemUpdatePayload,
+  { type: ChildLifecycleSystemUpdateKind }
+>;
+
+type ChildLifecycleNoticeInput = {
+  [Kind in ChildLifecycleSystemUpdateKind]: {
+    kind: Kind;
+    payload: Extract<SessionSystemUpdatePayload, { type: Kind }>;
+  };
+}[ChildLifecycleSystemUpdateKind] & {
+  dedupeKey: string;
+  classification: SystemUpdateClassification;
+  summary: string;
+  lineage?: Record<string, unknown>;
+};
+
+/**
+ * The one child -> parent outbox writer. The caller must already hold the
+ * child-lifecycle lock prefix (control FOR SHARE -> workspace FOR KEY SHARE ->
+ * UUID-ordered child + parent sessions FOR NO KEY UPDATE -> exact turn/attempt)
+ * or, for the generic-prefix human-input/approval producers, the UUID-ordered
+ * child + parent session rows. The insert is dedupe-keyed and idempotent; a
+ * session without a parent produces nothing. Returns whether a row was added.
+ */
+async function enqueueChildLifecycleNoticeOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: ChildLifecycleNoticeInput,
+): Promise<boolean> {
+  if (!session.parentSessionId) return false;
+  const authority = await parentOutboxAuthorityTx(tx, workspaceId, {
+    ...session,
+    parentSessionId: session.parentSessionId,
+  });
+  const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
       withLosslessContentWriteVersion(
@@ -61694,29 +61930,14 @@ async function enqueueFailedChildOutboxTx(
             sourceSessionId: session.id,
             targetSessionId: session.parentSessionId,
             dedupeKey: input.dedupeKey,
-            kind: "child_terminal_result",
-            classification: "failure",
+            kind: input.kind,
+            classification: input.classification,
             sourceId: session.id,
-            summary: "Child session failed; inspect the durable child timeline.",
-            payload: {
-              type: "child_terminal_result",
-              childSessionId: session.id,
-              status: "failed",
-              ...(input.turnId ? { turnId: input.turnId } : {}),
-            },
-            lineage: {
-              childSessionId: session.id,
-              parentSessionId: session.parentSessionId,
-              ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-              ...(input.turnId ? { turnId: input.turnId } : {}),
-              ...(connectionAuthoritySubjectId &&
-              personalConnectionDelegations.some((delegation) => delegation.userDelegation)
-                ? { connectionAuthoritySubjectId }
-                : {}),
-              ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
-            },
-            personalConnectionDelegations,
-            xaiProviderAccountAuthoritySnapshot,
+            summary: input.summary,
+            payload: input.payload,
+            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
+            personalConnectionDelegations: authority.personalConnectionDelegations,
+            xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
           },
           "summary",
           "summaryCodecVersion",
@@ -61730,7 +61951,206 @@ async function enqueueFailedChildOutboxTx(
         schema.sessionSystemUpdateOutbox.workspaceId,
         schema.sessionSystemUpdateOutbox.dedupeKey,
       ],
-    });
+    })
+    .returning({ id: schema.sessionSystemUpdateOutbox.id });
+  return inserted.length > 0;
+}
+
+async function enqueueFailedChildOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: { turnId: string | null; dedupeKey: string },
+): Promise<void> {
+  if (!session.parentSessionId) return;
+  await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: input.dedupeKey,
+    kind: "child_terminal_result",
+    classification: "failure",
+    summary: "Child session failed; inspect the durable child timeline.",
+    payload: {
+      type: "child_terminal_result",
+      childSessionId: session.id,
+      status: "failed",
+      ...(input.turnId ? { turnId: input.turnId } : {}),
+    },
+    ...(input.turnId ? { lineage: { turnId: input.turnId } } : {}),
+  });
+}
+
+/**
+ * Child-lifecycle notice producers below. Every one of them is gated by the
+ * process-global rollout flag, takes the child-lifecycle lock prefix (the
+ * parent session row is locked with the child), and only inserts the durable
+ * outbox row; the worker delivers it to the parent.
+ */
+async function enqueueChildRequiresActionOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    turnId: string;
+    turnGeneration: number;
+    humanInputRequests: Parameters<typeof buildChildRequiresActionPayload>[0]["humanInputRequests"];
+    pendingApprovals: readonly unknown[];
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = buildChildRequiresActionPayload({
+    childSessionId: session.id,
+    childTurnId: input.turnId,
+    childTurnGeneration: input.turnGeneration,
+    humanInputRequests: input.humanInputRequests,
+    pendingApprovals: input.pendingApprovals,
+  });
+  if (payload.requests.length === 0 && !payload.truncated) return false;
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childRequiresActionDedupeKey({
+      childSessionId: session.id,
+      turnId: input.turnId,
+      turnGeneration: input.turnGeneration,
+    }),
+    kind: "child_requires_action",
+    classification: "action_required",
+    summary: childRequiresActionSummary(session.id, payload),
+    payload,
+    lineage: { turnId: input.turnId },
+  });
+}
+
+async function enqueueChildRequiresActionResolvedOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    turnId: string;
+    turnGeneration: number;
+    requestId: string | null;
+    approvalId: string | null;
+    outcome: ChildRequiresActionResolvedOutcome;
+    respondedByKind: ChildRequiresActionRespondedByKind;
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = {
+    type: "child_requires_action_resolved" as const,
+    childSessionId: session.id,
+    childTurnId: input.turnId,
+    childTurnGeneration: input.turnGeneration,
+    requestId: input.requestId,
+    approvalId: input.approvalId,
+    outcome: input.outcome,
+    respondedByKind: input.respondedByKind,
+  };
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childRequiresActionResolvedDedupeKey({
+      childSessionId: session.id,
+      turnId: input.turnId,
+      turnGeneration: input.turnGeneration,
+      requestId: input.requestId,
+      approvalId: input.approvalId,
+    }),
+    kind: "child_requires_action_resolved",
+    classification: "info",
+    summary: childRequiresActionResolvedSummary(session.id, payload),
+    payload,
+    lineage: { turnId: input.turnId },
+  });
+}
+
+/** Derive the bounded responder kind of a human-input/approval resolution. */
+export function childRequiresActionRespondedByKindFor(
+  respondedBy: string,
+  explicit?: ChildRequiresActionRespondedByKind,
+): ChildRequiresActionRespondedByKind {
+  if (explicit) return explicit;
+  if (respondedBy.startsWith("agent_attempt:")) return "agent_attempt";
+  if (respondedBy.startsWith("system:")) return "system";
+  return "human";
+}
+
+async function enqueueChildWaitingCapacityOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    turnId: string;
+    waiterId: string;
+    provider: "codex" | "xai";
+    nextCheckAt: Date | null;
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = {
+    type: "child_waiting_capacity" as const,
+    childSessionId: session.id,
+    childTurnId: input.turnId,
+    provider: input.provider,
+    nextCheckAt: input.nextCheckAt?.toISOString() ?? null,
+  };
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childWaitingCapacityDedupeKey({
+      childSessionId: session.id,
+      waiterId: input.waiterId,
+    }),
+    kind: "child_waiting_capacity",
+    classification: "info",
+    summary: childWaitingCapacitySummary(session.id, payload),
+    payload,
+    lineage: { turnId: input.turnId },
+  });
+}
+
+async function enqueueChildProgressOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    goalId: string;
+    objectiveRevision: number;
+    operationId: string;
+    progressNote: string;
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = {
+    type: "child_progress" as const,
+    childSessionId: session.id,
+    goalId: input.goalId,
+    objectiveRevision: input.objectiveRevision,
+    operationId: input.operationId,
+    progressNote: boundedChildProgressNote(input.progressNote),
+  };
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childProgressDedupeKey({
+      childSessionId: session.id,
+      receiptId: input.operationId,
+    }),
+    kind: "child_progress",
+    classification: "info",
+    summary: childProgressSummary(session.id, payload),
+    payload,
+  });
+}
+
+/**
+ * Read the child's parent id without locking, so a generic-prefix writer can
+ * include the parent in its one UUID-ordered session lock call. The helper that
+ * later inserts the outbox row re-reads the locked child row and refuses a
+ * changed parent, exactly like the child-lifecycle lock prefix does.
+ */
+async function sessionIdsWithParentTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string[]> {
+  if (!childLifecycleNoticesEnabled()) return [sessionId];
+  const [preview] = await tx
+    .select({ parentSessionId: schema.sessions.parentSessionId })
+    .from(schema.sessions)
+    .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+    .limit(1);
+  return preview?.parentSessionId ? [sessionId, preview.parentSessionId] : [sessionId];
 }
 
 async function enqueueFailedChildOutboxForTurnTx(
@@ -61768,18 +62188,27 @@ async function enqueueFailedChildOutboxWithoutTurnTx(
   });
 }
 
-type ChildTerminalResultPayload = Extract<
-  SessionSystemUpdatePayload,
-  { type: "child_terminal_result" }
->;
-
-function parseChildTerminalResultPayload(input: unknown): ChildTerminalResultPayload {
-  const payload = SessionSystemUpdatePayload.parse(input);
-  if (payload.type !== "child_terminal_result") {
-    throw new Error(`Child-terminal outbox contains ${payload.type} payload`);
+function parseChildLifecycleOutboxPayload(
+  input: unknown,
+  kind: string,
+): { kind: ChildLifecycleSystemUpdateKind; payload: ChildLifecycleOutboxPayload } {
+  if (!isChildLifecycleSystemUpdateKind(kind)) {
+    throw new Error(`System-update outbox contains retired kind ${kind}`);
   }
-  return payload;
+  const payload = SessionSystemUpdatePayload.parse(input);
+  if (payload.type !== kind) {
+    throw new Error(`Child-lifecycle outbox ${kind} contains ${payload.type} payload`);
+  }
+  return { kind, payload: payload as ChildLifecycleOutboxPayload };
 }
+
+/** The exact kind/payload pair of one child-lifecycle outbox row, correlated for typed re-insert. */
+export type SessionSystemUpdateOutboxKindPayload = {
+  [Kind in ChildLifecycleSystemUpdateKind]: {
+    kind: Kind;
+    payload: Extract<SessionSystemUpdatePayload, { type: Kind }>;
+  };
+}[ChildLifecycleSystemUpdateKind];
 
 export type SessionSystemUpdateOutboxDelivery = {
   id: string;
@@ -61789,15 +62218,25 @@ export type SessionSystemUpdateOutboxDelivery = {
   sourceSessionId: string;
   targetSessionId: string;
   dedupeKey: string;
-  kind: "child_terminal_result";
+  kind: ChildLifecycleSystemUpdateKind;
   classification: SystemUpdateClassification;
   sourceId: string;
   summary: string;
-  payload: ChildTerminalResultPayload;
+  payload: ChildLifecycleOutboxPayload;
   lineage: Record<string, unknown>;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
 };
+
+/** Narrow an outbox row back to its correlated typed kind/payload input variant. */
+export function sessionSystemUpdateOutboxKindPayload(
+  outbox: Pick<SessionSystemUpdateOutboxDelivery, "kind" | "payload">,
+): SessionSystemUpdateOutboxKindPayload {
+  if (outbox.payload.type !== outbox.kind) {
+    throw new Error(`Outbox ${outbox.kind} carries a ${outbox.payload.type} payload`);
+  }
+  return { kind: outbox.kind, payload: outbox.payload } as SessionSystemUpdateOutboxKindPayload;
+}
 
 function mapSystemUpdateOutboxRow(row: {
   id: string;
@@ -61817,9 +62256,10 @@ function mapSystemUpdateOutboxRow(row: {
   personal_connection_delegations: unknown;
   xai_provider_account_authority_snapshot: unknown;
 }): SessionSystemUpdateOutboxDelivery {
-  if (row.kind !== "child_terminal_result") {
-    throw new Error(`System-update outbox contains retired kind ${row.kind}`);
-  }
+  const typed = parseChildLifecycleOutboxPayload(
+    fromPostgresLosslessJson(row.payload, row.payload_codec_version),
+    row.kind,
+  );
   return {
     id: row.id,
     status: "pending",
@@ -61828,13 +62268,11 @@ function mapSystemUpdateOutboxRow(row: {
     sourceSessionId: row.source_session_id,
     targetSessionId: row.target_session_id,
     dedupeKey: row.dedupe_key,
-    kind: "child_terminal_result",
+    kind: typed.kind,
     classification: row.classification as SystemUpdateClassification,
     sourceId: row.source_id,
     summary: fromPostgresLosslessText(row.summary, row.summary_codec_version),
-    payload: parseChildTerminalResultPayload(
-      fromPostgresLosslessJson(row.payload, row.payload_codec_version),
-    ),
+    payload: typed.payload,
     lineage: row.lineage,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personal_connection_delegations,
@@ -61870,9 +62308,10 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         )
         .limit(1);
       if (!row) return null;
-      if (row.kind !== "child_terminal_result") {
-        throw new Error(`System-update outbox contains retired kind ${row.kind}`);
-      }
+      const typed = parseChildLifecycleOutboxPayload(
+        fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+        row.kind,
+      );
       return {
         id: row.id,
         status: row.status as "pending" | "delivered",
@@ -61881,13 +62320,11 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         sourceSessionId: row.sourceSessionId,
         targetSessionId: row.targetSessionId,
         dedupeKey: row.dedupeKey,
-        kind: "child_terminal_result",
+        kind: typed.kind,
         classification: row.classification as SystemUpdateClassification,
         sourceId: row.sourceId,
         summary: fromPostgresLosslessText(row.summary, row.summaryCodecVersion),
-        payload: parseChildTerminalResultPayload(
-          fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
-        ),
+        payload: typed.payload,
         lineage: row.lineage,
         personalConnectionDelegations: parsedPersonalConnectionDelegations(
           row.personalConnectionDelegations,
@@ -61923,7 +62360,35 @@ export async function claimPendingSessionSystemUpdateOutbox(
     personal_connection_delegations: unknown;
     xai_provider_account_authority_snapshot: unknown;
   }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox(${limit})`);
-  return rows.map(mapSystemUpdateOutboxRow);
+  // One unparseable row (for example a kind this image does not understand, or
+  // a payload that no longer matches its schema) must not poison the whole
+  // batch: dead-letter exactly that row with a bounded error and keep
+  // delivering the rest. The row stays inspectable as `failed` + `last_error`.
+  const deliveries: SessionSystemUpdateOutboxDelivery[] = [];
+  for (const row of rows) {
+    try {
+      deliveries.push(mapSystemUpdateOutboxRow(row));
+    } catch (error) {
+      const message = `unrecognized outbox row: ${error instanceof Error ? error.message : String(error)}`;
+      await withRlsContext(
+        db,
+        { accountId: row.account_id, workspaceId: row.workspace_id },
+        async (scopedDb) => {
+          await scopedDb
+            .update(schema.sessionSystemUpdateOutbox)
+            .set({ status: "failed", lastError: message.slice(0, 500), updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdateOutbox.workspaceId, row.workspace_id),
+                eq(schema.sessionSystemUpdateOutbox.id, row.id),
+                eq(schema.sessionSystemUpdateOutbox.status, "pending"),
+              ),
+            );
+        },
+      );
+    }
+  }
+  return deliveries;
 }
 
 export type SessionWorkflowWake = {
@@ -62346,6 +62811,10 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     if (row.lineage.connectionAuthoritySubjectId !== input.lineage.connectionAuthoritySubjectId) {
       throw new Error("System-update outbox replay changed its connection authority subject");
     }
+    const typed = parseChildLifecycleOutboxPayload(
+      fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+      row.kind,
+    );
     return {
       id: row.id,
       status: row.status as "pending" | "delivered",
@@ -62354,13 +62823,11 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       sourceSessionId: row.sourceSessionId,
       targetSessionId: row.targetSessionId,
       dedupeKey: row.dedupeKey,
-      kind: "child_terminal_result",
+      kind: typed.kind,
       classification: row.classification as SystemUpdateClassification,
       sourceId: row.sourceId,
       summary: fromPostgresLosslessText(row.summary, row.summaryCodecVersion),
-      payload: parseChildTerminalResultPayload(
-        fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
-      ),
+      payload: typed.payload,
       lineage: row.lineage,
       personalConnectionDelegations: parsedPersonalConnectionDelegations(
         row.personalConnectionDelegations,
@@ -62644,17 +63111,64 @@ export async function addSessionSystemUpdateWithSourceMutation(
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
         await mutateSource(tx as unknown as Database, event.id, inserted.id);
+        // Producer-side supersession of this child's now-stale pending notices
+        // on the parent: a newer child_progress replaces an older one, and a
+        // resolution supersedes the child_requires_action of the same exact
+        // (child, turn, generation) because one accepted response advances that
+        // blocked boundary (a re-freeze is a new generation and a new notice).
+        const supersededUpdateIds = await supersedeStaleChildLifecycleNoticesInTransaction(
+          tx as unknown as Database,
+          { workspaceId: input.workspaceId, sessionId: input.sessionId, inserted },
+        );
+        const [supersededEvent] =
+          supersededUpdateIds.length > 0
+            ? await tx
+                .insert(schema.sessionEvents)
+                .values(
+                  withLosslessContentWriteVersion(
+                    {
+                      accountId: session.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      sequence: session.lastSequence + 2,
+                      type: "system.update.cancelled",
+                      payload: {
+                        updateIds: supersededUpdateIds,
+                        count: supersededUpdateIds.length,
+                        reason: childLifecycleSupersessionReason(input.kind),
+                        supersededByUpdateId: inserted.id,
+                      },
+                      occurredAt: now,
+                    },
+                    "payload",
+                    "payloadCodecVersion",
+                  ),
+                )
+                .returning()
+            : [];
+        if (supersededUpdateIds.length > 0 && !supersededEvent) {
+          throw new Error("Failed to append system-update supersession event");
+        }
+        const supersessionSequences = supersededEvent ? 1 : 0;
         const realtimeActive = await sessionRealtimeIsActiveInTransaction(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
         );
-        // Every kind except the goal's own synthesized continuation is external
-        // input for the goal. A child result may not revive an already-failed
-        // parent (settled authority); every other kind already wakes one.
+        // Wake class: only an `immediate` kind may register a workflow wake or
+        // resume a cap-paused goal in this commit; a `deferred` kind is a
+        // durable pending row that the next claim delivers coalesced.
+        const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[input.kind];
+        const childLifecycleKind = isChildLifecycleSystemUpdateKind(input.kind);
+        // Every immediate kind except the goal's own synthesized continuation
+        // is external input for the goal. A child notice may not revive an
+        // already-failed parent (settled authority); every other kind already
+        // wakes one. A deferred notice never resumes a goal by itself: a goal
+        // resumed without a workflow wake would strand its obligation.
         const externalGoalInput =
+          wakeClass === "immediate" &&
           input.kind !== "goal_continuation" &&
-          (input.kind !== "child_terminal_result" || session.status !== "failed");
+          (!childLifecycleKind || session.status !== "failed");
         let goalStatus: string | null = null;
         let autoResumed: SessionGoalAutoResumedByExternalInput | null = null;
         if (externalGoalInput) {
@@ -62695,7 +63209,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
                     accountId: session.accountId,
                     workspaceId: input.workspaceId,
                     sessionId: input.sessionId,
-                    sequence: session.lastSequence + 2,
+                    sequence: session.lastSequence + 2 + supersessionSequences,
                     type: "goal.resumed",
                     payload: autoResumed.payload,
                     occurredAt: now,
@@ -62709,21 +63223,22 @@ export async function addSessionSystemUpdateWithSourceMutation(
         if (autoResumed && !resumedEvent) {
           throw new Error("Failed to append goal.resumed event");
         }
-        const appendedSequences = autoResumed ? 2 : 1;
-        // Child completion remains durable model memory, but it is not new
-        // human intent. A completed goal, a goal paused by intent, or an
+        const appendedSequences = (autoResumed ? 2 : 1) + supersessionSequences;
+        // A child notice (completion, blocked-on-input, pause, capacity wait,
+        // progress) remains durable model memory, but it is not new human
+        // intent. A completed goal, a goal paused by intent, or an
         // already-failed parent is settled authority and cannot be restarted
         // solely by a late child. A live parent turn consumes the update in its
         // ordinary loop. Once an ordinary no-goal turn has settled, its child
-        // result remains pending until new human intent arrives. Only an
+        // notice remains pending until new human intent arrives. Only an
         // active goal (including one this input just resumed from its pacing
         // ceiling) is a durable obligation that may autonomously wake an idle
-        // parent.
-        const childResultMayWake =
-          input.kind !== "child_terminal_result" ||
-          (session.status !== "failed" && goalStatus === "active");
+        // parent, and only an `immediate` kind wakes at all.
+        const childNoticeMayWake =
+          !childLifecycleKind || (session.status !== "failed" && goalStatus === "active");
         const shouldWake =
-          childResultMayWake &&
+          wakeClass === "immediate" &&
+          childNoticeMayWake &&
           !realtimeActive &&
           session.activeTurnId === null &&
           effectiveControl.state === "active";
@@ -62751,10 +63266,108 @@ export async function addSessionSystemUpdateWithSourceMutation(
           workflowWakeRevision: wake?.wakeRevision ?? null,
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,
-          events: [mapEvent(event), ...(resumedEvent ? [mapEvent(resumedEvent)] : [])],
+          events: [
+            mapEvent(event),
+            ...(supersededEvent ? [mapEvent(supersededEvent)] : []),
+            ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
+          ],
         };
       }),
   );
+}
+
+/**
+ * Mark this child's now-stale pending notices on the parent `superseded` and
+ * return their ids. Rules (producer-side, under the parent session lock):
+ * a newer `child_progress` from the same child supersedes every older pending
+ * one; a `child_requires_action_resolved` supersedes the pending
+ * `child_requires_action` of the same exact (child, turn, generation), because
+ * one accepted response advances that blocked boundary and a later re-freeze
+ * is a new generation with a new notice. Any other kind supersedes nothing.
+ */
+async function supersedeStaleChildLifecycleNoticesInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    inserted: Pick<
+      typeof schema.sessionSystemUpdates.$inferSelect,
+      "id" | "kind" | "sourceId" | "payload" | "payloadCodecVersion"
+    >;
+  },
+): Promise<string[]> {
+  if (input.inserted.kind === "child_progress") {
+    const rows = await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.kind, "child_progress"),
+          eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+          ne(schema.sessionSystemUpdates.id, input.inserted.id),
+        ),
+      )
+      .returning({ id: schema.sessionSystemUpdates.id });
+    return rows.map((row) => row.id).sort();
+  }
+  if (input.inserted.kind === "child_requires_action_resolved") {
+    const payload = SessionSystemUpdatePayload.parse(
+      fromPostgresLosslessJson(input.inserted.payload, input.inserted.payloadCodecVersion),
+    );
+    if (payload.type !== "child_requires_action_resolved") return [];
+    const rows = await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.kind, "child_requires_action"),
+          eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnId' = ${payload.childTurnId}`,
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnGeneration' = ${String(payload.childTurnGeneration)}`,
+        ),
+      )
+      .returning({ id: schema.sessionSystemUpdates.id });
+    return rows.map((row) => row.id).sort();
+  }
+  if (input.inserted.kind === "child_terminal_result") {
+    // The child reached a terminal boundary: its still-pending progress and
+    // capacity-wait notices describe a state that no longer exists. A pending
+    // child_requires_action is deliberately NOT superseded here: terminal
+    // delivery is unordered against notice creation (a stale idle result
+    // delivered late by the reaper may land after the child got a new prompt
+    // and froze again), and every terminal path already emits its own exact
+    // (child, turn, generation) resolution, which is the ordered supersession.
+    // (A pending resolution stays: it is already informational.)
+    const rows = await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          inArray(schema.sessionSystemUpdates.kind, ["child_progress", "child_waiting_capacity"]),
+          eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+        ),
+      )
+      .returning({ id: schema.sessionSystemUpdates.id });
+    return rows.map((row) => row.id).sort();
+  }
+  return [];
+}
+
+function childLifecycleSupersessionReason(
+  kind: string,
+): "superseded_by_newer_progress" | "superseded_by_resolution" | "superseded_by_terminal" {
+  if (kind === "child_progress") return "superseded_by_newer_progress";
+  if (kind === "child_terminal_result") return "superseded_by_terminal";
+  return "superseded_by_resolution";
 }
 
 export async function listOutstandingSessionSystemUpdates(
@@ -62990,6 +63603,8 @@ export async function acceptSessionApprovalDecision(
     sessionId: string;
     subjectId: string;
     payload: Record<string, unknown>;
+    /** Bounded decider kind for the parent's resolution notice; `human` when omitted. */
+    respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
     interactionIntervention?: {
       interventionId: string;
@@ -63004,12 +63619,17 @@ export async function acceptSessionApprovalDecision(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const sessionIds = await sessionIdsWithParentTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
           controlLock: "none",
-          sessionIds: [input.sessionId],
+          sessionIds,
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         if (input.clientEventId) {
           const [existing] = await tx
@@ -63207,6 +63827,21 @@ export async function acceptSessionApprovalDecision(
         if (!event) throw new Error("Failed to append approval decision");
         const approvalDecision = input.payload.decision;
         if (approvalDecision === "approve" || approvalDecision === "reject") {
+          await enqueueChildRequiresActionResolvedOutboxTx(
+            tx as unknown as Database,
+            input.workspaceId,
+            session,
+            {
+              turnId: turn.id,
+              turnGeneration: turn.executionGeneration,
+              requestId: null,
+              approvalId,
+              outcome: approvalDecision === "approve" ? "approved" : "rejected",
+              respondedByKind: input.respondedByKind ?? "human",
+            },
+          );
+        }
+        if (approvalDecision === "approve" || approvalDecision === "reject") {
           const [connectorRequest] = await tx
             .update(schema.connectorActionRequests)
             .set({
@@ -63335,6 +63970,7 @@ export async function expireSessionInteractionIntervention(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: "system:expired",
+    respondedByKind: "system",
     payload: {
       approvalId: intervention.originatingToolCallId,
       decision: "reject",

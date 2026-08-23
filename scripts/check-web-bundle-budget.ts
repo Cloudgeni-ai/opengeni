@@ -133,8 +133,17 @@ const budgets = {
   // the next whole KiB, with one extra KiB on gzip for the up-to-1.5-KiB
   // Linux/x64 skew observed above; every initial, per-file, file-count,
   // lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2078 * kib,
-  directSessionGzip: 579 * kib,
+  // Child lifecycle notices add the five typed child notice payload schemas
+  // and wake classes to the shared contracts plus their queue-chrome and
+  // timeline labels. The same macOS/arm64 production build measures main at
+  // 2,126,938 raw / 591,668 gzip bytes (the measurement above) and this
+  // change at 2,129,504 raw / 592,296 gzip bytes. Advance only those two
+  // aggregate envelopes: raw to the next whole KiB above one KiB of headroom,
+  // gzip to the next whole KiB above 1.5 KiB of headroom for the Linux/x64
+  // skew; every initial, per-file, file-count, lazy-chunk, and CSS cap stays
+  // fixed.
+  directSessionRaw: 2081 * kib,
+  directSessionGzip: 580 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

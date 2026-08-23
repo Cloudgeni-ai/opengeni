@@ -780,6 +780,21 @@ parked indefinitely. When the selected root is a child, the same transaction
 also enqueues one deduplicated `child_terminal_result` with status `cancelled`
 for its surviving parent and copies the causal parent-turn delegation snapshot;
 cancelled descendants do not notify parents inside the same terminal subtree.
+Terminal results are not the only child lifecycle notice. Behind
+`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED`, the child's own lifecycle
+transactions also enqueue one dedupe-keyed outbox row for the parent when the
+child freezes in `requires_action` (`child_requires_action`, immediate wake
+class, bounded question previews and approval ids), when such a request is
+answered, skipped, expired, decided, or cancelled
+(`child_requires_action_resolved`), when a human/API/agent pauses the child
+directly (`child_paused`), when a capacity waiter is armed
+(`child_waiting_capacity`), and when the child records goal progress
+(`child_progress`); the latter four are `deferred` (pending row + event, no wake,
+delivered with the next claim). Each producer takes the child-lifecycle lock
+prefix (the parent session row is locked with the child) and the worker delivers
+the row right after the producing commit; the reaper covers crashes. See
+[`durable-agent-inputs.md`](durable-agent-inputs.md).
+
 Every child terminal result remains a durable pending machine input even when it
 arrives late. It may autonomously wake an idle parent only while the parent has
 an active goal, which is the durable obligation to keep working. A goal paused

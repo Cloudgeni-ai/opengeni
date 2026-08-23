@@ -14,6 +14,7 @@ import {
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
+import { deliverChildRequiresActionToParent } from "../parent-wake";
 import { deleteRecordingArtifacts } from "@opengeni/runtime";
 import {
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -79,6 +80,7 @@ export type ClaimTurnDeps = {
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
   entitlements: ActivityServices["entitlements"];
+  wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   cancellationSignal: AbortSignal | undefined;
   activityContext: ReturnType<typeof currentActivityContext>;
   dispatchId: string;
@@ -130,6 +132,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     objectStorage,
     observability,
     entitlements,
+    wakeSessionWorkflow,
     cancellationSignal,
     activityContext,
     dispatchId,
@@ -494,6 +497,17 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       }
     }
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
+    if (inputSettlement.turnStatus === "requires_action") {
+      // The settlement transaction committed the parent's child_requires_action
+      // outbox row (when this session has a parent and notices are enabled).
+      // Deliver it right away; the reaper covers a crash between the two.
+      await deliverChildRequiresActionToParent(
+        { db, bus, settings, observability, wakeSessionWorkflow },
+        input.workspaceId,
+        input.sessionId,
+        { turnId: attempt.turnId!, turnGeneration: attempt.executionGeneration },
+      );
+    }
     activityContext?.heartbeat({
       ...heartbeatDetails,
       phase: "events_published",
