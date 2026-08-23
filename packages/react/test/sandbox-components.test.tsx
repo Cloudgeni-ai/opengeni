@@ -586,6 +586,54 @@ describe("SandboxFiles guarded-file routing", () => {
     await r.unmount();
   });
 
+  test("a repeated request retries the same file after a read failure", async () => {
+    let reads = 0;
+    const files = filesResult({
+      readFile: async (path) => {
+        reads += 1;
+        if (reads === 1) throw new Error("temporary read failure");
+        return {
+          path,
+          encoding: "utf8",
+          content: "recovered\n",
+          sizeBytes: 10,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
+      },
+    });
+    const git = gitResult();
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={git}
+        requestedPath="README.md"
+        requestedPathRequestId={1}
+        usePierre={false}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[role="alert"]')?.textContent).toContain(
+      "temporary read failure",
+    );
+
+    await r.rerender(
+      <SandboxFiles
+        files={files}
+        git={git}
+        requestedPath="README.md"
+        requestedPathRequestId={2}
+        usePierre={false}
+      />,
+    );
+    await flush();
+    expect(reads).toBe(2);
+    expect(r.container.textContent).toContain("recovered");
+    expect(r.container.querySelector('[role="alert"]')).toBeNull();
+    await r.unmount();
+  });
+
   test("a new path-only request for the same file clears an earlier line focus", async () => {
     const files = filesResult({
       readFile: async (path) => ({
@@ -611,6 +659,8 @@ describe("SandboxFiles guarded-file routing", () => {
     await flush();
     expect(selectedFile(r.container)).toBe("README.md:3");
     expect(r.container.querySelector("[data-opengeni-focus-line]")).not.toBeNull();
+    const viewer = r.container.querySelector<HTMLElement>("[data-opengeni-file-viewer-scroll]")!;
+    viewer.scrollTop = 77;
 
     await r.rerender(
       <SandboxFiles files={files} git={git} requestedPath="README.md" requestedPathRequestId={2} />,
@@ -618,6 +668,7 @@ describe("SandboxFiles guarded-file routing", () => {
     await flush();
     expect(selectedFile(r.container)).toBe("README.md");
     expect(r.container.querySelector("[data-opengeni-focus-line]")).toBeNull();
+    expect(viewer.scrollTop).toBe(0);
     await r.unmount();
   });
 });

@@ -136,14 +136,11 @@ describe("useMachines", () => {
         return response;
       },
     };
-    const hook = await renderHook(
-      () => {
-        const a = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
-        const b = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
-        return { a, b };
-      },
-      undefined,
-    );
+    const hook = await renderHook(() => {
+      const a = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
+      const b = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
+      return { a, b };
+    }, undefined);
     await flush();
     expect(lists).toBe(1);
     expect(hook.result.current.a.machines.length).toBe(2);

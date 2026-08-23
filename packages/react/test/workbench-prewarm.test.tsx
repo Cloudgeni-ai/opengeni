@@ -1321,7 +1321,7 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     await flush(60);
     expect(spy.attachCalls).toBe(0);
 
-    const request = { path: "/projects/example/src/app.ts", requestId: 41 };
+    const request = { path: "/workspace/projects/example/src/app.ts", requestId: 41 };
     await rendered.rerender(workspace(request));
     await flush(60);
     expect(selectedTabName(rendered.container)).toBe("Files");

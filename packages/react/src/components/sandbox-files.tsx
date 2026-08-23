@@ -98,6 +98,7 @@ export function SandboxFiles({
   } | null>(null);
   const [liveRequestedPath, setLiveRequestedPath] = useState<string | null>(null);
   const [viewReloadRevision, setViewReloadRevision] = useState(0);
+  const viewerScrollRef = useRef<HTMLDivElement | null>(null);
   const pendingRequestRef = useRef<string | number | null>(null);
   const handledRequestRef = useRef<string | number | null>(null);
   const requestKey = requestedPath ? (requestedPathRequestId ?? requestedPath) : null;
@@ -124,6 +125,7 @@ export function SandboxFiles({
     setEditMode(false);
     setFocusLine(requestedLine != null && requestedLine > 0 ? requestedLine : null);
     setTreeRevealRequest({ path: requestedPath, requestId: requestKey });
+    setViewReloadRevision((revision) => revision + 1);
   }, [onSelectedPathChange, requestKey, requestedLine, requestedPath, requestedPathReady]);
 
   // Side-by-side (tree left, viewer right) once the surface is wide enough;
@@ -167,8 +169,14 @@ export function SandboxFiles({
   const fileView = useFileView(
     viewPath,
     files.readFile,
-    (files.contentRevision ?? 0) + viewReloadRevision,
+    `${files.contentRevision ?? 0}:${viewReloadRevision}`,
   );
+
+  useEffect(() => {
+    if (focusLine === null && viewReloadRevision > 0 && viewerScrollRef.current) {
+      viewerScrollRef.current.scrollTop = 0;
+    }
+  }, [focusLine, viewReloadRevision]);
 
   // Selecting a (different) file always returns to View — never drop the user into
   // an editor whose buffer belongs to the previously-selected path. Manual
@@ -347,7 +355,11 @@ export function SandboxFiles({
               />
             )}
           </div>
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div
+            ref={viewerScrollRef}
+            className="min-h-0 flex-1 overflow-auto"
+            data-opengeni-file-viewer-scroll
+          >
             {viewPath ? (
               showEditor && fileView.content !== null ? (
                 <CodeEditor
@@ -417,6 +429,7 @@ export function SandboxFiles({
                   )}
                   {usePierre && focusLine === null ? (
                     <PierreFile
+                      key={`${viewPath}:${viewReloadRevision}`}
                       path={viewPath}
                       contents={fileView.content}
                       themeType={resolvedTheme}
@@ -643,7 +656,7 @@ type FileViewState = {
 function useFileView(
   path: string | null,
   readFile: UseSandboxFilesResult["readFile"],
-  reloadRevision = 0,
+  reloadRevision: string | number = 0,
 ): FileViewState {
   const previousPathRef = useRef<string | null>(null);
   const [state, setState] = useState<FileViewState>({

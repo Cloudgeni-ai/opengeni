@@ -11961,7 +11961,9 @@ export type FsNodeType = z.infer<typeof FsNodeType>;
 // depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
 export interface FsTreeNode {
   name: string;
-  path: string; // workspace-relative POSIX, no leading slash
+  // Same namespace as the request: workspace-relative for relative requests,
+  // canonical target path for requests rooted at FileSystem.root.
+  path: string;
   type: z.infer<typeof FsNodeType>;
   sizeBytes: number | null; // null for dirs
   mtimeMs: number | null;
@@ -11983,7 +11985,9 @@ export const FsTreeNode: z.ZodType<FsTreeNode> = z.lazy(() =>
 ) as z.ZodType<FsTreeNode>;
 
 export const FsListRequest = z.object({
-  path: z.string().default(""), // "" = workspace root
+  // "" = workspace root; canonical absolute paths must stay within the
+  // selected target's advertised FileSystem.root.
+  path: z.string().default(""),
   depth: z.number().int().min(0).max(8).default(1),
   maxEntries: z.number().int().positive().max(20_000).default(2_000),
   includeHidden: z.boolean().default(true),

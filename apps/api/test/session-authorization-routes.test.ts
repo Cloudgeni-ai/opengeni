@@ -729,6 +729,7 @@ describe("embedding host session authorization routes", () => {
     const capabilities = await app.request(`${base}/stream-capabilities`, { headers });
     expect(capabilities.status).toBe(200);
     expect((await capabilities.json()) as unknown).toMatchObject({
+      FileSystem: { root: "/workspace" },
       DesktopStream: { shared: true, sharedSessionIds: [] },
     });
     expect(sharedSibling.id).not.toBe(value.child.id);

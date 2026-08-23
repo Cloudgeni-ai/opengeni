@@ -23,11 +23,7 @@ import {
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
-import {
-  MACHINES_COMPOSER_POLL_MS,
-  useMachines,
-  type MachineView,
-} from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
   RealtimeVoiceModelPanel,
@@ -1276,9 +1272,7 @@ function ComputeTargetControl(props: {
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
   useEffect(() => {
     if (fleet.loading) return;
-    setFleetPollMs(
-      !fleetEmpty || fleetLoadFailed ? MACHINES_COMPOSER_POLL_MS : undefined,
-    );
+    setFleetPollMs(!fleetEmpty || fleetLoadFailed ? MACHINES_COMPOSER_POLL_MS : undefined);
   }, [fleet.loading, fleetEmpty, fleetLoadFailed]);
   // The Connected Machine path is OPT-IN. With an EMPTY self-hosted fleet and no
   // explicit opt-in, the segmented control is not rendered at all — the composer

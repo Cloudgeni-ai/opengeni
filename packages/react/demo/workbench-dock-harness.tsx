@@ -64,7 +64,7 @@ function PrimaryPane({
           <p>The full diff is in the Changes tab.</p>
           <Markdown onSandboxFile={onSandboxFile}>
             {
-              "[Open source](sandbox:apps/api/src/server.ts) · [Open source at line 2](sandbox:apps/api/src/server.ts:2)"
+              "[Open source](sandbox:/workspace/apps/api/src/server.ts) · [Open source at line 2](sandbox:/workspace/apps/api/src/server.ts:2)"
             }
           </Markdown>
         </div>
