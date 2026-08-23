@@ -153,7 +153,15 @@ model:
   `memory_search` when it needs it, rather than receiving it unbidden;
 - durable agent writes go through `remember` (explicit user-directed) and
   task-note promotion (the agent's own findings). The Memory V1 agent writes
-  `memory_save` and `memory_correct` are retired; `memory_search` remains;
+  `memory_save` and `memory_correct` are retired; `memory_search` remains.
+  Agent-authored durable text is bounded by where it lands in the prompt: 600
+  characters for a mandatory workspace rule (composed verbatim into every session
+  prompt), 1,200 for a preference (descriptor composed, content retrieved on
+  demand), and 4,000 for a Knowledge fact (retrieval evidence only). Write one
+  imperative statement in 1-3 sentences with no numbered procedure, and keep
+  procedure in a Document or Skill the entry references. See
+  [`company-brain-write-routing.md`](company-brain-write-routing.md) and
+  [`workspace-instruction-policies.md`](workspace-instruction-policies.md);
 - first-party agent `memory_search` excludes legacy `kind = preference` rows,
   while authorized human search, audit, correction, export, and the canonical
   rows remain unchanged;

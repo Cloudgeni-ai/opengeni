@@ -10,6 +10,7 @@ import {
   rememberHumanInputQuestionId,
   type CompanyBrainGovernedWriteAttempt as Attempt,
   type CompanyBrainGovernedWriteRequest,
+  type RememberLane,
   type CompanyBrainLearningPolicyRouteReceipt,
   type GovernedLearningActivationReceipt,
   type RememberConfirmReceipt as RememberConfirmReceiptType,
@@ -190,6 +191,35 @@ function promotionRequest(
   }
 }
 
+/** Bound for the card title; `HumanInputQuestion.label` accepts 128 characters. */
+const REMEMBER_LABEL_MAX_CHARS = 128;
+
+/**
+ * What saving this costs, shown on the confirmation card so a human can judge
+ * the length before agreeing. A mandatory rule is composed into the prompt of
+ * every session in the workspace; a preference contributes its descriptor to
+ * that prompt and keeps its content behind on-demand retrieval; knowledge is
+ * retrieval evidence and never joins the always-composed prefix.
+ *
+ * This deliberately lives on `label` rather than `helpText`: migrations 0272 /
+ * 0274 / 0284 / 0293 / 0316 byte-verify the reconstructed `prompt`, `helpText`,
+ * and `options` against the exact Task-note text before authorizing an
+ * activation, and `label` is the one field of the canonical question those
+ * capabilities do not constrain.
+ */
+export function rememberConfirmationLabel(input: {
+  lane: RememberLane;
+  contentChars: number;
+}): string {
+  const cost =
+    input.lane === "instruction_policy"
+      ? "added to every session prompt in this workspace"
+      : input.lane === "preference"
+        ? "summary in every session prompt, full text on demand"
+        : "retrieved when relevant, not always in the prompt";
+  return `Remember - ${input.contentChars} characters, ${cost}`.slice(0, REMEMBER_LABEL_MAX_CHARS);
+}
+
 /**
  * Canonical confirmation question. Migration 0272 reconstructs exactly this
  * prompt/help/options from the proposal and refuses any human-input row that
@@ -209,7 +239,10 @@ function humanInputPrompt(request: RememberRequest, targetId: string) {
         id: rememberHumanInputQuestionId(targetId),
         kind: "single_select" as const,
         prompt,
-        label: "Remember",
+        label: rememberConfirmationLabel({
+          lane: request.lane,
+          contentChars: Array.from(request.content).length,
+        }),
         helpText: Array.from(request.content).slice(0, 2_000).join(""),
         options: [
           { id: REMEMBER_HUMAN_INPUT_SAVE_OPTION, label: "Save" },

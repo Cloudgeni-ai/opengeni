@@ -154,6 +154,36 @@ confidence, and the receipt is one of:
   through the built-in tool, then calls `remember_confirm` with the proposal id,
   the decision receipt id, and the returned `requestId`.
 
+### Budgets and authoring style
+
+Durable text an agent authors is prompt cost, so each lane carries an explicit,
+enforced budget from
+[`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts):
+
+| Lane | Where it lands | Agent budget |
+| --- | --- | --- |
+| `instruction_policy` | composed verbatim into every session prompt in the workspace | 600 characters |
+| `preference` | descriptor pair composed into every session prompt; content retrieved on demand | 1,200 characters |
+| `knowledge` | retrieval evidence, never in the always-composed prefix | 4,000 characters (`REMEMBER_CONTENT_MAX_CHARS`) |
+
+The same bounds apply to `instruction_policy_propose` and `preference_propose`,
+which are agent-only surfaces. The human editor limits
+(`WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS`,
+`PREFERENCE_REGISTRY_CONTENT_MAX_CHARS`) are unchanged, and stored revisions are
+never rewritten. An over-budget lane is refused before any durable row is
+written, with an actionable message naming the actual length, the limit, and the
+shape to use instead: one imperative rule in 1-3 sentences, no numbered
+procedure, no examples, no rationale essay, several small entries rather than one
+long one, and procedure kept in a Document or Skill that the rule references.
+
+The confirmation card names that cost before a human agrees to it. The question
+`label` carries the character count and where the text lands ("Remember - 612
+characters, added to every session prompt in this workspace"). It is deliberately
+`label` and not `helpText`: migrations 0272 / 0274 / 0284 / 0293 / 0316
+byte-verify the reconstructed `prompt`, `helpText`, and `options` against the
+exact Task-note text before authorizing an activation, and `label` is the one
+field of the canonical question those capabilities do not constrain.
+
 `remember_confirm` invokes migration 0272's
 `activate_human_confirmed_learning_decision`. That SECURITY DEFINER capability
 requires the exact initiating human's `session_human_input_requests` row: same

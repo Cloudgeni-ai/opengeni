@@ -270,6 +270,50 @@ UTF-8 bytes. Evidence includes snapshot IDs/hashes, revision IDs/hashes,
 ordering, role source, descriptor counts, truncation, provenance, and retrieval
 handles without copying private full preference content.
 
+## Agent-authored budgets and style
+
+An active policy revision is composed verbatim into the prompt of every session
+in the workspace, for as long as it stays active, so its length is a permanent
+per-turn cost rather than a one-time one. Agents are bad at judging that cost on
+their own: asked for "always track work in Linear", a model will happily author a
+five-step numbered procedure. The budget is therefore explicit and enforced,
+separately from the human editor limit:
+
+| Author | Surface | Limit |
+| --- | --- | --- |
+| Agent | `remember` lane `instruction_policy`, `instruction_policy_propose` | `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (600) |
+| Agent | `remember` lane `preference`, `preference_propose` | `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS` (1,200) |
+| Human | Workspace State editor, HTTP/SDK policy routes | `WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` (262,144) |
+
+The constants and the actionable rejection messages live in
+[`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts)
+and are enforced by the request contracts, so every caller of those agent
+surfaces gets the same bound. The human limit is deliberately unchanged:
+somebody editing a charter in the UI is making a deliberate, visible choice, and
+lowering their limit would reject text they had already typed. Existing stored
+revisions are never rewritten, and a legacy import stays byte-identical; only new
+agent writes are bounded.
+
+The style rule the tool descriptions state, and the one to keep in prose and
+prompts consistent with:
+
+- write one imperative rule in 1-3 sentences;
+- no numbered procedure, no examples, no rationale essay, no restating of
+  platform defaults;
+- prefer several small rules over one long one, each a separate revision;
+- keep procedure in a Document or Skill and have the rule reference it.
+
+A preference is cheaper than a rule but not free: its title and description
+descriptors are prompt-composed in every session while its full content stays
+behind the exact attempt's retrieval handle, which is why its budget is larger
+but still far below the human registry limit. The Knowledge lane keeps the wider
+`REMEMBER_CONTENT_MAX_CHARS` (4,000) ceiling because it is retrieval evidence and
+never joins the always-composed prefix.
+
+The `remember` confirmation card names the cost before a human agrees to it: its
+question label carries the character count and where that text lands. See
+[`company-brain-write-routing.md`](company-brain-write-routing.md).
+
 ## Legacy compatibility and inactive workspaces
 
 Migration `0130_workspace_instruction_policies.sql` performs no backfill.

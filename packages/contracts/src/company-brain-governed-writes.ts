@@ -1,6 +1,11 @@
 import { z } from "zod";
 import {
-  PREFERENCE_REGISTRY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+} from "./agent-authored-durable-text";
+import {
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
@@ -12,10 +17,7 @@ import {
   GovernedLearningDecisionOutcome,
   GovernedLearningDecisionReason,
 } from "./governed-learning-evaluator";
-import {
-  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
-  WorkspaceInstructionPolicyTarget,
-} from "./workspace-instruction-policies";
+import { WorkspaceInstructionPolicyTarget } from "./workspace-instruction-policies";
 import { WorkspaceLearningPolicyEffectiveMode } from "./workspace-learning-policy";
 
 const boundedReason = z.string().trim().min(1).max(4_096);
@@ -180,10 +182,15 @@ export const ProposeWorkspaceInstructionPolicyRequest = z
     operationId,
     ...exactEvidence,
     target: WorkspaceInstructionPolicyTarget,
+    // Agent-authored: this draft becomes prompt text in every session once a
+    // human activates it, so it is bounded far below the human editor limit.
     content: z
       .string()
       .min(1)
-      .max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
+      .max(
+        AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+        AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+      )
       .refine((value) => value.trim().length > 0, "instruction proposal must not be blank"),
     expectedCurrentRevisionId: z.string().uuid().nullable(),
     expectedActivationVersion: z.number().int().nonnegative(),
@@ -208,10 +215,15 @@ export const ProposeWorkspacePreferenceRequest = z.strictObject({
   stableKey: PreferenceRegistryStableKey.max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
   title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
   description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+  // Agent-authored: the descriptor pair is prompt-composed in every session and
+  // the content is retrieved on demand, so it stays short.
   content: z
     .string()
     .min(1)
-    .max(PREFERENCE_REGISTRY_CONTENT_MAX_CHARS)
+    .max(
+      AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+      AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+    )
     .refine((value) => value.trim().length > 0, "preference proposal must not be blank"),
   precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
   conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),

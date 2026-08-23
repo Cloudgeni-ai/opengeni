@@ -1,9 +1,13 @@
 import {
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
   REMEMBER_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
+  agentAuthoredDurableTextTooLongMessage,
   type CompanyBrainGovernedWriteAttempt,
+  type RememberLane,
 } from "@opengeni/contracts";
 import { RememberError, createRememberRouter } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
@@ -23,9 +27,28 @@ export type RegisterRememberToolsInput = {
   router?: Pick<ReturnType<typeof createRememberRouter>, "remember" | "confirm">;
 };
 
+/**
+ * Per-lane budgets. The flat MCP input schema cannot vary `content` by lane, so
+ * it carries the widest lane (Knowledge) and the handler rejects an over-budget
+ * prompt-composed lane with the actionable message before anything durable is
+ * written. The contract enforces the same bounds for every other caller.
+ */
+const laneContentMaxChars: Record<RememberLane, number> = {
+  instruction_policy: AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  preference: AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+  knowledge: REMEMBER_CONTENT_MAX_CHARS,
+};
+
 const laneFields = {
   operationId: z.string().uuid(),
-  content: z.string().trim().min(1).max(REMEMBER_CONTENT_MAX_CHARS),
+  content: z
+    .string()
+    .trim()
+    .min(1)
+    .max(REMEMBER_CONTENT_MAX_CHARS)
+    .describe(
+      `The exact thing to remember, in the user's words. Budgets by lane: instruction_policy at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters because it is prompt text in every session, preference at most ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS}, knowledge at most ${REMEMBER_CONTENT_MAX_CHARS}.`,
+    ),
   reason: z.string().trim().min(1).max(4_096),
 };
 
@@ -43,7 +66,9 @@ export function registerRememberTools(input: RegisterRememberToolsInput): void {
     "remember",
     {
       description:
-        "Durably remember something the user explicitly asked to keep for this workspace. Use lane=preference for how agents should act, lane=instruction_policy only when the user stated a hard always/never rule, lane=knowledge for a company/product/people fact. Under Automatic learning a preference activates immediately; otherwise the receipt returns status=confirmation_required with the exact `humanInput` payload: call `request_human_input` with it verbatim, then call `remember_confirm` with the returned requestId. Mandatory rules always need that confirmation. Do not use this for facts you merely inferred; use knowledge_propose or task notes for those. A confirmed lane=knowledge fact enters the human-reviewed Knowledge claim lifecycle; it does not become workspace memory, so do not expect to find it later through `memory_search`.",
+        "Durably remember something the user explicitly asked to keep for this workspace. Use lane=preference for how agents should act, lane=instruction_policy only when the user stated a hard always/never rule, lane=knowledge for a company/product/people fact. " +
+        `Write it short. A lane=instruction_policy rule is prompt text prepended to every session in this workspace for as long as it stays active, so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters: one imperative rule in 1-3 sentences, no numbered steps, no examples, no rationale, no restating of defaults. Keep a lane=preference under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. Prefer several small entries over one long one, and put procedure in a Document or Skill that the rule references instead of inlining it. ` +
+        "Under Automatic learning a preference activates immediately; otherwise the receipt returns status=confirmation_required with the exact `humanInput` payload: call `request_human_input` with it verbatim, then call `remember_confirm` with the returned requestId. Mandatory rules always need that confirmation. Do not use this for facts you merely inferred; use knowledge_propose or task notes for those. A confirmed lane=knowledge fact enters the human-reviewed Knowledge claim lifecycle; it does not become workspace memory, so do not expect to find it later through `memory_search`.",
       inputSchema: {
         lane: z.enum(["preference", "instruction_policy", "knowledge"]),
         ...laneFields,
@@ -68,6 +93,16 @@ export function registerRememberTools(input: RegisterRememberToolsInput): void {
     async (request) => {
       await input.authorize();
       const { lane, operationId, content, reason } = request;
+      if (lane !== "knowledge" && content.length > laneContentMaxChars[lane]) {
+        return input.json({
+          status: "not_remembered",
+          code: "content_too_long",
+          message: agentAuthoredDurableTextTooLongMessage({
+            kind: lane,
+            actualChars: content.length,
+          }),
+        });
+      }
       const base = { operationId, content, reason, scope: "workspace" as const };
       const rememberRequest =
         lane === "preference"

@@ -13,7 +13,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { RememberError, createRememberRouter } from "../src/domain/remember";
+import {
+  RememberError,
+  createRememberRouter,
+  rememberConfirmationLabel,
+} from "../src/domain/remember";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
@@ -214,6 +218,10 @@ describe("remember router (real PostgreSQL)", () => {
       ],
     });
     expect(receipt.humanInput.questions[0]!.helpText).toBe(request.content);
+    // The card names the cost before a human agrees to it.
+    expect(receipt.humanInput.questions[0]!.label).toBe(
+      rememberConfirmationLabel({ lane: "preference", contentChars: request.content.length }),
+    );
     expect(receipt.learning?.outcome).toBe("suggest");
     // Replaying the same remember converges on the same proposal.
     const replay = await router.remember({ attempt: f.attempt, request });

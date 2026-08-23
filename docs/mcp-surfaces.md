@@ -17,7 +17,7 @@ page exists so you pick the right one in one read.
 First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
-- `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
+- `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically. Content is bounded by where it lands in the prompt: 600 characters for a mandatory workspace rule, 1,200 for a preference, 4,000 for a Knowledge fact (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
 
 These tools are session-scoped: they register only when the delegated bearer carries
 a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`

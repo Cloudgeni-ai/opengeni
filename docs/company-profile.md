@@ -123,6 +123,19 @@ bytes. Longer source material belongs in organization-authority Documents/RAG
 and is retrieved as evidence; it is never copied wholesale into this profile or
 the mandatory prompt.
 
+Those numbers are hard bounds, not a target. Every field here is mandatory prompt
+context in every session for the whole organization, so a good profile sits far
+below them: identity and mission at most a couple of sentences each, and each
+list entry a phrase or a single sentence. No numbered procedure, no marketing
+copy, no rationale essay, no restating of platform defaults. The bounds are the
+same whether a human or an agent authors the revision, because every field is
+already scoped to a concise role rather than left open-ended, and lowering them
+would reject profiles a human had already typed. The agent-authoring surface
+states this shape rule in the `company_profile_propose` tool description; the
+equivalent rule for workspace rules and preferences, where the agent budget is
+tighter than the human one, is in
+[`workspace-instruction-policies.md`](workspace-instruction-policies.md).
+
 ## Revisions, activation, audit, and rollback
 
 `company_profile_revisions` is append-only immutable history. Every revision
@@ -207,6 +220,13 @@ derived from entry content and de-duplicated before the exact canonical profile
 is hashed. The proposal appends one inactive revision with `agent_admin`
 provenance and returns the exact structured-human-input payload. It never changes
 the head or activation events.
+
+The tool description states the authoring style, because a model left to itself
+writes an essay into a field that is then prepended to every prompt in the
+organization: each field is one concise statement, identity and mission at most a
+couple of sentences, list entries a phrase or a single sentence, no numbered
+procedure and no rationale. The bounds in "Bounded structured content" above are
+the hard ceiling, not the target.
 
 The returned question's `helpText` binds the revision number and content
 SHA-256 and renders a readable summary of the proposed identity, mission,

@@ -1,5 +1,11 @@
 import { z } from "zod";
 import {
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+} from "./agent-authored-durable-text";
+import {
   CompanyBrainLearningDecisionSummary,
   CompanyBrainLearningStepFailure,
 } from "./company-brain-governed-writes";
@@ -30,6 +36,12 @@ export type RememberLane = z.infer<typeof RememberLane>;
 export const RememberScope = z.enum(["workspace"]);
 export type RememberScope = z.infer<typeof RememberScope>;
 
+/**
+ * Ceiling for the Knowledge lane, which is retrieval evidence rather than
+ * always-composed prompt text. The prompt-composed lanes are bounded far more
+ * tightly: see `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` and
+ * `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS`.
+ */
 export const REMEMBER_CONTENT_MAX_CHARS = 4_000;
 
 const rememberBase = {
@@ -46,6 +58,17 @@ export const RememberRequest = z.discriminatedUnion("lane", [
     .object({
       ...rememberBase,
       lane: z.literal("preference"),
+      // The descriptor pair is prompt-composed in every session and the full
+      // content is retrieved on demand, so an agent-authored preference is
+      // bounded well below the human registry limit.
+      content: z
+        .string()
+        .trim()
+        .min(1)
+        .max(
+          AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+          AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+        ),
       stableKey: PreferenceRegistryStableKey,
       title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
       description: z
@@ -63,6 +86,17 @@ export const RememberRequest = z.discriminatedUnion("lane", [
     .object({
       ...rememberBase,
       lane: z.literal("instruction_policy"),
+      // A mandatory rule is composed verbatim into the prompt of every session
+      // in the workspace, for as long as it stays active, so this is the
+      // tightest agent budget in the Company Brain.
+      content: z
+        .string()
+        .trim()
+        .min(1)
+        .max(
+          AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+          AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+        ),
       target: WorkspaceInstructionPolicyTarget.default({
         kind: "policy",
         scope: "global",

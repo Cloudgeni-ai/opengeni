@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import {
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+  agentAuthoredDurableTextTooLongMessage,
+} from "@opengeni/contracts";
 import { RememberError } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -23,12 +28,14 @@ type Handler = (input: Record<string, unknown>) => Promise<{
 
 function harness() {
   const handlers = new Map<string, Handler>();
+  const configs = new Map<string, { description?: string }>();
   const remembers: unknown[] = [];
   const confirms: unknown[] = [];
   let authorizations = 0;
   const server = {
-    registerTool(name: string, _config: unknown, handler: Handler) {
+    registerTool(name: string, config: { description?: string }, handler: Handler) {
       handlers.set(name, handler);
+      configs.set(name, config);
     },
   } as unknown as McpServer;
   registerRememberTools({
@@ -92,7 +99,7 @@ function harness() {
       },
     },
   });
-  return { handlers, remembers, confirms, authorizations: () => authorizations };
+  return { handlers, configs, remembers, confirms, authorizations: () => authorizations };
 }
 
 describe("remember MCP tools", () => {
@@ -139,6 +146,64 @@ describe("remember MCP tools", () => {
       subject: "Acme",
     });
     expect(h.remembers[2]).toMatchObject({ request: { lane: "knowledge", subject: "Acme" } });
+  });
+
+  test("the tool description states the prompt cost and the shape of a durable rule", () => {
+    const description = harness().configs.get("remember")?.description ?? "";
+    expect(description).toContain("prompt text prepended to every session in this workspace");
+    expect(description).toContain(
+      `under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
+    );
+    expect(description).toContain("one imperative rule in 1-3 sentences");
+    expect(description).toContain("no numbered steps");
+    expect(description).toContain("Prefer several small entries over one long one");
+    expect(description).toContain("Document or Skill");
+    expect(description).toContain(
+      `Keep a lane=preference under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
+    );
+  });
+
+  test("an over-budget prompt-composed lane is refused before anything durable is written", async () => {
+    const h = harness();
+    const essay = "x".repeat(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS + 1);
+    const refused = await h.handlers.get("remember")!({
+      lane: "instruction_policy",
+      operationId: OPERATION_ID,
+      content: essay,
+      reason: "The user asked to remember it.",
+    });
+    expect(JSON.parse(refused.content[0]!.text)).toEqual({
+      status: "not_remembered",
+      code: "content_too_long",
+      message: agentAuthoredDurableTextTooLongMessage({
+        kind: "instruction_policy",
+        actualChars: essay.length,
+      }),
+    });
+    expect(h.remembers).toEqual([]);
+
+    const preference = "y".repeat(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS + 1);
+    const refusedPreference = await h.handlers.get("remember")!({
+      lane: "preference",
+      operationId: OPERATION_ID,
+      content: preference,
+      reason: "The user asked to remember it.",
+    });
+    expect(JSON.parse(refusedPreference.content[0]!.text)).toMatchObject({
+      status: "not_remembered",
+      code: "content_too_long",
+    });
+    expect(h.remembers).toEqual([]);
+
+    // The Knowledge lane is retrieval evidence, so it keeps the wider ceiling.
+    await h.handlers.get("remember")!({
+      lane: "knowledge",
+      operationId: OPERATION_ID,
+      content: "z".repeat(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS + 1),
+      reason: "Stated by the user.",
+      subject: "Acme",
+    });
+    expect(h.remembers).toHaveLength(1);
   });
 
   test("remember_confirm returns a bounded not_confirmed result instead of throwing on remember errors", async () => {

@@ -1,9 +1,12 @@
 import {
-  PREFERENCE_REGISTRY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_DURABLE_TEXT_STYLE,
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
-  WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
   type CompanyBrainGovernedWriteAttempt,
 } from "@opengeni/contracts";
@@ -121,7 +124,9 @@ export function registerCompanyBrainGovernedWriteTools(
     "task_note_promote_instruction_policy",
     {
       description:
-        "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content. The frozen learning policy records a decision receipt, but mandatory policy still requires human activation even under Automatic; this never widens scope.",
+        "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content. " +
+        `Once a human activates the draft, those bytes are prompt text in every session in this workspace, so promote only a short imperative note of at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters; write a fresh short note rather than promoting a long working note. ` +
+        "The frozen learning policy records a decision receipt, but mandatory policy still requires human activation even under Automatic; this never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
         target: WorkspaceInstructionPolicyTarget,
@@ -144,7 +149,9 @@ export function registerCompanyBrainGovernedWriteTools(
     "task_note_promote_preference",
     {
       description:
-        "Atomically promote one still-active note from this exact root task tree into a workspace preference proposal. The note bytes remain exact evidence and full proposal content. Under Suggest the proposal waits for human review; under Automatic an eligible decision is activated through the preference lifecycle and remains undoable. This never widens scope.",
+        "Atomically promote one still-active note from this exact root task tree into a workspace preference proposal. The note bytes remain exact evidence and full proposal content. " +
+        `The title and description you supply become prompt text in every session in this workspace, so write them as one short imperative statement and promote only a note of at most ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ` +
+        "Under Suggest the proposal waits for human review; under Automatic an eligible decision is activated through the preference lifecycle and remains undoable. This never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
         stableKey: z.string().trim().min(1).max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
@@ -178,11 +185,20 @@ export function registerCompanyBrainGovernedWriteTools(
     "instruction_policy_propose",
     {
       description:
-        "Materialize an evidence-backed inactive workspace instruction-policy draft. The frozen learning policy records a decision receipt, but this tool cannot activate mandatory behavior, including when learning mode is Automatic; a human must activate the draft.",
+        "Materialize an evidence-backed inactive workspace instruction-policy draft. " +
+        `Once a human activates it, this content is prompt text in every session in this workspace, so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
+        "The frozen learning policy records a decision receipt, but this tool cannot activate mandatory behavior, including when learning mode is Automatic; a human must activate the draft.",
       inputSchema: {
         ...evidence,
         target: WorkspaceInstructionPolicyTarget,
-        content: z.string().trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
+        content: z
+          .string()
+          .trim()
+          .min(1)
+          .max(
+            AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+            AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+          ),
         expectedCurrentRevisionId: z.string().uuid().nullable(),
         expectedActivationVersion: z.number().int().nonnegative(),
         reason,
@@ -203,7 +219,9 @@ export function registerCompanyBrainGovernedWriteTools(
     "preference_propose",
     {
       description:
-        "Materialize an evidence-backed workspace preference proposal. Under Suggest it stays inactive for human review; under Automatic an eligible decision is activated through the governed preference lifecycle with an undoable receipt. It never creates mandatory authority.",
+        "Materialize an evidence-backed workspace preference proposal. " +
+        `Its title and description are prompt text in every session in this workspace and the content is retrieved on demand, so keep the content under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
+        "Under Suggest it stays inactive for human review; under Automatic an eligible decision is activated through the governed preference lifecycle with an undoable receipt. It never creates mandatory authority.",
       inputSchema: {
         ...evidence,
         stableKey: z.string().trim().min(1).max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS),
@@ -213,7 +231,14 @@ export function registerCompanyBrainGovernedWriteTools(
           .trim()
           .min(1)
           .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
-        content: z.string().trim().min(1).max(PREFERENCE_REGISTRY_CONTENT_MAX_CHARS),
+        content: z
+          .string()
+          .trim()
+          .min(1)
+          .max(
+            AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+            AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+          ),
         precedenceRank: z.number().int().min(-1_000).max(1_000).optional().default(0),
         conflictStrategy: z
           .enum(["override", "merge", "reject", "inform"])

@@ -1,4 +1,5 @@
 import {
+  AGENT_AUTHORED_DURABLE_TEXT_STYLE,
   COMPANY_PROFILE_ENTRY_MAX_CHARS,
   COMPANY_PROFILE_ENTRY_MAX_COUNT,
   COMPANY_PROFILE_REASON_MAX_CHARS,
@@ -107,7 +108,10 @@ export function registerCompanyProfileAgentAdminTools(
     "company_profile_propose",
     {
       description:
-        "Prepare one complete organization company profile covering identity, mission, products, customers, strategic goals, and critical constraints. Omitted list keys are derived from content. This creates only an immutable inactive proposal for the exact live turn initiated by the organization owner and does not use workspace learning policy. The receipt returns the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId.",
+        "Prepare one complete organization company profile covering identity, mission, products, customers, strategic goals, and critical constraints. Omitted list keys are derived from content. " +
+        "Once activated, every field here is mandatory prompt context in every session for the whole organization, so write it as a concise profile rather than a document: identity and mission at most a couple of sentences each, and each list entry a phrase or a single sentence. " +
+        `${AGENT_AUTHORED_DURABLE_TEXT_STYLE} Longer source material belongs in organization Documents and is retrieved as evidence; never copy it into the profile. Hard bounds are ${COMPANY_PROFILE_SCALAR_MAX_CHARS} characters for identity and mission, ${COMPANY_PROFILE_ENTRY_MAX_CHARS} per list entry, and ${COMPANY_PROFILE_ENTRY_MAX_COUNT} entries per list, but a good profile is far below them. ` +
+        "This creates only an immutable inactive proposal for the exact live turn initiated by the organization owner and does not use workspace learning policy. The receipt returns the exact `humanInput` payload; call `request_human_input` with it verbatim, then call `company_profile_confirm` with the returned requestId.",
       inputSchema: {
         operationId: z.string().uuid(),
         identity: scalar,
