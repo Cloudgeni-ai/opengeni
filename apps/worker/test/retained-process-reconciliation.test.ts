@@ -414,6 +414,7 @@ async function settlementProjection(fixture: ProcessFixture) {
     {
       processState: string;
       processReason: string | null;
+      processExitCode: number | null;
       admissionOutcome: string | null;
       admissionSettled: boolean;
       processHolders: number;
@@ -427,6 +428,7 @@ async function settlementProjection(fixture: ProcessFixture) {
     }[]
   >`
     select process.state as "processState", process.settlement_reason as "processReason",
+      process.exit_code as "processExitCode",
       admission.provider_outcome as "admissionOutcome",
       admission.settled_at is not null as "admissionSettled",
       (select count(*)::integer from sandbox_lease_holders holder
