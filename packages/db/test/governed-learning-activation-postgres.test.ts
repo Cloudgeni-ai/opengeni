@@ -256,7 +256,11 @@ async function answeredRememberInput(
       id: questionId,
       kind: "single_select",
       prompt: overrides.prompt ?? `Save this as a ${what} for everyone in this workspace?`,
-      label: "Remember",
+      // `packages/db` cannot import the core label builder, and the point
+      // stands better this way: the capability reconstructs and byte-checks
+      // `prompt`, `helpText`, and `options` but deliberately never `label`,
+      // so an unrelated label must still authorize the activation.
+      label: "a label the capability does not constrain",
       helpText: overrides.helpText ?? content,
       options: overrides.options ?? [
         { id: "save", label: "Save" },

@@ -12,7 +12,11 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { RememberError, createRememberRouter } from "../src/domain/remember";
+import {
+  RememberError,
+  createRememberRouter,
+  rememberConfirmationLabel,
+} from "../src/domain/remember";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
@@ -117,6 +121,13 @@ async function fixture(mode: "off" | "suggest" | "automatic") {
   return { grant, ownerSubjectId, session, attempt };
 }
 
+/** The canonical prompt is lane-specific, so the fixture can derive the lane. */
+function laneFromPrompt(prompt: string): "preference" | "instruction_policy" | "knowledge" {
+  if (prompt.includes("mandatory workspace rule")) return "instruction_policy";
+  if (prompt.includes("workspace knowledge")) return "knowledge";
+  return "preference";
+}
+
 async function answeredRememberInput(
   f: Awaited<ReturnType<typeof fixture>>,
   targetId: string,
@@ -139,7 +150,12 @@ async function answeredRememberInput(
           id: questionId,
           kind: "single_select",
           prompt,
-          label: "Remember",
+          // The exact label production produces, so this proves the real
+          // card text still satisfies the human-confirmed capability.
+          label: rememberConfirmationLabel({
+            lane: laneFromPrompt(prompt),
+            contentChars: Array.from(content).length,
+          }),
           helpText: content,
           options: [
             { id: "save", label: "Save" },

@@ -15447,3 +15447,4 @@ export * from "./task-notes";
 export * from "./canonical-human-identities";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
+export * from "./agent-authored-durable-text";
