@@ -11,6 +11,7 @@ import {
   type WorkspaceSlackReactionSummonSettings,
 } from "@opengeni/contracts";
 import {
+  addSessionSystemUpdate,
   appendSessionEvents,
   bootstrapWorkspace,
   createConnection,
@@ -6714,4 +6715,234 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       terminal_delivery_state: "completed",
     });
   });
+
+  test("posts one bounded pointer card when a worker the human started needs input", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_CHILD_BLOCKED_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_CHILD_BLOCKED",
+        ts: "1770000000.000001",
+        text: "Orchestrate some workers",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const childSessionId = crypto.randomUUID();
+    const childTurnId = crypto.randomUUID();
+    const added = await addSessionSystemUpdate(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: route!.session_id,
+      kind: "child_requires_action",
+      classification: "action_required",
+      sourceId: childSessionId,
+      dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:1`,
+      summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+      payload: {
+        type: "child_requires_action",
+        childSessionId,
+        childTurnId,
+        childTurnGeneration: 1,
+        requests: [
+          {
+            kind: "human_input",
+            requestId: crypto.randomUUID(),
+            questionCount: 2,
+            firstQuestion: "Which environment should I deploy to?",
+            allowSkip: false,
+            expiresAt: null,
+          },
+        ],
+        truncated: false,
+      },
+    });
+    expect(added.added).toBe(true);
+
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const delivered = value.slack.posts.slice(postsBefore);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.text).toBe(
+      [
+        "A worker you started needs input.",
+        "> Which environment should I deploy to? (+1 more)",
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+      ].join("\n"),
+    );
+    expect(delivered[0]!.threadTimestamp).toBe("1770000000.000001");
+    expect(delivered[0]!.text).not.toContain(childTurnId);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "open",
+    });
+
+    // A reaper retry that lost the delivery cursor reuses the same durable post
+    // operation instead of announcing the blocked worker a second time.
+    await shared!.admin`
+      update slack_interactions
+      set last_delivered_session_event_sequence = 0,
+          delivery_claim_holder_id = null,
+          delivery_claim_expires_at = null,
+          delivery_retry_at = null,
+          updated_at = now()
+      where id = ${route!.id}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(1);
+    const [operations] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from slack_bot_post_operations
+      where workspace_id = ${value.owner.workspaceId}
+        and target_id = 'D_CHILD_BLOCKED'`;
+    expect(operations?.count).toBe(2);
+  }, 60_000);
+
+  test("stays quiet for deferred child lifecycle notices", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_CHILD_QUIET_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_CHILD_QUIET",
+        ts: "1771000000.000001",
+        text: "Orchestrate some quiet workers",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const childSessionId = crypto.randomUUID();
+    const childTurnId = crypto.randomUUID();
+    const deferred = [
+      {
+        kind: "child_progress" as const,
+        classification: "info" as const,
+        dedupeKey: `child-progress:${childSessionId}:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_progress" as const,
+          childSessionId,
+          goalId: crypto.randomUUID(),
+          objectiveRevision: 1,
+          operationId: crypto.randomUUID(),
+          progressNote: "Halfway through the migration",
+        },
+      },
+      {
+        kind: "child_waiting_capacity" as const,
+        classification: "info" as const,
+        dedupeKey: `child-waiting-capacity:${childSessionId}:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_waiting_capacity" as const,
+          childSessionId,
+          childTurnId,
+          provider: "codex" as const,
+          nextCheckAt: null,
+        },
+      },
+      {
+        kind: "child_requires_action_resolved" as const,
+        classification: "info" as const,
+        dedupeKey: `child-requires-action-resolved:${childSessionId}:${childTurnId}:1:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_requires_action_resolved" as const,
+          childSessionId,
+          childTurnId,
+          childTurnGeneration: 1,
+          requestId: crypto.randomUUID(),
+          approvalId: null,
+          outcome: "answered" as const,
+          respondedByKind: "human" as const,
+        },
+      },
+      {
+        kind: "child_paused" as const,
+        classification: "action_required" as const,
+        dedupeKey: `child-paused:${childSessionId}:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_paused" as const,
+          childSessionId,
+          operationId: crypto.randomUUID(),
+          actorKind: "human" as const,
+          reason: null,
+        },
+      },
+    ];
+    for (const notice of deferred) {
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        sourceId: childSessionId,
+        summary: `Worker ${childSessionId} lifecycle notice.`,
+        ...notice,
+      });
+      expect(added.added).toBe(true);
+    }
+
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(0);
+  }, 60_000);
+
+  test("posts one bounded line when a goal pauses for budget or the continuation cap", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_GOAL_PAUSED_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_GOAL_PAUSED",
+        ts: "1772000000.000001",
+        text: "Run a long goal",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const goalId = crypto.randomUUID();
+    const sessionLink = `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in OpenGeni>`;
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "limits" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      `Goal paused (budget). ${sessionLink}`,
+    ]);
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "goal.paused",
+        payload: { goalId, actor: "system", reason: "max_auto_continuations" },
+      },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      `Goal paused (budget). ${sessionLink}`,
+      `Goal paused (continuation cap). ${sessionLink}`,
+    ]);
+
+    // Human/API/agent pauses are decisions the human already made, no_progress
+    // is not a stop they must act on, and a resume is never announced.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "goal.paused", payload: { goalId, actor: "api", reason: "api" } },
+      { type: "goal.paused", payload: { goalId, actor: "api", reason: "user_pause" } },
+      { type: "goal.paused", payload: { goalId, actor: "agent", reason: "agent" } },
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "no_progress" } },
+      { type: "goal.resumed", payload: { goalId, actor: "api", reason: "api" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(2);
+  }, 60_000);
 });

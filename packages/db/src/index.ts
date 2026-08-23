@@ -63467,6 +63467,35 @@ function childLifecycleSupersessionReason(
   return "superseded_by_resolution";
 }
 
+/**
+ * One durable machine input by id, under the ordinary workspace RLS scope.
+ * The row outlives delivery, so a late bounded projection of an already
+ * announced `system.update.pending` event (Slack notification delivery)
+ * resolves the exact typed notice instead of re-deriving it from the
+ * lossy event preview. Read-only: it never mutates or consumes the update.
+ */
+export async function getSessionSystemUpdateById(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  updateId: string,
+): Promise<SessionSystemUpdate | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.id, updateId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionSystemUpdate(row) : null;
+  });
+}
+
 export async function listOutstandingSessionSystemUpdates(
   db: Database,
   workspaceId: string,
