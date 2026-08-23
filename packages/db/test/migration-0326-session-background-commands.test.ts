@@ -25,12 +25,14 @@ describe("migration 0326 session background commands", () => {
     expect(sql).toContain("session_background_commands_connected_op_uq");
     expect(sql).toContain("session_background_commands_active_session_idx");
     expect(sql).toContain("FORCE ROW LEVEL SECURITY");
+    expect(sql).toContain("session_visibility_isolation");
     expect(sql).toContain("settle_background_command_from_retained_process");
     expect(sql).toContain("claim_connected_machine_background_commands");
     expect(sql).toContain("reconcile_proof_outcome");
     expect(sql).toContain("REVOKE ALL ON FUNCTION");
     expect(sql).toContain("command.state = 'stopping'");
     expect(sql).toContain("'background_stopping'");
+    expect(sql).toContain("direct_owner.live IS NULL");
     expect(sql).not.toMatch(/\bUPDATE\s+session_background_commands\b/iu);
     expect(FORCE_RLS_TABLES).toContain("session_background_commands");
     expect(RUNTIME_FULL_DML_TABLES).toContain("session_background_commands");
@@ -59,6 +61,13 @@ describe("migration 0326 session background commands", () => {
     expect(indexNames).toContain("session_background_commands_connected_op_uq");
     expect(indexNames).toContain("session_background_commands_active_session_idx");
 
+    const [visibilityPolicy] = await shared.admin<Array<{ restrictive: boolean }>>`
+      select not polpermissive as restrictive
+      from pg_policy
+      where polrelid = 'session_background_commands'::regclass
+        and polname = 'session_visibility_isolation'`;
+    expect(visibilityPolicy?.restrictive).toBe(true);
+
     const [trigger] = await shared.admin<Array<{ trigger_name: string }>>`
       select tgname as trigger_name
       from pg_trigger
@@ -73,6 +82,7 @@ describe("migration 0326 session background commands", () => {
       ) as definition`;
     expect(claim?.definition).toContain("session_background_commands");
     expect(claim?.definition).toContain("background_stopping");
+    expect(claim?.definition).toContain("direct_owner.live IS NULL");
 
     const [connectedClaim] = await shared.admin<
       Array<{ security_definer: boolean; definition: string }>

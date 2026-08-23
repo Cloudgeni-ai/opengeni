@@ -186,6 +186,7 @@ export async function adoptManagedSessionBackgroundCommand(
           })
           .onConflictDoUpdate({
             target: schema.sessionBackgroundCommands.retainedProcessId,
+            targetWhere: sql`${schema.sessionBackgroundCommands.retainedProcessId} is not null`,
             set: { updatedAt: new Date() },
           })
           .returning();

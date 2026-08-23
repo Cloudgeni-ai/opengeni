@@ -151,6 +151,9 @@ ALTER TABLE session_background_commands FORCE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON session_background_commands
   USING (opengeni_private.workspace_rls_visible(account_id, workspace_id))
   WITH CHECK (opengeni_private.workspace_rls_visible(account_id, workspace_id));
+CREATE POLICY session_visibility_isolation ON session_background_commands AS RESTRICTIVE
+  USING (session_reference_visible(account_id, workspace_id, session_id))
+  WITH CHECK (session_reference_visible(account_id, workspace_id, session_id));
 
 DO $grants$
 DECLARE data_schema text := current_schema();
@@ -251,6 +254,7 @@ BEGIN
       WITH candidate_window AS MATERIALIZED (
         SELECT process.id,
           process.workspace_id,
+          process.parent_admission_id,
           process.owner_actor_kind,
           process.owner_turn_id,
           process.owner_attempt_id,
@@ -267,9 +271,10 @@ BEGIN
           candidate.due_at,
           candidate.started_at,
           command.state AS command_state,
-          command.id IS NOT NULL
-            OR candidate.owner_actor_kind = 'direct'
-            OR attempt.state = 'closed' AS eligible,
+          command.id IS NOT NULL OR CASE
+            WHEN candidate.owner_actor_kind = 'direct' THEN direct_owner.live IS NULL
+            ELSE attempt.state = 'closed'
+          END AS eligible,
           CASE
             WHEN command.state = 'stopping' THEN 'background_stopping'
             WHEN command.state = 'running' THEN 'background_running'
@@ -281,6 +286,21 @@ BEGIN
         LEFT JOIN %1$I.session_background_commands command
           ON command.retained_process_id = candidate.id
          AND command.state IN ('running', 'stopping')
+        LEFT JOIN LATERAL (
+          SELECT true AS live
+          FROM %1$I.sandbox_workspace_mutation_admissions admission
+          JOIN %1$I.sandbox_lease_holders holder
+            ON holder.lease_id = admission.lease_id
+           AND holder.account_id = admission.account_id
+           AND holder.workspace_id = admission.workspace_id
+           AND holder.kind = 'direct'
+           AND holder.holder_id = admission.holder_id
+           AND holder.subject_id = admission.session_id
+          WHERE candidate.owner_actor_kind = 'direct'
+            AND admission.id = candidate.parent_admission_id
+            AND admission.actor_kind = 'direct'
+          LIMIT 1
+        ) direct_owner ON true
         LEFT JOIN LATERAL (
           SELECT source_turn.status
           FROM %1$I.session_turns source_turn
