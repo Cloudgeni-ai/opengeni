@@ -1058,12 +1058,11 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const activeTabHint = selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
   const openFile = useCallback(
     (path: string, line?: number | null) => {
-      nextFileRequestId.current += 1;
       setRequestedFile({
         sessionId,
         path,
         line: line != null && line > 0 ? line : null,
-        requestId: nextFileRequestId.current,
+        requestId: ++nextFileRequestId.current,
       });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
       onActiveTabChange?.(WORKBENCH_TAB_FILES);
@@ -1077,7 +1076,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     if (!openFileRequest) return;
     if (handledOpenFileRequestId.current === openFileRequest.requestId) return;
     handledOpenFileRequestId.current = openFileRequest.requestId;
-    openFile(openFileRequest.path, openFileRequest.line ?? null);
+    openFile(openFileRequest.path, openFileRequest.line);
   }, [openFile, openFileRequest]);
   const openComputer = useCallback(
     (computerSessionId: string) => {

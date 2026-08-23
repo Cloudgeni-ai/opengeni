@@ -621,7 +621,7 @@ export function SessionRoute({
   const sandboxFileRequestSeq = useRef(0);
   const [sandboxFileRequest, setSandboxFileRequest] = useState<{
     path: string;
-    line: number | null;
+    line?: number;
     requestId: number;
   } | null>(null);
   useEffect(() => {
@@ -629,12 +629,11 @@ export function SessionRoute({
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
   const openSandboxFile = useCallback(
-    (path: string, line?: number | null) => {
-      sandboxFileRequestSeq.current += 1;
+    (path: string, line?: number) => {
       setSandboxFileRequest({
         path,
-        line: line != null && line > 0 ? line : null,
-        requestId: sandboxFileRequestSeq.current,
+        line,
+        requestId: ++sandboxFileRequestSeq.current,
       });
       setInspectorOpen(true);
     },
@@ -1003,7 +1002,7 @@ function SessionChatPane(props: {
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
-  onOpenSandboxFile: (path: string, line?: number | null) => void;
+  onOpenSandboxFile: (path: string, line?: number) => void;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
