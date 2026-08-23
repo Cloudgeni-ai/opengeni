@@ -217,7 +217,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     // ANY op kind — and the next resolution gets the real connection. Before
     // the never-sent retry class existed this surfaced as a hard agent_offline
     // on the first op; the healed-in-place behavior is the current contract.
-    const mock = new MockAgentResponder({ hostname: "late-nats-vm" });
+    const mock = new MockAgentResponder({ files: { "/late-nats": "connection-ready" } });
     const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
     const unsub = bus.subscribeRequests(subject, responderFor(mock));
     let attempts = 0;
@@ -234,9 +234,12 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     });
     const session = await client.resume({ agentId: AGENT });
     try {
-      // The transient null is retried inside the SAME ping (a fresh request id
-      // per attempt), so the caller sees a clean success — no surfaced blip.
-      expect(await session.ping()).toBe(true);
+      // Unlike ping(), readFile surfaces its first transport fault, so this proves
+      // the transient null is retried inside the SAME operation (with a fresh
+      // request id per attempt) and the caller sees a clean success.
+      expect(new TextDecoder().decode(await session.readFile({ path: "/late-nats" }))).toBe(
+        "connection-ready",
+      );
       expect(attempts).toBe(2);
     } finally {
       unsub();

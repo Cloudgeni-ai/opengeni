@@ -23,7 +23,8 @@ import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import type { OpStreamConnection } from "@opengeni/events";
 import {
   createDb,
   createEnrollment,
@@ -33,10 +34,16 @@ import {
   getLiveEnrollmentConnection,
   claimEnrollmentConnection,
   readActiveSandbox,
+  setEnrollmentOpStreamState,
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { subjectFor } from "@opengeni/runtime";
+import {
+  createMockSelfhostedOpStream,
+  MockAgentResponder,
+  subjectFor,
+  type InMemoryOpStreamTransport,
+} from "@opengeni/runtime";
 import {
   listFleet,
   provisionSandbox,
@@ -56,18 +63,17 @@ const CONNECTION_INSTANCE_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const settings = testSettings({
   productAccessMode: "managed",
   sandboxSelfhostedEnabled: true,
-  // This fixture intentionally implements only the finite legacy request/reply
-  // protocol. Production's unbounded default requires the resumable op stream.
-  agentOpStreamEnabled: false,
+  agentOpStreamEnabled: true,
   sandboxSelfhostedExecTimeoutMs: 30_000,
   selfhostedRelayUrl: "wss://relay.example",
   publicBaseUrl: "https://app.example",
 });
 
 /** A MemoryEventBus whose responder, registered on the machine's agent subject,
- *  answers ping/exec/fsRead/fsWrite from an in-memory FS — an in-process stand-in
- *  for a real enrolled agent over NATS. `online=false` registers NO responder
- *  (the subject 503s → offline). */
+ *  answers request/reply control ops from an in-memory FS and runs exec through
+ *  the resumable op-stream protocol — an in-process stand-in for a real enrolled
+ *  agent over NATS. `online=false` registers NO responder (the subject 503s →
+ *  offline). */
 function busWithAgent(opts: {
   workspaceId: string;
   agentId: string;
@@ -78,81 +84,80 @@ function busWithAgent(opts: {
   if (!opts.online) {
     return bus;
   }
-  const files = new Map<string, Uint8Array>();
-  const enc = new TextEncoder();
+  const responder = new MockAgentResponder({ hostname: opts.hostname });
+  const stream = createMockSelfhostedOpStream({
+    responder,
+    workspaceId: opts.workspaceId,
+    agentId: opts.agentId,
+    connectionInstanceId: CONNECTION_INSTANCE_ID,
+  });
   bus.subscribeRequests(
     subjectFor(opts.workspaceId, opts.agentId, CONNECTION_INSTANCE_ID),
-    (payload) => {
+    async (payload, subject) => {
       const req = ControlRequest.decode(payload);
-      const op = req.op;
-      let res: ControlResponse;
-      if (op?.$case === "ping") {
-        res = {
-          requestId: req.requestId,
-          result: {
-            $case: "ping",
-            ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
-          },
-        };
-      } else if (op?.$case === "exec") {
-        const joined = op.exec.command.join(" ");
-        const stdout = /HOSTNAME|hostname/.test(joined) ? (opts.hostname ?? "the-machine") : joined;
-        res = {
-          requestId: req.requestId,
-          result: {
-            $case: "exec",
-            exec: {
-              exitCode: 0,
-              stdout: enc.encode(`${stdout}\n`),
-              stderr: new Uint8Array(0),
-              timedOut: false,
-              durationMs: "1",
-            },
-          },
-        };
-      } else if (op?.$case === "fsWrite") {
-        files.set(op.fsWrite.path, op.fsWrite.content);
-        res = {
-          requestId: req.requestId,
-          result: {
-            $case: "fsWrite",
-            fsWrite: { bytesWritten: String(op.fsWrite.content.length) },
-          },
-        };
-      } else if (op?.$case === "fsRead") {
-        const bytes = files.get(op.fsRead.path);
-        res = bytes
-          ? {
-              requestId: req.requestId,
-              result: {
-                $case: "fsRead",
-                fsRead: { content: bytes, totalSize: String(bytes.length) },
-              },
-            }
-          : {
-              requestId: req.requestId,
-              error: {
-                code: ErrorCode.ERROR_CODE_NOT_FOUND,
-                message: "no such file",
-                retryable: false,
-                detail: {},
-              },
-            };
-      } else {
-        res = {
-          requestId: req.requestId,
-          error: {
-            code: ErrorCode.ERROR_CODE_UNSUPPORTED,
-            message: "unsupported",
-            retryable: false,
-            detail: {},
-          },
-        };
-      }
+      const res = await stream.controlRpc.request(subject, req, { timeoutMs: 0 });
       return ControlResponse.encode(res).finish();
     },
   );
+  const opStreamConnection = opStreamConnectionFor(stream.transport);
+  (
+    bus as MemoryEventBus & { getOpStreamConnection: () => OpStreamConnection }
+  ).getOpStreamConnection = () => opStreamConnection;
   return bus;
+}
+
+function opStreamConnectionFor(transport: InMemoryOpStreamTransport): OpStreamConnection {
+  return {
+    subscribe(subject) {
+      const values: Array<{ data: Uint8Array }> = [];
+      const readers: Array<(result: IteratorResult<{ data: Uint8Array }>) => void> = [];
+      let done = false;
+      let release: (() => void) | undefined;
+      void transport
+        .subscribe(subject, (data) => {
+          const message = { data };
+          const reader = readers.shift();
+          if (reader) reader({ done: false, value: message });
+          else values.push(message);
+        })
+        .then((subscription) => {
+          if (done) subscription.unsubscribe();
+          else release = subscription.unsubscribe;
+        })
+        .catch(() => {
+          done = true;
+          for (const reader of readers.splice(0)) {
+            reader({ done: true, value: undefined });
+          }
+        });
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              const value = values.shift();
+              if (value) return Promise.resolve({ done: false as const, value });
+              if (done) return Promise.resolve({ done: true as const, value: undefined });
+              return new Promise<IteratorResult<{ data: Uint8Array }>>((resolve) =>
+                readers.push(resolve),
+              );
+            },
+          };
+        },
+        unsubscribe() {
+          if (done) return;
+          done = true;
+          release?.();
+          for (const reader of readers.splice(0)) {
+            reader({ done: true, value: undefined });
+          }
+        },
+      };
+    },
+    publish(subject, payload) {
+      void transport.publish(subject, payload);
+    },
+    async flush() {},
+  };
 }
 
 async function freshWorkspace(): Promise<{
@@ -208,6 +213,17 @@ async function seedFleet(
     leaseMs: 60_000,
   });
   expect(connection.claimed).toBe(true);
+  expect(
+    (
+      await setEnrollmentOpStreamState(db, {
+        accountId,
+        workspaceId,
+        enrollmentId: enrollment.id,
+        opStream: true,
+        connectionInstanceId: CONNECTION_INSTANCE_ID,
+      })
+    ).updated,
+  ).toBe(true);
   // Stamp lastSeenAt recent so a probe-miss would be "reconnecting", but our online
   // responder makes the probe succeed → online.
   await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;
@@ -331,6 +347,17 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
           leaseMs: 60_000,
         })
       ).claimed,
+    ).toBe(true);
+    expect(
+      (
+        await setEnrollmentOpStreamState(db, {
+          accountId: account!.id,
+          workspaceId: originWorkspace!.id,
+          enrollmentId: machine.enrollmentId,
+          opStream: true,
+          connectionInstanceId,
+        })
+      ).updated,
     ).toBe(true);
     await admin`update enrollments set last_seen_at = now() where id = ${machine.enrollmentId}`;
     const session = await createSession(db, {
