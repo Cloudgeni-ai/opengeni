@@ -99,9 +99,13 @@ cannot parse `failed` with a visible `system.update.cancelled{reason:
 "unrecognized_kind"}` instead of throwing.
 
 When a child's `child_terminal_result` is delivered, that child's still-pending
-`child_requires_action`, `child_progress`, and `child_waiting_capacity` notices
-on the parent are superseded (`reason: superseded_by_terminal`): they describe a
-state that no longer exists. A `failSessionWorkBeforeAttemptClaim` that cancels a
+`child_progress` and `child_waiting_capacity` notices on the parent are
+superseded (`reason: superseded_by_terminal`): they describe a state that no
+longer exists. A pending `child_requires_action` is deliberately left to its
+exact (child, turn, generation) resolution: terminal delivery is unordered
+against notice creation (a stale idle result may arrive late through the
+reaper after the child got a new prompt and froze again), and every terminal
+path emits that resolution itself. A `failSessionWorkBeforeAttemptClaim` that cancels a
 child's pending human-input rows emits the same `child_requires_action_resolved`
 (`outcome: cancelled`, `respondedByKind: system`) as an ordinary terminal
 settlement.

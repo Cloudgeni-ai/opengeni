@@ -63336,9 +63336,14 @@ async function supersedeStaleChildLifecycleNoticesInTransaction(
     return rows.map((row) => row.id).sort();
   }
   if (input.inserted.kind === "child_terminal_result") {
-    // The child reached a terminal boundary: its still-pending blocked-on-input,
-    // progress, and capacity-wait notices describe a state that no longer
-    // exists. (A pending resolution stays: it is already informational.)
+    // The child reached a terminal boundary: its still-pending progress and
+    // capacity-wait notices describe a state that no longer exists. A pending
+    // child_requires_action is deliberately NOT superseded here: terminal
+    // delivery is unordered against notice creation (a stale idle result
+    // delivered late by the reaper may land after the child got a new prompt
+    // and froze again), and every terminal path already emits its own exact
+    // (child, turn, generation) resolution, which is the ordered supersession.
+    // (A pending resolution stays: it is already informational.)
     const rows = await tx
       .update(schema.sessionSystemUpdates)
       .set({ state: "superseded" })
@@ -63346,11 +63351,7 @@ async function supersedeStaleChildLifecycleNoticesInTransaction(
         and(
           eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
           eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-          inArray(schema.sessionSystemUpdates.kind, [
-            "child_requires_action",
-            "child_progress",
-            "child_waiting_capacity",
-          ]),
+          inArray(schema.sessionSystemUpdates.kind, ["child_progress", "child_waiting_capacity"]),
           eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
           eq(schema.sessionSystemUpdates.state, "pending"),
         ),

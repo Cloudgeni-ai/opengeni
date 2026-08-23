@@ -894,10 +894,39 @@ describe("child lifecycle notices", () => {
     });
   });
 
-  test("a delivered child_terminal_result supersedes that child's pending notices", async () => {
+  test("a delivered child_terminal_result supersedes progress but not a blocked-on-input notice", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { goal: true, message: "orchestrate" });
     const child = await startSession(grant, { parent, message: "work", goal: true });
+    const progress = await recordSessionGoalProgressWithEvent(
+      client.db,
+      grant.workspaceId,
+      child.session.id,
+      {
+        progressNote: "almost there",
+        command: {
+          accountId: grant.accountId,
+          actor: {
+            type: "agent_attempt",
+            attemptId: child.attemptId,
+            sessionId: child.session.id,
+            turnId: child.turn.id,
+            executionGeneration: child.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      },
+    );
+    const progressDelivered = await deliver(
+      (await outbox(
+        grant,
+        childProgressDedupeKey({
+          childSessionId: child.session.id,
+          receiptId: progress.operationId,
+        }),
+      ))!,
+    );
+    if (progressDelivered.reason !== "added") throw new Error("progress not added");
     await freezeChild(grant, child);
     const blocked = await deliver(
       (await outbox(
@@ -910,6 +939,10 @@ describe("child lifecycle notices", () => {
       ))!,
     );
     if (blocked.reason !== "added") throw new Error("notice not added");
+    // Terminal delivery is unordered against notice creation (a stale idle
+    // result may arrive late through the reaper), so it supersedes only the
+    // progress/capacity notices; the blocked-on-input notice is superseded by
+    // the exact (child, turn, generation) resolution every terminal path emits.
     const terminal = await addSessionSystemUpdateWithSourceMutation(
       client.db,
       {
@@ -935,14 +968,14 @@ describe("child lifecycle notices", () => {
       "system.update.cancelled",
     ]);
     expect(terminal.events[1]!.payload).toMatchObject({
-      updateIds: [blocked.update.id],
+      updateIds: [progressDelivered.update.id],
       reason: "superseded_by_terminal",
     });
     expect(
       (
         await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId, parent.session.id)
-      ).map((update) => update.kind),
-    ).toEqual(["child_terminal_result"]);
+      ).map((update) => update.id),
+    ).toEqual([blocked.update.id, terminal.update.id]);
   });
 
   test("system resolutions keep their responder kind and pre-claim failure resolves leftovers", async () => {
