@@ -6,6 +6,7 @@ import {
   type SessionRealtimeController,
   type SessionRealtimeControllerSnapshot,
   type CreateSessionRealtimeControllerOptions,
+  type SessionRealtimeLifecycleProjection,
   type SessionRealtimeModel,
   type WorkspaceRealtimeModelCatalogItem,
 } from "@opengeni/sdk/realtime";
@@ -280,7 +281,7 @@ export function useSessionRealtime(options: {
   const eventsReadyRef = useRef(options.eventsReady);
   lifecycleRef.current = lifecycle;
   eventsReadyRef.current = options.eventsReady;
-  const lifecycleActive = lifecycle?.state === "active";
+  const lifecycleActive = sessionRealtimeLifecycleIsActive(lifecycle);
 
   useEffect(() => {
     let disposed = false;
@@ -401,6 +402,14 @@ export function useSessionRealtime(options: {
   };
 }
 
+function sessionRealtimeLifecycleIsActive(
+  lifecycle: SessionRealtimeLifecycleProjection | null,
+): boolean {
+  if (lifecycle?.state !== "active") return false;
+  const leaseExpiresAt = Date.parse(lifecycle.leaseExpiresAt);
+  return !Number.isFinite(leaseExpiresAt) || leaseExpiresAt > Date.now();
+}
+
 export function SessionRealtimeControl(props: {
   client?: RealtimeControllerClient | undefined;
   workspaceId?: string | undefined;
@@ -429,11 +438,12 @@ export function SessionRealtimeControl(props: {
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }) {
   const lifecycle = useMemo(() => projectSessionRealtimeLifecycle(props.events), [props.events]);
+  const lifecycleActive = sessionRealtimeLifecycleIsActive(lifecycle);
   const selection = useRealtimeModelSelection({
     client: props.client,
     workspaceId: props.workspaceId,
     codexConnected: props.codexConnected,
-    activeModel: lifecycle?.state === "active" ? lifecycle.model : null,
+    activeModel: lifecycleActive && lifecycle?.state === "active" ? lifecycle.model : null,
   });
   const selectedModel = selection.selectedModel;
   const realtime = useSessionRealtime({
@@ -457,7 +467,7 @@ export function SessionRealtimeControl(props: {
 
   useEffect(() => {
     const pending = autostartModelRef.current;
-    if (!pending || autostartStartedRef.current || lifecycle?.state === "active") return;
+    if (!pending || autostartStartedRef.current || lifecycleActive) return;
     const available = models.some((model) => model.id === pending && model.available);
     if (!available) return;
     if (selectedRealtimeModel.id !== pending) {
@@ -476,7 +486,7 @@ export function SessionRealtimeControl(props: {
       });
   }, [
     canStart,
-    lifecycle?.state,
+    lifecycleActive,
     models,
     props.sessionId,
     props.workspaceId,

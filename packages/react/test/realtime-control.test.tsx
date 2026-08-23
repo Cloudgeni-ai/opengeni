@@ -174,7 +174,7 @@ describe("ordinary session Codex realtime control", () => {
         model: "gpt-live-1-boulder-alpha",
         version: 1,
         connectionEpoch: 1,
-        leaseExpiresAt: "2026-07-29T07:00:30.000Z",
+        leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
       occurredAt: "2026-07-29T07:00:00.000Z",
     };
@@ -217,6 +217,56 @@ describe("ordinary session Codex realtime control", () => {
     } finally {
       consoleError.mockRestore();
     }
+  });
+
+  test("re-enables voice when the durable foreign-owner lease is already expired", async () => {
+    const started: SessionEvent = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      workspaceId: "11111111-1111-4111-8111-111111111111",
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      sequence: 10,
+      type: "session.realtime.started",
+      payload: {
+        realtimeId: "33333333-3333-4333-8333-333333333333",
+        operationId: "44444444-4444-4444-8444-444444444444",
+        model: "gpt-live-1-boulder-alpha",
+        version: 1,
+        connectionEpoch: 1,
+        leaseExpiresAt: "2020-07-29T07:00:30.000Z",
+      },
+      occurredAt: "2020-07-29T07:00:00.000Z",
+    };
+    const client = {
+      beginSessionRealtime: async () => {
+        throw new Error("start was not requested");
+      },
+    } as unknown as OpenGeniClient;
+    const events = [started];
+
+    function Harness() {
+      const realtime = useSessionRealtime({
+        client,
+        workspaceId: started.workspaceId,
+        sessionId: started.sessionId,
+        sessionStatus: "idle",
+        effectiveControl,
+        events,
+        eventsReady: true,
+        codexConnected: true,
+      });
+      return (
+        <output data-status={realtime.snapshot.status} data-can-start={String(realtime.canStart)} />
+      );
+    }
+
+    await act(async () => root.render(<Harness />));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+      if (container.querySelector("output")?.getAttribute("data-can-start") === "true") break;
+    }
+    const output = container.querySelector("output");
+    expect(output?.getAttribute("data-status")).toBe("idle");
+    expect(output?.getAttribute("data-can-start")).toBe("true");
   });
 
   test("keeps one controller while exposing the latest host model-context callback", async () => {
