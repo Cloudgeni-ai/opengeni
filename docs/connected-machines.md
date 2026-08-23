@@ -309,8 +309,8 @@ Organization- and user-scoped machines used from another same-organization
 workspace retain the machine's origin workspace for their physical control and
 relay route; the session workspace remains the authorization target. A refused
 op-stream `OpStart` may be retried only after a fresh live admission proves the
-exact route and policy are still current, and a proven-unstarted downgrade to
-legacy request/reply takes another fresh admission immediately before dispatch.
+exact route and policy are still current. It is never retried through a second
+wire form.
 Exec and Git additionally read the policy revision and enforcement capabilities
 from that authoritative admission. Memory enforcement and CPU-quota enforcement
 are separately advertised; a configured unsupported limit fails command
@@ -372,13 +372,12 @@ deadline by default), while preserving the active sandbox pointer and epoch.
 
 ### Streaming exec (op-stream)
 
-Runners that advertise the `op_stream` capability serve exec over the
-op-stream protocol when `OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on).
-This is required for the default unbounded-duration mode. An older runner may
-still use legacy request/reply only when the deployment explicitly configures a
-positive exec timeout; otherwise OpenGeni refuses before starting the command
-instead of launching work whose caller can later disappear ambiguously. Output
-streams as sequenced, credit-flowed frames the runner retains
+Connected Machine exec requires a runner that advertises the `op_stream`
+capability and serves the op-stream protocol with
+`OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on). OpenGeni refuses before
+starting a command when op-stream is unavailable or unsupported; it never
+downgrades exec to request/reply. Output streams as sequenced, credit-flowed
+frames the runner retains
 for replay: a connection blip mid-command detaches instead of killing the
 child, and the server re-attaches and collects the complete output byte-exact
 (blake3-verified). Each exec carries a durable op id derived from the model's

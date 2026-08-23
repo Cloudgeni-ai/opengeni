@@ -1242,8 +1242,8 @@ export async function establishSelfhostedTurnSession(
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the
-    // capability AND the server flag is on. It is required when execTimeoutMs=0;
-    // legacy request/reply remains available only for explicitly bounded exec.
+    // capability AND the server flag is on. Connected Machine exec fails closed
+    // when it is absent; there is no request/reply downgrade.
     ...(opStream !== undefined ? { opStream } : {}),
   });
   return {

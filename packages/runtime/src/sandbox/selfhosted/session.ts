@@ -341,7 +341,7 @@ export interface SelfhostedSessionDeps {
    *  ControlRequest so the agent can reject a stale op with ERROR_CODE_FENCED).
    *  Defaults to 0 (no fence) for the negotiation-only / test path. */
   epoch?: number;
-  /** The CONTROL-op timeout (ping/fs/desktop/pty and the exec wire fallback). The
+  /** The CONTROL-op timeout (ping/fs/desktop/pty and op-stream control RPCs). The
    *  agent's own control liveness must stay responsive, so this is short (the 30s
    *  default). Override for tests or per-deployment tuning. */
   timeoutMs?: number;
@@ -349,7 +349,7 @@ export interface SelfhostedSessionDeps {
    * The EXEC process deadline — distinct from `timeoutMs`. A real command
    * (compile, test run, install) routinely outlives the short control timeout, so
    * a positive value asks the agent to kill the child at that wall; 0 means no
-   * duration deadline over op-stream. Omitted preserves the legacy `timeoutMs`
+   * duration deadline over op-stream. Omitted preserves the `timeoutMs` value
    * fallback for older embedding callers; production settings always thread this
    * field explicitly.
    */
@@ -762,17 +762,16 @@ export class SelfhostedSession {
     const opKind = op.$case;
     // This is the last shared boundary before every request/reply provider
     // operation. Even a cached routed or pinned session must re-resolve its live
-    // authority here; an already-admitted exec/Git threads its exact snapshot so
-    // the op-stream and legacy paths cannot disagree.
-    const commandOperation = opKind === "exec" || opKind === "git";
+    // authority here; an already-admitted Git operation threads its exact
+    // snapshot. Exec uses the op-stream client and never enters this helper.
+    const commandOperation = opKind === "git";
     let operationAdmission = admittedCommand ?? (await this.admitOperation(commandOperation));
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
     for (;;) {
-      const commandAdmission =
-        opKind === "exec" || opKind === "git" ? operationAdmission : undefined;
+      const commandAdmission = opKind === "git" ? operationAdmission : undefined;
       const resourcePolicy = commandAdmission?.resourcePolicy;
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
@@ -910,51 +909,17 @@ export class SelfhostedSession {
       timeoutMs: executionTimeoutMs,
     };
     const opStreamClient = this.opStreamClientFor(admission);
-    let legacyAdmission = admission;
-    if (opStreamClient) {
-      try {
-        return await this.execViaOpStream(opStreamClient, execReq, executionTimeoutMs);
-      } catch (error) {
-        // The transport had no live connection, or the runner refused the START
-        // itself (capability/downgrade race). The op provably never ran. A bounded
-        // command may use the legacy fallback; an unbounded command must not be
-        // launched onto a request/reply path that can stop waiting invisibly.
-        if (!(error instanceof OpStreamUnavailableError)) {
-          throw error;
-        }
-        if (executionTimeoutMs === 0) {
-          throw unboundedExecRequiresOpStream(error);
-        }
-        // A runner refusal or unavailable stream proves the START never
-        // executed, but time elapsed after the first admission. Re-read live
-        // authority at the final boundary before the distinct legacy provider
-        // dispatch. The ordinary no-op-stream path retains its single immediate
-        // admission below.
-        legacyAdmission = await this.admitCommand();
+    if (!opStreamClient) {
+      throw execRequiresOpStream();
+    }
+    try {
+      return await this.execViaOpStream(opStreamClient, execReq, executionTimeoutMs);
+    } catch (error) {
+      if (error instanceof OpStreamUnavailableError) {
+        throw execRequiresOpStream(error);
       }
+      throw error;
     }
-    if (executionTimeoutMs === 0) {
-      throw unboundedExecRequiresOpStream();
-    }
-    return this.execLegacy(execReq, executionTimeoutMs, legacyAdmission);
-  }
-
-  /** The legacy monolithic exec request/reply — the permanent fallback wire
-   *  form (and the only form for runners without `op_stream`). */
-  private async execLegacy(
-    execReq: ExecRequest,
-    executionTimeoutMs: number,
-    admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
-  ): Promise<SelfhostedExecResult> {
-    const result = await this.call(
-      { $case: "exec", exec: execReq },
-      executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS,
-      admission,
-    );
-    if (result.$case !== "exec") {
-      throw new Error(`selfhosted exec: unexpected result ${result.$case}`);
-    }
-    return execResultToChannelA(result.exec, executionTimeoutMs);
   }
 
   /**
@@ -996,11 +961,7 @@ export class SelfhostedSession {
       });
       return execResultToChannelA(outcome.response, executionTimeoutMs);
     } catch (error) {
-      if (error instanceof OpStreamUnavailableError) {
-        // Not a fault: the caller falls back to the legacy exec, which emits
-        // its own observation.
-        throw error;
-      }
+      if (error instanceof OpStreamUnavailableError) throw error;
       const controlError =
         error instanceof SelfhostedControlError
           ? error
@@ -1630,7 +1591,7 @@ export class SelfhostedSandboxClient {
     timeoutMs?: number;
     /** The exec process deadline threaded into every bound session (distinct from
      *  `timeoutMs`; 0 means no duration deadline, while omission preserves the
-     *  legacy control-timeout fallback for older embedding callers). */
+     *  historical control-timeout value fallback for embedding callers). */
     execTimeoutMs?: number;
     operationResourcePolicy?: SelfhostedOperationResourcePolicy;
     operationResourcePolicySupported?: boolean;
@@ -1801,7 +1762,7 @@ export interface SelfhostedSessionBuild {
   /** The control-op timeout (ping/fs/desktop/pty). Absent ⇒ the 30s default. */
   timeoutMs?: number;
   /** The exec process deadline, distinct from `timeoutMs`. 0 = none; absence
-   *  preserves the control-timeout fallback for older embedding callers. */
+   *  preserves the historical control-timeout value fallback for embedding callers. */
   execTimeoutMs?: number;
   /** Per-enrollment optional command policy resolved from the same database
    * snapshot as the exact connection identity. */
@@ -1815,8 +1776,7 @@ export interface SelfhostedSessionBuild {
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
   /** The op-stream exec transport (present when the runner advertises it and the
-   *  server flag is on). Required for an unbounded command; bounded commands may
-   *  use the legacy request/reply fallback. */
+   *  server flag is on). Required for every Connected Machine exec command. */
   opStream?: SelfhostedOpStreamDeps;
 }
 
@@ -1935,12 +1895,12 @@ function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): Selfho
   };
 }
 
-function unboundedExecRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedControlError {
+function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedControlError {
   const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
   return new SelfhostedControlError({
     message: runnerUpgrade
-      ? "This Connected Machine does not advertise the streaming command protocol required for unbounded execution. Update and reconnect the OpenGeni agent, or explicitly configure a positive Connected Machine exec timeout for legacy compatibility. The command was not started."
-      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not fall back to an ambiguous request/reply command because unbounded execution is configured; the command was not started. Retry after the machine reconnects.",
+      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the OpenGeni agent. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
     code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,

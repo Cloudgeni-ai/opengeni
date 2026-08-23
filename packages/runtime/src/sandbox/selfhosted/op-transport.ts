@@ -63,8 +63,8 @@ export interface OpStreamTransport {
 }
 
 /** Thrown before OpStart when the stream transport is unavailable or the runner
- *  does not support it. A bounded command may safely use legacy request/reply;
- *  an unbounded command fails before execution because legacy has an outer wall. */
+ *  does not support the required protocol. Exec fails before dispatch and never
+ *  retries through a request/reply wire form. */
 export class OpStreamUnavailableError extends Error {
   readonly name = "OpStreamUnavailableError";
 

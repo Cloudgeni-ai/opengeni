@@ -17,6 +17,8 @@ use opengeni_agent_proto::v1::{
 use prost::bytes::Bytes;
 use prost::Message as _;
 
+use crate::opstream::{grant_all_acks, OpCollector, OpDriver, OpReply};
+
 /// A monotonic source of unique request ids (correlates a reply to its request).
 static REQUEST_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -63,55 +65,73 @@ impl Op {
         }
     }
 
-    /// Builds the wire op (epoch 0 → never fenced; the agent holds epoch 0).
-    fn into_wire(self) -> ReqOp {
+    /// Builds either a request/reply op or a replayable op-stream exec.
+    fn prepare(self) -> PreparedOp {
         match self {
-            Op::Ping => ReqOp::Ping(v1::PingRequest {
+            Op::Ping => PreparedOp::Control(ReqOp::Ping(v1::PingRequest {
                 nonce: REQUEST_SEQ.load(Ordering::Relaxed),
-            }),
-            Op::ExecEcho => ReqOp::Exec(v1::ExecRequest {
-                command: vec!["echo hx".to_string()],
-                shell: true,
-                timeout_ms: 0,
-                ..Default::default()
-            }),
-            Op::ExecSleep { secs, timeout_ms } => ReqOp::Exec(v1::ExecRequest {
-                command: vec!["sleep".to_string(), secs],
-                shell: false,
-                timeout_ms,
-                ..Default::default()
-            }),
-            Op::ExecGen { bytes } => ReqOp::Exec(v1::ExecRequest {
-                command: vec![format!("head -c {bytes} /dev/zero | tr '\\0' 'a'")],
-                shell: true,
-                timeout_ms: 0,
-                ..Default::default()
-            }),
-            Op::ExecMarker { secs, marker_path } => ReqOp::Exec(v1::ExecRequest {
-                command: vec![format!("sleep {secs}; echo done > {marker_path}")],
-                shell: true,
-                timeout_ms: 0,
-                ..Default::default()
-            }),
-            Op::FsStat { path } => ReqOp::FsStat(v1::FsStatRequest { path }),
-            Op::FsList { path } => ReqOp::FsList(v1::FsListRequest {
+            })),
+            Op::ExecEcho => PreparedOp::Exec {
+                request: v1::ExecRequest {
+                    command: vec!["echo hx".to_string()],
+                    shell: true,
+                    ..Default::default()
+                },
+                deadline_after_ms: 0,
+            },
+            Op::ExecSleep { secs, timeout_ms } => PreparedOp::Exec {
+                request: v1::ExecRequest {
+                    command: vec!["sleep".to_string(), secs],
+                    shell: false,
+                    ..Default::default()
+                },
+                deadline_after_ms: timeout_ms,
+            },
+            Op::ExecGen { bytes } => PreparedOp::Exec {
+                request: v1::ExecRequest {
+                    command: vec![format!("head -c {bytes} /dev/zero | tr '\\0' 'a'")],
+                    shell: true,
+                    ..Default::default()
+                },
+                deadline_after_ms: 0,
+            },
+            Op::ExecMarker { secs, marker_path } => PreparedOp::Exec {
+                request: v1::ExecRequest {
+                    command: vec![format!("sleep {secs}; echo done > {marker_path}")],
+                    shell: true,
+                    ..Default::default()
+                },
+                deadline_after_ms: 0,
+            },
+            Op::FsStat { path } => PreparedOp::Control(ReqOp::FsStat(v1::FsStatRequest { path })),
+            Op::FsList { path } => PreparedOp::Control(ReqOp::FsList(v1::FsListRequest {
                 path,
                 recursive: false,
-            }),
-            Op::FsRead { path } => ReqOp::FsRead(v1::FsReadRequest {
+            })),
+            Op::FsRead { path } => PreparedOp::Control(ReqOp::FsRead(v1::FsReadRequest {
                 path,
                 offset: 0,
                 length: 0,
-            }),
-            Op::FsWrite { path, bytes } => ReqOp::FsWrite(v1::FsWriteRequest {
-                path,
-                content: Bytes::from(vec![b'a'; usize::try_from(bytes).unwrap_or(usize::MAX)]),
-                create_parents: true,
-                append: false,
-                mode: 0,
-            }),
+            })),
+            Op::FsWrite { path, bytes } => {
+                PreparedOp::Control(ReqOp::FsWrite(v1::FsWriteRequest {
+                    path,
+                    content: Bytes::from(vec![b'a'; usize::try_from(bytes).unwrap_or(usize::MAX)]),
+                    create_parents: true,
+                    append: false,
+                    mode: 0,
+                }))
+            }
         }
     }
+}
+
+enum PreparedOp {
+    Control(ReqOp),
+    Exec {
+        request: v1::ExecRequest,
+        deadline_after_ms: u32,
+    },
 }
 
 /// How an issued op resolved.
@@ -208,12 +228,25 @@ impl Driver {
     /// `OpOutcome`.
     pub async fn execute(&self, subject: &str, op: Op, timeout: Duration) -> OpOutcome {
         let label = op.label();
+        let prepared = op.prepare();
+        if let PreparedOp::Exec {
+            request,
+            deadline_after_ms,
+        } = prepared
+        {
+            return self
+                .execute_streamed_exec(subject, label, request, deadline_after_ms, timeout)
+                .await;
+        }
+        let PreparedOp::Control(op) = prepared else {
+            unreachable!("streamed exec returned above")
+        };
         let request_id = format!("hx-{}", REQUEST_SEQ.fetch_add(1, Ordering::Relaxed));
         let control = ControlRequest {
             request_id,
             epoch: 0,
             resource_policy: None,
-            op: Some(op.into_wire()),
+            op: Some(op),
         };
         let payload = Bytes::from(control.encode_to_vec());
         if payload.len() > self.max_payload() {
@@ -246,6 +279,119 @@ impl Driver {
             Ok(message) => classify_reply(label, latency_us, &message.payload),
         }
     }
+
+    async fn execute_streamed_exec(
+        &self,
+        subject: &str,
+        label: &'static str,
+        request: v1::ExecRequest,
+        deadline_after_ms: u32,
+        timeout: Duration,
+    ) -> OpOutcome {
+        const CREDIT_BYTES: u64 = 64 * 1024 * 1024;
+        const GENERATION: u64 = 1;
+
+        let op_id = format!("hx-{}", REQUEST_SEQ.fetch_add(1, Ordering::Relaxed));
+        let started_at = Instant::now();
+        let collector = match OpCollector::attach_rpc(&self.client, subject, &op_id).await {
+            Ok(collector) => Arc::new(collector),
+            Err(error) => return stream_transport_outcome(label, started_at, error),
+        };
+        let driver = OpDriver::from_rpc_subject(self.client.clone(), subject);
+        let acker = grant_all_acks(
+            driver.clone(),
+            collector.clone(),
+            op_id.clone(),
+            GENERATION,
+            CREDIT_BYTES,
+        );
+        let deadline_ms = if deadline_after_ms == 0 {
+            0
+        } else {
+            epoch_ms().saturating_add(i64::from(deadline_after_ms))
+        };
+        let start = driver
+            .start_exec_request(&op_id, request, CREDIT_BYTES, deadline_ms)
+            .await;
+        match start {
+            Err(error) => {
+                acker.abort();
+                return stream_transport_outcome(label, started_at, error);
+            }
+            Ok(OpReply::Error(code)) => {
+                acker.abort();
+                return OpOutcome {
+                    label,
+                    latency_us: elapsed_us(started_at),
+                    class: OpClass::AgentError(code.to_ascii_uppercase()),
+                    exec_timed_out: false,
+                    payload_len: None,
+                };
+            }
+            Ok(OpReply::Started(started)) if !started.accepted => {
+                acker.abort();
+                return OpOutcome {
+                    label,
+                    latency_us: elapsed_us(started_at),
+                    class: OpClass::AgentError("OP_START_REFUSED".to_string()),
+                    exec_timed_out: false,
+                    payload_len: None,
+                };
+            }
+            Ok(OpReply::Started(_)) => {}
+            Ok(OpReply::Status(_)) => {
+                acker.abort();
+                return stream_transport_outcome(
+                    label,
+                    started_at,
+                    "UNEXPECTED_OP_REPLY".to_string(),
+                );
+            }
+        }
+
+        let Some((exit_seq, exit)) = collector.wait_for_exit(timeout).await else {
+            acker.abort();
+            return stream_transport_outcome(label, started_at, "CLIENT_TIMEOUT".to_string());
+        };
+        acker.abort();
+        let _ = driver
+            .ack(&op_id, exit_seq, CREDIT_BYTES, GENERATION, true)
+            .await;
+        let class = if exit.failure_code.is_empty() {
+            OpClass::Ok
+        } else {
+            OpClass::AgentError(exit.failure_code.clone())
+        };
+        OpOutcome {
+            label,
+            latency_us: elapsed_us(started_at),
+            class,
+            exec_timed_out: exit.timed_out,
+            payload_len: Some(collector.channel_bytes(v1::OpChannel::Stdout).len() as u64),
+        }
+    }
+}
+
+fn elapsed_us(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn epoch_ms() -> i64 {
+    let value = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn stream_transport_outcome(label: &'static str, started: Instant, error: String) -> OpOutcome {
+    OpOutcome {
+        label,
+        latency_us: elapsed_us(started),
+        class: OpClass::Transport(error),
+        exec_timed_out: false,
+        payload_len: None,
+    }
 }
 
 /// Maps a decoded reply into an outcome.
@@ -269,7 +415,6 @@ fn classify_reply(label: &'static str, latency_us: u64, payload: &[u8]) -> OpOut
         };
     }
     let (exec_timed_out, payload_len) = match response.result {
-        Some(RespResult::Exec(e)) => (e.timed_out, Some(e.stdout.len() as u64)),
         Some(RespResult::FsRead(r)) => (false, Some(r.content.len() as u64)),
         Some(RespResult::FsWrite(w)) => (false, Some(w.bytes_written)),
         _ => (false, None),

@@ -987,8 +987,8 @@ message AgentUpdateProgress {
 // requests and two new fire-and-forget subjects for the bulk direction:
 //   * `agent.<ws>.<id>.connection.<instance>.op.<op_id>` — runner→server frames.
 //   * `agent.<ws>.<id>.connection.<instance>.ack` — server→runner acks/credit.
-// Everything here is ADDITIVE: the legacy request/reply exec/fs/git ops remain
-// valid forever and are served by adapters over the same engine. These types
+// Exec is served only through this replayable op-stream protocol. Other
+// request/reply control operations remain on the envelope below. These types
 // wire NO behavior on their own — they are the contract the runtime implements.
 // (Wire subject strings keep the "agent." prefix for compatibility; the runner
 // builds them via named helpers.)
@@ -1202,14 +1202,15 @@ message ControlRequest {
   string request_id = 1;
   uint32 epoch = 2;
   // Per-connection policy snapshot attached to the operation request. It lives
-  // on the envelope so both legacy exec/git and replayable OpStart share one
+  // on the envelope so request/reply Git and replayable OpStart share one
   // contract. Absent means unrestricted by the control plane.
   OperationResourcePolicy resource_policy = 3;
+  reserved 13;
+  reserved "exec";
   oneof op {
     PingRequest ping = 10;
     Hello hello = 11;
     ResumeRequest resume = 12;
-    ExecRequest exec = 13;
     FsReadRequest fs_read = 14;
     FsWriteRequest fs_write = 15;
     FsListRequest fs_list = 16;
@@ -1246,11 +1247,12 @@ message ControlResponse {
   string request_id = 1;
   // Present when the op failed; when set, `result` is empty.
   AgentError error = 2;
+  reserved 13;
+  reserved "exec";
   oneof result {
     PingResponse ping = 10;
     HelloAck hello = 11;
     ResumeResponse resume = 12;
-    ExecResponse exec = 13;
     FsReadResponse fs_read = 14;
     FsWriteResponse fs_write = 15;
     FsListResponse fs_list = 16;

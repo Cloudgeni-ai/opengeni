@@ -492,7 +492,7 @@ describe("op-stream exec (fake runner)", () => {
     expect(ok?.retries).toBe(3);
   });
 
-  test("unavailable transport falls back to the legacy exec path", async () => {
+  test("unavailable transport fails before request-reply exec dispatch", async () => {
     const transport = new InMemoryOpStreamTransport();
     transport.available = false;
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
@@ -506,11 +506,16 @@ describe("op-stream exec (fake runner)", () => {
       retryClock: { sleep: async () => {}, jitter: () => 0.5 },
       opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
     });
-    const result = await session.exec({ cmd: "echo legacy" });
-    expect(result.exitCode).toBe(0);
+    await expect(session.exec({ cmd: "must-not-start" })).rejects.toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_STREAM,
+      reason: "agent_reconnecting",
+      retryable: true,
+    });
+    expect(responder.requests).toHaveLength(0);
   });
 
-  test("op-stream fallback takes a fresh authoritative command admission", async () => {
+  test("op-stream transport failure does not take a second admission for fallback", async () => {
     const transport = new InMemoryOpStreamTransport();
     transport.available = false;
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
@@ -546,15 +551,14 @@ describe("op-stream exec (fake runner)", () => {
       },
     });
 
-    const result = await session.exec({ cmd: "echo legacy" });
-
-    expect(result.exitCode).toBe(0);
-    expect(admissionReads).toBe(2);
-    expect(responder.requests).toHaveLength(1);
-    expect(responder.requests[0]?.subject).toContain("connection.admitted-instance.rpc");
-    expect(responder.requests[0]?.req.resourcePolicy).toEqual({
-      memoryMaxBytes: "134217728",
+    await expect(session.exec({ cmd: "must-not-start" })).rejects.toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_STREAM,
+      reason: "agent_reconnecting",
+      retryable: true,
     });
+    expect(admissionReads).toBe(1);
+    expect(responder.requests).toHaveLength(0);
   });
 
   test("revocation after a refused OpStart fences the proven-unstarted retry", async () => {
@@ -668,7 +672,7 @@ describe("op-stream exec (fake runner)", () => {
     expect(runner.runs.has("call_subscribe_revoke:0")).toBe(false);
   });
 
-  test("revocation after an OpStart downgrade fences legacy fallback dispatch", async () => {
+  test("an OpStart protocol refusal never dispatches request-reply exec", async () => {
     const transport = new InMemoryOpStreamTransport();
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
     const fallback = new MockAgentResponder();
@@ -687,14 +691,12 @@ describe("op-stream exec (fake runner)", () => {
         detail: {},
       },
     });
-    let authorized = true;
     let startDispatches = 0;
     const rpc: ControlRpc = {
       request: async (subject, request, opts) => {
         const response = await runner.request(subject, request, opts);
         if (request.op?.$case === "opStart") {
           startDispatches += 1;
-          authorized = false;
         }
         return response;
       },
@@ -708,21 +710,18 @@ describe("op-stream exec (fake runner)", () => {
       timeoutMs: 2_000,
       execTimeoutMs: 5_000,
       retryClock: { sleep: async () => {}, jitter: () => 0.5 },
-      resolveOperationAdmission: async () =>
-        authorized
-          ? {
-              connectionInstanceId: "connection-1",
-              operationResourcePolicy: {
-                memoryMaxBytes: null,
-                memoryHighBytes: null,
-                cpuMaxMillicores: null,
-                revision: 1,
-              },
-              operationResourcePolicySupported: true,
-              operationCpuQuotaSupported: true,
-              opStream: { transport },
-            }
-          : null,
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: "connection-1",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 1,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+        opStream: { transport },
+      }),
     });
     const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
 
@@ -730,12 +729,16 @@ describe("op-stream exec (fake runner)", () => {
       runWithToolCallCorrelation("call_fallback_revoke", () =>
         session.exec({ cmd: "must-not-run" }),
       ),
-    ).rejects.toThrow(/authoritative live runner connection/iu);
+    ).rejects.toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
     expect(startDispatches).toBe(1);
     expect(fallback.requests).toHaveLength(0);
   });
 
-  test("unbounded exec never degrades to legacy when the stream is unavailable", async () => {
+  test("unbounded exec fails without request-reply downgrade when the stream is unavailable", async () => {
     const transport = new InMemoryOpStreamTransport();
     transport.available = false;
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
@@ -764,7 +767,7 @@ describe("op-stream exec (fake runner)", () => {
     expect(responder.requests).toHaveLength(0);
   });
 
-  test("a runner that refuses OpStart (protocol) falls back to the legacy exec", async () => {
+  test("a runner that refuses OpStart (protocol) is unsupported without fallback", async () => {
     const transport = new InMemoryOpStreamTransport();
     const { MockAgentResponder } = await import("../src/sandbox/selfhosted/testing");
     const responder = new MockAgentResponder();
@@ -793,10 +796,14 @@ describe("op-stream exec (fake runner)", () => {
       opStream: { transport, ackIntervalMs: 20, silenceTimeoutMs: 120, reconnectHoldMs: 600 },
     });
     const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
-    const result = await runWithToolCallCorrelation("call_old", () =>
-      session.exec({ cmd: "echo legacy" }),
-    );
-    expect(result.exitCode).toBe(0);
+    await expect(
+      runWithToolCallCorrelation("call_old", () => session.exec({ cmd: "must-not-start" })),
+    ).rejects.toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
+    expect(responder.requests).toHaveLength(0);
   });
 
   test("non-tool exec (no correlation context) still streams under an anonymous id", async () => {
@@ -804,16 +811,17 @@ describe("op-stream exec (fake runner)", () => {
     // No script is registered for an anon id we cannot predict — so instead
     // assert the OTHER direction: the exec reaches the fake runner as an
     // opStart whose id is NOT correlation-shaped, and the typed no-script
-    // refusal (PROTOCOL) falls back to legacy, which MockAgentResponder is not
-    // wired for here — so expect the typed legacy offline surface instead.
-    // Simpler and load-bearing: unique anon ids never collide with dedup.
+    // refusal (PROTOCOL) becomes a typed unsupported result. Unique anon ids
+    // still never collide with durable tool-call ids.
     runner.script("unused", { frames: [] });
     const error = await session.exec({ cmd: "anon" }).then(
       () => null,
       (e: unknown) => e,
     );
-    // The fake refuses unknown ids with PROTOCOL → the session falls back to
-    // legacy → FakeOpRunner has no fallback here → UNSUPPORTED error surfaces.
-    expect(error).not.toBeNull();
+    expect(error).toMatchObject({
+      name: "SelfhostedControlError",
+      code: ErrorCode.ERROR_CODE_UNSUPPORTED,
+      retryable: false,
+    });
   });
 });

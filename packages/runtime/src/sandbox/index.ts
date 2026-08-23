@@ -483,7 +483,8 @@ export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`
-// adapted onto Temporal; sessions without the injection keep the legacy exec.
+// adapted onto Temporal. Connected Machine exec requires this injection and
+// fails closed when it is absent or unsupported.
 export {
   NatsOpStreamTransport,
   OpStreamUnavailableError,

@@ -83,10 +83,10 @@ export const OP_STREAM_RECONNECT_HOLD_MS = 120_000;
  *  retention log. This scales with the negotiated stream window and cannot turn
  *  100 concurrent quiet gaps into a multi-gigabyte frame-count allocation. */
 const OP_STREAM_STASH_WINDOW_MULTIPLIER = 2;
-/** OpStart DRAINING retry budget — mirrors the legacy exec's patient budget
- *  (retry-policy.ts): op start is not latency-critical and a saturated machine
- *  should queue, not fail. OpStart is idempotent by op id, so timeout blips are
- *  also safe to re-issue (unlike legacy exec) — same small bounded budget. */
+/** OpStart DRAINING retry budget (retry-policy.ts): op start is not
+ *  latency-critical and a saturated machine should queue, not fail. OpStart
+ *  is idempotent by op id, so pre-dispatch timeout blips are also safe to
+ *  re-issue with the same small bounded budget. */
 const OP_START_DRAINING_MAX_RETRIES = 10;
 const OP_START_BLIP_MAX_RETRIES = 3;
 
@@ -456,9 +456,9 @@ class OpConsumer {
           throw error;
         }
         // A PROTOCOL/UNSUPPORTED refusal of the START ITSELF means the runner
-        // does not speak op-stream (a capability/downgrade race — M8 latches
-        // the transport per-op, and the legacy exec is the permanent fallback
-        // wire form). The op provably never started, so falling back is safe.
+        // does not speak the required op-stream protocol. The op provably
+        // never started, so surface a typed availability error without trying
+        // another wire form.
         if (
           error.code === ErrorCode.ERROR_CODE_PROTOCOL ||
           error.code === ErrorCode.ERROR_CODE_UNSUPPORTED
