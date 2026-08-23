@@ -9205,6 +9205,11 @@ export type SlackBotUserLink = {
   slackUserId: string;
   subjectId: string;
   linkedBySubjectId: string;
+  /**
+   * The exact Slack interaction id that durably claimed this identity's
+   * one-time onboarding hint, or `null` when the hint has not been shown.
+   */
+  firstTaskHintInteractionId: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -9362,7 +9367,9 @@ export async function resolveSlackInstallationRoute(
 
 export async function saveSlackBotUserLink(
   db: Database,
-  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt">,
+  // The one-time onboarding hint claim is deliberately not writable here: a
+  // re-link of the same Slack identity keeps whatever was already shown.
+  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId">,
 ): Promise<SlackBotUserLink> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -9404,6 +9411,48 @@ export async function getSlackBotUserLink(
       )
       .limit(1);
     return row ? mapSlackBotUserLink(row) : null;
+  });
+}
+
+/**
+ * Durably claim the one-time Slack onboarding hint for one Slack identity
+ * inside one installation.
+ *
+ * The claim stores the exact interaction id that won it, so the answer is
+ * idempotent: the winning interaction keeps returning `true` across retries,
+ * replica races, and delivery replays, while every later interaction for the
+ * same identity returns `false` forever. A missing link row also returns
+ * `false` — an unlinked identity never reaches an acknowledgement.
+ */
+export async function claimSlackBotUserLinkFirstTaskHint(
+  db: Database,
+  input: {
+    workspaceId: string;
+    connectionId: string;
+    slackUserId: string;
+    interactionId: string;
+  },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const identity = and(
+      eq(schema.slackBotUserLinks.workspaceId, input.workspaceId),
+      eq(schema.slackBotUserLinks.connectionId, input.connectionId),
+      eq(schema.slackBotUserLinks.slackUserId, input.slackUserId),
+    );
+    const claimed = await scopedDb
+      .update(schema.slackBotUserLinks)
+      .set({ firstTaskHintInteractionId: input.interactionId, updatedAt: sql`now()` })
+      .where(and(identity, isNull(schema.slackBotUserLinks.firstTaskHintInteractionId)))
+      .returning({ id: schema.slackBotUserLinks.id });
+    if (claimed.length > 0) return true;
+    const [row] = await scopedDb
+      .select({
+        firstTaskHintInteractionId: schema.slackBotUserLinks.firstTaskHintInteractionId,
+      })
+      .from(schema.slackBotUserLinks)
+      .where(identity)
+      .limit(1);
+    return row?.firstTaskHintInteractionId === input.interactionId;
   });
 }
 

@@ -1925,6 +1925,9 @@ export const slackBotUserLinks = pgTable(
     slackUserId: text("slack_user_id").notNull(),
     subjectId: text("subject_id").notNull(),
     linkedBySubjectId: text("linked_by_subject_id").notNull(),
+    // The exact interaction id that won this identity's one-time onboarding
+    // hint. NULL means the hint has not been shown yet.
+    firstTaskHintInteractionId: uuid("first_task_hint_interaction_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
