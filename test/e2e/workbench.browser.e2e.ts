@@ -890,11 +890,13 @@ describe("workbench browser acceptance", () => {
           .count(),
       );
       for (const directory of ["apps", "api", "src"]) {
-        expect(
-          await activeFiles
+        await expectEventually(async () =>
+          (await activeFiles
             .getByRole("treeitem", { name: directory, exact: true })
-            .getAttribute("aria-expanded"),
-        ).toBe("true");
+            .getAttribute("aria-expanded")) === "true"
+            ? 1
+            : 0,
+        );
       }
       const treeBounds = await activeFiles.locator("[data-opengeni-file-tree]").boundingBox();
       const selectedRowBounds = await activeFiles
