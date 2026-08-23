@@ -128,6 +128,29 @@ describe("useMachines", () => {
     await hook.unmount();
   });
 
+  test("two hooks on the same workspace share one list request", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        return response;
+      },
+    };
+    const hook = await renderHook(
+      () => {
+        const a = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
+        const b = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
+        return { a, b };
+      },
+      undefined,
+    );
+    await flush();
+    expect(lists).toBe(1);
+    expect(hook.result.current.a.machines.length).toBe(2);
+    expect(hook.result.current.b.activeSandboxId).toBe("modal-box");
+    await hook.unmount();
+  });
+
   test("loads the fleet + active pointer from the structural client", async () => {
     const machinesClient: MachinesClientLike = {
       listMachines: async () => response,

@@ -1,7 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -1008,7 +1008,7 @@ function SessionChatPane(props: {
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const fleet = useMachines({
     sessionId: props.session.id,
-    pollIntervalMs: 5000,
+    pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
   const computeLabel =
     fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;

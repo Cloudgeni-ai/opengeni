@@ -5,9 +5,10 @@
 // (default OFF → 404, invisible). Both routes need perm enrollments:read.
 //
 //   GET /v1/workspaces/:ws/machines[?sessionId=...]  -> MachinesResponse
-//     The dashboard list: the workspace's enrolled selfhosted machines (state +
-//     latest metrics + sharedSessionCount) and, when sessionId is supplied, the
-//     session's synthetic Modal group box + the active-sandbox pointer.
+//     The dashboard list: the workspace's enrolled selfhosted machines (heartbeat
+//     state + latest metrics + sharedSessionCount) and, when sessionId is
+//     supplied, the session's synthetic Modal group box + the active-sandbox
+//     pointer. This GET does not ControlRpc-ping.
 //
 //   GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h
 //     -> { samples: MetricSample[] }

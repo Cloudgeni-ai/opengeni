@@ -71,7 +71,12 @@ export type {
   EnrollmentConsentPhase,
   EnrollmentConsentProps,
 } from "./components/enrollment-consent";
-export { useMachines } from "./hooks/use-machines";
+export {
+  useMachines,
+  MACHINES_COMPOSER_POLL_MS,
+  MACHINES_DASHBOARD_POLL_MS,
+  MACHINES_SESSION_POLL_MS,
+} from "./hooks/use-machines";
 export type {
   MachinesClientLike,
   UseMachinesOptions,

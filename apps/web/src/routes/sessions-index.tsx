@@ -23,7 +23,11 @@ import {
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
-import { useMachines, type MachineView } from "@opengeni/react/machines";
+import {
+  MACHINES_COMPOSER_POLL_MS,
+  useMachines,
+  type MachineView,
+} from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
   RealtimeVoiceModelPanel,
@@ -1258,13 +1262,16 @@ function ComputeTargetControl(props: {
   selectionHistory: NewSessionSelectionHistory;
 }) {
   const { draft, onChange } = props;
-  // The workspace fleet (no sessionId → no swap; just the picker source). Degrades
-  // gracefully: when selfhosted is disabled the API 404s → `machines` is empty and
-  // the Connected Machine kind is offered only as a disabled "enroll a machine"
-  // affordance, never blocking session creation.
-  const fleet = useMachines({ pollIntervalMs: 10000 });
+  // One load to learn whether any machine exists; poll only while the compute
+  // picker is shown. The list is a heartbeat read, not a live ping.
+  const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
+  const fleet = useMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const fleetEmpty = machines.length === 0;
+  useEffect(() => {
+    if (fleet.loading) return;
+    setFleetPollMs(fleetEmpty ? undefined : MACHINES_COMPOSER_POLL_MS);
+  }, [fleet.loading, fleetEmpty]);
   // A 404 is the expected "self-hosted machines are disabled here" signal, not a
   // failure — only a genuine load error (network/5xx) is surfaced, so the machine
   // option isn't silently swallowed by a transient outage (states #4).

@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MockAgentResponder,
-  SelfhostedSession,
   type SelfhostedEnrollment,
   negotiateSelfhostedCapabilities,
   selfhostedLiveness,
-} from "../src/sandbox";
+  selfhostedHeartbeatLiveness,
+} from "../src/sandbox/selfhosted/capabilities";
+import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
+import { MockAgentResponder } from "../src/sandbox/selfhosted/testing";
 
 const SESSION_ID = "00000000-0000-0000-0000-0000000000aa";
 const NOW = new Date("2026-06-22T12:00:00.000Z");
@@ -77,6 +78,40 @@ describe("selfhostedLiveness — the online/reconnecting/offline derivation", ()
       now: NOW,
     });
     expect(live.state).toBe("offline");
+  });
+
+  test("heartbeat-only list: fresh lastSeenAt is online, stale or missing is offline", () => {
+    expect(
+      selfhostedHeartbeatLiveness({
+        enrollment: enrollment({ lastSeenAt: new Date(NOW.getTime() - 5_000).toISOString() }),
+        now: NOW,
+      }).state,
+    ).toBe("online");
+    expect(
+      selfhostedHeartbeatLiveness({
+        enrollment: enrollment({ lastSeenAt: new Date(NOW.getTime() - 120_000).toISOString() }),
+        now: NOW,
+      }).state,
+    ).toBe("offline");
+    expect(
+      selfhostedHeartbeatLiveness({
+        enrollment: enrollment({ lastSeenAt: null }),
+        now: NOW,
+      }).state,
+    ).toBe("offline");
+  });
+
+  test("heartbeat-only list: a clean goodbye stays offline even with a fresh lastSeenAt", () => {
+    expect(
+      selfhostedHeartbeatLiveness({
+        enrollment: enrollment({
+          lastSeenAt: NOW.toISOString(),
+          wentOfflineAt: NOW.toISOString(),
+          wentOfflineReason: "GOING_OFFLINE_REASON_HOST_SHUTDOWN",
+        }),
+        now: NOW,
+      }).state,
+    ).toBe("offline");
   });
 
   test("an un-cleared clean goodbye reads OFFLINE even with a fresh lastSeenAt AND a responding probe", () => {
