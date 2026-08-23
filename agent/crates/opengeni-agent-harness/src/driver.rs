@@ -68,9 +68,9 @@ impl Op {
     /// Builds either a request/reply op or a replayable op-stream exec.
     fn prepare(self) -> PreparedOp {
         match self {
-            Op::Ping => PreparedOp::Control(ReqOp::Ping(v1::PingRequest {
+            Op::Ping => PreparedOp::Control(Box::new(ReqOp::Ping(v1::PingRequest {
                 nonce: REQUEST_SEQ.load(Ordering::Relaxed),
-            })),
+            }))),
             Op::ExecEcho => PreparedOp::Exec {
                 request: v1::ExecRequest {
                     command: vec!["echo hx".to_string()],
@@ -103,31 +103,37 @@ impl Op {
                 },
                 deadline_after_ms: 0,
             },
-            Op::FsStat { path } => PreparedOp::Control(ReqOp::FsStat(v1::FsStatRequest { path })),
-            Op::FsList { path } => PreparedOp::Control(ReqOp::FsList(v1::FsListRequest {
-                path,
-                recursive: false,
-            })),
-            Op::FsRead { path } => PreparedOp::Control(ReqOp::FsRead(v1::FsReadRequest {
-                path,
-                offset: 0,
-                length: 0,
-            })),
+            Op::FsStat { path } => {
+                PreparedOp::Control(Box::new(ReqOp::FsStat(v1::FsStatRequest { path })))
+            }
+            Op::FsList { path } => {
+                PreparedOp::Control(Box::new(ReqOp::FsList(v1::FsListRequest {
+                    path,
+                    recursive: false,
+                })))
+            }
+            Op::FsRead { path } => {
+                PreparedOp::Control(Box::new(ReqOp::FsRead(v1::FsReadRequest {
+                    path,
+                    offset: 0,
+                    length: 0,
+                })))
+            }
             Op::FsWrite { path, bytes } => {
-                PreparedOp::Control(ReqOp::FsWrite(v1::FsWriteRequest {
+                PreparedOp::Control(Box::new(ReqOp::FsWrite(v1::FsWriteRequest {
                     path,
                     content: Bytes::from(vec![b'a'; usize::try_from(bytes).unwrap_or(usize::MAX)]),
                     create_parents: true,
                     append: false,
                     mode: 0,
-                }))
+                })))
             }
         }
     }
 }
 
 enum PreparedOp {
-    Control(ReqOp),
+    Control(Box<ReqOp>),
     Exec {
         request: v1::ExecRequest,
         deadline_after_ms: u32,
@@ -246,7 +252,7 @@ impl Driver {
             request_id,
             epoch: 0,
             resource_policy: None,
-            op: Some(op),
+            op: Some(*op),
         };
         let payload = Bytes::from(control.encode_to_vec());
         if payload.len() > self.max_payload() {

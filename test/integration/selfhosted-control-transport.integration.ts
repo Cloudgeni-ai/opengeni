@@ -77,18 +77,16 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     await services?.down();
   }, 60_000);
 
-  // (a) ROUND-TRIP: a subscriber answering on the exact process subject round-trips a
-  //     ControlRequest → ControlResponse through `NatsControlRpc` (real exec + fs).
-  test("(a) an exact process subscriber round-trips exec + fs through NatsControlRpc", async () => {
+  // (a) ROUND-TRIP: a subscriber answering on the exact process subject round-trips
+  //     typed control operations through `NatsControlRpc`. Exec is op-stream-only.
+  test("(a) an exact process subscriber round-trips ping + fs through NatsControlRpc", async () => {
     const mock = new MockAgentResponder({ hostname: "real-nats-vm" });
     const subject = subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID);
     const unsub = bus.subscribeRequests(subject, responderFor(mock));
     try {
       const session = await buildClient(bus, WS_A).resume({ agentId: AGENT });
 
-      // exec travels over the wire and the VM hostname comes back.
-      const hostExec = await session.exec({ cmd: "echo $HOSTNAME" });
-      expect(hostExec.stdout.trim()).toBe("real-nats-vm");
+      expect(await session.ping()).toBe(true);
 
       // fs write → read round-trips byte-identically across the broker.
       await session.writeFile({ path: "/tmp/marker", content: "byo-over-nats" });
@@ -109,7 +107,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     const session = await buildClient(bus, WS_A).resume({ agentId: "no-such-agent" });
     let err: { reason?: string; agentOffline?: boolean; osNotFound?: boolean } | undefined;
     try {
-      await session.exec({ cmd: "true" });
+      await session.readFile({ path: "/missing" });
     } catch (e) {
       err = e as typeof err;
     }
@@ -129,7 +127,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     const session = await buildClient(bus, WS_A).resume({ agentId: AGENT });
 
     // Healthy before the bounce.
-    expect((await session.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("reconnect-vm");
+    expect(await session.ping()).toBe(true);
 
     // Bounce: the responder goes away (a transient connection blip on the agent).
     unsub();
@@ -137,7 +135,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     await waitFor(
       async () => {
         try {
-          await session.exec({ cmd: "true" });
+          await session.readFile({ path: "/missing" });
           return false;
         } catch (e) {
           // While the subject has no subscriber the op surfaces agent_offline (the
@@ -156,7 +154,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
       await waitFor(
         async () => {
           try {
-            return (await session.exec({ cmd: "echo $HOSTNAME" })).stdout.trim() === "reconnect-vm";
+            return await session.ping();
           } catch {
             return false;
           }
@@ -190,7 +188,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
       const sessionB = await buildClient(bus, WS_B).resume({ agentId: AGENT });
       let err: { reason?: string; agentOffline?: boolean } | undefined;
       try {
-        await sessionB.exec({ cmd: "true" });
+        await sessionB.readFile({ path: "/missing" });
       } catch (e) {
         err = e as typeof err;
       }
@@ -201,7 +199,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
       // Sanity: A's own client DOES reach the responder (so the offline above is
       // genuinely the isolation boundary, not a broken responder).
       const sessionA = await buildClient(bus, WS_A).resume({ agentId: AGENT });
-      expect((await sessionA.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("workspace-a-vm");
+      expect(await sessionA.ping()).toBe(true);
       expect(
         mock.requests.every((r) => r.subject === subjectFor(WS_A, AGENT, CONNECTION_INSTANCE_ID)),
       ).toBe(true);
@@ -236,9 +234,9 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     });
     const session = await client.resume({ agentId: AGENT });
     try {
-      // The transient null is retried inside the SAME exec (a fresh request id
+      // The transient null is retried inside the SAME ping (a fresh request id
       // per attempt), so the caller sees a clean success — no surfaced blip.
-      expect((await session.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("late-nats-vm");
+      expect(await session.ping()).toBe(true);
       expect(attempts).toBe(2);
     } finally {
       unsub();
