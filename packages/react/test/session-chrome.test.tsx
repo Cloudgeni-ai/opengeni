@@ -686,8 +686,8 @@ describe("SessionChrome goal pill reasons", () => {
       "Paused · cap",
     );
     expect(sessionChromeGoalPillLabel("paused", paused("limits").goal)).toBe("Paused · budget");
-    expect(sessionChromeGoalPillLabel("paused", paused("user_pause").goal)).toBe("Paused · by you");
-    expect(sessionChromeGoalPillLabel("paused", paused("api").goal)).toBe("Paused · by you");
+    expect(sessionChromeGoalPillLabel("paused", paused("user_pause").goal)).toBe("Paused · manually");
+    expect(sessionChromeGoalPillLabel("paused", paused("api").goal)).toBe("Paused · manually");
     expect(sessionChromeGoalPillLabel("paused", paused("agent").goal)).toBe("Paused · agent");
     // Unknown/legacy reasons and missing records keep the bare label.
     expect(sessionChromeGoalPillLabel("paused", paused("something_else").goal)).toBe("Paused");

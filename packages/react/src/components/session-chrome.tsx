@@ -134,8 +134,8 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
 const GOAL_PAUSED_REASON_SUFFIX: Record<string, string> = {
   max_auto_continuations: "cap",
   limits: "budget",
-  user_pause: "by you",
-  api: "by you",
+  user_pause: "manually",
+  api: "manually",
   agent: "agent",
 };
 
@@ -143,8 +143,8 @@ const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
   max_auto_continuations:
     "Paused at the automatic continuation cap. New input (a child result, an agent message, or your prompt) resumes it; you can also resume it here.",
   limits: "Paused because budget or usage limits block another run. Resume once limits allow.",
-  user_pause: "Paused by you. Resume to let the goal continue on its own.",
-  api: "Paused by you. Resume to let the goal continue on its own.",
+  user_pause: "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
+  api: "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
   agent: "Paused by the agent: it is waiting on a human decision before continuing.",
 };
 
@@ -152,7 +152,7 @@ type GoalPillRecord = Pick<SessionGoal, "status" | "pausedReason"> & {
   continuation?: SessionGoal["continuation"] | null | undefined;
 };
 
-/** Pill label, with the pause reason spelled out: "Paused · cap" / "Paused · by you". */
+/** Pill label, with the pause reason spelled out: "Paused · cap" / "Paused · manually". */
 export function sessionChromeGoalPillLabel(
   state: GoalPillState,
   record: GoalPillRecord | null | undefined,
