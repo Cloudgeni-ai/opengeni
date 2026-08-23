@@ -5,6 +5,7 @@ import {
   CodexRealtimeError,
   CodexReloginRequired,
   createCodexRealtimeCall,
+  fetchCodexRealtimeProviderConfig,
   selectCodexCredentialId,
   type CodexAuthHeaders,
   type CodexFetch,
@@ -295,8 +296,13 @@ export function buildSessionCodexRealtimeBroker(
         },
         tokenResolver: (credentialId) =>
           buildCodexTokenResolver(db, settings, workspaceId, credentialId),
-        createCall: async (auth, callInput, options) =>
-          await createCodexRealtimeCall(auth, callInput, fetchImpl, options),
+        createCall: async (auth, callInput, options) => {
+          const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
+          return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
+            ...options,
+            providerConfig,
+          });
+        },
       },
       { ...input, sessionId },
     );

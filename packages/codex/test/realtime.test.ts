@@ -4,6 +4,7 @@ import {
   CODEX_REALTIME_VERSION,
   CodexRealtimeError,
   createCodexRealtimeCall,
+  fetchCodexRealtimeProviderConfig,
   selectCodexCredentialId,
 } from "../src";
 
@@ -67,7 +68,7 @@ describe("native Codex subscription realtime call", () => {
         instructions: "Help with the current OpenGeni session.",
         audio: { output: { voice: "juniper" } },
         delegation: { type: "client" },
-        model: "gpt-live-1-boulder-alpha",
+        model: "gpt-live-1-codex",
         initial_items: [
           {
             type: "message",
@@ -302,6 +303,77 @@ describe("native Codex subscription realtime call", () => {
     );
     await expect(pending).rejects.toMatchObject({ code: "timeout" });
     expect(calls).toBe(1);
+  });
+});
+
+describe("Codex realtime remote configuration", () => {
+  test("resolves the current V3 model and architecture from authenticated Statsig", async () => {
+    let captured: Request | null = null;
+    const config = await fetchCodexRealtimeProviderConfig(auth, async (input, init) => {
+      captured = new Request(input, init);
+      return Response.json({
+        statsigPayload: JSON.stringify({
+          dynamic_configs: {
+            "3566525122": {
+              value: {
+                architecture: "avas-next",
+                model: "gpt-live-1-codex",
+                version: "v3",
+              },
+            },
+          },
+        }),
+      });
+    });
+
+    expect(captured!.url).toBe("https://chatgpt.com/backend-api/wham/statsig/bootstrap");
+    expect(captured!.headers.get("authorization")).toBe("Bearer server-only-token");
+    expect(captured!.headers.get("chatgpt-account-id")).toBe("acct_bound");
+    expect(config).toEqual({
+      architecture: "avas-next",
+      model: "gpt-live-1-codex",
+      version: "v3",
+    });
+  });
+
+  test("never downgrades when the remote protocol is not V3", async () => {
+    await expect(
+      fetchCodexRealtimeProviderConfig(auth, async () =>
+        Response.json({
+          statsigPayload: JSON.stringify({
+            dynamic_configs: {
+              "3566525122": { value: { model: "legacy", version: "v2" } },
+            },
+          }),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "incompatible" });
+  });
+
+  test("uses the verified V3 fallback for transient or malformed config responses", async () => {
+    expect(
+      await fetchCodexRealtimeProviderConfig(
+        auth,
+        async () => new Response("unavailable", { status: 503 }),
+      ),
+    ).toEqual({
+      architecture: "avas",
+      model: "gpt-live-1-codex",
+      version: "v3",
+    });
+    expect(
+      await fetchCodexRealtimeProviderConfig(auth, async () => Response.json({ nope: true })),
+    ).toEqual({
+      architecture: "avas",
+      model: "gpt-live-1-codex",
+      version: "v3",
+    });
+  });
+
+  test("preserves an authentication rejection for the broker's one safe refresh", async () => {
+    await expect(
+      fetchCodexRealtimeProviderConfig(auth, async () => new Response(null, { status: 401 })),
+    ).rejects.toMatchObject({ code: "authentication", providerStatus: 401 });
   });
 });
 

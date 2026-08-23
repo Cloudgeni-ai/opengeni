@@ -1,10 +1,15 @@
 import { codexSubscriptionHeaders, type CodexAuthHeaders } from "./api-client";
 import {
   CODEX_REALTIME_CALL_TIMEOUT_MS,
+  CODEX_REALTIME_CONFIG_ID,
+  CODEX_REALTIME_CONFIG_TIMEOUT_MS,
   CODEX_REALTIME_DEFAULT_VOICE,
   CODEX_REALTIME_MODEL,
+  CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK,
+  CODEX_REALTIME_PROVIDER_MODEL_FALLBACK,
   CODEX_REALTIME_VERSION,
   CODEX_RESPONSES_BASE,
+  CODEX_WHAM_BASE,
 } from "./constants";
 import type { CodexFetch } from "./device-code";
 import {
@@ -13,8 +18,9 @@ import {
   type CodexRealtimeInitialItem,
 } from "./realtime-v3";
 
-const CODEX_REALTIME_CALL_URL = `${CODEX_RESPONSES_BASE}/realtime/calls?intent=quicksilver&architecture=avas`;
 const MAX_REALTIME_SDP_BYTES = 1024 * 1024;
+const MAX_REALTIME_PROVIDER_VALUE_LENGTH = 128;
+const REALTIME_PROVIDER_VALUE = /^[a-z0-9][a-z0-9._-]*$/i;
 const REALTIME_CALL_ID =
   /^(?:rtc_.+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
@@ -78,7 +84,107 @@ export class CodexRealtimeError extends Error {
 export type CodexRealtimeCallOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
+  providerConfig?: CodexRealtimeProviderConfig | undefined;
 };
+
+export type CodexRealtimeProviderConfig = {
+  architecture: string;
+  model: string;
+  version: typeof CODEX_REALTIME_VERSION;
+};
+
+const FALLBACK_REALTIME_PROVIDER_CONFIG: CodexRealtimeProviderConfig = {
+  architecture: CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK,
+  model: CODEX_REALTIME_PROVIDER_MODEL_FALLBACK,
+  version: CODEX_REALTIME_VERSION,
+};
+
+/**
+ * Resolve the provider-controlled Codex voice model without changing the
+ * stable OpenGeni model id. ChatGPT rotates this config independently of Codex
+ * releases; pinning the old value caused deterministic call-creation failures.
+ */
+export async function fetchCodexRealtimeProviderConfig(
+  auth: CodexAuthHeaders,
+  fetchImpl: CodexFetch = fetch,
+  options: {
+    signal?: AbortSignal | undefined;
+    timeoutMs?: number | undefined;
+  } = {},
+): Promise<CodexRealtimeProviderConfig> {
+  if (options.signal?.aborted) {
+    throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
+  }
+  const controller = new AbortController();
+  const timeoutMs = options.timeoutMs ?? CODEX_REALTIME_CONFIG_TIMEOUT_MS;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = (): void => controller.abort(options.signal?.reason);
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const response = await fetchImpl(`${CODEX_WHAM_BASE}/wham/statsig/bootstrap`, {
+      method: "POST",
+      headers: {
+        ...codexSubscriptionHeaders(auth),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        app_session_id: crypto.randomUUID(),
+        app_version: auth.clientVersion,
+        brand_name: "Codex",
+        build_flavor: "stable",
+        locale: "en-US",
+        stable_id: auth.chatgptAccountId ?? "opengeni-server",
+        system_name: "OpenGeni",
+        system_version: "server",
+        window_type: "local",
+      }),
+      signal: controller.signal,
+    });
+    if (response.status === 401) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new CodexRealtimeError(
+        "authentication",
+        "Codex subscription rejected authentication",
+        response.status,
+      );
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      return FALLBACK_REALTIME_PROVIDER_CONFIG;
+    }
+    const outer = (await response.json().catch(() => null)) as {
+      statsigPayload?: unknown;
+    } | null;
+    if (typeof outer?.statsigPayload !== "string") return FALLBACK_REALTIME_PROVIDER_CONFIG;
+    const payload = JSON.parse(outer.statsigPayload) as {
+      dynamic_configs?: Record<string, { value?: Record<string, unknown> }>;
+    };
+    const value = payload.dynamic_configs?.[CODEX_REALTIME_CONFIG_ID]?.value;
+    const version = value?.version;
+    if (version !== undefined && version !== CODEX_REALTIME_VERSION) {
+      throw new CodexRealtimeError(
+        "incompatible",
+        `Codex realtime remote configuration requires ${String(version)}`,
+      );
+    }
+    const architecture = validProviderValue(value?.architecture)
+      ? value.architecture
+      : FALLBACK_REALTIME_PROVIDER_CONFIG.architecture;
+    const model = validProviderValue(value?.model)
+      ? value.model
+      : FALLBACK_REALTIME_PROVIDER_CONFIG.model;
+    return { architecture, model, version: CODEX_REALTIME_VERSION };
+  } catch (error) {
+    if (error instanceof CodexRealtimeError) throw error;
+    if (options.signal?.aborted) {
+      throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
+    }
+    return FALLBACK_REALTIME_PROVIDER_CONFIG;
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", onAbort);
+  }
+}
 
 /**
  * Create one native subscription-authenticated Codex GPT-Live V3 WebRTC call.
@@ -95,11 +201,27 @@ export async function createCodexRealtimeCall(
 ): Promise<CodexRealtimeCallResult> {
   validateRealtimeInput(input);
   const timeoutMs = options.timeoutMs ?? CODEX_REALTIME_CALL_TIMEOUT_MS;
+  const providerConfig = options.providerConfig ?? FALLBACK_REALTIME_PROVIDER_CONFIG;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new CodexRealtimeError("invalid_request", "Codex realtime timeout must be positive");
   }
   if (options.signal?.aborted) {
     throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
+  }
+  if (providerConfig.version !== CODEX_REALTIME_VERSION) {
+    throw new CodexRealtimeError(
+      "incompatible",
+      `Codex realtime provider configuration requires ${providerConfig.version}`,
+    );
+  }
+  if (
+    !validProviderValue(providerConfig.architecture) ||
+    !validProviderValue(providerConfig.model)
+  ) {
+    throw new CodexRealtimeError(
+      "invalid_request",
+      "Codex realtime provider configuration is invalid",
+    );
   }
 
   const controller = new AbortController();
@@ -124,42 +246,45 @@ export async function createCodexRealtimeCall(
   });
 
   const request = (async (): Promise<CodexRealtimeCallResult> => {
-    const response = await fetchImpl(CODEX_REALTIME_CALL_URL, {
-      method: "POST",
-      headers: {
-        ...codexSubscriptionHeaders(auth),
-        "content-type": "application/json",
-        "openai-alpha": "quicksilver=v2",
-        "session-id": input.sessionId,
-        "thread-id": input.sessionId,
-      },
-      body: JSON.stringify({
-        sdp: input.sdp,
-        session: {
-          instructions: input.instructions ?? "",
-          audio: {
-            output: { voice: input.voice ?? CODEX_REALTIME_DEFAULT_VOICE },
-          },
-          delegation: { type: "client" },
-          model: CODEX_REALTIME_MODEL,
-          ...(input.initialItems?.length
-            ? {
-                initial_items: input.initialItems.map((item) => ({
-                  type: "message",
-                  role: item.role,
-                  content: [
-                    {
-                      type: item.role === "assistant" ? "output_text" : "input_text",
-                      text: item.text,
-                    },
-                  ],
-                })),
-              }
-            : {}),
+    const response = await fetchImpl(
+      `${CODEX_RESPONSES_BASE}/realtime/calls?intent=quicksilver&architecture=${encodeURIComponent(providerConfig.architecture)}`,
+      {
+        method: "POST",
+        headers: {
+          ...codexSubscriptionHeaders(auth),
+          "content-type": "application/json",
+          "openai-alpha": "quicksilver=v2",
+          "session-id": input.sessionId,
+          "thread-id": input.sessionId,
         },
-      }),
-      signal: controller.signal,
-    });
+        body: JSON.stringify({
+          sdp: input.sdp,
+          session: {
+            instructions: input.instructions ?? "",
+            audio: {
+              output: { voice: input.voice ?? CODEX_REALTIME_DEFAULT_VOICE },
+            },
+            delegation: { type: "client" },
+            model: providerConfig.model,
+            ...(input.initialItems?.length
+              ? {
+                  initial_items: input.initialItems.map((item) => ({
+                    type: "message",
+                    role: item.role,
+                    content: [
+                      {
+                        type: item.role === "assistant" ? "output_text" : "input_text",
+                        text: item.text,
+                      },
+                    ],
+                  })),
+                }
+              : {}),
+          },
+        }),
+        signal: controller.signal,
+      },
+    );
 
     if (!response.ok) {
       await response.body?.cancel().catch(() => undefined);
@@ -206,6 +331,14 @@ export async function createCodexRealtimeCall(
     if (timeout) clearTimeout(timeout);
     options.signal?.removeEventListener("abort", onAbort);
   }
+}
+
+function validProviderValue(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length <= MAX_REALTIME_PROVIDER_VALUE_LENGTH &&
+    REALTIME_PROVIDER_VALUE.test(value)
+  );
 }
 
 /** Shared pin→active selection for worker turns and direct realtime calls. */
