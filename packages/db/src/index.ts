@@ -27982,6 +27982,7 @@ type SessionTreeStatsRow = {
   failedDescendants: number | string;
   unreadDescendants: number | string;
   activelyWorkingDescendants: number | string;
+  attentionSince: Date | string | null;
   truncated: boolean;
 };
 
@@ -28000,6 +28001,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   failedDescendants: 0,
   unreadDescendants: 0,
   activelyWorkingDescendants: 0,
+  attentionSince: null,
   truncated: false,
 };
 
@@ -28114,6 +28116,7 @@ export async function sessionTreeStatsForSessions(
         stats."failedDescendants",
         stats."unreadDescendants",
         stats."activelyWorkingDescendants",
+        stats."attentionSince",
         stats.truncated
       from ${schema.sessions} root
       join ${schema.workspaceInferenceControls} workspace_control
@@ -28257,6 +28260,20 @@ export async function sessionTreeStatsForSessions(
                   and personal.actively_working
               )
           )::int as "activelyWorkingDescendants",
+          -- Oldest still-open requires_action turn among the counted attention
+          -- descendants. The correlated lookup runs only for rows passing the
+          -- FILTER and walks session_turns_workspace_queue_idx
+          -- (workspace_id, session_id, status, position).
+          min((
+            select min(waiting_turn.updated_at)
+            from ${schema.sessionTurns} waiting_turn
+            where waiting_turn.workspace_id = ${workspaceId}
+              and waiting_turn.session_id = numbered.id
+              and waiting_turn.status = 'requires_action'
+          )) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'requires_action'
+          ) as "attentionSince",
           coalesce(bool_or(
             ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
             or (
@@ -28299,10 +28316,52 @@ export async function sessionTreeStatsForSessions(
         failedDescendants: Number(row.failedDescendants),
         unreadDescendants: Number(row.unreadDescendants),
         activelyWorkingDescendants: Number(row.activelyWorkingDescendants),
+        attentionSince: row.attentionSince ? new Date(row.attentionSince).toISOString() : null,
         truncated: row.truncated,
       },
     ]),
   );
+}
+
+/**
+ * When each given `requires_action` session's own open turn entered that
+ * state: the oldest still-open `requires_action` turn per session. Only the
+ * ids whose current status is `requires_action` should be passed; the lookup
+ * walks `session_turns_workspace_queue_idx` per session and returns no row
+ * for sessions with no such turn.
+ */
+export async function sessionRequiresActionSinceForSessions(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, string>> {
+  const uniqueIds = [...new Set(sessionIds)];
+  if (uniqueIds.length === 0) return new Map();
+  const rows = await rawRows<{ sessionId: string; since: Date | string }>(
+    db,
+    sql`
+      select
+        ${schema.sessionTurns.sessionId} as "sessionId",
+        min(${schema.sessionTurns.updatedAt}) as "since"
+      from ${schema.sessionTurns}
+      where ${schema.sessionTurns.workspaceId} = ${workspaceId}
+        and ${inArray(schema.sessionTurns.sessionId, uniqueIds)}
+        and ${schema.sessionTurns.status} = 'requires_action'
+      group by ${schema.sessionTurns.sessionId}
+    `,
+  );
+  return new Map(rows.map((row) => [row.sessionId, new Date(row.since).toISOString()]));
+}
+
+function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requiresActionSince">>(
+  session: T,
+  since: ReadonlyMap<string, string>,
+): T {
+  return {
+    ...session,
+    requiresActionSince:
+      session.status === "requires_action" ? (since.get(session.id) ?? null) : null,
+  };
 }
 
 function sessionFilters(
@@ -28915,6 +28974,13 @@ export async function listSessionsForSubject(
           [...rootRelatedIds],
           options.subjectId,
         );
+        const requiresActionSince = await sessionRequiresActionSinceForSessions(
+          tx,
+          workspaceId,
+          [...pinnedRows, ...pageRows]
+            .filter((row) => row.session.status === "requires_action")
+            .map((row) => row.session.id),
+        );
         const controls = await sessionControlProjections(tx, workspaceId, ids);
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
@@ -28922,18 +28988,21 @@ export async function listSessionsForSubject(
           const control = controls.get(row.session.id);
           if (!control) throw new Error(`Effective control missing for session ${row.session.id}`);
           return projectSessionForRelatedAccess(
-            {
-              ...mapSession(
-                row.session,
-                control,
-                mcpServers.get(row.session.id) ?? [],
-                mapSessionPin(row.pin),
-                mapSessionAttention(row.session, row.pin),
-                mapSessionArchive(row.pin),
-                { subjectId: options.subjectId, activated: tenancyActivated },
-              ),
-              treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
-            },
+            withRequiresActionSince(
+              {
+                ...mapSession(
+                  row.session,
+                  control,
+                  mcpServers.get(row.session.id) ?? [],
+                  mapSessionPin(row.pin),
+                  mapSessionAttention(row.session, row.pin),
+                  mapSessionArchive(row.pin),
+                  { subjectId: options.subjectId, activated: tenancyActivated },
+                ),
+                treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
+              },
+              requiresActionSince,
+            ),
             rootRelatedIds.has(row.session.id) ? "root" : "target",
           );
         };
@@ -30350,11 +30419,22 @@ export async function getSessionLineage(
       rows.map((row) => row.id),
     );
     const controls = await sessionControlProjections(scopedDb, workspaceId, ids);
+    const requiresActionSince = await sessionRequiresActionSinceForSessions(
+      scopedDb,
+      workspaceId,
+      rows.filter((row) => row.status === "requires_action").map((row) => row.id),
+    );
     const sessionsById = new Map(
       rows.map((row) => {
         const control = controls.get(row.id);
         if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-        return [row.id, mapSession(row, control, grouped.get(row.id) ?? [])] as const;
+        return [
+          row.id,
+          withRequiresActionSince(
+            mapSession(row, control, grouped.get(row.id) ?? []),
+            requiresActionSince,
+          ),
+        ] as const;
       }),
     );
 
@@ -49976,6 +50056,8 @@ export type SessionGoalContinuationProjection = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
+  /** The agent's stated `goal_wait` reason while `held_for_input`; null otherwise. */
+  holdReason: string | null;
 };
 
 /**
@@ -50142,6 +50224,7 @@ export async function getSessionGoalWithContinuation(
         // revision. A late duplicate failure must not make already-accepted
         // Temporal work look blocked or broken.
         lastError: pendingWorkflowWake?.lastError ?? null,
+        holdReason: null,
       };
       let continuation: SessionGoalContinuationProjection;
       if (goal.status !== "active") {
@@ -50206,6 +50289,7 @@ export async function getSessionGoalWithContinuation(
           reason: "held_for_input",
           ...base,
           nextAttemptAt: currentHoldUntil.toISOString(),
+          holdReason: goal.continuationHoldReason ?? null,
         };
       } else if (
         goal.continuationWakeRevision > goal.continuationObservedRevision &&

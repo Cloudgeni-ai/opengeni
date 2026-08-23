@@ -169,3 +169,47 @@ describe("formatAgentMinutes", () => {
     expect(formatAgentMinutes(50 * 60)).toBe("2 d 2 h");
   });
 });
+
+describe("buildPriorityFeed waiting duration", () => {
+  test("says how long blocked agents have waited for a human", () => {
+    const feed = buildPriorityFeed(
+      [
+        session({
+          id: "s-mgr",
+          status: "idle",
+          updatedAt: minutesAgo(30),
+          treeStats: stats({
+            attentionDescendants: 3,
+            totalDescendants: 6,
+            attentionSince: minutesAgo(10 * 60 + 5),
+          }),
+        }),
+        session({
+          id: "s-own",
+          status: "requires_action",
+          updatedAt: minutesAgo(5),
+          requiresActionSince: minutesAgo(95),
+        }),
+      ],
+      NOW,
+    );
+    const byId = new Map(feed.blocked.map((entry) => [entry.session.id, entry]));
+    expect(byId.get("s-mgr")?.reason).toBe("3 spawned agents need you for 10 h 5 m");
+    expect(byId.get("s-own")?.reason).toMatch(/ for 1 h 35 m$/);
+  });
+
+  test("keeps the plain wording when the server reports no waiting timestamp", () => {
+    const feed = buildPriorityFeed(
+      [
+        session({
+          id: "s-mgr",
+          status: "idle",
+          updatedAt: minutesAgo(30),
+          treeStats: stats({ attentionDescendants: 1, totalDescendants: 2 }),
+        }),
+      ],
+      NOW,
+    );
+    expect(feed.blocked[0]!.reason).toBe("1 spawned agent needs you");
+  });
+});

@@ -63,6 +63,7 @@ import type { ComposerState } from "../hooks/use-composer";
 import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import { cn } from "../lib/cn";
+import { formatClockTime } from "../lib/format";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
@@ -123,6 +124,73 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
   invariant_broken: "Needs attention",
   completed: "Done",
 };
+
+/**
+ * Short pill suffix per `pausedReason`. `max_auto_continuations` is pacing
+ * (new input resumes it); `limits` is budget/admission; `user_pause`/`api` is
+ * the human's own override; `agent` is the model declaring it is blocked on a
+ * human decision. Unknown or legacy reasons keep the bare "Paused".
+ */
+const GOAL_PAUSED_REASON_SUFFIX: Record<string, string> = {
+  max_auto_continuations: "cap",
+  limits: "budget",
+  user_pause: "by you",
+  api: "by you",
+  agent: "agent",
+};
+
+const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
+  max_auto_continuations:
+    "Paused at the automatic continuation cap. New input (a child result, an agent message, or your prompt) resumes it; you can also resume it here.",
+  limits: "Paused because budget or usage limits block another run. Resume once limits allow.",
+  user_pause: "Paused by you. Resume to let the goal continue on its own.",
+  api: "Paused by you. Resume to let the goal continue on its own.",
+  agent: "Paused by the agent: it is waiting on a human decision before continuing.",
+};
+
+type GoalPillRecord = Pick<SessionGoal, "status" | "pausedReason"> & {
+  continuation?: SessionGoal["continuation"] | null | undefined;
+};
+
+/** Pill label, with the pause reason spelled out: "Paused · cap" / "Paused · by you". */
+export function sessionChromeGoalPillLabel(
+  state: GoalPillState,
+  record: GoalPillRecord | null | undefined,
+): string {
+  if (state !== "paused") return GOAL_LABEL[state];
+  const suffix = record?.pausedReason ? GOAL_PAUSED_REASON_SUFFIX[record.pausedReason] : undefined;
+  return suffix ? `Paused · ${suffix}` : "Paused";
+}
+
+/**
+ * One human sentence explaining WHY the goal is not pursuing right now: the
+ * pause reason, the agent's own `goal_wait` hold (reason + deadline), or the
+ * next idle-backoff check time. Null when the state needs no explanation.
+ */
+export function sessionChromeGoalPillExplanation(
+  state: GoalPillState,
+  record: GoalPillRecord | null | undefined,
+): string | null {
+  const continuation = record?.continuation ?? null;
+  if (state === "paused") {
+    return record?.pausedReason
+      ? (GOAL_PAUSED_REASON_EXPLANATION[record.pausedReason] ?? null)
+      : null;
+  }
+  if (state === "scheduled" && continuation?.reason === "backoff_pending") {
+    return continuation.nextAttemptAt
+      ? `Next goal check at ${formatClockTime(continuation.nextAttemptAt)}.`
+      : "Next goal check is scheduled.";
+  }
+  if (state === "held" && continuation?.reason === "held_for_input") {
+    const reason = continuation.holdReason?.trim();
+    const until = continuation.nextAttemptAt
+      ? ` until ${formatClockTime(continuation.nextAttemptAt)}`
+      : "";
+    return `Waiting for input${reason ? `: ${reason}` : ""}${until}. A child result, an agent message, or your prompt wakes it sooner.`;
+  }
+  return null;
+}
 
 function queuedTurnPresentation(turn: SessionTurn): QueuedTurnPresentation {
   const realtimeDelegation = objectValue(turn.metadata.realtimeDelegation);
@@ -303,6 +371,8 @@ export function SessionChrome({
       id: SessionChromeSignalId;
       label: string;
       detail?: string | undefined;
+      /** Hover explanation (why paused / held / when the next check is). */
+      title?: string | undefined;
       tone: SessionChromeSignalTone;
       icon: ReactNode;
     }> = [];
@@ -370,10 +440,12 @@ export function SessionChrome({
         goalState === "blocked" ||
         goalState === "held" ||
         goalState === "paused";
+      const explanation = sessionChromeGoalPillExplanation(goalState, record);
       rows.push({
         id: "goal",
-        label: GOAL_LABEL[goalState],
+        label: sessionChromeGoalPillLabel(goalState, record),
         detail: elapsed ? `${elapsed} · ${record.text}` : record.text,
+        ...(explanation ? { title: explanation } : {}),
         tone: waiting
           ? "waiting"
           : goalState === "pursuing" || goalState === "scheduled"
@@ -658,6 +730,7 @@ export function SessionChrome({
                     aria-label={selected ? `Close ${signal.label}` : undefined}
                     data-testid={`session-chrome-${signal.id}`}
                     data-og-session-chrome-signal={signal.id}
+                    title={signal.title}
                     onClick={() => setActive(selected ? null : signal.id)}
                     className={cn(
                       "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-hidden",
@@ -1011,11 +1084,12 @@ function GoalPanel({
   const record = goal.goal;
   if (!record) return null;
   const canToggle = !readOnly && (record.status === "active" || record.status === "paused");
+  const explanation = sessionChromeGoalPillExplanation(state, record);
 
   return (
     <div className="space-y-1.5" data-og-session-chrome-panel="goal">
       <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-og-fg-subtle">
-        <span>{GOAL_LABEL[state]}</span>
+        <span>{sessionChromeGoalPillLabel(state, record)}</span>
         {elapsed ? (
           <span className="tabular-nums normal-case tracking-normal text-og-fg-muted">
             · {elapsed}
@@ -1027,6 +1101,14 @@ function GoalPanel({
       {record.successCriteria ? (
         <p className="text-og-xs leading-4 text-og-fg-muted">
           <span className="font-medium text-og-fg">Done when</span> {record.successCriteria}
+        </p>
+      ) : null}
+      {explanation ? (
+        <p
+          data-og-session-chrome-goal-explanation
+          className="text-og-xs leading-4 text-og-fg-muted"
+        >
+          {explanation}
         </p>
       ) : null}
       {record.continuation?.lastError ? (

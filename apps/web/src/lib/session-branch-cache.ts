@@ -39,6 +39,7 @@ export function sessionBranchSummaryKey(session: Session): string {
     stats.failedDescendants,
     stats.unreadDescendants ?? 0,
     stats.activelyWorkingDescendants ?? 0,
+    stats.attentionSince ?? "",
     stats.truncated ? 1 : 0,
   ].join(":");
 }

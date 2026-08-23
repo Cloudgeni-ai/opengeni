@@ -5535,6 +5535,12 @@ export const SessionGoalContinuation = z.object({
   observedRevision: z.number().int().nonnegative(),
   nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
   lastError: z.string().nullable(),
+  /**
+   * The agent's stated reason for a `held_for_input` hold (`goal_wait`), so a
+   * human can see why the goal is waiting and until when (`nextAttemptAt`).
+   * Null for every other state; omitted by older servers.
+   */
+  holdReason: z.string().nullable().optional(),
 });
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
 
@@ -11022,10 +11028,22 @@ export const Session = z.object({
       failedDescendants: z.number().int().nonnegative(),
       unreadDescendants: z.number().int().nonnegative().optional(),
       activelyWorkingDescendants: z.number().int().nonnegative().optional(),
+      /**
+       * Earliest moment one of the counted `attentionDescendants` entered
+       * `requires_action` (the oldest still-open `requires_action` turn among
+       * those descendants). Null when none is waiting; omitted by older servers.
+       */
+      attentionSince: z.string().nullable().optional(),
       /** Counts are lower bounds rather than exact totals when true. */
       truncated: z.boolean().default(false),
     })
     .optional(),
+  /**
+   * When this session's own open turn entered `requires_action`. Populated by
+   * list and lineage reads for sessions whose status is `requires_action`;
+   * null otherwise and omitted by older servers or detail reads.
+   */
+  requiresActionSince: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

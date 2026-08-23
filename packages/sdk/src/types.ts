@@ -1319,10 +1319,20 @@ export type Session = {
         failedDescendants: number;
         unreadDescendants?: number | undefined;
         activelyWorkingDescendants?: number | undefined;
+        /**
+         * Earliest moment one of the counted `attentionDescendants` entered
+         * `requires_action`; null when none is waiting, absent on older servers.
+         */
+        attentionSince?: string | null | undefined;
         /** Counts are lower bounds rather than exact totals when true. */
         truncated: boolean;
       }
     | undefined;
+  /**
+   * When this session's own open turn entered `requires_action`. Populated by
+   * list and lineage reads for `requires_action` sessions; null otherwise.
+   */
+  requiresActionSince?: string | null | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -4033,6 +4043,8 @@ export type SessionGoalContinuation = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
+  /** Agent-stated reason for a `held_for_input` hold; null otherwise. */
+  holdReason?: string | null | undefined;
 };
 
 export type SessionGoal = {

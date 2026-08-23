@@ -57,6 +57,7 @@ function sameTreeStats(a: SessionTreeStats | undefined, b: SessionTreeStats | un
     a.attentionDescendants === b.attentionDescendants &&
     a.pausedDescendants === b.pausedDescendants &&
     a.failedDescendants === b.failedDescendants &&
+    (a.attentionSince ?? null) === (b.attentionSince ?? null) &&
     a.truncated === b.truncated
   );
 }

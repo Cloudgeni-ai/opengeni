@@ -124,8 +124,17 @@ const budgets = {
   // immutable deployment revision, measures 2,122,755 raw bytes. Advance only
   // this aggregate to the next whole-KiB envelope; every compressed, file-count,
   // per-file, lazy-chunk, CSS, and initial-graph cap remains unchanged.
-  directSessionRaw: 2074 * kib,
-  directSessionGzip: 576 * kib,
+  // Surfacing goal pause/hold/backoff reasons in the session chrome and the
+  // "N need you · X h" waiting durations in the rail, priority feed, and
+  // agents panel adds the reason copy plus the waiting helpers to the shared
+  // session graph. The same macOS/arm64 production build measures current
+  // main at 2,123,006 raw / 588,924 gzip bytes and this change at 2,126,938
+  // raw / 591,668 gzip bytes. Advance only those two aggregate envelopes to
+  // the next whole KiB, with one extra KiB on gzip for the up-to-1.5-KiB
+  // Linux/x64 skew observed above; every initial, per-file, file-count,
+  // lazy-chunk, and CSS cap stays fixed.
+  directSessionRaw: 2078 * kib,
+  directSessionGzip: 579 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

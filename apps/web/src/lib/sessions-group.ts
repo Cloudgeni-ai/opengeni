@@ -2,6 +2,7 @@
 // bucketing (Today / Yesterday / Previous 7 days / Older), and the ordering
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
+import { formatWaitingSince } from "@/lib/format";
 import type { Session, SessionStatus } from "@/types";
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
@@ -181,17 +182,31 @@ export type RailAggregateStatus = {
   /** Total sessions represented by the node or section. */
   total: number;
   label: string;
+  /**
+   * `needs_attention` only: when the longest-waiting represented session
+   * entered `requires_action` (the earliest known `requiresActionSince` /
+   * `treeStats.attentionSince`). Absent when no server reported it.
+   */
+  attentionSince?: string;
 };
 
 type RailStatusCounts = {
   total: number;
   sendFailed: number;
   attention: number;
+  /** Earliest known requires_action entry across the counted `attention` sessions. */
+  attentionSince: string | null;
   failed: number;
   active: number;
   unread: number;
   activeWork: number;
 };
+
+function earliestIso(a: string | null | undefined, b: string | null | undefined): string | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return Date.parse(b) < Date.parse(a) ? b : a;
+}
 
 function ownRailStatusCounts(
   session: Session,
@@ -201,6 +216,8 @@ function ownRailStatusCounts(
     total: 1,
     sendFailed: localDeliveryAttention.get(session.id) ?? 0,
     attention: session.status === "requires_action" ? 1 : 0,
+    attentionSince:
+      session.status === "requires_action" ? (session.requiresActionSince ?? null) : null,
     failed: session.status === "failed" ? 1 : 0,
     active:
       hasActiveEffectiveControl(session) &&
@@ -219,6 +236,7 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.total += source.total;
   target.sendFailed += source.sendFailed;
   target.attention += source.attention;
+  target.attentionSince = earliestIso(target.attentionSince, source.attentionSince);
   target.failed += source.failed;
   target.active += source.active;
   target.unread += source.unread;
@@ -234,6 +252,7 @@ function railStatusCounts(
   if (stats) {
     counts.total += stats.totalDescendants;
     counts.attention += stats.attentionDescendants;
+    counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
     counts.failed += stats.failedDescendants;
     counts.active += stats.runningDescendants + stats.queuedDescendants;
     counts.unread += stats.unreadDescendants ?? 0;
@@ -279,11 +298,13 @@ function loadedLocalDeliveryFailureCount(
 export function summarizeRailNodes(
   nodes: readonly SessionTreeNode[],
   localDeliveryAttention: ReadonlyMap<string, number> = new Map(),
+  now: Date = new Date(),
 ): RailAggregateStatus {
   const counts: RailStatusCounts = {
     total: 0,
     sendFailed: 0,
     attention: 0,
+    attentionSince: null,
     failed: 0,
     active: 0,
     unread: 0,
@@ -303,11 +324,17 @@ export function summarizeRailNodes(
   }
 
   if (counts.attention > 0) {
+    // "2 need you · 10h": how long the longest-waiting one has been blocked on
+    // a human, so a parked child is never silent in a collapsed parent row.
+    const waiting = counts.attentionSince ? formatWaitingSince(counts.attentionSince, now) : "";
     return {
       kind: "needs_attention",
       count: counts.attention,
       total: counts.total,
-      label: `${counts.attention} need${counts.attention === 1 ? "s" : ""} you`,
+      label: `${counts.attention} need${counts.attention === 1 ? "s" : ""} you${
+        waiting ? ` · ${waiting}` : ""
+      }`,
+      ...(counts.attentionSince ? { attentionSince: counts.attentionSince } : {}),
     };
   }
   if (counts.failed > 0) {
@@ -800,6 +827,14 @@ function prunePinnedSubtreesWithCounts(
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
+          // The pruned subtree may have held the oldest waiter; keep the server
+          // timestamp only while some counted attention descendant remains.
+          ...(stats.attentionSince !== undefined
+            ? {
+                attentionSince:
+                  stats.attentionDescendants - removed.attention > 0 ? stats.attentionSince : null,
+              }
+            : {}),
           truncated: stats.truncated,
         },
       }

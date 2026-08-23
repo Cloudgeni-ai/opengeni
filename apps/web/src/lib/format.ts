@@ -87,6 +87,24 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
+/**
+ * Compact "waiting for" duration since `iso`, e.g. "<1m", "5m", "10h", "3d".
+ * Unlike the rail's relative-time label it never collapses to "now" or a
+ * calendar date: a session can wait for input for weeks and the wait should
+ * keep reading as a duration. Empty for an unparseable timestamp.
+ */
+export function formatWaitingSince(iso: string, now: Date = new Date()): string {
+  const since = Date.parse(iso);
+  if (Number.isNaN(since)) return "";
+  const seconds = Math.max(0, Math.floor((now.getTime() - since) / 1000));
+  if (seconds < 60) return "<1m";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 /** Compact elapsed-time label, e.g. "4s", "2m 13s", "1h 04m". */
 export function formatElapsedSeconds(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
