@@ -86,6 +86,26 @@ before these kinds existed throws on an unknown kind, so enable the flag only
 once the whole fleet runs an image that understands them. Delivery and
 consumption of an already committed notice never read the flag.
 
+Rollout and rollback rule: once the flag has produced rows, a pre-notice image
+must never restart while any new-kind row is still pending in
+`session_system_updates` or `session_system_update_outbox`; a pre-notice worker
+fails its whole outbox reaper batch on one such row and re-peeks a parent's
+claim forever. Turning the flag back off stops production but does not drain
+already committed rows. Images from this change onward are hardened against the
+same two failure modes for any future kind: the outbox reaper dead-letters one
+unparseable row (`status = failed`, bounded `last_error`) and keeps delivering
+the rest, and the claim path marks a pending row whose kind or payload it
+cannot parse `failed` with a visible `system.update.cancelled{reason:
+"unrecognized_kind"}` instead of throwing.
+
+When a child's `child_terminal_result` is delivered, that child's still-pending
+`child_requires_action`, `child_progress`, and `child_waiting_capacity` notices
+on the parent are superseded (`reason: superseded_by_terminal`): they describe a
+state that no longer exists. A `failSessionWorkBeforeAttemptClaim` that cancels a
+child's pending human-input rows emits the same `child_requires_action_resolved`
+(`outcome: cancelled`, `respondedByKind: system`) as an ordinary terminal
+settlement.
+
 A live agent attempt may answer a child's blocking human-input request with the
 first-party `session_human_input_respond` tool (`sessions:control`,
 `session.human_input.write`); tool approvals (`session.approval.write`) are

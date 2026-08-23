@@ -273,6 +273,20 @@ type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSes
 
 const VIEWER_LIFECYCLE_PERMISSIONS = ["stream:view", "terminal:attach", "files:write"] as const;
 
+/**
+ * Bounded responder kind recorded on a child's requires-action resolution
+ * notice for its parent: a key principal is `api`, a signed agent attempt is
+ * `agent_attempt`, and every other HTTP caller is a human. Never a subject id.
+ */
+function childRequiresActionRespondedByKindForGrant(
+  grant: Pick<AccessGrant, "principalKind">,
+): "human" | "api" | "agent_attempt" | "system" {
+  if (grant.principalKind === "api_key" || grant.principalKind === "configured_key") return "api";
+  if (grant.principalKind === "agent_attempt") return "agent_attempt";
+  if (grant.principalKind === "service") return "system";
+  return "human";
+}
+
 function requireViewerLifecyclePermission(grant: AccessGrant): void {
   if (
     VIEWER_LIFECYCLE_PERMISSIONS.some((permission) => hasPermission(grant.permissions, permission))
@@ -2773,6 +2787,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         sessionId,
         subjectId: grant.subjectId,
+        respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
         payload: event.payload,
         clientEventId: event.clientEventId ?? null,
       });
@@ -2804,6 +2819,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           requestId: event.payload.requestId,
           response: event.payload.response,
           respondedBy: grant.subjectId,
+          respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
           clientEventId: event.clientEventId ?? null,
         });
       } catch (error) {

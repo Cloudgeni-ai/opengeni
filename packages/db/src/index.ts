@@ -8,6 +8,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
   isChildLifecycleSystemUpdateKind,
   type ChildLifecycleSystemUpdateKind,
   type ChildRequiresActionResolvedOutcome,
@@ -54628,7 +54629,25 @@ export async function claimSessionWorkForAttempt(
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
+          const unrecognizedUpdateIds: string[] = [];
           for (const update of updates) {
+            // A kind or payload this image cannot parse is a bounded, visible
+            // condition, never an endless re-peek: mark that one row failed
+            // and record `unrecognized_kind` on the timeline; the rest of the
+            // batch is claimed normally.
+            if (
+              !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
+              !SessionSystemUpdatePayload.safeParse(
+                fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+              ).success
+            ) {
+              await tx
+                .update(schema.sessionSystemUpdates)
+                .set({ state: "failed" })
+                .where(eq(schema.sessionSystemUpdates.id, update.id));
+              unrecognizedUpdateIds.push(update.id);
+              continue;
+            }
             const scheduledAuthorityDenial = update.scheduledTaskRunId
               ? await validateScheduledTargetExecutionAtClaim(tx as unknown as Database, {
                   accountId,
@@ -54777,6 +54796,25 @@ export async function claimSessionWorkForAttempt(
                 occurredAt,
               });
             }
+            if (unrecognizedUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: unrecognizedUpdateIds,
+                  count: unrecognizedUpdateIds.length,
+                  reason: "unrecognized_kind",
+                },
+                occurredAt,
+              });
+            }
             return {
               count: 0,
               lastSequence: sequence,
@@ -54891,6 +54929,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: authorityRejectedUpdateIds,
                 count: authorityRejectedUpdateIds.length,
                 reason: "stale_execution_authority",
+              },
+              occurredAt,
+            });
+          }
+          if (unrecognizedUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: unrecognizedUpdateIds,
+                count: unrecognizedUpdateIds.length,
+                reason: "unrecognized_kind",
               },
               occurredAt,
             });
@@ -58375,7 +58432,7 @@ export async function failSessionWorkBeforeAttemptClaim(
           );
           sequence = closedTools.sequence;
           closedToolEvents = closedTools.events;
-          await tx
+          const cancelledHumanInputs = await tx
             .update(schema.sessionHumanInputRequests)
             .set({
               status: "cancelled",
@@ -58391,7 +58448,29 @@ export async function failSessionWorkBeforeAttemptClaim(
                 eq(schema.sessionHumanInputRequests.turnId, turn.id),
                 eq(schema.sessionHumanInputRequests.status, "pending"),
               ),
+            )
+            .returning({
+              id: schema.sessionHumanInputRequests.id,
+              turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
+            });
+          // The child's blocked boundary died with the turn: resolve each
+          // request for the parent (locked by the child-lifecycle prefix
+          // above) so its pending child_requires_action can be superseded.
+          for (const request of cancelledHumanInputs) {
+            await enqueueChildRequiresActionResolvedOutboxTx(
+              tx as unknown as Database,
+              workspaceId,
+              session,
+              {
+                turnId: turn.id,
+                turnGeneration: request.turnGeneration,
+                requestId: request.id,
+                approvalId: null,
+                outcome: "cancelled",
+                respondedByKind: "system",
+              },
             );
+          }
         }
         await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
           accountId: session.accountId,
@@ -62281,7 +62360,35 @@ export async function claimPendingSessionSystemUpdateOutbox(
     personal_connection_delegations: unknown;
     xai_provider_account_authority_snapshot: unknown;
   }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox(${limit})`);
-  return rows.map(mapSystemUpdateOutboxRow);
+  // One unparseable row (for example a kind this image does not understand, or
+  // a payload that no longer matches its schema) must not poison the whole
+  // batch: dead-letter exactly that row with a bounded error and keep
+  // delivering the rest. The row stays inspectable as `failed` + `last_error`.
+  const deliveries: SessionSystemUpdateOutboxDelivery[] = [];
+  for (const row of rows) {
+    try {
+      deliveries.push(mapSystemUpdateOutboxRow(row));
+    } catch (error) {
+      const message = `unrecognized outbox row: ${error instanceof Error ? error.message : String(error)}`;
+      await withRlsContext(
+        db,
+        { accountId: row.account_id, workspaceId: row.workspace_id },
+        async (scopedDb) => {
+          await scopedDb
+            .update(schema.sessionSystemUpdateOutbox)
+            .set({ status: "failed", lastError: message.slice(0, 500), updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdateOutbox.workspaceId, row.workspace_id),
+                eq(schema.sessionSystemUpdateOutbox.id, row.id),
+                eq(schema.sessionSystemUpdateOutbox.status, "pending"),
+              ),
+            );
+        },
+      );
+    }
+  }
+  return deliveries;
 }
 
 export type SessionWorkflowWake = {
@@ -63028,10 +63135,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
                       payload: {
                         updateIds: supersededUpdateIds,
                         count: supersededUpdateIds.length,
-                        reason:
-                          input.kind === "child_progress"
-                            ? "superseded_by_newer_progress"
-                            : "superseded_by_resolution",
+                        reason: childLifecycleSupersessionReason(input.kind),
                         supersededByUpdateId: inserted.id,
                       },
                       occurredAt: now,
@@ -63231,7 +63335,38 @@ async function supersedeStaleChildLifecycleNoticesInTransaction(
       .returning({ id: schema.sessionSystemUpdates.id });
     return rows.map((row) => row.id).sort();
   }
+  if (input.inserted.kind === "child_terminal_result") {
+    // The child reached a terminal boundary: its still-pending blocked-on-input,
+    // progress, and capacity-wait notices describe a state that no longer
+    // exists. (A pending resolution stays: it is already informational.)
+    const rows = await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          inArray(schema.sessionSystemUpdates.kind, [
+            "child_requires_action",
+            "child_progress",
+            "child_waiting_capacity",
+          ]),
+          eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+        ),
+      )
+      .returning({ id: schema.sessionSystemUpdates.id });
+    return rows.map((row) => row.id).sort();
+  }
   return [];
+}
+
+function childLifecycleSupersessionReason(
+  kind: string,
+): "superseded_by_newer_progress" | "superseded_by_resolution" | "superseded_by_terminal" {
+  if (kind === "child_progress") return "superseded_by_newer_progress";
+  if (kind === "child_terminal_result") return "superseded_by_terminal";
+  return "superseded_by_resolution";
 }
 
 export async function listOutstandingSessionSystemUpdates(
@@ -63834,6 +63969,7 @@ export async function expireSessionInteractionIntervention(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: "system:expired",
+    respondedByKind: "system",
     payload: {
       approvalId: intervention.originatingToolCallId,
       decision: "reject",

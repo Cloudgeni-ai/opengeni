@@ -1,11 +1,20 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
+  armCodexCapacityWait,
+  armXaiCapacityWait,
   bootstrapWorkspace,
+  childWaitingCapacityDedupeKey,
+  claimPendingSessionSystemUpdateOutbox,
+  ensureCodexRotationSettings,
+  failSessionWorkBeforeAttemptClaim,
+  getSessionGoal,
+  updateCodexRotationSettings,
   childPausedDedupeKey,
   childProgressDedupeKey,
   childRequiresActionDedupeKey,
@@ -141,9 +150,20 @@ const questions = [
 async function freezeChild(
   grant: Grant,
   child: Started,
-  options: { approvals?: unknown[]; requestId?: string } = {},
+  options: { approvals?: unknown[]; requestId?: string; parallelRequestId?: string } = {},
 ) {
   const requestId = options.requestId ?? crypto.randomUUID();
+  const parallelRequests = options.parallelRequestId
+    ? [
+        {
+          id: options.parallelRequestId,
+          toolCallId: "human-call-2",
+          questions,
+          allowSkip: false,
+          expiresAt: null,
+        },
+      ]
+    : [];
   const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
     sessionId: child.session.id,
     turnId: child.turn.id,
@@ -157,6 +177,7 @@ async function freezeChild(
       pendingApprovals: options.approvals ?? [],
       humanInputRequests: [
         { id: requestId, toolCallId: "human-call-1", questions, allowSkip: false, expiresAt: null },
+        ...parallelRequests,
       ],
     },
     events: [
@@ -164,6 +185,10 @@ async function freezeChild(
         type: "session.humanInput.requested",
         payload: { request: { id: requestId, questions, allowSkip: false, expiresAt: null } },
       },
+      ...parallelRequests.map((request) => ({
+        type: "session.humanInput.requested" as const,
+        payload: { request: { id: request.id, questions, allowSkip: false, expiresAt: null } },
+      })),
       ...(options.approvals && options.approvals.length > 0
         ? [
             {
@@ -245,13 +270,13 @@ async function pause(
   );
 }
 
-function materialize(grant: Grant, sessionId: string) {
+function materialize(grant: Grant, sessionId: string, cap: number | null = null) {
   return materializeGoalContinuation(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId,
     workflowId: `session-${sessionId}`,
-    defaultMaxAutoContinuations: null,
+    defaultMaxAutoContinuations: cap,
     budgetBlocked: null,
     policy: {
       model: "scripted-model",
@@ -745,6 +770,444 @@ describe("child lifecycle notices", () => {
     expect((await materialize(grant, parent.session.id)).action).toBe("queue");
     const events = await listSessionEvents(client.db, grant.workspaceId, parent.session.id);
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
+  });
+
+  test("codex and xai capacity waits enqueue child_waiting_capacity", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const codexChild = await startSession(grant, { parent, message: "codex work" });
+    await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
+    await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+    const codex = await armCodexCapacityWait(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: codexChild.session.id,
+      turnId: codexChild.turn.id,
+      attemptId: codexChild.attemptId,
+      workflowId: `session-${codexChild.session.id}`,
+      earliestResetAt: new Date(Date.now() + 5 * 60_000),
+      resetKind: "authoritative",
+      failurePayload: { error: "all connected Codex subscriptions are unavailable" },
+    });
+    if (codex.action !== "waiting") throw new Error(`codex wait not armed: ${codex.action}`);
+    expect(
+      await outbox(
+        grant,
+        childWaitingCapacityDedupeKey({
+          childSessionId: codexChild.session.id,
+          waiterId: codex.waiter.id,
+        }),
+      ),
+    ).toMatchObject({
+      kind: "child_waiting_capacity",
+      classification: "info",
+      targetSessionId: parent.session.id,
+      payload: {
+        type: "child_waiting_capacity",
+        childSessionId: codexChild.session.id,
+        childTurnId: codexChild.turn.id,
+        provider: "codex",
+        nextCheckAt: codex.waiter.nextCheckAt.toISOString(),
+      },
+    });
+
+    const xaiChild = await startSession(grant, { parent, message: "xai work" });
+    const xai = await armXaiCapacityWait(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      sessionId: xaiChild.session.id,
+      turnId: xaiChild.turn.id,
+      attemptId: xaiChild.attemptId,
+      workflowId: `session-${xaiChild.session.id}`,
+      authoritySnapshot: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+      earliestResetAt: null,
+      failurePayload: { error: "all connected SuperGrok subscriptions are unavailable" },
+    });
+    if (xai.action !== "waiting") throw new Error(`xai wait not armed: ${xai.action}`);
+    expect(
+      await outbox(
+        grant,
+        childWaitingCapacityDedupeKey({
+          childSessionId: xaiChild.session.id,
+          waiterId: xai.waiter.id,
+        }),
+      ),
+    ).toMatchObject({
+      kind: "child_waiting_capacity",
+      payload: { provider: "xai", childTurnId: xaiChild.turn.id },
+    });
+  });
+
+  test("a child_requires_action auto-resumes a cap-paused parent goal and wakes it", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleIdle(grant, parent);
+    expect((await materialize(grant, parent.session.id, 1)).action).toBe("continue");
+    const goalAttemptId = crypto.randomUUID();
+    const goalClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: goalAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (goalClaim.action !== "claimed") throw new Error("goal turn was not claimed");
+    await settleIdle(grant, {
+      session: parent.session,
+      turn: goalClaim.turn,
+      attemptId: goalAttemptId,
+    });
+    const paused = await materialize(grant, parent.session.id, 1);
+    expect(paused.action).toBe("paused");
+    expect(await getSessionGoal(client.db, grant.workspaceId, parent.session.id)).toMatchObject({
+      status: "paused",
+      pausedReason: "max_auto_continuations",
+    });
+
+    await freezeChild(grant, child);
+    const delivered = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (delivered.reason !== "added") throw new Error("notice not added");
+    expect(delivered.events.map((event) => event.type)).toEqual([
+      "system.update.pending",
+      "goal.resumed",
+    ]);
+    expect(delivered.events[1]!.payload).toMatchObject({
+      actor: "system",
+      reason: "external_input",
+      cause: { kind: "child_requires_action", updateId: delivered.update.id },
+    });
+    expect(delivered.workflowWakeRevision).not.toBeNull();
+    expect(await getSessionGoal(client.db, grant.workspaceId, parent.session.id)).toMatchObject({
+      status: "active",
+    });
+  });
+
+  test("a delivered child_terminal_result supersedes that child's pending notices", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work", goal: true });
+    await freezeChild(grant, child);
+    const blocked = await deliver(
+      (await outbox(
+        grant,
+        childRequiresActionDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+        }),
+      ))!,
+    );
+    if (blocked.reason !== "added") throw new Error("notice not added");
+    const terminal = await addSessionSystemUpdateWithSourceMutation(
+      client.db,
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: parent.session.id,
+        kind: "child_terminal_result",
+        classification: "failure",
+        sourceId: child.session.id,
+        dedupeKey: `child-completion:${child.session.id}:turn:${child.turn.id}`,
+        summary: "Child session failed",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: child.session.id,
+          status: "failed",
+        },
+      },
+      async () => undefined,
+    );
+    if (terminal.reason !== "added") throw new Error("terminal result not added");
+    expect(terminal.events.map((event) => event.type)).toEqual([
+      "system.update.pending",
+      "system.update.cancelled",
+    ]);
+    expect(terminal.events[1]!.payload).toMatchObject({
+      updateIds: [blocked.update.id],
+      reason: "superseded_by_terminal",
+    });
+    expect(
+      (
+        await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId, parent.session.id)
+      ).map((update) => update.kind),
+    ).toEqual(["child_terminal_result"]);
+  });
+
+  test("system resolutions keep their responder kind and pre-claim failure resolves leftovers", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const approvalChild = await startSession(grant, { parent, message: "approval" });
+    await freezeChild(grant, approvalChild, { approvals: [{ id: "tool-call-x" }] });
+    const decided = await acceptSessionApprovalDecision(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: approvalChild.session.id,
+      subjectId: "system:expired",
+      respondedByKind: "system",
+      payload: { approvalId: "tool-call-x", decision: "reject" },
+    });
+    expect(decided.action).toBe("accepted");
+    expect(
+      await outbox(
+        grant,
+        childRequiresActionResolvedDedupeKey({
+          childSessionId: approvalChild.session.id,
+          turnId: approvalChild.turn.id,
+          turnGeneration: approvalChild.turn.executionGeneration,
+          requestId: null,
+          approvalId: "tool-call-x",
+        }),
+      ),
+    ).toMatchObject({ payload: { outcome: "rejected", respondedByKind: "system" } });
+
+    const child = await startSession(grant, { parent, message: "two requests" });
+    const parallelRequestId = crypto.randomUUID();
+    const { requestId } = await freezeChild(grant, child, { parallelRequestId });
+    const answered = await acceptSessionHumanInputResponse(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: child.session.id,
+      requestId,
+      response: {
+        outcome: "answered",
+        answers: [{ questionId: "environment", values: ["staging"] }],
+      },
+      respondedBy: grant.subjectId,
+      respondedByKind: "api",
+    });
+    if (answered.action !== "accepted") throw new Error("answer was not accepted");
+    expect(
+      await outbox(
+        grant,
+        childRequiresActionResolvedDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+          requestId,
+          approvalId: null,
+        }),
+      ),
+    ).toMatchObject({ payload: { outcome: "answered", respondedByKind: "api" } });
+    // The approval-trigger admission fails permanently before any attempt
+    // claims it: the leftover parallel request is cancelled and resolved.
+    const failed = await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId, {
+      accountId: grant.accountId,
+      sessionId: child.session.id,
+      workflowId: `session-${child.session.id}`,
+      trigger: { kind: "approval", triggerEventId: answered.event.id },
+      error: "permanent admission failure",
+    });
+    expect(failed.action).toBe("failed");
+    expect(
+      await outbox(
+        grant,
+        childRequiresActionResolvedDedupeKey({
+          childSessionId: child.session.id,
+          turnId: child.turn.id,
+          turnGeneration: child.turn.executionGeneration,
+          requestId: parallelRequestId,
+          approvalId: null,
+        }),
+      ),
+    ).toMatchObject({
+      payload: { requestId: parallelRequestId, outcome: "cancelled", respondedByKind: "system" },
+    });
+  });
+
+  test("an unparseable pending row is failed visibly at claim and a poison outbox row is dead-lettered", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work", goal: true });
+    await settleIdle(grant, parent);
+    const bogusId = crypto.randomUUID();
+    await shared.admin`
+      insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, classification, source_id, dedupe_key, summary, payload)
+      values
+        (${bogusId}, ${grant.accountId}, ${grant.workspaceId}, ${parent.session.id}, 'child_progress',
+         'info', ${child.session.id}, ${`bogus:${bogusId}`}, 'payload from a newer image', '{"type":"child_progress"}'::jsonb)`;
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).not.toBe("claimed");
+    const [row] = await shared.admin<Array<{ state: string }>>`
+      select state from session_system_updates where id = ${bogusId}`;
+    expect(row?.state).toBe("failed");
+    const events = await listSessionEvents(client.db, grant.workspaceId, parent.session.id);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "system.update.cancelled" &&
+          (event.payload as { reason?: string }).reason === "unrecognized_kind" &&
+          ((event.payload as { updateIds?: string[] }).updateIds ?? []).includes(bogusId),
+      ),
+    ).toBe(true);
+
+    const poisonId = crypto.randomUUID();
+    await shared.admin`
+      insert into session_system_update_outbox
+        (id, account_id, workspace_id, source_session_id, target_session_id, dedupe_key, kind, classification, source_id, summary, payload)
+      values
+        (${poisonId}, ${grant.accountId}, ${grant.workspaceId}, ${child.session.id}, ${parent.session.id},
+         ${`poison:${poisonId}`}, 'child_progress', 'info', ${child.session.id}, 'poison', '{"type":"child_progress"}'::jsonb)`;
+    const progress = await recordSessionGoalProgressWithEvent(
+      client.db,
+      grant.workspaceId,
+      child.session.id,
+      {
+        progressNote: "valid neighbour",
+        command: {
+          accountId: grant.accountId,
+          actor: {
+            type: "agent_attempt",
+            attemptId: child.attemptId,
+            sessionId: child.session.id,
+            turnId: child.turn.id,
+            executionGeneration: child.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      },
+    );
+    const validKey = childProgressDedupeKey({
+      childSessionId: child.session.id,
+      receiptId: progress.operationId,
+    });
+    const claimedOutbox = await claimPendingSessionSystemUpdateOutbox(client.db, 1_000);
+    expect(claimedOutbox.some((delivery) => delivery.dedupeKey === validKey)).toBe(true);
+    expect(claimedOutbox.some((delivery) => delivery.id === poisonId)).toBe(false);
+    const [poison] = await shared.admin<Array<{ status: string; last_error: string | null }>>`
+      select status, last_error from session_system_update_outbox where id = ${poisonId}`;
+    expect(poison).toMatchObject({ status: "failed" });
+    expect(poison?.last_error).toContain("unrecognized outbox row");
+  });
+
+  test("the rollout flag also gates progress, capacity, cancel, and terminal producers", async () => {
+    configureChildLifecycleNotices({ enabled: false });
+    try {
+      const grant = await workspace();
+      const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+      const child = await startSession(grant, { parent, message: "work", goal: true });
+      const progress = await recordSessionGoalProgressWithEvent(
+        client.db,
+        grant.workspaceId,
+        child.session.id,
+        {
+          progressNote: "quiet",
+          command: {
+            accountId: grant.accountId,
+            actor: {
+              type: "agent_attempt",
+              attemptId: child.attemptId,
+              sessionId: child.session.id,
+              turnId: child.turn.id,
+              executionGeneration: child.turn.executionGeneration,
+            },
+            operationKey: crypto.randomUUID(),
+          },
+        },
+      );
+      expect(
+        await outbox(
+          grant,
+          childProgressDedupeKey({
+            childSessionId: child.session.id,
+            receiptId: progress.operationId,
+          }),
+        ),
+      ).toBeNull();
+      await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId);
+      await updateCodexRotationSettings(client.db, grant.workspaceId, { rotationEnabled: true });
+      const codex = await armCodexCapacityWait(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: child.session.id,
+        turnId: child.turn.id,
+        attemptId: child.attemptId,
+        workflowId: `session-${child.session.id}`,
+        earliestResetAt: null,
+        resetKind: "authoritative",
+        failurePayload: { error: "unavailable" },
+      });
+      if (codex.action !== "waiting") throw new Error("codex wait not armed");
+      expect(
+        await outbox(
+          grant,
+          childWaitingCapacityDedupeKey({
+            childSessionId: child.session.id,
+            waiterId: codex.waiter.id,
+          }),
+        ),
+      ).toBeNull();
+      const cancelled = await startSession(grant, { parent, message: "cancel me" });
+      const { requestId } = await freezeChild(grant, cancelled);
+      await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: cancelled.session.id,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action: "cancel",
+          }),
+        ),
+      );
+      expect(
+        await outbox(
+          grant,
+          childRequiresActionResolvedDedupeKey({
+            childSessionId: cancelled.session.id,
+            turnId: cancelled.turn.id,
+            turnGeneration: cancelled.turn.executionGeneration,
+            requestId,
+            approvalId: null,
+          }),
+        ),
+      ).toBeNull();
+      // Terminal results are not gated: the pre-existing child_terminal_result
+      // still reaches the parent.
+      expect(
+        await outbox(grant, `child-completion:${cancelled.session.id}:cancelled`),
+      ).toMatchObject({ kind: "child_terminal_result" });
+      const failing = await startSession(grant, { parent, message: "fail me" });
+      const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
+        sessionId: failing.session.id,
+        turnId: failing.turn.id,
+        triggerEventId: failing.turn.triggerEventId,
+        attemptId: failing.attemptId,
+        turnStatus: "failed",
+        sessionStatus: "failed",
+        activeTurnId: null,
+        events: [
+          { type: "turn.failed", payload: { error: "boom" } },
+          { type: "session.status.changed", payload: { status: "failed" } },
+        ],
+      });
+      expect(settled.action).toBe("settled");
+      expect(
+        await outbox(grant, `child-completion:${failing.session.id}:turn:${failing.turn.id}`),
+      ).toMatchObject({ kind: "child_terminal_result", payload: { status: "failed" } });
+    } finally {
+      configureChildLifecycleNotices({ enabled: true });
+    }
   });
 
   test("the rollout flag gates every producer", async () => {

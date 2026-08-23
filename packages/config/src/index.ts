@@ -479,8 +479,12 @@ const SettingsSchema = z.object({
   // become typed `session_system_updates` rows for the parent (in addition to
   // `child_terminal_result`). Rolling hazard: a pre-notice worker throws on an
   // unknown update kind, so enable only once the whole fleet runs an image
-  // that understands the new kinds. Default off. The API and both workers
-  // install the validated value into @opengeni/db once at boot.
+  // that understands the new kinds. Once the flag has produced rows, a
+  // pre-notice image must never restart while any new-kind row is still
+  // pending (session_system_updates or session_system_update_outbox); turning
+  // the flag back off stops production but does not drain already committed
+  // rows. Default off. The API and both workers install the validated value
+  // into @opengeni/db once at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
   childLifecycleNoticesEnabled: EnvBoolean.default(false),
   // Per-segment ceiling on agent loop turns (model calls) within a single

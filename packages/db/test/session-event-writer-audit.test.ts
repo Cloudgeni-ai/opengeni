@@ -400,6 +400,7 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "acceptSessionApprovalDecision",
     "acceptSessionHumanInputResponse",
     "applySessionTurnSettlement",
+    "failSessionWorkBeforeAttemptClaim",
   ],
   enqueueChildWaitingCapacityOutboxTx: ["armCodexCapacityWait", "armXaiCapacityWait"],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],

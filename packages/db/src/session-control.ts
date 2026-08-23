@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   boundWorkspaceControlEvent,
+  childPausedClassification,
   McpPersonalConnectionDelegations,
   workspaceControlUtf8Bytes,
   type SessionMcpApprovalPolicy,
@@ -2408,7 +2409,7 @@ async function enqueueChildPausedOutboxInTransaction(
       receiptId: input.operationId,
     }),
     kind: "child_paused",
-    classification: input.actorKind === "agent" ? "info" : "action_required",
+    classification: childPausedClassification(input.actorKind),
     summary: childPausedSummary(input.childSession.id, payload),
     payload,
   });
