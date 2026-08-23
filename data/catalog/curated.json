@@ -173,11 +173,7 @@
       "category": "project-management",
       "featured": true,
       "official": true,
-      "oauthProfile": { "clientSource": "dcr" },
-      "notes": [
-        "Name only. Tier, provenance, auth kind, and scopes stay snapshot-derived.",
-        "Linear advertises CIMD but only issues MCP-accepted tokens to DCR clients; oauthProfile.clientSource expresses that compatibility override as data (the OAuth client also keeps the issuer on its prefer-DCR list for deployments with a stale catalog)."
-      ]
+      "notes": ["Name only. Tier, provenance, auth kind, and scopes stay snapshot-derived."]
     },
     {
       "mcpUrl": "https://mcp.asana.com/v2/mcp",

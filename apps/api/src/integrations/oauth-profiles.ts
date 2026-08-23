@@ -97,10 +97,9 @@ export type OAuthProviderProfile = {
    */
   postDiscoveryProviderDomain?: { domain: string; message: string };
   /**
-   * Client registration preference. `dcr` prefers the advertised registration
-   * endpoint over CIMD (the Linear compatibility override, now data);
-   * `deployment_managed`/`cimd` follow the ordinary resolution order, which
-   * already tries operator and deployment clients first and CIMD next.
+   * Client registration preference. `dcr` or `cimd` forces that advertised
+   * self-registration mechanism after operator/deployment clients. Without an
+   * explicit preference, DCR wins when both mechanisms are advertised.
    */
   clientSource?: "deployment_managed" | "cimd" | "dcr";
   /** Send RFC 8707 `resource` on authorize and token requests. */
@@ -226,13 +225,6 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
     message: `Slack OAuth is allowed only for ${OFFICIAL_SLACK_MCP_URL}`,
   },
 ];
-
-/**
- * Issuers whose advertised CIMD support is broken and whose documented
- * interactive setup uses DCR; the simultaneously advertised registration
- * endpoint is preferred. Linear is the only known case.
- */
-export const PREFER_DCR_ISSUERS: ReadonlySet<string> = new Set(["https://mcp.linear.app"]);
 
 export type DeploymentManagedClientKey = "slack";
 
