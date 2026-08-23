@@ -65,7 +65,8 @@ export type SandboxWriteFileOptions = {
 /** A node in the Pierre file tree. `children === undefined` ⇒ an unexpanded dir
  *  (lazy treeMode); `children: []` ⇒ an expanded-but-empty dir. */
 export type FileTreeNode = {
-  path: string; // workspace-relative POSIX
+  /** Opaque path returned by the selected target's FileSystem boundary. */
+  path: string;
   name: string;
   kind: "file" | "dir";
   children?: FileTreeNode[] | undefined;

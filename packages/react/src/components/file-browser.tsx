@@ -43,6 +43,12 @@ export type FileBrowserProps = {
   /** Selection callback for the preview pane. */
   onSelectFile?: ((path: string) => void) | undefined;
   selectedPath?: string | undefined;
+  /** Deliberately reveal this selected path by lazily opening every loaded
+   * ancestor and scrolling its row into view. The path is opaque and is never
+   * normalized or re-rooted here. */
+  revealPath?: string | undefined;
+  /** Increment/change to reveal the same path again after a user collapses it. */
+  revealPathRequestId?: string | number | undefined;
   /** Render-prop to theme/replace a row entirely (the Pierre-swap escape hatch). */
   renderNode?: ((node: FileTreeNode, depth: number, expanded: boolean) => ReactNode) | undefined;
   /** Shown when the tree is empty (no files / not loaded yet). */
@@ -96,16 +102,51 @@ function itemKey(item: RenderItem): string {
   }
 }
 
-/** Walk the tree to find a node by path. */
+function pathIsInsideDirectory(path: string, directory: string): boolean {
+  if (!path.startsWith(directory) || path === directory) return false;
+  if (directory.endsWith("/") || directory.endsWith("\\")) return true;
+  const boundary = path[directory.length];
+  return boundary === "/" || boundary === "\\";
+}
+
+/** Walk the authoritative tree without assuming its target-owned separator. */
 function findNode(nodes: FileTreeNode[], path: string): FileTreeNode | undefined {
   for (const node of nodes) {
     if (node.path === path) return node;
-    if (node.kind === "dir" && node.children && path.startsWith(`${node.path}/`)) {
+    if (node.kind === "dir" && node.children && pathIsInsideDirectory(path, node.path)) {
       const hit = findNode(node.children, path);
       if (hit) return hit;
     }
   }
   return undefined;
+}
+
+type RevealTrace = {
+  directories: string[];
+  frontier: string | null;
+};
+
+/** Follow only paths already named by the authoritative tree. This deliberately
+ * avoids manufacturing ancestors from a platform-specific path string. */
+function traceRevealPath(nodes: FileTreeNode[], targetPath: string): RevealTrace {
+  for (const node of nodes) {
+    if (node.path === targetPath) {
+      return {
+        directories: node.kind === "dir" ? [node.path] : [],
+        frontier: node.kind === "dir" && node.children === undefined ? node.path : null,
+      };
+    }
+    if (node.kind !== "dir" || !pathIsInsideDirectory(targetPath, node.path)) continue;
+    if (node.children === undefined) {
+      return { directories: [node.path], frontier: node.path };
+    }
+    const child = traceRevealPath(node.children, targetPath);
+    return {
+      directories: [node.path, ...child.directories],
+      frontier: child.frontier,
+    };
+  }
+  return { directories: [], frontier: null };
 }
 
 /** A pending inline-create: a phantom input row under `parent`. */
@@ -142,6 +183,8 @@ export function FileBrowser({
   fallback,
   onSelectFile,
   selectedPath,
+  revealPath,
+  revealPathRequestId,
   renderNode,
   emptyState,
   editable = true,
@@ -158,6 +201,15 @@ export function FileBrowser({
   const [pendingDelete, setPendingDelete] = useState<FileTreeNode | null>(null);
   const [busy, setBusy] = useState(false);
   const [coarsePointer, setCoarsePointer] = useState(false);
+  const [revealRequest, setRevealRequest] = useState<{
+    path: string;
+    requestId: string | number;
+  } | null>(null);
+  const handledRevealRequestRef = useRef<{
+    path: string;
+    requestId: string | number;
+  } | null>(null);
+  const attemptedRevealPathsRef = useRef<Set<string>>(new Set());
   const treeId = useId();
   const container = usePortalTokenSource<HTMLDivElement>();
   const containerRef = container.currentRef;
@@ -183,6 +235,23 @@ export function FileBrowser({
       return () => query.removeListener(update);
     }
   }, []);
+
+  const effectiveRevealRequestId = revealPath ? (revealPathRequestId ?? revealPath) : null;
+  useEffect(() => {
+    if (!revealPath || effectiveRevealRequestId === null) {
+      setRevealRequest(null);
+      return;
+    }
+    const handled = handledRevealRequestRef.current;
+    if (handled?.path === revealPath && handled.requestId === effectiveRevealRequestId) return;
+    handledRevealRequestRef.current = {
+      path: revealPath,
+      requestId: effectiveRevealRequestId,
+    };
+    attemptedRevealPathsRef.current = new Set();
+    setActive(null);
+    setRevealRequest({ path: revealPath, requestId: effectiveRevealRequestId });
+  }, [effectiveRevealRequestId, revealPath]);
 
   // The keyboard cursor: an explicitly-navigated node falls back to the
   // externally-selected file so arrow keys pick up where the preview pane is.
@@ -214,6 +283,34 @@ export function FileBrowser({
     },
     [expand],
   );
+
+  useEffect(() => {
+    if (!revealRequest) return;
+    const trace = traceRevealPath(result.tree, revealRequest.path);
+    if (trace.directories.length > 0) {
+      setExpanded((previous) => {
+        const next = new Set(previous);
+        let changed = false;
+        for (const path of trace.directories) {
+          if (next.has(path)) continue;
+          next.add(path);
+          changed = true;
+        }
+        return changed ? next : previous;
+      });
+    }
+    const frontier = trace.frontier;
+    if (
+      !frontier ||
+      attemptedRevealPathsRef.current.has(frontier) ||
+      loadingPaths.has(frontier) ||
+      result.expandingPaths.has(frontier)
+    ) {
+      return;
+    }
+    attemptedRevealPathsRef.current.add(frontier);
+    void expand(frontier);
+  }, [expand, loadingPaths, result.expandingPaths, result.tree, revealRequest]);
 
   const toggle = useCallback(
     async (node: FileTreeNode) => {
@@ -799,6 +896,24 @@ export function FileBrowser({
     const index = renderItems.findIndex((it) => it.type === "node" && it.node.path === cursor);
     if (index >= 0) vlistRef.current?.scrollToIndex(index);
   }, [cursor, renderItems]);
+
+  useEffect(() => {
+    if (!revealRequest) return;
+    const index = renderItems.findIndex(
+      (item) => item.type === "node" && item.node.path === revealRequest.path,
+    );
+    if (index < 0) return;
+    if (usesVirtualTree) {
+      vlistRef.current?.scrollToIndex(index);
+    } else {
+      document.getElementById(`${treeId}-item-${index}`)?.scrollIntoView?.({ block: "nearest" });
+    }
+    setRevealRequest((current) =>
+      current?.path === revealRequest.path && current.requestId === revealRequest.requestId
+        ? null
+        : current,
+    );
+  }, [renderItems, revealRequest, treeId, usesVirtualTree]);
 
   return (
     <div className={cn("flex min-h-0 min-w-0 flex-col", className)}>

@@ -105,7 +105,6 @@ import {
 } from "@/lib/session-attention";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
-import { downloadSandboxFileArtifact } from "@/lib/sandbox-artifact-download";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
@@ -622,19 +621,19 @@ export function SessionRoute({
   const sandboxFileRequestSeq = useRef(0);
   const [sandboxFileRequest, setSandboxFileRequest] = useState<{
     path: string;
-    line: number;
+    line: number | null;
     requestId: number;
   } | null>(null);
   useEffect(() => {
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
-  const openSandboxFileAtLine = useCallback(
-    (path: string, line: number) => {
+  const openSandboxFile = useCallback(
+    (path: string, line?: number | null) => {
       sandboxFileRequestSeq.current += 1;
       setSandboxFileRequest({
         path,
-        line,
+        line: line != null && line > 0 ? line : null,
         requestId: sandboxFileRequestSeq.current,
       });
       setInspectorOpen(true);
@@ -726,7 +725,7 @@ export function SessionRoute({
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
-      onOpenSandboxFile={openSandboxFileAtLine}
+      onOpenSandboxFile={openSandboxFile}
     />
   );
 
@@ -1004,7 +1003,7 @@ function SessionChatPane(props: {
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
-  onOpenSandboxFile: (path: string, line: number) => void;
+  onOpenSandboxFile: (path: string, line?: number | null) => void;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
@@ -1030,28 +1029,6 @@ function SessionChatPane(props: {
   const loadVideoArtifactPlayback = useMemo(
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
-  );
-  const downloadSandboxFile = useCallback(
-    async (path: string) => {
-      await downloadSandboxFileArtifact(
-        context.client,
-        props.session.workspaceId,
-        props.session.id,
-        path,
-      );
-    },
-    [context.client, props.session.id, props.session.workspaceId],
-  );
-  const onOpenSandboxFile = props.onOpenSandboxFile;
-  const handleSandboxFile = useCallback(
-    async (path: string, line?: number) => {
-      if (line != null && line > 0) {
-        onOpenSandboxFile(path, line);
-        return;
-      }
-      await downloadSandboxFile(path);
-    },
-    [downloadSandboxFile, onOpenSandboxFile],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1532,11 +1509,15 @@ function SessionChatPane(props: {
       }
       return (
         <div data-testid="assistant-markdown">
-          <MarkdownText text={text} streaming={item.streaming} onSandboxFile={handleSandboxFile} />
+          <MarkdownText
+            text={text}
+            streaming={item.streaming}
+            onSandboxFile={props.onOpenSandboxFile}
+          />
         </div>
       );
     },
-    [handleSandboxFile, props.session.workspaceId],
+    [props.onOpenSandboxFile, props.session.workspaceId],
   );
 
   return (

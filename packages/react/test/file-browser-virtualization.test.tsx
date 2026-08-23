@@ -148,6 +148,31 @@ describe("FileBrowser virtualization", () => {
     await r.unmount();
   });
 
+  test("a deliberate reveal requests an off-screen virtual row scroll", async () => {
+    const tree: FileTreeNode[] = Array.from({ length: 600 }, (_, index) => ({
+      path: `file-${index}.ts`,
+      name: `file-${index}.ts`,
+      kind: "file" as const,
+    }));
+    const target = "file-599.ts";
+    const r = await renderComponent(
+      <FileBrowser
+        result={filesResult(tree)}
+        selectedPath={target}
+        revealPath={target}
+        revealPathRequestId={1}
+        editable={false}
+      />,
+    );
+    await flush(20);
+
+    const treeElement = r.container.querySelector<HTMLElement>('[role="tree"]');
+    expect(treeElement).not.toBeNull();
+    expect(treeElement!.scrollTop).toBeGreaterThan(0);
+    expect(r.container.querySelectorAll('[role="treeitem"]').length).toBeLessThan(100);
+    await r.unmount();
+  });
+
   test("a cold residue dir shows the 'open when live' row when expanded", async () => {
     // A collapsed residue dir from a capture: truncated, no children, source=capture.
     const tree: FileTreeNode[] = [

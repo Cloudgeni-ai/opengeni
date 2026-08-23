@@ -620,7 +620,18 @@ intentional changes should regenerate those snapshots and review the diff.
   runnable latency modes such as Fast. It accepts either `ClientModel[]` or
   catalog-backed `PickerModelRow[]`, and supports host-supplied labels.
 - `Markdown` — the timeline's markdown renderer (GFM), also usable standalone.
+  With `onSandboxFile`, a valid `sandbox:<path>[:line]` application link becomes
+  an in-session Open action. The callback receives the decoded path unchanged;
+  the optional line is positive and 1-based. Invalid sandbox references render
+  as disabled text, never as empty or browser-navigation links.
 - `CommandPalette` — the slash-command palette UI over `useSlashCommands`.
+
+`SandboxWorkspace.openFileRequest` is the host seam for that callback. Each new
+`requestId` selects Files, opens the exact path on the already selected session
+target, reveals its loaded/lazy ancestors in the file tree, selects and scrolls
+to the file, and optionally focuses the requested line. A request without a line
+opens the top of the file; file publication/download remains a separate explicit
+artifact action.
 
 The timeline is extensible: `createToolRegistry` / `defaultToolRegistry` plug
 per-tool renderers, and the rendering primitives (`ActivityDisclosure`,

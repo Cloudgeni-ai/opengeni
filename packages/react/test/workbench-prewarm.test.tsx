@@ -818,7 +818,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     await hook.unmount();
   });
 
-  test("opening a guarded file is explicit live-file intent and warms a cold box", async () => {
+  test("opening a deliberate file is explicit live-file intent and warms a cold box", async () => {
     const opened: string[] = [];
     const { client, spy } = coldClient();
     const hook = await renderTabsHook(client, {
@@ -1295,6 +1295,54 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
       (element) => tabName(element).trim() === name,
     );
   }
+
+  test("a host file request selects Files and creates one exact cold-workspace warm intent", async () => {
+    const selectedTabs: string[] = [];
+    const selectedPaths: Array<string | null> = [];
+    const { client, spy } = coldClient();
+    const workspace = (openFileRequest?: {
+      path: string;
+      line?: number | null;
+      requestId: number;
+    }) =>
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          onActiveTabChange={(tab) => selectedTabs.push(tab)}
+          onFilePathChange={(path) => selectedPaths.push(path)}
+          openFileRequest={openFileRequest}
+          autoSaveId="og.test.prewarm.file-request"
+        />,
+      );
+    const rendered = await renderComponent(workspace());
+    await flush(60);
+    expect(spy.attachCalls).toBe(0);
+
+    const request = { path: "/projects/example/src/app.ts", requestId: 41 };
+    await rendered.rerender(workspace(request));
+    await flush(60);
+    expect(selectedTabName(rendered.container)).toBe("Files");
+    expect(selectedTabs).toEqual(["files"]);
+    expect(selectedPaths.length).toBeGreaterThan(0);
+    expect(new Set(selectedPaths)).toEqual(new Set([request.path]));
+    expect(spy.attachCalls).toBe(1);
+    expect(rendered.container.querySelector("[data-opengeni-selected-file]")?.textContent).toBe(
+      request.path,
+    );
+    expect(rendered.container.textContent).toContain("On machine");
+    expect(rendered.container.textContent).toContain("Retry live file");
+
+    const pathNotificationCount = selectedPaths.length;
+    await rendered.rerender(workspace(request));
+    await flush(60);
+    expect(selectedTabs).toEqual(["files"]);
+    expect(selectedPaths).toHaveLength(pathNotificationCount);
+    expect(spy.attachCalls).toBe(1);
+    await rendered.unmount();
+  });
 
   test("pure embedder, changes present: Changes is the selected tab before AND after resolve", async () => {
     let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
