@@ -136,7 +136,11 @@ import {
   readSkillLibraryArtifact,
   verifySkillLibraryArtifact,
 } from "../src/skill-library";
-import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
+import {
+  MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  guardedMcpFetch,
+  mcpTransportRequestFailureDiagnostic,
+} from "../src/mcp-network";
 import {
   ScriptedModel,
   functionCall as scriptedFunctionCall,
@@ -8448,6 +8452,28 @@ describe("runtime event normalization", () => {
       responseBody: { sentinel },
       cause: { exact: sentinel },
     });
+    const guarded = guardedMcpFetch(
+      testSettings(),
+      async () => {
+        throw exactSourceError;
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+    await expect(
+      guarded("https://example.test/mcp", {
+        method: "POST",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+      }),
+    ).rejects.toBe(exactSourceError);
+    const transportDiagnostic = mcpTransportRequestFailureDiagnostic(exactSourceError);
+    expect(transportDiagnostic).toMatchObject({
+      httpMethod: "POST",
+      rpcMethod: "initialize",
+      causeChainComplete: true,
+    });
     const makeFacade = () =>
       new PrefixedMcpServer(
         {
@@ -8480,6 +8506,7 @@ describe("runtime event normalization", () => {
       });
       const returnedError = bestEffort.errors.get(bestEffortFacade);
       expect(returnedError).toBe(exactSourceError);
+      expect(mcpTransportRequestFailureDiagnostic(returnedError)).toEqual(transportDiagnostic);
       await bestEffort.close();
 
       const strictFacade = makeFacade();
@@ -8490,6 +8517,7 @@ describe("runtime event normalization", () => {
         (error) => error as Error,
       );
       expect(strictError).toBe(exactSourceError);
+      expect(mcpTransportRequestFailureDiagnostic(strictError)).toEqual(transportDiagnostic);
 
       const renderedLogs = [...warnings, ...errors]
         .flat()

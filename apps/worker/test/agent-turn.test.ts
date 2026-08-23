@@ -44,6 +44,7 @@ import {
   mcpTransportErrorWithRetryMetadata,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
+import { guardedMcpFetch } from "@opengeni/runtime/mcp-network";
 import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
@@ -4172,6 +4173,109 @@ describe("escaped MCP transport timeout classifier", () => {
       code: "ECONNREFUSED",
     });
     expect(agentRunFailurePayload(classified).detail).toContain("private.example");
+  });
+
+  test("persists the exact failed MCP request phase and cause chain for recovery", async () => {
+    const socketFailure = Object.assign(new Error("connect ECONNREFUSED 10.0.0.8:443"), {
+      code: "ECONNREFUSED",
+    });
+    const source = new TypeError("Unable to connect. Is the computer able to access the url?", {
+      cause: socketFailure,
+    });
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async () => {
+        throw source;
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+
+    let observed: unknown;
+    try {
+      await guarded("https://example.test/mcp", {
+        method: "POST",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+    } catch (error) {
+      observed = error;
+    }
+    const classified = mcpTransportErrorWithRetryMetadata(
+      new Error("MCP SDK request failed", { cause: observed }),
+    );
+
+    expect(agentRunFailurePayload(classified)).toEqual({
+      error:
+        "A required MCP server was temporarily unreachable. The same turn will retry after a short delay.",
+      code: "mcp_transport_unavailable",
+      retryable: true,
+      detail: "MCP SDK request failed",
+      mcpTransportDiagnostic: {
+        httpMethod: "POST",
+        rpcMethod: "tools/list",
+        causeChain: [
+          {
+            kind: "error",
+            name: "TypeError",
+            message: "Unable to connect. Is the computer able to access the url?",
+          },
+          {
+            kind: "error",
+            name: "Error",
+            message: "connect ECONNREFUSED 10.0.0.8:443",
+            code: "ECONNREFUSED",
+          },
+        ],
+        causeChainComplete: true,
+      },
+    });
+  });
+
+  test("persists transport request diagnostics for retryable MCP timeouts", async () => {
+    const source = Object.assign(new Error("MCP error -32001: Request timed out"), {
+      name: "McpError",
+      code: -32_001,
+    });
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async () => {
+        throw source;
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+
+    await expect(
+      guarded("https://example.test/mcp", {
+        method: "POST",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+      }),
+    ).rejects.toBe(source);
+
+    expect(agentRunFailurePayload(mcpTransportErrorWithRetryMetadata(source))).toEqual({
+      error:
+        "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+      code: "mcp_transport_timeout",
+      retryable: true,
+      detail: "MCP error -32001: Request timed out",
+      mcpTransportDiagnostic: {
+        httpMethod: "POST",
+        rpcMethod: "initialize",
+        causeChain: [
+          {
+            kind: "error",
+            name: "McpError",
+            message: "MCP error -32001: Request timed out",
+            code: -32_001,
+          },
+        ],
+        causeChainComplete: true,
+      },
+    });
   });
 
   test("keeps exact MCP client and ambiguous failures terminal", () => {
