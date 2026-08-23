@@ -210,11 +210,15 @@ fn requested_policy(
         .map_err(|error| PlatformError::os(format!("invalid operation resource policy: {error}")))
 }
 
-/// A zero-CPU Unix process-group leader that remains stopped until the group is
-/// killed. If another group member sends `SIGCONT`, the loop immediately stops it
-/// again. Keeping this private child unreaped fences the numeric PGID against reuse.
+/// A Unix process-group leader and runner-death witness. The parent keeps the
+/// anchor's stdin writer open; a runner crash closes it in the kernel, causing
+/// the anchor to kill the operation cgroup when present or its own process group
+/// otherwise. Keeping this private child unreaped also fences numeric PGID reuse.
 #[cfg(unix)]
-const UNIX_EXEC_ANCHOR: &str = "while :; do kill -STOP $$; done";
+const UNIX_EXEC_ANCHOR: &str = "\
+while IFS= read -r _; do :; done; \
+if [ -n \"$1\" ] && printf '1' > \"$1\" 2>/dev/null; then exit 0; fi; \
+kill -KILL -- \"-$$\" 2>/dev/null || kill -KILL \"-$$\" 2>/dev/null || true";
 
 struct ExecOutput {
     exit_code: i32,
@@ -232,6 +236,10 @@ struct ExecOutput {
 #[cfg(unix)]
 struct ExecProcessGroup {
     anchor: tokio::process::Child,
+    /// The sole writer for the anchor's kernel-close death lease. Tokio creates
+    /// child pipes close-on-exec, so user commands and descendants cannot inherit
+    /// authority to keep the anchor alive after the runner process disappears.
+    runner_lease: Option<tokio::process::ChildStdin>,
     child: tokio::process::Child,
     pgid: i32,
     running: bool,
@@ -270,12 +278,20 @@ impl ExecProcessGroup {
         };
 
         let mut anchor_command = tokio::process::Command::new("/bin/sh");
+        #[cfg(target_os = "linux")]
+        let cgroup_kill_path = prepared_op
+            .as_ref()
+            .and_then(crate::cgroup::PreparedOpCgroup::kill_file_path);
+        #[cfg(not(target_os = "linux"))]
+        let cgroup_kill_path: Option<PathBuf> = None;
         anchor_command
             .arg("-c")
             .arg(UNIX_EXEC_ANCHOR)
+            .arg("opengeni-exec-anchor")
+            .arg(cgroup_kill_path.as_deref().unwrap_or_else(|| Path::new("")))
             .process_group(0)
             .kill_on_drop(true)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         #[cfg(target_os = "linux")]
@@ -285,6 +301,15 @@ impl ExecProcessGroup {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
         }
         let mut anchor = anchor_command.spawn()?;
+        let runner_lease = match anchor.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                let _ = anchor.start_kill();
+                return Err(std::io::Error::other(
+                    "exec anchor did not expose its runner-death lease",
+                ));
+            }
+        };
         let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
             .map_err(|_| std::io::Error::other("exec anchor PID exceeds i32"))?;
 
@@ -347,6 +372,7 @@ impl ExecProcessGroup {
 
         Ok(Self {
             anchor,
+            runner_lease: Some(runner_lease),
             child,
             pgid,
             running: true,
@@ -401,6 +427,7 @@ impl ExecProcessGroup {
         // this future is dropped after reaping, anchor.id() is None and Drop will
         // not signal the now-recyclable numeric PGID.
         let _ = self.anchor.wait().await?;
+        self.runner_lease.take();
         self.running = false;
         // The complete cgroup-owned tree is now killed. Remove the leaf after the
         // kernel reports it unpopulated; taking the handle here means Drop below
@@ -1399,6 +1426,36 @@ mod tests {
         panic!("descendant fixture did not publish its pid");
     }
 
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    #[ignore = "runner-crash containment fixture; invoked explicitly by the parent test"]
+    async fn exec_runner_crash_fixture() {
+        let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
+            .expect("runner-crash fixture pid-file env");
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("current test executable"));
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "native::tests::exec_descendant_parent_fixture",
+                "--nocapture",
+            ])
+            .env(EXEC_DESCENDANT_PID_FILE_ENV, &pid_file);
+        let _contained = spawn_contained(command, None).expect("spawn crash-contained fixture");
+        for _ in 0..400 {
+            if Path::new(&pid_file).exists() {
+                // The parent test SIGKILLs this whole test process. Keeping the
+                // ContainedExec live here proves kernel-handle cleanup rather
+                // than the ordinary Rust Drop path.
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("runner-crash descendant fixture did not publish its pid");
+    }
+
     #[test]
     #[ignore = "bounded child fixture; invoked explicitly by the parent fixture"]
     fn exec_descendant_fixture() {
@@ -1777,6 +1834,38 @@ mod tests {
         let _ = exec_task.await;
 
         assert_process_exits(descendant_pid, "cancelled exec").await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn runner_process_crash_kills_descendant_tree_without_drop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("runner-crash-descendant.pid");
+        let mut helper =
+            tokio::process::Command::new(std::env::current_exe().expect("current test executable"));
+        helper
+            .args([
+                "--ignored",
+                "--exact",
+                "native::tests::exec_runner_crash_fixture",
+                "--nocapture",
+            ])
+            .env(EXEC_DESCENDANT_PID_FILE_ENV, &pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut helper = helper.spawn().expect("spawn runner-crash helper");
+        let descendant_pid = recorded_pid(&pid_file).await;
+
+        // Kill the owning runner process itself so no Rust destructor can run.
+        helper.start_kill().expect("kill runner-crash helper");
+        let status = helper.wait().await.expect("wait for runner-crash helper");
+        assert!(
+            !status.success(),
+            "runner-crash helper should be forcibly killed"
+        );
+
+        assert_process_exits(descendant_pid, "runner-crash exec").await;
     }
 
     /// Every exec child receives the smallest OOM-score adjustment above the live
