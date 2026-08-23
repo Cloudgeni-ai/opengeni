@@ -35,6 +35,7 @@ import {
   assertSlackAuthorizationServer,
   buildAuthorizationUrl,
   chooseMcpAuthorizeScopes,
+  preferredOAuthSelfRegistration,
 } from "../src/integrations/oauth-client";
 import { builtInOAuthProfileByKey } from "../src/integrations/oauth-profiles";
 
@@ -48,6 +49,47 @@ let settings: Settings;
 
 const rawKey = randomBytes(32);
 const encryptionKey = rawKey.toString("base64");
+
+describe("OAuth self-registration selection", () => {
+  test("prefers DCR generically when both DCR and CIMD are advertised", () => {
+    expect(
+      preferredOAuthSelfRegistration(
+        {
+          registrationEndpoint: "https://auth.example/register",
+          clientIdMetadataDocumentSupported: true,
+        },
+        undefined,
+      ),
+    ).toBe("dcr");
+  });
+
+  test("retains explicit CIMD and DCR profile authority", () => {
+    const dual = {
+      registrationEndpoint: "https://auth.example/register",
+      clientIdMetadataDocumentSupported: true,
+    };
+    expect(preferredOAuthSelfRegistration(dual, "cimd")).toBe("cimd");
+    expect(preferredOAuthSelfRegistration(dual, "dcr")).toBe("dcr");
+  });
+
+  test("uses the only advertised self-registration mechanism", () => {
+    expect(
+      preferredOAuthSelfRegistration(
+        { registrationEndpoint: undefined, clientIdMetadataDocumentSupported: true },
+        undefined,
+      ),
+    ).toBe("cimd");
+    expect(
+      preferredOAuthSelfRegistration(
+        {
+          registrationEndpoint: "https://auth.example/register",
+          clientIdMetadataDocumentSupported: false,
+        },
+        undefined,
+      ),
+    ).toBe("dcr");
+  });
+});
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api_connections");
@@ -2214,11 +2256,10 @@ describe("connections routes", () => {
     expect(nonOfficialResourceText).toContain("https://mcp.slack.com/mcp");
   });
 
-  test("oauth start prefers DCR for Linear when DCR and CIMD are advertised", async () => {
+  test("oauth start prefers DCR generically when DCR and CIMD are advertised", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const as = startFakeAuthorizationServer({
-      issuer: "https://mcp.linear.app",
       clientIdMetadataDocumentSupported: true,
       dcr: true,
       scopesSupported: ["read", "write"],
@@ -2238,9 +2279,9 @@ describe("connections routes", () => {
             "content-type": "application/json",
           },
           body: JSON.stringify({
-            providerDomain: "linear.app",
+            providerDomain: "dual-registration.example.com",
             mcpUrl: mcp.url,
-            returnPath: "/integrations?connect_item=linear",
+            returnPath: "/integrations?connect_item=dual-registration",
           }),
         },
       );
