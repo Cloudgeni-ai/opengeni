@@ -2,7 +2,7 @@ import {
   SessionStatus as SessionStatusBadge,
   type SessionEventsConnectionState,
 } from "@opengeni/react";
-import { useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
 import { CopyIcon, FileJsonIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -29,7 +29,10 @@ export function SessionInspector(props: {
   // inspector agrees with the "Run on" header instead of reading "modal" while a
   // selfhosted box runs the turn. Degrades to the home backend when no machine is
   // active (or selfhosted is disabled → the fleet 404s to empty).
-  const fleet = useMachines({ sessionId: props.session.id, pollIntervalMs: 10000 });
+  const fleet = useMachines({
+    sessionId: props.session.id,
+    pollIntervalMs: MACHINES_SESSION_POLL_MS,
+  });
   const activeMachine =
     fleet.machines.find((machine) => machine.active && machine.kind === "selfhosted") ?? null;
   // Compute context, honestly: don't fall back to the home backend while the

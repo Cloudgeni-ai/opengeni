@@ -176,6 +176,13 @@ home group box when one exists and the session's active-sandbox pointer. A
 `backend:none` session has no synthetic home, but its owned Connected Machines
 remain visible and attachable.
 
+List `state` is the durable heartbeat cursor (`lastSeenAt`, `wentOfflineAt`),
+not a live ControlRpc ping. A fresh heartbeat is online; a clean goodbye or a
+stale/missing heartbeat is offline. The list therefore does not emit
+`reconnecting` (that blip needs a missed live probe). Attach, capability
+negotiation, and fleet tools still ping when they need to know whether a
+responder is answering now.
+
 ```ts
 const res = await client.listMachines(workspaceId, { sessionId });
 // res.activeSandboxId — the session's currently-active sandbox (null ⇒ the
@@ -537,9 +544,10 @@ resulting scope in their list cards so wider publication is never implicit.
 
 `@opengeni/react/machines` renders all of the above:
 
-- **`useMachines`** — the fleet hook: polls `listMachines`, exposes
-  `attach(sandboxId)` (wired to `swapActiveSandbox` when a `sessionId` is in
-  scope), `fetchSeries`, and `activeSandboxId`/`activeEpoch`.
+- **`useMachines`** — the fleet hook: polls `listMachines` (one shared poll per
+  workspace+session client), exposes `attach(sandboxId)` (wired to
+  `swapActiveSandbox` when a `sessionId` is in scope), `fetchSeries`, and
+  `activeSandboxId`/`activeEpoch`.
 - **`MachinesDashboard`** / **`MachineCard`** / **`MachineMetrics`** — the fleet
   grid with per-machine meters and an attach/swap affordance.
 - **`MachineDockBar`** — a slim bar over the Files/Terminal/Desktop dock that
