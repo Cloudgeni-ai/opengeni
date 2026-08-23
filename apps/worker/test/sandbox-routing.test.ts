@@ -453,7 +453,9 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     const established = await establishSelfhostedTurnSession(
       { db, settings, bus, opJournal: testOpJournal },
       {
+        accountId: account!.id,
         workspaceId: targetWorkspace!.id,
+        sessionId: crypto.randomUUID(),
         controlWorkspaceId: originWorkspace!.id,
         agentId: machine.enrollmentId,
         connectionInstanceId,
@@ -621,11 +623,22 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     const pinned = await establishSelfhostedTurnSession(
       { db, settings, bus, opJournal: testOpJournal },
       {
+        accountId: account!.id,
         workspaceId: targetWorkspace!.id,
+        sessionId: session.id,
         controlWorkspaceId: originWorkspace!.id,
         agentId: machine.enrollmentId,
         connectionInstanceId,
         opStream: false,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+          updatedAt: null,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
         epoch: 0,
         environment: {},
         workingDir: null,

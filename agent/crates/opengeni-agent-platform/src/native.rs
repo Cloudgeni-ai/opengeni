@@ -301,14 +301,11 @@ impl ExecProcessGroup {
             cgroups.configure_process_cgroup_before_exec(prepared, &mut anchor_command)?;
         }
         let mut anchor = anchor_command.spawn()?;
-        let runner_lease = match anchor.stdin.take() {
-            Some(stdin) => stdin,
-            None => {
-                let _ = anchor.start_kill();
-                return Err(std::io::Error::other(
-                    "exec anchor did not expose its runner-death lease",
-                ));
-            }
+        let Some(runner_lease) = anchor.stdin.take() else {
+            let _ = anchor.start_kill();
+            return Err(std::io::Error::other(
+                "exec anchor did not expose its runner-death lease",
+            ));
         };
         let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
             .map_err(|_| std::io::Error::other("exec anchor PID exceeds i32"))?;

@@ -17,6 +17,17 @@ import type { ResourceRef } from "@opengeni/contracts";
 import { sandboxEnvironmentForRun } from "../src/activities/environment";
 import { establishSelfhostedTurnSession } from "../src/sandbox-routing";
 
+const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
+const SESSION_ID = "22222222-2222-4222-8222-222222222222";
+const CONNECTION_INSTANCE_ID = "33333333-3333-4333-8333-333333333333";
+const EMPTY_OPERATION_POLICY = {
+  memoryMaxBytes: null,
+  memoryHighBytes: null,
+  cpuMaxMillicores: null,
+  revision: 0,
+  updatedAt: null,
+} as const;
+
 const repoResource = (): ResourceRef => ({
   kind: "repository",
   uri: "https://github.com/acme/repo",
@@ -109,9 +120,15 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
       // RPC is offline-until-bound, and resume() is a pure subject re-address (no NATS).
       { db: null as never, settings: settings(), bus: undefined },
       {
+        accountId: ACCOUNT_ID,
         workspaceId: "ws-1",
+        sessionId: SESSION_ID,
         agentId: "enr_1",
+        connectionInstanceId: CONNECTION_INSTANCE_ID,
         opStream: false,
+        operationResourcePolicy: EMPTY_OPERATION_POLICY,
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
         epoch: 4,
         environment: env,
         workingDir: "/home/user/repo",
@@ -147,9 +164,15 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
     const established = await establishSelfhostedTurnSession(
       { db: null as never, settings: settings(), bus: undefined },
       {
+        accountId: ACCOUNT_ID,
         workspaceId: "ws-1",
+        sessionId: SESSION_ID,
         agentId: "enr_xyz",
+        connectionInstanceId: CONNECTION_INSTANCE_ID,
         opStream: false,
+        operationResourcePolicy: EMPTY_OPERATION_POLICY,
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
         epoch: 1,
         environment: {},
         workingDir: null,
