@@ -14,4 +14,9 @@ export type {
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
 } from "./editable-artifact-resources";
-export type { FetchLike, OpenGeniClientOptions, OpenGeniRequestOptions } from "./client";
+export type {
+  FetchLike,
+  FetchResponse,
+  OpenGeniClientOptions,
+  OpenGeniRequestOptions,
+} from "./client";

@@ -1,6 +1,7 @@
 export { OpenGeniClient as OpenGeniCoreClient } from "./client";
 export type {
   FetchLike,
+  FetchResponse,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
