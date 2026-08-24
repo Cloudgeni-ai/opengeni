@@ -31,12 +31,33 @@ export type CodemodeGrantAuthority = {
   subjectId: string;
 };
 
+export type CodemodeAuthorityFailureReason =
+  | "invalid_grant"
+  | "inactive_attempt"
+  | "catalog_mismatch";
+
+const CODEMODE_AUTHORITY_FAILURE_MESSAGES: Record<CodemodeAuthorityFailureReason, string> = {
+  invalid_grant: "Codemode bearer does not carry valid execution-attempt authority",
+  inactive_attempt: "Codemode execution attempt is no longer active",
+  catalog_mismatch: "Codemode tool catalog does not match the active execution attempt",
+};
+
 export class CodemodeAuthorityError extends Error {
-  readonly code = "codemode_authority_invalid";
+  readonly code: `codemode_${CodemodeAuthorityFailureReason}`;
+
+  constructor(readonly reason: CodemodeAuthorityFailureReason) {
+    super(CODEMODE_AUTHORITY_FAILURE_MESSAGES[reason]);
+    this.name = "CodemodeAuthorityError";
+    this.code = `codemode_${reason}`;
+  }
+}
+
+export class CodemodeCatalogNotReadyError extends Error {
+  readonly code = "codemode_catalog_not_ready";
 
   constructor() {
-    super("Codemode bearer is not bound to an active execution attempt");
-    this.name = "CodemodeAuthorityError";
+    super("Codemode tool catalog is not ready for the active execution attempt");
+    this.name = "CodemodeCatalogNotReadyError";
   }
 }
 
@@ -71,11 +92,29 @@ export function isCodemodeGrant(grant: AccessGrant): boolean {
   );
 }
 
+export function requireMatchingCodemodeCatalog(
+  authority: CodemodeGrantAuthority,
+  catalog: AttemptToolCatalog | null,
+): AttemptToolCatalog {
+  if (!catalog) throw new CodemodeCatalogNotReadyError();
+  if (
+    catalog.accountId !== authority.accountId ||
+    catalog.workspaceId !== authority.workspaceId ||
+    catalog.sessionId !== authority.sessionId ||
+    catalog.turnId !== authority.turnId ||
+    catalog.attemptId !== authority.attemptId ||
+    catalog.executionGeneration !== authority.executionGeneration
+  ) {
+    throw new CodemodeAuthorityError("catalog_mismatch");
+  }
+  return catalog;
+}
+
 export async function requireActiveCodemodeCatalog(
   deps: ApiRouteDeps,
   grant: AccessGrant,
 ): Promise<{ authority: CodemodeGrantAuthority; catalog: AttemptToolCatalog }> {
-  if (!isCodemodeGrant(grant)) throw new CodemodeAuthorityError();
+  if (!isCodemodeGrant(grant)) throw new CodemodeAuthorityError("invalid_grant");
   const authority = codemodeAuthorityForGrant(grant)!;
   await requireSessionAuthorization(deps, grant, {
     sessionId: authority.sessionId,
@@ -94,24 +133,16 @@ export async function requireActiveCodemodeCatalog(
     active.activeAttemptId !== authority.attemptId ||
     active.executionGeneration !== authority.executionGeneration
   ) {
-    throw new CodemodeAuthorityError();
+    throw new CodemodeAuthorityError("inactive_attempt");
   }
-  const catalog = await getAttemptToolCatalog(deps.db, {
-    accountId: authority.accountId,
-    workspaceId: authority.workspaceId,
-    attemptId: authority.attemptId,
-  });
-  if (
-    !catalog ||
-    catalog.accountId !== authority.accountId ||
-    catalog.workspaceId !== authority.workspaceId ||
-    catalog.sessionId !== authority.sessionId ||
-    catalog.turnId !== authority.turnId ||
-    catalog.attemptId !== authority.attemptId ||
-    catalog.executionGeneration !== authority.executionGeneration
-  ) {
-    throw new CodemodeAuthorityError();
-  }
+  const catalog = requireMatchingCodemodeCatalog(
+    authority,
+    await getAttemptToolCatalog(deps.db, {
+      accountId: authority.accountId,
+      workspaceId: authority.workspaceId,
+      attemptId: authority.attemptId,
+    }),
+  );
   return { authority, catalog };
 }
 
@@ -170,7 +201,7 @@ export async function readCodemodeOperation(
   grant: AccessGrant,
   operationId: string,
 ): Promise<CodemodeOperation | null> {
-  if (!isCodemodeGrant(grant)) throw new CodemodeAuthorityError();
+  if (!isCodemodeGrant(grant)) throw new CodemodeAuthorityError("invalid_grant");
   const authority = codemodeAuthorityForGrant(grant)!;
   return await getCodemodeOperation(deps.db, {
     accountId: authority.accountId,
