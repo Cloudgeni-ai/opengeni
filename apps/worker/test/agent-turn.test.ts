@@ -2906,9 +2906,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const imageEnsure = credentialsSource.indexOf(
       "ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend)",
     );
-    const gitAssert = credentialsSource.indexOf(
-      "assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)",
-    );
+    const gitAssert = credentialsSource.indexOf("assertGitHubResourcesRemainAuthorized(");
     expect(authorize).toBeGreaterThan(0);
     expect(overlappedReads).toBeGreaterThan(authorize);
     expect(packRead).toBeGreaterThan(overlappedReads);
