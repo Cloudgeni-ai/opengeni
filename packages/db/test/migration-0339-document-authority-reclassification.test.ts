@@ -69,11 +69,19 @@ beforeAll(async () => {
     }
     return;
   }
-  const password = `app-${crypto.randomUUID()}`;
   // Migrate as the NOSUPERUSER/NOBYPASSRLS owner; provision roles over the
   // superuser admin connection, which is the only identity allowed to CREATE
   // ROLE (exactly how a deployment separates its migration and bootstrap
   // credentials).
+  //
+  // Use the harness's OWN app password, never a fresh one. PostgreSQL roles are
+  // cluster-wide, so `rlsStrategy: "force"` here issues an
+  // `ALTER ROLE opengeni_app … PASSWORD` that applies to every database in the
+  // shared container - including the template every other test file connects
+  // to. A fresh password silently breaks concurrent shared-harness tests with
+  // `28P01` while still passing in isolation. Passing this value keeps the
+  // ALTER an idempotent re-assertion of the credential already in use.
+  const password = owned.appPassword;
   await migrate(owned.ownerUrl);
   await provisionRoles(owned.adminUrl, { appPassword: password, rlsStrategy: "force" });
   [ownerIdentity = null] = await owned.admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
