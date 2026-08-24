@@ -4,6 +4,23 @@ This repository is a clean TypeScript/Bun stack. The public API is session-based
 
 > **Start here for orientation: [`docs/architecture.md`](docs/architecture.md).** It is the canonical whole-system map — what OpenGeni is, the load-bearing invariants, the full repo layout, per-component deep-dives, and a *"if you're changing X, read Y first"* decision table. Read it before navigating an unfamiliar area, and **keep it current**: if your change adds/removes/renames an app, package, or sandbox backend; alters an architectural invariant, the data-flow, or the session/turn lifecycle; or changes which file is canonical for a change area — update `docs/architecture.md` in the *same* change. A stale map is a bug. (This file, AGENTS.md, owns *how to run and operate* the stack; architecture.md owns *how the system is shaped*.)
 
+## Durable worktree checkpoints
+
+Never leave material source changes uncommitted when pausing, handing off, or
+ending work. An approval gate pauses delivery, not source durability.
+
+- Put worktrees that may outlive the current turn under a durable repository
+  sibling such as `../opengeni-wt/<task>`. Do not use `/tmp`, `/private/tmp`, or
+  another automatically cleaned location for retained work.
+- Before pausing or handing off, create a local checkpoint commit containing all
+  intended source, test, documentation, generated-file, and approval-harness
+  changes. The commit may remain unpushed while awaiting approval.
+- Leave the worktree clean and report its absolute path, branch, and checkpoint
+  SHA. Store approval boards and screenshots in a durable location as well.
+- Do not delete the worktree or branch until the change is merged or the user
+  explicitly asks to discard it. If unrelated user-owned changes prevent a
+  complete checkpoint, stop and ask instead of leaving a partially dirty tree.
+
 When the user says **"start the dev server"**, **"spin it up"**, or **"run the full stack"**, they mean the steps under **Full local stack**.
 
 ## Full Local Stack

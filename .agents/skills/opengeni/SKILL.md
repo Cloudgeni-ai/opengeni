@@ -125,6 +125,21 @@ Do not rely on this skill for exact route lists, env var lists, event types, mod
 
 ## Code Change Workflow
 
+Preserve every material candidate before pausing or handing it off. Approval
+gates stop delivery, not checkpointing:
+
+- Use a durable worktree outside `/tmp` and `/private/tmp` for any task that may
+  survive the current turn.
+- Commit all intended changes locally before pausing, including tests, docs,
+  generated files, and visual-approval harnesses. Waiting for user approval is
+  not a reason to leave a dirty worktree.
+- Hand off the absolute worktree path, branch, and checkpoint SHA, and verify
+  `git status --porcelain` is empty.
+- Keep the branch and worktree until merge or explicit user-directed discard.
+
+If user-owned unrelated edits make a complete checkpoint unsafe, stop and ask
+for direction rather than leaving material work uncommitted.
+
 Before editing, identify which layer owns the behavior:
 
 - Public API or validation: routes, core domain helpers, contracts, tests.
