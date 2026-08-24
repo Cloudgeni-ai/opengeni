@@ -1966,6 +1966,7 @@ export async function submitHumanPromptInTransaction(
           temporalWorkflowId: workflowId,
           status: "queued",
           source: input.source,
+          promptRouting: routing,
           position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
           annotations,

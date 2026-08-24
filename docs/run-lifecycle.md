@@ -25,10 +25,13 @@ needs.
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
 `clientEventId`, clears the visible draft immediately, and renders that snapshot
-as `Sending`, `Queued`, or `Not sent`. Rapid distinct sends keep distinct keys
-and preserve order. An outcome-unknown retry first reconciles and reuses the
-same key; a definite rejection retry receives a fresh key. Newer edits are a
-separate draft shadow and survive the in-flight operation and remount. The
+directly in chat when admitted toward execution, in the prompt queue when it
+must wait behind work, or as `Not sent` after a definite rejection. Rapid
+distinct sends keep distinct keys and preserve order: while the first admission
+is unsettled, the next Send is provisionally placed in the queue and never
+bounces between surfaces. An outcome-unknown retry first reconciles and reuses
+the same key; a definite rejection retry receives a fresh key. Newer edits are
+a separate draft shadow and survive the in-flight operation and remount. The
 optimistic row disappears when the authoritative `user.message` arrives, so
 HTTP-first, SSE-first, reconnect, and remount paths cannot create duplicate
 visible messages.
@@ -46,9 +49,10 @@ session fork copies the source session's exact typed reasoning and latency; it
 does not invent defaults or consult either composer.
 
 On the server, prompt acceptance remains one canonical Postgres transaction:
-the user event, queued turn, session/queue state, optional realtime mirror,
-audit receipt, `agent_run.created` usage fact, and workflow-wake outbox revision
-commit together. The response is built from those returned committed rows.
+the user event, physically queued turn, immutable admission routing,
+session/queue state, optional realtime mirror, audit receipt,
+`agent_run.created` usage fact, and workflow-wake outbox revision commit
+together. The response is built from those returned committed rows.
 NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
@@ -244,12 +248,17 @@ them. A Codex-subscription manager therefore keeps its external billing path for
 workers by default instead of falling back to the deployment's OpenGeni-credit
 model.
 
-The prompt queue is not worker backlog. In particular, human prompts preserved
-behind paused session/workspace gates are intentionally ineligible and do not
-schedule an activity. Fleet pressure comes from Temporal's dedicated
-`runAgentTurn` activity queue (`approximateBacklogCount` and oldest backlog
-age), together with the turn workers' used/memory-safe slots. Each turn worker
-must obtain a cgroup-aware slot before polling. Admission is capped at the
+The prompt queue is not worker backlog. `session_turns.status = 'queued'` means
+the worker has not claimed the physical row; it does not decide whether the user
+sees a queued prompt. Immutable `session_turns.prompt_routing` records that
+admission decision: `accepted_for_execution` and `accepted_for_steering` stay in
+chat, while only `queued_for_execution` appears in the prompt queue. Null remains
+a conservative visible-queue fallback for rolling/legacy writers. In particular,
+human prompts preserved behind paused session/workspace gates are intentionally
+ineligible and do not schedule an activity. Fleet pressure comes from Temporal's
+dedicated `runAgentTurn` activity queue (`approximateBacklogCount` and oldest
+backlog age), together with the turn workers' used/memory-safe slots. Each turn
+worker must obtain a cgroup-aware slot before polling. Admission is capped at the
 measured density of 16 and reserves a hard 100 MiB per turn plus 512 MiB of
 runtime/native headroom; a finite container that cannot safely admit one turn
 does not start. The invariant is checked both before and after Temporal's native

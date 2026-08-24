@@ -54227,6 +54227,7 @@ export async function initializeSessionStartAtomically(
                   temporalWorkflowId,
                   status: "queued",
                   source: "user",
+                  promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
                   modelContext: session.initialModelContext ?? null,
@@ -54533,6 +54534,7 @@ export async function enqueueSessionTurn(
                 temporalWorkflowId: input.temporalWorkflowId,
                 status: "queued",
                 source: input.source,
+                promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
                 modelContext: input.modelContext ?? null,
@@ -62178,13 +62180,20 @@ export async function getSessionQueueSnapshot(
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
-    const items = rows.map(mapSessionTurn);
+    // `status=queued` is the physical worker-claim queue. Only an explicit
+    // queued_for_execution admission belongs in the operator-visible queue.
+    // Null remains visible during rolling deploys and for legacy rows so a
+    // prompt written by an older process can never disappear from the UI.
+    const physicalItems = rows.map(mapSessionTurn);
+    const items = rows
+      .filter((row) => row.promptRouting === null || row.promptRouting === "queued_for_execution")
+      .map(mapSessionTurn);
     const latestInterruption = await latestSessionAttemptInterruption(
       scopedDb,
       workspaceId,
       sessionId,
     );
-    const queuedSteerPredecessorIds = items
+    const queuedSteerPredecessorIds = physicalItems
       .map((turn) => queuedSteerReplacementAttemptId(turn.metadata))
       .filter((attemptId): attemptId is string => attemptId !== null);
     const stoppingPreviousAttempt =
@@ -62202,8 +62211,8 @@ export async function getSessionQueueSnapshot(
       (update) => update.kind === "agent_steer_instruction",
     );
     const attachmentTurn = hasPendingAgentSteer
-      ? items.find((turn) => turn.metadata.delivery === "steer")
-      : items[0];
+      ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
+      : physicalItems[0];
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
