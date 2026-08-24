@@ -34,6 +34,7 @@ import {
   NatsOpStreamTransport,
   selfhostedLiveness,
   SelfhostedSession,
+  resolveConnectedMachineWorkspaceRoot,
   swapTargetEstablishability,
   type BackendUnresolvableCode,
   type ControlRpc,
@@ -187,6 +188,7 @@ export type FleetSwapResult = {
   reason?: string;
   code?:
     | BackendUnresolvableCode
+    | "invalid_working_directory"
     | "concurrent_swap"
     | "recovery_in_progress"
     | "recovery_degraded"
@@ -226,6 +228,9 @@ async function probeEnrollment(
       workspaceId,
       agentId: enrollment.id,
       connectionInstanceId: liveConnection.connectionInstanceId,
+      // Ping does not touch the filesystem. Use the reported root when present;
+      // older agents can still answer liveness before they reconnect and report it.
+      workspaceRoot: enrollment.workspaceRoot ?? "/",
       controlRpc: controlRpc(bus),
       relay: relayConfigFromSettings(settings),
       timeoutMs: PROBE_TIMEOUT_MS,
@@ -457,7 +462,7 @@ async function resolveTarget(
   ctx: FleetContext,
   target: string,
 ): Promise<
-  | { ok: true; targetSandboxId: string | null }
+  | { ok: true; targetSandboxId: string | null; workspaceRoot?: string }
   | { ok: false; reason: string; code: BackendUnresolvableCode }
 > {
   // The session's own group box → the default pointer (null).
@@ -507,6 +512,7 @@ async function resolveTarget(
       code: establishable.code,
     };
   }
+  let targetWorkspaceRoot: string | undefined;
   if (sandbox.kind === "selfhosted") {
     if (!sandbox.enrollmentId) {
       return {
@@ -533,6 +539,14 @@ async function resolveTarget(
         code: "offline_enrollment",
       };
     }
+    if (!enrollment.workspaceRoot) {
+      return {
+        ok: false,
+        reason: `sandbox ${target} has not reported an absolute workspace root; reconnect it with a current agent`,
+        code: "workspace_root_unavailable",
+      };
+    }
+    targetWorkspaceRoot = enrollment.workspaceRoot;
     const probe = await probeEnrollment(services, sandbox.workspaceId, enrollment, enrollment);
     if (probe.liveness !== "online") {
       return {
@@ -542,7 +556,11 @@ async function resolveTarget(
       };
     }
   }
-  return { ok: true, targetSandboxId: sandbox.id };
+  return {
+    ok: true,
+    targetSandboxId: sandbox.id,
+    ...(targetWorkspaceRoot ? { workspaceRoot: targetWorkspaceRoot } : {}),
+  };
 }
 
 /**
@@ -595,6 +613,7 @@ export async function swapActiveSandbox(
       const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
         activeSandboxId: null,
         activeEpoch: 0,
+        workingDir: null,
       };
       return {
         swapped: false,
@@ -616,7 +635,27 @@ export async function swapActiveSandbox(
       const pointer = (await readActiveSandbox(services.db, ctx.workspaceId, ctx.sessionId)) ?? {
         activeSandboxId: null,
         activeEpoch: 0,
+        workingDir: null,
       };
+      let effectiveWorkingDir = workingDir;
+      if (resolved.workspaceRoot) {
+        try {
+          effectiveWorkingDir = resolveConnectedMachineWorkspaceRoot(
+            resolved.workspaceRoot,
+            workingDir === undefined && pointer.activeSandboxId === resolved.targetSandboxId
+              ? pointer.workingDir
+              : workingDir,
+          );
+        } catch (error) {
+          return {
+            swapped: false,
+            activeSandboxId: pointer.activeSandboxId,
+            activeEpoch: pointer.activeEpoch,
+            reason: error instanceof Error ? error.message : String(error),
+            code: "invalid_working_directory",
+          };
+        }
+      }
       // Even a same-target attach advances active_epoch. It is a repair/fence
       // request, not a no-op acknowledgment: any cached stale route is invalidated
       // only after target readiness has been proved above.
@@ -628,7 +667,11 @@ export async function swapActiveSandbox(
         expectedEpoch: pointer.activeEpoch,
         ...(ctx.subjectId ? { subjectId: ctx.subjectId } : {}),
         ...(ctx.attemptAuthority ? { personalMachineAttempt: ctx.attemptAuthority } : {}),
-        ...(workingDir !== undefined ? { workingDir } : {}),
+        ...(resolved.workspaceRoot !== undefined
+          ? { workingDir: effectiveWorkingDir ?? resolved.workspaceRoot }
+          : workingDir !== undefined
+            ? { workingDir }
+            : {}),
       });
       if (result.swapped && result.pointer) {
         return {
@@ -686,6 +729,7 @@ export type RunOnSelfhostedMachine = {
   agentId: string;
   /** Exact live daemon pinned for this operation. */
   connectionInstanceId: string;
+  workspaceRoot: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
   /** Short request/reply deadline for read/write and other control operations. */
@@ -716,7 +760,7 @@ function runOnOperationAdmission(
   services: FleetServices,
   enrollment: EnrollmentRecord | null,
 ): SelfhostedOperationAdmission | null {
-  if (!enrollment?.connectionInstanceId) return null;
+  if (!enrollment?.connectionInstanceId || !enrollment.workspaceRoot) return null;
   const opStream =
     services.settings.agentOpStreamEnabled === true &&
     enrollment.opStream === true &&
@@ -730,6 +774,7 @@ function runOnOperationAdmission(
   return {
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
+    workspaceRoot: enrollment.workspaceRoot,
     ...(opStream ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
@@ -752,6 +797,7 @@ export async function executeRunOnSelfhostedMachine(
     workspaceId: machine.workspaceId,
     agentId: machine.agentId,
     connectionInstanceId: machine.connectionInstanceId,
+    workspaceRoot: machine.workspaceRoot,
     controlRpc: machine.controlRpc,
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,
@@ -944,6 +990,15 @@ export async function runOnSandbox(
       reason: `sandbox ${target} is not enrolled/active`,
     };
   }
+  if (!enrollment.workspaceRoot) {
+    return {
+      target,
+      targetName: sandbox.name,
+      kind: op.kind,
+      ok: false,
+      reason: `sandbox ${target} has not reported an absolute workspace root; reconnect it with a current agent`,
+    };
+  }
   const resolveOperationAdmission = async (): Promise<SelfhostedOperationAdmission | null> => {
     try {
       const current =
@@ -981,6 +1036,7 @@ export async function runOnSandbox(
       workspaceId: sandbox.workspaceId,
       agentId: sandbox.enrollmentId,
       connectionInstanceId: enrollment.connectionInstanceId,
+      workspaceRoot: enrollment.workspaceRoot,
       controlRpc: controlRpc(services.bus),
       relay: relayConfigFromSettings(services.settings),
       controlTimeoutMs: services.settings.sandboxSelfhostedControlTimeoutMs,

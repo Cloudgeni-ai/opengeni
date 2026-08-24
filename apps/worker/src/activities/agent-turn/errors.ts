@@ -10,6 +10,8 @@ import {
   EmptyCompactionSummaryError,
   isMcpRequestTimeoutError,
   isMcpTransportConnectivityError,
+  RoutingWorkspaceRootChangedError,
+  SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
 } from "@opengeni/runtime";
 import {
@@ -257,7 +259,9 @@ export function isWorkerShutdownCancellation(error: unknown): boolean {
  * only those structural error links with a strict bound; never classify from
  * message text, which could originate in model or tool content.
  */
-export function isHomeSandboxTurnTransitionError(error: unknown): boolean {
+export function sandboxRouteTransitionCode(
+  error: unknown,
+): "home_unavailable_this_turn" | "workspace_root_changed_this_turn" | null {
   const pending: unknown[] = [error];
   const seen = new WeakSet<object>();
   let inspected = 0;
@@ -275,7 +279,15 @@ export function isHomeSandboxTurnTransitionError(error: unknown): boolean {
           record.name === "ActiveBackendUnresolvableError") &&
         record.code === "home_unavailable_this_turn"
       ) {
-        return true;
+        return "home_unavailable_this_turn";
+      }
+      if (
+        current instanceof RoutingWorkspaceRootChangedError ||
+        current instanceof SelfhostedWorkspaceRootChangedError ||
+        record.name === "RoutingWorkspaceRootChangedError" ||
+        record.name === "SelfhostedWorkspaceRootChangedError"
+      ) {
+        return "workspace_root_changed_this_turn";
       }
 
       for (const key of ["cause", "error"] as const) {
@@ -290,7 +302,17 @@ export function isHomeSandboxTurnTransitionError(error: unknown): boolean {
     }
   }
 
-  return false;
+  return null;
+}
+
+export function isSandboxRouteTransitionError(error: unknown): boolean {
+  return sandboxRouteTransitionCode(error) !== null;
+}
+
+/** Backward-compatible name for callers/tests that only exercised the original
+ * machine-to-home transition. */
+export function isHomeSandboxTurnTransitionError(error: unknown): boolean {
+  return sandboxRouteTransitionCode(error) === "home_unavailable_this_turn";
 }
 
 /**

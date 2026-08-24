@@ -4574,15 +4574,15 @@ export function defaultRepositoryMountPath(
   );
 }
 
-/** Virtual SDK/UI workspace root. Provisioned boxes mount this path; Connected Machines do not. */
+/** Durable SDK/UI artifact root. Provisioned boxes also mount this path;
+ * Connected Machine execution does not treat it as an alias. */
 export const VIRTUAL_WORKSPACE_ROOT = "/workspace" as const;
 
 /**
  * Cwd-relative path for shell/exec prompts. Durable receipts and `sandbox:` UI
- * links keep the virtual `/workspace/...` form. Every backend already starts the
- * shell in that frame (provisioned boxes at `/workspace`, Connected Machines at
- * `sessions.working_dir`), so advertising the absolute virtual root ENOENTs on a
- * machine and is redundant on a box.
+ * links keep the durable `/workspace/...` form. Tool receipts use the relative
+ * projection so they remain usable from either a provisioned box root or a
+ * Connected Machine's truthful host-native cwd.
  */
 export function sandboxShellPath(virtualPath: string): string {
   if (virtualPath === VIRTUAL_WORKSPACE_ROOT) return ".";
@@ -13746,11 +13746,11 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // machine (race-free: the pointer is committed before the worker turn
     // workflow can read it). An invalid/unowned/offline target fails the create.
     targetSandboxId: z.string().uuid().optional(),
-    // The working directory the targeted machine runs the session under — the
-    // path/cwd base for its agent exec, terminal, and file dock. Free-form pass-
-    // through: a launch-workspace_root-relative subdir or an absolute machine path
-    // (the agent's resolve_cwd handles both). Only valid WITH targetSandboxId
-    // (workingDir alone is a 422); omitted ⇒ the machine's default workspace_root.
+    // The working directory the targeted machine runs the session under. It may
+    // be absolute or relative to the machine's persisted Hello root; the server
+    // stores the resolved absolute value. Tilde is rejected because the control
+    // plane has no authenticated home-directory fact. Only valid WITH
+    // targetSandboxId; omitted selects the reported root.
     workingDir: z.string().min(1).optional(),
     // Variable set attachment is fixed at session creation; follow-up
     // user.message events cannot switch or add one.

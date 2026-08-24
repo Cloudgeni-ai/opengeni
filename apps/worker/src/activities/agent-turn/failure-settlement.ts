@@ -59,7 +59,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
-  isHomeSandboxTurnTransitionError,
+  sandboxRouteTransitionCode,
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
   agentRunFailurePayload,
@@ -228,12 +228,8 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // and every preceding model/tool receipt, close only the unresolved suffix,
   // and continue the SAME logical turn in a fresh attempt. That next attempt
   // starts from the now-null pointer and establishes home normally.
-  if (
-    isHomeSandboxTurnTransitionError(error) &&
-    recoveryTurnId &&
-    eventing.publish &&
-    eventing.turnStartedPublished
-  ) {
+  const routeTransitionCode = sandboxRouteTransitionCode(error);
+  if (routeTransitionCode && recoveryTurnId && eventing.publish && eventing.turnStartedPublished) {
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -242,9 +238,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
         attemptId: input.attemptId,
-        reason: "sandbox_home_route_transition",
+        reason: "sandbox_route_transition",
         detail: {
-          code: "home_unavailable_this_turn",
+          code: routeTransitionCode,
           effectiveBoundary: "next_attempt",
         },
       });
@@ -264,10 +260,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       control.activityError = error;
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
-      console.error(
-        "home sandbox route-transition recovery failed",
-        safeErrorDiagnostic(recoveryError),
-      );
+      console.error("sandbox route-transition recovery failed", safeErrorDiagnostic(recoveryError));
       throw recoveryError;
     }
   }

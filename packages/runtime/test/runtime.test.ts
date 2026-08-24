@@ -4346,7 +4346,7 @@ describe("runtime event normalization", () => {
     ).toBe(true);
   });
 
-  test("buildOpenGeniAgent accepts the activeSandboxBackend option for both cloud and selfhosted targets", () => {
+  test("buildOpenGeniAgent requires and exposes the truthful root for selfhosted targets", () => {
     const resources = [
       {
         kind: "repository" as const,
@@ -4363,8 +4363,20 @@ describe("runtime event normalization", () => {
     expect(() =>
       buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, {
         activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/home/user/project",
       }),
     ).not.toThrow();
+    const machineAgent = buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, {
+      activeSandboxBackend: "selfhosted",
+      sandboxWorkspaceRoot: "/home/user/project",
+    }) as { defaultManifest: { root: string; entries: Record<string, unknown> } };
+    expect(machineAgent.defaultManifest.root).toBe("/home/user/project");
+    expect(machineAgent.defaultManifest.entries).toEqual({});
+    expect(() =>
+      buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, {
+        activeSandboxBackend: "selfhosted",
+      }),
+    ).toThrow("requires its reported workspace root");
     expect(() =>
       buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), resources, {
         activeSandboxBackend: "modal",

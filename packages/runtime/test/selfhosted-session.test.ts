@@ -34,6 +34,7 @@ function sessionWith(
   terminalScopeId?: string,
   overrides: SessionOverrides = {},
 ): SelfhostedSession {
+  const workspaceRoot = overrides.workspaceRoot ?? "/home/user/project";
   if (rpc instanceof MockAgentResponder) {
     const transport = new InMemoryOpStreamTransport();
     const runner = new FakeOpRunner({
@@ -70,7 +71,13 @@ function sessionWith(
     const resolveOperationAdmission = overrides.resolveOperationAdmission
       ? async () => {
           const admission = await overrides.resolveOperationAdmission?.();
-          return admission ? { ...admission, opStream: admission.opStream ?? { transport } } : null;
+          return admission
+            ? {
+                ...admission,
+                workspaceRoot: admission.workspaceRoot ?? workspaceRoot,
+                opStream: admission.opStream ?? { transport },
+              }
+            : null;
         }
       : undefined;
     return new SelfhostedSession({
@@ -80,6 +87,7 @@ function sessionWith(
       connectionInstanceId: overrides.connectionInstanceId ?? CONNECTION_INSTANCE,
       controlRpc,
       relay: RELAY,
+      workspaceRoot,
       epoch: overrides.epoch ?? epoch,
       opStream: { ...overrides.opStream, transport },
       ...(resolveOperationAdmission ? { resolveOperationAdmission } : {}),
@@ -93,6 +101,7 @@ function sessionWith(
     connectionInstanceId: overrides.connectionInstanceId ?? CONNECTION_INSTANCE,
     controlRpc: rpc,
     relay: RELAY,
+    workspaceRoot,
     epoch: overrides.epoch ?? epoch,
     ...(terminalScopeId !== undefined ? { terminalScopeId } : {}),
   });
@@ -118,6 +127,22 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
 
   test("live routing rejects an absent connection instance before dispatch", () => {
     expect(() => subjectFor(WS, AGENT, "")).toThrow("requires an exact connection instance");
+  });
+
+  test("construction rejects missing or non-normalized workspace roots", () => {
+    const base = {
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: new MockAgentResponder(),
+      relay: RELAY,
+    };
+    expect(() => new SelfhostedSession({ ...base, workspaceRoot: undefined as never })).toThrow(
+      "workspaceRoot is required",
+    );
+    expect(() => new SelfhostedSession({ ...base, workspaceRoot: "/home/user/project/" })).toThrow(
+      "normalized absolute path",
+    );
   });
 
   test("exec runs through the agent and returns stdout/exitCode", async () => {
@@ -247,6 +272,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
         connectionInstanceId: "stale-instance",
         controlRpc: mock,
         relay: RELAY,
+        workspaceRoot: "/home/user/project",
         resolveOperationAdmission: async () => null,
       });
       const failure = await operation(session).catch((error: unknown) => error);
@@ -266,8 +292,10 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       connectionInstanceId: "instance-a",
       controlRpc: mock,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       resolveOperationAdmission: async () => ({
         connectionInstanceId: "instance-b",
+        workspaceRoot: "/home/user/project",
         operationResourcePolicy: {
           memoryMaxBytes: null,
           memoryHighBytes: null,
@@ -296,6 +324,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
       operationResourcePolicySupported: false,
     });
@@ -319,6 +348,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
       operationResourcePolicySupported: false,
     });
@@ -341,6 +371,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
           connectionInstanceId: CONNECTION_INSTANCE,
           controlRpc: new MockAgentResponder(),
           relay: RELAY,
+          workspaceRoot: "/home/user/project",
           operationResourcePolicy: {
             memoryMaxBytes: 1_000,
             memoryHighBytes: 1_001,
@@ -401,6 +432,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       execTimeoutMs: 0,
     });
 
@@ -593,6 +625,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const client = new SelfhostedSandboxClient({
       workspaceId: WS,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       controlRpcFactory: () => mock,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
@@ -619,6 +652,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       // A command policy on an incapable runner must not disable or rewrite the
       // independent typed Browser/Computer planes.
       operationResourcePolicy: { memoryMaxBytes: 134_217_728 },
@@ -770,6 +804,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       environment: { HOME: "/workspace", FOO: "bar" },
     });
     expect(threaded.state.environment).toEqual({
@@ -799,6 +834,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       environment: env,
     });
     // The manifest resolves the SAME values the turn declares (the parity the SDK
@@ -806,8 +842,37 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     // over the per-key Environment wrappers serializeManifestEnvironment compares.
     const resolved = await session.state.manifest.resolveEnvironment();
     expect(resolved).toEqual(env);
-    // root stays /workspace to match buildManifest's declared root (root-delta guard).
-    expect(session.state.manifest.root).toBe("/workspace");
+    // Root parity is also truthful: both the session and target manifest carry
+    // the machine's exact effective root.
+    expect(session.state.manifest.root).toBe("/home/user/project");
+  });
+
+  test("a reconnect that changes the effective root is fenced before dispatch", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock, 0, undefined, {
+      workspaceRoot: "/home/user/project",
+      resolveOperationAdmission: async () => ({
+        connectionInstanceId: CONNECTION_INSTANCE,
+        workspaceRoot: "/srv/other-project",
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+        },
+        operationResourcePolicySupported: true,
+        operationCpuQuotaSupported: true,
+      }),
+    });
+
+    const error = await session.exec({ cmd: "pwd" }).catch((reason: unknown) => reason);
+    expect(error).toMatchObject({
+      name: "SelfhostedWorkspaceRootChangedError",
+      expectedWorkspaceRoot: "/home/user/project",
+      actualWorkspaceRoot: "/srv/other-project",
+      retryable: true,
+    });
+    expect(mock.requests).toHaveLength(0);
   });
 
   test("the SelfhostedSandboxClient threads its environment into bound sessions' manifests", async () => {
@@ -831,16 +896,9 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
   });
 });
 
-describe("virtual-root → machine-frame path translation (the live-swap exec ENOENT fix)", () => {
-  // The bug: the SDK presents the sandbox rooted at the VIRTUAL "/workspace"
-  // (state.manifest.root, held there for the provided-session root-delta guard).
-  // It then hands the session exec workdirs / fs paths anchored at that root.
-  // The Rust agent's resolve_cwd takes an ABSOLUTE path as-is, so a literal
-  // "/workspace" → current_dir("/workspace") → ENOENT on a real machine
-  // ("spawn hostname: No such file or directory"). The session must rewrite the
-  // virtual frame onto the machine's: the root → "" (agent uses workspace_root),
-  // a child → its workspace_root-relative remainder; a real machine-absolute
-  // path passes through. The proof is the wire request the agent receives.
+describe("host-native Connected Machine path contract", () => {
+  // The model/session root is the machine's real absolute root. Relative paths
+  // resolve from it; absolute paths remain literal. There is no /workspace alias.
 
   function execCwdFor(workdir: string | undefined): Promise<string> {
     const mock = new MockAgentResponder({ hostname: "vm" });
@@ -851,41 +909,43 @@ describe("virtual-root → machine-frame path translation (the live-swap exec EN
       });
   }
 
-  test("exec workdir '/workspace' (the SDK virtual root) → empty cwd (agent uses its workspace_root)", async () => {
-    // This is the EXACT failing live-swap case: workdir was the manifest root.
-    expect(await execCwdFor("/workspace")).toBe("");
+  test("an omitted workdir resolves to the exact reported root", async () => {
+    expect(await execCwdFor(undefined)).toBe("/home/user/project");
   });
 
-  test("exec workdir '/workspace/sub/dir' → the workspace_root-relative remainder", async () => {
-    expect(await execCwdFor("/workspace/sub/dir")).toBe("sub/dir");
+  test("a relative workdir resolves beneath the exact reported root", async () => {
+    expect(await execCwdFor("sub/dir")).toBe("/home/user/project/sub/dir");
   });
 
-  test("exec workdir undefined (the working pinned case) → empty cwd", async () => {
-    expect(await execCwdFor(undefined)).toBe("");
+  test("literal '/workspace' remains literal instead of aliasing the machine root", async () => {
+    expect(await execCwdFor("/workspace")).toBe("/workspace");
   });
 
-  test("a genuine machine-absolute workdir ('/tmp') passes through untouched", async () => {
+  test("another absolute workdir remains absolute", async () => {
     expect(await execCwdFor("/tmp")).toBe("/tmp");
   });
 
-  test("a sibling that merely shares the prefix ('/workspaceX') is NOT rewritten", async () => {
-    expect(await execCwdFor("/workspaceX")).toBe("/workspaceX");
-  });
-
-  test("fs paths anchored at the virtual root are rewritten on the wire (write then read round-trips relative)", async () => {
+  test("absolute filesystem paths are sent unchanged and round-trip", async () => {
     const mock = new MockAgentResponder();
     const session = sessionWith(mock);
     await session.writeFile({ path: "/workspace/notes.md", content: "hi" });
-    // The agent received the workspace_root-relative path, NOT a literal /workspace/…
     const wop = mock.requests[0]?.req.op;
     if (wop?.$case !== "fsWrite") throw new Error("expected fsWrite");
-    expect(wop.fsWrite.path).toBe("notes.md");
-    // And the same virtual path reads back through the translated key.
+    expect(wop.fsWrite.path).toBe("/workspace/notes.md");
     const bytes = await session.readFile({ path: "/workspace/notes.md" });
     expect(new TextDecoder().decode(bytes)).toBe("hi");
     const rop = mock.requests[1]?.req.op;
     if (rop?.$case !== "fsRead") throw new Error("expected fsRead");
-    expect(rop.fsRead.path).toBe("notes.md");
+    expect(rop.fsRead.path).toBe("/workspace/notes.md");
+  });
+
+  test("relative filesystem paths resolve beneath the exact root", async () => {
+    const mock = new MockAgentResponder();
+    const session = sessionWith(mock);
+    await session.writeFile({ path: "notes.md", content: "hi" });
+    const op = mock.requests[0]?.req.op;
+    if (op?.$case !== "fsWrite") throw new Error("expected fsWrite");
+    expect(op.fsWrite.path).toBe("/home/user/project/notes.md");
   });
 
   test("placement-private staging uses mode 0600 and idempotent host-side removal", async () => {
@@ -926,18 +986,10 @@ describe("virtual-root → machine-frame path translation (the live-swap exec EN
   });
 });
 
-describe("per-session workingDir → the toMachinePath frame BASE (create-time machine targeting)", () => {
-  // `toMachinePath` is the SOLE adapter rule between the SDK's virtual "/workspace"
-  // frame and the machine's real filesystem; the per-session `workingDir` is its
-  // BASE. The function is NOT exported, so probe it through the SAME public seam the
-  // agent observes — the wire `cwd` on an exec op (exec calls
-  // toMachinePath(workdir, workingDir)) and the wire `path` on an fs op. An EMPTY
-  // workingDir is byte-identical to today; a non-empty one roots the virtual frame
-  // under it; a trailing slash is normalized so the join never doubles.
-
-  function wireExecCwd(workingDir: string, workdir: string | undefined): Promise<string> {
+describe("effective workspace root threading", () => {
+  function wireExecCwd(workspaceRoot: string, workdir: string | undefined): Promise<string> {
     const mock = new MockAgentResponder({ hostname: "vm" });
-    const session = sessionWith(mock, 0, undefined, { workingDir });
+    const session = sessionWith(mock, 0, undefined, { workspaceRoot });
     return session
       .exec({ cmd: "hostname", ...(workdir !== undefined ? { workdir } : {}) })
       .then(() => {
@@ -945,29 +997,12 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
       });
   }
 
-  test("workingDir='' is byte-identical to today: '/workspace' → '', '/workspace/sub' → 'sub'", async () => {
-    expect(await wireExecCwd("", "/workspace")).toBe("");
-    expect(await wireExecCwd("", "/workspace/sub")).toBe("sub");
+  test("the effective root is the default cwd and relative base", async () => {
+    expect(await wireExecCwd("/home/u/proj", undefined)).toBe("/home/u/proj");
+    expect(await wireExecCwd("/home/u/proj", "sub")).toBe("/home/u/proj/sub");
   });
 
-  test("an ABSOLUTE workingDir roots the frame under it: '/workspace' → the base, '/workspace/sub' → base/sub", async () => {
-    expect(await wireExecCwd("/home/u/proj", "/workspace")).toBe("/home/u/proj");
-    expect(await wireExecCwd("/home/u/proj", "/workspace/sub")).toBe("/home/u/proj/sub");
-  });
-
-  test("a RELATIVE workingDir stays relative: 'proj' → 'proj', '/workspace/sub' → 'proj/sub'", async () => {
-    expect(await wireExecCwd("proj", "/workspace")).toBe("proj");
-    expect(await wireExecCwd("proj", "/workspace/sub")).toBe("proj/sub");
-  });
-
-  test("a trailing slash on workingDir is normalized (the join never doubles), absolute and relative", async () => {
-    expect(await wireExecCwd("/home/u/proj/", "/workspace")).toBe("/home/u/proj");
-    expect(await wireExecCwd("/home/u/proj/", "/workspace/sub")).toBe("/home/u/proj/sub");
-    expect(await wireExecCwd("proj/", "/workspace")).toBe("proj");
-    expect(await wireExecCwd("proj/", "/workspace/sub")).toBe("proj/sub");
-  });
-
-  test("the fs path boundary shares the SAME workingDir rewrite (fsWrite path on the wire)", async () => {
+  test("the filesystem boundary uses the same exact root", async () => {
     const mock = new MockAgentResponder();
     const session = new SelfhostedSession({
       workspaceId: WS,
@@ -975,19 +1010,15 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
       relay: RELAY,
-      workingDir: "/home/u/proj",
+      workspaceRoot: "/home/u/proj",
     });
-    await session.writeFile({ path: "/workspace/sub/file.txt", content: "x" });
+    await session.writeFile({ path: "sub/file.txt", content: "x" });
     const op = mock.requests[0]?.req.op;
     if (op?.$case !== "fsWrite") throw new Error("expected an fsWrite op on the wire");
     expect(op.fsWrite.path).toBe("/home/u/proj/sub/file.txt");
   });
 
-  test("SelfhostedSandboxClient threads workingDir into every bound session (the resolver→client→session chain)", async () => {
-    // makeActiveBackendResolver builds a SelfhostedSandboxClient with
-    // `workingDir: pointer.workingDir` then `client.resume(...)` (backend-resolver.ts).
-    // Mirror that exactly: a client constructed with a workingDir must bind sessions
-    // that root the virtual frame under it.
+  test("SelfhostedSandboxClient threads the exact root into every bound session", async () => {
     const rpc = new MockAgentResponder();
     const client = new SelfhostedSandboxClient({
       workspaceId: WS,
@@ -995,10 +1026,10 @@ describe("per-session workingDir → the toMachinePath frame BASE (create-time m
       controlRpcFactory: () => rpc,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
-      workingDir: "/home/u/proj",
+      workspaceRoot: "/home/u/proj",
     });
     const resumed = await client.resume({ agentId: AGENT });
-    await resumed.writeFile({ path: "/workspace/notes.md", content: "hi" });
+    await resumed.writeFile({ path: "notes.md", content: "hi" });
     const op = rpc.requests.at(-1)?.req.op;
     if (op?.$case !== "fsWrite") throw new Error("expected an fsWrite op on the wire");
     expect(op.fsWrite.path).toBe("/home/u/proj/notes.md");
@@ -1124,6 +1155,7 @@ describe("SelfhostedSandboxClient — create/resume bind + serialize round-trips
     return new SelfhostedSandboxClient({
       workspaceId: WS,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       controlRpcFactory: () => rpc,
       ...(agentId ? { agentId } : {}),
       connectionInstanceId: CONNECTION_INSTANCE,

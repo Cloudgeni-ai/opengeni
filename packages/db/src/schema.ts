@@ -3409,13 +3409,10 @@ export const sessions = pgTable(
     // sandbox. integer (NOT bigint) — the lease-epoch spike: int8 reads back as a
     // JS string and breaks the strict fence; int4 returns a number.
     activeEpoch: integer("active_epoch").notNull().default(0),
-    // The session's WORKING DIRECTORY — the path/cwd base the (selfhosted) box's
-    // agent/terminal/file-dock operate under. A launch-workspace_root-relative
-    // subdir or an absolute machine path; surfaced alongside the active-sandbox
-    // pointer (readActiveSandbox) and written through the epoch-fenced
-    // setActiveSandbox CAS, NOT the row INSERT. NULL (the default) ⇒ today's
-    // behavior exactly — the agent substitutes its workspace_root for an empty cwd,
-    // so an unset working_dir is a byte-identical no-op. Create-time only (Stage A).
+    // The session's effective absolute Connected Machine root. New attaches
+    // resolve an optional relative request against the persisted Hello root and
+    // write the result through the epoch-fenced setActiveSandbox CAS. Legacy
+    // rows may still be null/relative and are resolved at establishment.
     workingDir: text("working_dir"),
     variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, {
       onDelete: "set null",
@@ -9156,6 +9153,9 @@ export const enrollments = pgTable(
     }),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
+    // Exact absolute launch root reported by the authoritative runner Hello.
+    // Null means no current runner has supplied a usable root yet.
+    workspaceRoot: text("workspace_root"),
     // Heartbeat liveness cursor. Null until the first connect.
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     // Clean going-offline marker (migration 0049). Set when the machine announces a

@@ -1778,7 +1778,7 @@ function ConnectedMachineFields(props: {
                   folder: { kind: "path", path: event.target.value },
                 })
               }
-              placeholder="e.g. ~/repos/myproject or packages/runtime"
+              placeholder="e.g. /home/me/repos/project or packages/runtime"
               aria-label="Custom working directory"
               className="ml-[1.375rem] h-9 w-[calc(100%_-_1.375rem)] text-sm"
             />

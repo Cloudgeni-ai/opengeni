@@ -3064,6 +3064,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId: activeSandbox.workspaceId,
           agentId: liveConnection.id,
           connectionInstanceId: liveConnection.connectionInstanceId,
+          // Capability negotiation only pings, so a pre-root agent may still
+          // report upgrade guidance without exposing a false filesystem root.
+          workspaceRoot: liveConnection.workspaceRoot ?? "/",
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
           relay: relayConfigFromSettings(settings),
           epoch: session.activeEpoch,

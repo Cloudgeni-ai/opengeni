@@ -278,6 +278,7 @@ function sessionWith(
 ): SelfhostedSession {
   return new SelfhostedSession({
     workspaceId: WS,
+    workspaceRoot: "/home/user/project",
     agentId: AGENT,
     connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: rpc,
@@ -304,6 +305,7 @@ function opStreamSessionWith(
   });
   const session = new SelfhostedSession({
     workspaceId: WS,
+    workspaceRoot: "/home/user/project",
     agentId: AGENT,
     connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: {

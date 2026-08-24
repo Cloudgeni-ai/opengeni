@@ -46587,6 +46587,8 @@ export type EnrollmentRecord = {
   connectionDuplicateDeniedAt: string | null;
   os: EnrollmentOs;
   arch: string;
+  /** Exact absolute launch root last reported by an authoritative runner Hello. */
+  workspaceRoot: string | null;
   lastSeenAt: string | null;
   /** When the machine announced a clean GoingOffline; the liveness derivation reads
    *  an un-cleared marker as offline immediately. NULL ⇒ no goodbye pending. */
@@ -46635,6 +46637,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     connectionDuplicateDeniedAt: row.connectionDuplicateDeniedAt?.toISOString() ?? null,
     os: row.os as EnrollmentOs,
     arch: row.arch,
+    workspaceRoot: row.workspaceRoot ?? null,
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
     wentOfflineAt: row.wentOfflineAt ? row.wentOfflineAt.toISOString() : null,
     wentOfflineReason: row.wentOfflineReason ?? null,
@@ -48106,6 +48109,8 @@ export async function setEnrollmentAgentRuntime(
     binarySha256: string | null;
     updateChannel: "stable" | "beta" | null;
     capabilities: Record<string, boolean>;
+    /** Omitted when an older or malformed Hello did not report a usable root. */
+    workspaceRoot?: string;
     completedUpdate: {
       operationId: string;
       targetVersion: string;
@@ -48145,6 +48150,7 @@ export async function setEnrollmentAgentRuntime(
           agentBinarySha256: input.binarySha256,
           agentUpdateChannel: input.updateChannel,
           agentCapabilities: input.capabilities,
+          ...(input.workspaceRoot !== undefined ? { workspaceRoot: input.workspaceRoot } : {}),
           // Success is derived atomically from the successor's durable updater
           // receipt + exact running build. If another process replaced the
           // accepting one without that proof, fail retryably instead of leaving
@@ -48196,6 +48202,9 @@ export async function setEnrollmentAgentRuntime(
               sql`${schema.enrollments.agentBinarySha256} is distinct from ${input.binarySha256}`,
               sql`${schema.enrollments.agentUpdateChannel} is distinct from ${input.updateChannel}`,
               sql`${schema.enrollments.agentCapabilities} is distinct from ${JSON.stringify(input.capabilities)}::jsonb`,
+              ...(input.workspaceRoot !== undefined
+                ? [sql`${schema.enrollments.workspaceRoot} is distinct from ${input.workspaceRoot}`]
+                : []),
               successorProvesCompletion,
               acceptingProcessWasReplaced,
             ),
@@ -49030,8 +49039,8 @@ export async function listSandboxes(db: Database, workspaceId: string): Promise<
 export type ActiveSandboxPointer = {
   activeSandboxId: string | null;
   activeEpoch: number;
-  // The session's working directory (the path/cwd base for a selfhosted backend),
-  // surfaced alongside the pointer. NULL ⇒ the default workspace_root behavior.
+  // Effective absolute Connected Machine root. Null/relative values can exist on
+  // legacy rows and are resolved against the current persisted Hello root.
   workingDir: string | null;
 };
 
