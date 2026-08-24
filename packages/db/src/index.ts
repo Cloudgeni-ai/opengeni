@@ -22157,13 +22157,27 @@ async function withTemporarySubjectRls<T>(
     sql`select current_setting('opengeni.subject_id', true) as subject_id`,
   );
   await setSubjectRlsContext(tx, subjectId);
-  try {
-    return await fn();
-  } finally {
+  const restoreSubjectScope = async () =>
     await tx.execute(
       sql`select set_config('opengeni.subject_id', ${prior?.subject_id ?? ""}, true)`,
     );
+  let result: T;
+  try {
+    result = await fn();
+  } catch (error) {
+    // Restoring the scope inside an already-aborted transaction raises 25P02,
+    // which would replace the real error with a useless one. Callers on the
+    // claim path classify the original SQLSTATE (40P01/40001) for the
+    // idempotent-persistence retry, so that substitution is not cosmetic: it
+    // silently disables the retry. The transaction is unwinding here and the
+    // scope dies with it, so a failed restore is moot.
+    await restoreSubjectScope().catch(() => undefined);
+    throw error;
   }
+  // `fn` succeeded, so the transaction is still usable and the caller keeps
+  // running inside it: a restore failure here is real and must surface.
+  await restoreSubjectScope();
+  return result;
 }
 
 async function getXaiCapacityWaitForSessionInTransaction(
@@ -55015,21 +55029,22 @@ function isChildLifecycleSystemUpdatePayload(
 }
 
 /**
- * The child sessions a delivered machine-input batch reports on. Keyed on the
- * child lifecycle kind set and never on an orchestrator/goal shape.
+ * The child sessions a delivered machine-input batch reports on, deduped in
+ * first-delivery order. Keyed on the child lifecycle kind set and never on an
+ * orchestrator/goal shape. Callers pass the payloads the delivery loop already
+ * validated, so no row is parsed twice.
  */
 function consumedChildLifecycleSessionIds(
   updates: ReadonlyArray<typeof schema.sessionSystemUpdates.$inferSelect>,
+  payloadsById: ReadonlyMap<string, SessionSystemUpdatePayload>,
 ): string[] {
   const childSessionIds = new Set<string>();
   for (const update of updates) {
     if (!isChildLifecycleSystemUpdateKind(update.kind)) continue;
-    const payload = SessionSystemUpdatePayload.parse(
-      fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
-    );
+    const payload = payloadsById.get(update.id);
     // The row's kind and its payload discriminator are written together; narrow
     // on the discriminator so the shared field access is typed rather than cast.
-    if (!isChildLifecycleSystemUpdatePayload(payload)) continue;
+    if (!payload || !isChildLifecycleSystemUpdatePayload(payload)) continue;
     childSessionIds.add(payload.childSessionId);
   }
   return [...childSessionIds];
@@ -55047,92 +55062,105 @@ function consumedChildLifecycleSessionIds(
  * per-viewer fence `setSessionAttention` writes, as if that human had viewed the
  * child. A pure service turn has no initiating human and writes nothing.
  *
- * It can only ever remove rail noise: `failed` and `requires_action` indicators
- * are derived from `sessions.status` and rank above unread, so an acknowledged
- * child that still needs a human keeps saying so. A child that emits a further
- * event goes unread again on its own, because unread is only the sequence
- * comparison in {@link mapSessionAttention}.
+ * `failed` and `requires_action` indicators are derived from `sessions.status`
+ * and rank above unread, so an acknowledged child that still needs a human keeps
+ * saying so, and a child that emits a further event goes unread again on its own
+ * because unread is only the sequence comparison in {@link mapSessionAttention}.
+ * The fence is monotone, so it also advances past a human's earlier explicit
+ * mark-unread once the parent consumes a newer notice: consumption is the
+ * signal, and OpenGeni keeps no durable "keep this unread" intent.
+ *
+ * This deliberately does NOT touch `attention_version`. That revision exists
+ * only to order explicit human attention mutations against each other, and this
+ * writer publishes no event, NATS invalidation, or sequence advance a browser
+ * could learn from - bumping it would silently invalidate the version the rail
+ * holds and turn the human's next mark-read click into a 409.
  *
  * Lock discipline: the claim transaction already owns the canonical workspace →
- * session → turn → attempt prefix for the PARENT. This takes no child session
- * row lock, no child turn/attempt lock, and deliberately not the
- * `session-personal-state` advisory fence: workspace-membership removal takes
- * that fence BEFORE the workspace/session prefix, so taking it here would invert
- * the order and deadlock. The upsert is monotone in one statement instead: the
- * conflict path re-reads the committed row under its own row lock and refuses to
- * move a fence backward.
+ * session → turn → attempt prefix for the PARENT.
+ *
+ * - It takes the `session-personal-state` fence with `pg_try_advisory_xact_lock`
+ *   and SKIPS the acknowledgment when the fence is already held. Membership
+ *   removal (migration 0278) takes that fence BEFORE the workspace/session
+ *   prefix, so blocking on it here would invert the canonical order; a
+ *   non-blocking probe cannot. Honouring the fence is what keeps this from being
+ *   the "racing pin writer recreates personal rows after cleanup" hole 0278
+ *   exists to close, and losing the probe is a clean no-op rather than a partial
+ *   write - the child simply stays unread, which is today's behaviour.
+ * - It takes no child turn/attempt lock and no explicit child session lock.
+ *   `session_pins` does carry two foreign keys to `sessions`, so each inserted
+ *   row does take `FOR KEY SHARE` on the child's session row. That is safe
+ *   rather than an inversion: `FOR KEY SHARE` conflicts only with `FOR UPDATE`,
+ *   and every canonical session writer takes `FOR NO KEY UPDATE`, which is
+ *   compatible with it.
+ * - One statement inserts every child in `ORDER BY id`, matching the UUID lock
+ *   ordering the rest of this file uses and the index order migration 0278
+ *   deletes in, so the two cannot deadlock against each other.
+ *
+ * The upsert is monotone: the conflict path re-reads the committed row under its
+ * own row lock and refuses to move a fence backward.
  *
  * There is no membership probe. The write grants nothing and discloses nothing
  * (a fence is visible only to its own subject), the subject comes from durable
  * frozen turn provenance rather than a request, membership removal deletes these
- * rows (migration 0278), and the personal-workspace-owner exception a bare
- * membership probe would need is authorized by an API-layer
- * canonical-managed-cookie stamp that this worker path does not have. Both RLS
- * policies on `session_pins` still apply through the temporary subject scope.
+ * rows and is serialized against this writer by the fence above, and the
+ * personal-workspace-owner exception a bare membership probe would need is
+ * authorized by an API-layer canonical-managed-cookie stamp that this worker path
+ * does not have. Both RLS policies on `session_pins` still apply through the
+ * temporary subject scope, and the insert is additionally fenced on
+ * `parent_session_id`, so a payload field can never decide whose personal state
+ * is mutated on an unrelated session.
  */
 async function acknowledgeConsumedChildLifecycleNotices(
   tx: Database,
   input: {
     workspaceId: string;
+    sessionId: string;
     subjectId: string | null;
-    updates: ReadonlyArray<typeof schema.sessionSystemUpdates.$inferSelect>;
+    childSessionIds: readonly string[];
   },
 ): Promise<void> {
   const subjectId = input.subjectId?.trim();
-  if (!subjectId) return;
-  const childSessionIds = consumedChildLifecycleSessionIds(input.updates);
-  if (childSessionIds.length === 0) return;
+  if (!subjectId || input.childSessionIds.length === 0) return;
+  const [fence] = await rawRows<{ acquired: boolean }>(
+    tx,
+    sql`select pg_try_advisory_xact_lock(
+      hashtextextended(${sessionPersonalStateLockKey(input.workspaceId, subjectId)}, 0)
+    ) as acquired`,
+  );
+  if (!fence?.acquired) return;
+  const pins = schema.sessionPins;
+  const sessions = schema.sessions;
   await withTemporarySubjectRls(tx, subjectId, async () => {
-    const children = await tx
-      .select({
-        id: schema.sessions.id,
-        accountId: schema.sessions.accountId,
-        lastSequence: schema.sessions.lastSequence,
-      })
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          inArray(schema.sessions.id, childSessionIds),
-        ),
-      );
-    for (const child of children) {
-      // Nothing to acknowledge on a child with no durable events: the
-      // absent-row projection already reports it read.
-      if (child.lastSequence <= 0) continue;
-      await tx
-        .insert(schema.sessionPins)
-        .values({
-          accountId: child.accountId,
-          workspaceId: input.workspaceId,
-          subjectId,
-          sessionId: child.id,
-          // An acknowledgment is not a pin. Keep the pin domain at version 0 so
-          // a concurrent pin writer holding the absent-row projection stays
-          // valid, exactly as `setSessionAttention` does.
-          pinned: false,
-          pinnedAt: null,
-          version: 0,
-          acknowledgedSequence: child.lastSequence,
-          activelyWorking: false,
-          attentionVersion: 1,
-          archiveVersion: 0,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.sessionPins.subjectId,
-            schema.sessionPins.workspaceId,
-            schema.sessionPins.sessionId,
-          ],
-          set: {
-            acknowledgedSequence: child.lastSequence,
-            attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
-          },
-          // Monotone: a human who already read further, or a racing claim that
-          // observed a later sequence, is never regressed.
-          setWhere: lt(schema.sessionPins.acknowledgedSequence, child.lastSequence),
-        });
-    }
+    await tx.execute(sql`
+      insert into ${pins} (
+        account_id, workspace_id, subject_id, session_id,
+        pinned, pinned_at, version,
+        acknowledged_sequence, actively_working, attention_version,
+        archived, archived_at, archive_version
+      )
+      select
+        ${sessions.accountId}, ${sessions.workspaceId}, ${subjectId}, ${sessions.id},
+        -- An acknowledgment is not a pin and not an archive. Both domains stay
+        -- at the absent-row projection so a concurrent pin/archive writer
+        -- holding that projection stays valid.
+        false, null, 0,
+        ${sessions.lastSequence}, false, 0,
+        false, null, 0
+      from ${sessions}
+      where ${and(
+        eq(sessions.workspaceId, input.workspaceId),
+        eq(sessions.parentSessionId, input.sessionId),
+        inArray(sessions.id, [...input.childSessionIds]),
+        // Nothing to acknowledge on a child with no durable events: the
+        // absent-row projection already reports it read.
+        gt(sessions.lastSequence, 0),
+      )}
+      order by ${sessions.id}
+      on conflict (subject_id, workspace_id, session_id) do update
+        set acknowledged_sequence = excluded.acknowledged_sequence
+        where ${pins.acknowledgedSequence} < excluded.acknowledged_sequence
+    `);
   });
 }
 
@@ -55177,6 +55205,8 @@ export async function claimSessionWorkForAttempt(
           historyItemId: string | null;
           historyItem: Record<string, unknown> | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
+          /** Deduped children the delivered batch reports on, in delivery order. */
+          childSessionIds: string[];
           events: SessionEventInsertWithPayload[];
           event: SessionEventInsertWithPayload | null;
         }> => {
@@ -55268,6 +55298,7 @@ export async function claimSessionWorkForAttempt(
               historyItemId: null,
               historyItem: null,
               updates: [],
+              childSessionIds: [],
               events: [],
               event: null,
             };
@@ -55276,16 +55307,22 @@ export async function claimSessionWorkForAttempt(
           const cancelledUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
           const unrecognizedUpdateIds: string[] = [];
+          // Retained so later consumers of the delivered batch (the child
+          // read-fence advance) reuse this exact validation instead of parsing
+          // the same payloads a second time.
+          const parsedPayloadsById = new Map<string, SessionSystemUpdatePayload>();
           for (const update of updates) {
             // A kind or payload this image cannot parse is a bounded, visible
             // condition, never an endless re-peek: mark that one row failed
             // and record `unrecognized_kind` on the timeline; the rest of the
             // batch is claimed normally.
+            const parsedPayload = SessionSystemUpdatePayload.safeParse(
+              fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+            );
+            if (parsedPayload.success) parsedPayloadsById.set(update.id, parsedPayload.data);
             if (
               !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
-              !SessionSystemUpdatePayload.safeParse(
-                fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
-              ).success
+              !parsedPayload.success
             ) {
               await tx
                 .update(schema.sessionSystemUpdates)
@@ -55468,6 +55505,7 @@ export async function claimSessionWorkForAttempt(
               historyItemId: null,
               historyItem: null,
               updates: [],
+              childSessionIds: [],
               events: cancellationEvents,
               event: null,
             };
@@ -55626,6 +55664,7 @@ export async function claimSessionWorkForAttempt(
             historyItemId,
             historyItem,
             updates: deliverable,
+            childSessionIds: consumedChildLifecycleSessionIds(deliverable, parsedPayloadsById),
             events,
             event,
           };
@@ -56948,8 +56987,9 @@ export async function claimSessionWorkForAttempt(
           // those children advances with the same commit.
           await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
             workspaceId,
+            sessionId,
             subjectId: initiatingHumanSubjectId,
-            updates: delivered.updates,
+            childSessionIds: delivered.childSessionIds,
           });
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
@@ -57113,10 +57153,11 @@ export async function claimSessionWorkForAttempt(
         // lifecycle notices into its own inference.
         await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
           workspaceId,
+          sessionId,
           subjectId:
             row.initiatingHumanSubjectId ??
             (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
-          updates: delivered.updates,
+          childSessionIds: delivered.childSessionIds,
         });
         if (delivered.events.length > 0) {
           await tx

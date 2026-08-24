@@ -309,7 +309,10 @@ describe("child read acknowledgment on parent consumption", () => {
 
     expect(await pinRow(grant.subjectId, child.session.id)).toMatchObject({
       acknowledged_sequence: childSequence,
-      attention_version: 1,
+      // The acknowledgment must NOT mint an optimistic revision: it publishes no
+      // event a browser could learn from, so bumping this would silently stale
+      // the version the rail holds and 409 the human's next attention click.
+      attention_version: 0,
       // Acknowledging is not pinning and not archiving.
       pinned: false,
       version: 0,
@@ -469,7 +472,7 @@ describe("child read acknowledgment on parent consumption", () => {
     expect(await pinRowCount(child.session.id)).toBe(1);
     expect(await pinRow(grant.subjectId, child.session.id)).toMatchObject({
       acknowledged_sequence: childSequence,
-      attention_version: 1,
+      attention_version: 0,
     });
   });
 
@@ -500,7 +503,7 @@ describe("child read acknowledgment on parent consumption", () => {
     });
   });
 
-  test("an explicit mark-unread still wins over an existing acknowledgment", async () => {
+  test("the acknowledgment mints no optimistic revision, so the next attention click still applies", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { message: "orchestrate" });
     const child = await startSession(grant, { parent, message: "work" });
@@ -510,13 +513,38 @@ describe("child read acknowledgment on parent consumption", () => {
     await enqueueHumanTurn(grant, parent.session.id);
     expect((await claim(grant, parent.session.id)).action).toBe("claimed");
 
-    const acknowledged = await getSessionForSubject(
+    // The rail sends `expectedVersion: session.attentionVersion ?? 0` with every
+    // attention mutation, and the acknowledgment emits no event, no NATS
+    // invalidation, and no sequence advance the page could learn from. If it had
+    // bumped the revision, this exact call would raise the conflict the API maps
+    // to a 409 and a "Couldn't update the session status." toast.
+    const seen = await getSessionForSubject(
       client.db,
       grant.workspaceId,
       child.session.id,
       grant.subjectId,
     );
-    expect(acknowledged?.unread).toBe(false);
+    expect(seen?.attentionVersion).toBe(0);
+    const marked = await setSessionAttention(client.db, {
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      sessionId: child.session.id,
+      unread: true,
+      expectedVersion: seen?.attentionVersion ?? 0,
+    });
+    expect(marked?.unread).toBe(true);
+  });
+
+  test("a later consumption advances past an earlier explicit mark-unread", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleIdle(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+    const firstParentClaim = await claim(grant, parent.session.id);
+    if (firstParentClaim.action !== "claimed") throw new Error("parent turn was not claimed");
 
     const marked = await setSessionAttention(client.db, {
       workspaceId: grant.workspaceId,
@@ -525,5 +553,58 @@ describe("child read acknowledgment on parent consumption", () => {
       unread: true,
     });
     expect(marked?.unread).toBe(true);
+
+    // The child does more work and reports again. The fence is monotone and
+    // OpenGeni keeps no durable "leave this unread" intent, so the next
+    // consumption advances straight past the human's earlier mark-unread. This
+    // pins the real behaviour: consumption is the signal, and an explicit
+    // mark-unread survives only until the parent consumes a newer notice.
+    await enqueueHumanTurn(grant, child.session.id);
+    const reclaimed = await claim(grant, child.session.id);
+    if (reclaimed.action !== "claimed") throw new Error("child turn was not reclaimed");
+    await settleIdle(grant, {
+      session: child.session,
+      turn: reclaimed.turn,
+      attemptId: reclaimed.attemptId,
+    });
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, {
+      session: parent.session,
+      turn: firstParentClaim.turn,
+      attemptId: firstParentClaim.attemptId,
+    });
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+
+    const afterSecondConsumption = await getSessionForSubject(
+      client.db,
+      grant.workspaceId,
+      child.session.id,
+      grant.subjectId,
+    );
+    expect(afterSecondConsumption?.unread).toBe(false);
+  });
+
+  test("a notice naming a session that is not this parent's child acknowledges nothing", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    const stranger = await startSession(grant, { message: "unrelated" });
+    await settleIdle(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    // Repoint the committed notice at a session this parent does not own, as a
+    // corrupt or hand-inserted payload would. The insert is fenced on
+    // `parent_session_id`, so a payload field cannot decide whose personal state
+    // is mutated even under the temporary subject scope.
+    await shared.admin`
+      update session_system_updates
+      set payload = jsonb_set(payload, '{childSessionId}', ${shared.admin.json(stranger.session.id)})
+      where session_id = ${parent.session.id} and kind = 'child_terminal_result'`;
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+
+    expect(await pinRowCount(stranger.session.id)).toBe(0);
+    expect(await pinRowCount(child.session.id)).toBe(0);
   });
 });

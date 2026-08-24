@@ -144,17 +144,47 @@ child that emits one more event goes unread again with no special handling, and
 the `failed` and `requires_action` rail indicators are derived from
 `sessions.status`, rank above unread, and are untouched. The fence is monotone:
 a human who has already read further, or a racing claim that observed a later
-sequence, is never regressed, while an explicit mark-unread still wins.
+sequence, is never regressed.
 
-The write is deliberately lightweight. It takes no lock on the child session,
-turn, or attempt (only a plain workspace-RLS read of the child's
-`last_sequence` plus a monotone upsert under a temporary subject scope), and it
-does not take the `session-personal-state` advisory fence, because workspace
-membership removal takes that fence *before* the workspace/session lock prefix
-the claim already holds. Taking it there would invert the canonical order. The
-other `session_pins` writers therefore tolerate a row appearing between their
-read and their write; the acknowledgment row is pin-neutral and
-archive-neutral, so their conflict path is the same transition as their insert.
+Monotonicity has one consequence worth stating plainly: an explicit mark-unread
+is **not** sticky against a later consumption. Marking a child unread, then
+letting that child work and report again, leaves it acknowledged after the
+parent's next claim. That follows from the premise that consumption is the read
+signal, and the mark still holds until the parent consumes a newer notice, but
+mark-unread is therefore not a durable personal to-do flag on a child of an
+active orchestrator. Making it sticky would need a durable explicit-unread
+marker the acknowledgment respects; there is deliberately no such marker.
+
+The acknowledgment never touches `attention_version`. That revision orders
+explicit human attention mutations against each other, and this writer emits no
+event, NATS invalidation, or sequence advance a browser could observe. Bumping
+it would silently stale the revision the rail holds and turn the human's next
+mark-read click into a 409 with no way for the page to know why.
+
+The write is deliberately lightweight and is one statement per claim.
+
+- It honours the `session-personal-state` advisory fence with
+  `pg_try_advisory_xact_lock` and skips the acknowledgment when the fence is
+  already held. Workspace membership removal takes that fence *before* the
+  workspace/session lock prefix the claim already holds, so blocking on it here
+  would invert the canonical order; a non-blocking probe cannot. Honouring it is
+  what keeps this from being the "racing pin writer recreates personal rows
+  after cleanup" hole migration 0278 exists to close, and losing the probe is a
+  clean no-op: the child stays unread, exactly as it does today.
+- It takes no child turn/attempt lock and no explicit child session lock.
+  `session_pins` does carry two foreign keys to `sessions`, so each inserted row
+  takes `FOR KEY SHARE` on the child's session row. That is compatible rather
+  than an inversion: `FOR KEY SHARE` conflicts only with `FOR UPDATE`, and every
+  canonical session writer takes `FOR NO KEY UPDATE`.
+- One `INSERT ... SELECT ... ORDER BY id` covers every child in the batch, so
+  rows lock in the same UUID order the rest of the session writers use and the
+  index order migration 0278 deletes in.
+- The insert is fenced on `parent_session_id`, so a payload field can never
+  decide whose personal state is mutated on an unrelated session.
+
+The other `session_pins` writers tolerate a row appearing between their read and
+their write; the acknowledgment row is pin-neutral and archive-neutral, so their
+conflict path is the same transition as their insert.
 
 ## Queue and timeline
 
