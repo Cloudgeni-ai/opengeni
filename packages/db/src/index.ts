@@ -29587,6 +29587,24 @@ export async function setSessionPin(
               attentionVersion: 0,
               archiveVersion: 0,
             })
+            // A turn claim may have created this subject's row for the same
+            // session between the read above and here, to acknowledge a
+            // consumed child lifecycle notice. That writer keeps the pin domain
+            // exactly at the absent-row projection (`pinned` false, version 0),
+            // so the conflict path is the same false -> true transition; only
+            // the attention fence it owns must survive untouched.
+            .onConflictDoUpdate({
+              target: [
+                schema.sessionPins.subjectId,
+                schema.sessionPins.workspaceId,
+                schema.sessionPins.sessionId,
+              ],
+              set: {
+                pinned: true,
+                pinnedAt: new Date(),
+                version: sql`${schema.sessionPins.version} + 1`,
+              },
+            })
             .returning();
           pin = inserted ?? null;
         } else if (existing.pinned !== input.pinned) {
@@ -29720,6 +29738,17 @@ export async function setSessionAttention(
           throw new SessionAttentionVersionConflictError(current);
         }
 
+        // A turn claim acknowledging a consumed child lifecycle notice advances
+        // this same fence for this same subject without holding the personal
+        // state fence above (it must not: membership removal takes that fence
+        // BEFORE the workspace/session lock prefix a claim already owns). Marking
+        // read must therefore never regress a fence that committed after the read
+        // above. An explicit mark-unread is the one deliberate regression and
+        // keeps its exact sentinel.
+        const monotonicAcknowledgment = input.unread !== true;
+        const acknowledgedSequenceWrite = monotonicAcknowledgment
+          ? sql`greatest(${schema.sessionPins.acknowledgedSequence}, ${acknowledgedSequence})`
+          : acknowledgedSequence;
         let state = existing ?? null;
         if (!existing) {
           const [inserted] = await tx
@@ -29737,13 +29766,25 @@ export async function setSessionAttention(
               attentionVersion: 1,
               archiveVersion: 0,
             })
+            .onConflictDoUpdate({
+              target: [
+                schema.sessionPins.subjectId,
+                schema.sessionPins.workspaceId,
+                schema.sessionPins.sessionId,
+              ],
+              set: {
+                acknowledgedSequence: acknowledgedSequenceWrite,
+                activelyWorking: desiredActivelyWorking,
+                attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
+              },
+            })
             .returning();
           state = inserted ?? null;
         } else {
           const [updated] = await tx
             .update(schema.sessionPins)
             .set({
-              acknowledgedSequence,
+              acknowledgedSequence: acknowledgedSequenceWrite,
               activelyWorking: desiredActivelyWorking,
               attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
             })
@@ -29865,6 +29906,26 @@ export async function setSessionArchive(
               archivedAt: new Date(),
               attentionVersion: 0,
               archiveVersion: 1,
+            })
+            // A turn claim may have created this subject's row for the same
+            // session between the read above and here, to acknowledge a consumed
+            // child lifecycle notice. That row is archive-neutral and pin-neutral
+            // (the absent-row projection), so this is the same false -> true
+            // archive transition; its attention fence and version stay untouched.
+            .onConflictDoUpdate({
+              target: [
+                schema.sessionPins.subjectId,
+                schema.sessionPins.workspaceId,
+                schema.sessionPins.sessionId,
+              ],
+              set: {
+                archived: true,
+                archivedAt: new Date(),
+                archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+                pinned: false,
+                pinnedAt: null,
+                activelyWorking: false,
+              },
             })
             .returning();
           state = inserted ?? null;
@@ -54937,6 +54998,145 @@ async function goalSnapshotForAcceptedTurnInTransaction(
 }
 
 /**
+ * Every child lifecycle payload carries the same `childSessionId`. Deriving the
+ * set from `CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS` keeps that a compiler fact: a
+ * seventh kind without the field stops compiling here instead of silently
+ * dropping out of the read-fence advance.
+ */
+type ChildLifecycleSystemUpdatePayload = Extract<
+  SessionSystemUpdatePayload,
+  { type: ChildLifecycleSystemUpdateKind }
+>;
+
+function isChildLifecycleSystemUpdatePayload(
+  payload: SessionSystemUpdatePayload,
+): payload is ChildLifecycleSystemUpdatePayload {
+  return isChildLifecycleSystemUpdateKind(payload.type);
+}
+
+/**
+ * The child sessions a delivered machine-input batch reports on. Keyed on the
+ * child lifecycle kind set and never on an orchestrator/goal shape.
+ */
+function consumedChildLifecycleSessionIds(
+  updates: ReadonlyArray<typeof schema.sessionSystemUpdates.$inferSelect>,
+): string[] {
+  const childSessionIds = new Set<string>();
+  for (const update of updates) {
+    if (!isChildLifecycleSystemUpdateKind(update.kind)) continue;
+    const payload = SessionSystemUpdatePayload.parse(
+      fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+    );
+    // The row's kind and its payload discriminator are written together; narrow
+    // on the discriminator so the shared field access is typed rather than cast.
+    if (!isChildLifecycleSystemUpdatePayload(payload)) continue;
+    childSessionIds.add(payload.childSessionId);
+  }
+  return [...childSessionIds];
+}
+
+/**
+ * Acknowledge every child whose lifecycle notice this claim just turned into
+ * durable model input, for the receiving turn's frozen initiating human only.
+ *
+ * A parent agent that consumed a child's result, pause, capacity wait, progress
+ * note, or human-input boundary has already carried that fact to the human who
+ * started the turn, so the child's blue unread dot is pure noise: an
+ * orchestrator with dozens of children otherwise leaves dozens of permanently
+ * unread rows until a human opens each one by hand. This advances exactly the
+ * per-viewer fence `setSessionAttention` writes, as if that human had viewed the
+ * child. A pure service turn has no initiating human and writes nothing.
+ *
+ * It can only ever remove rail noise: `failed` and `requires_action` indicators
+ * are derived from `sessions.status` and rank above unread, so an acknowledged
+ * child that still needs a human keeps saying so. A child that emits a further
+ * event goes unread again on its own, because unread is only the sequence
+ * comparison in {@link mapSessionAttention}.
+ *
+ * Lock discipline: the claim transaction already owns the canonical workspace →
+ * session → turn → attempt prefix for the PARENT. This takes no child session
+ * row lock, no child turn/attempt lock, and deliberately not the
+ * `session-personal-state` advisory fence: workspace-membership removal takes
+ * that fence BEFORE the workspace/session prefix, so taking it here would invert
+ * the order and deadlock. The upsert is monotone in one statement instead: the
+ * conflict path re-reads the committed row under its own row lock and refuses to
+ * move a fence backward.
+ *
+ * There is no membership probe. The write grants nothing and discloses nothing
+ * (a fence is visible only to its own subject), the subject comes from durable
+ * frozen turn provenance rather than a request, membership removal deletes these
+ * rows (migration 0278), and the personal-workspace-owner exception a bare
+ * membership probe would need is authorized by an API-layer
+ * canonical-managed-cookie stamp that this worker path does not have. Both RLS
+ * policies on `session_pins` still apply through the temporary subject scope.
+ */
+async function acknowledgeConsumedChildLifecycleNotices(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string | null;
+    updates: ReadonlyArray<typeof schema.sessionSystemUpdates.$inferSelect>;
+  },
+): Promise<void> {
+  const subjectId = input.subjectId?.trim();
+  if (!subjectId) return;
+  const childSessionIds = consumedChildLifecycleSessionIds(input.updates);
+  if (childSessionIds.length === 0) return;
+  await withTemporarySubjectRls(tx, subjectId, async () => {
+    const children = await tx
+      .select({
+        id: schema.sessions.id,
+        accountId: schema.sessions.accountId,
+        lastSequence: schema.sessions.lastSequence,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          inArray(schema.sessions.id, childSessionIds),
+        ),
+      );
+    for (const child of children) {
+      // Nothing to acknowledge on a child with no durable events: the
+      // absent-row projection already reports it read.
+      if (child.lastSequence <= 0) continue;
+      await tx
+        .insert(schema.sessionPins)
+        .values({
+          accountId: child.accountId,
+          workspaceId: input.workspaceId,
+          subjectId,
+          sessionId: child.id,
+          // An acknowledgment is not a pin. Keep the pin domain at version 0 so
+          // a concurrent pin writer holding the absent-row projection stays
+          // valid, exactly as `setSessionAttention` does.
+          pinned: false,
+          pinnedAt: null,
+          version: 0,
+          acknowledgedSequence: child.lastSequence,
+          activelyWorking: false,
+          attentionVersion: 1,
+          archiveVersion: 0,
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.sessionPins.subjectId,
+            schema.sessionPins.workspaceId,
+            schema.sessionPins.sessionId,
+          ],
+          set: {
+            acknowledgedSequence: child.lastSequence,
+            attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
+          },
+          // Monotone: a human who already read further, or a racing claim that
+          // observed a later sequence, is never regressed.
+          setWhere: lt(schema.sessionPins.acknowledgedSequence, child.lastSequence),
+        });
+    }
+  });
+}
+
+/**
  * Claim and register one inference attempt after a turn worker has accepted the
  * Temporal activity. This is the only transition into `running`: queue choice,
  * execution generation, active attempt identity, dispatch identity, and the
@@ -56743,6 +56943,14 @@ export async function claimSessionWorkForAttempt(
             frozenGoalSnapshot,
             goalContinuationHistoryItem,
           );
+          // The batch is now durable model memory. Every child it reports on has
+          // been carried to this turn's initiating human, so their read fence on
+          // those children advances with the same commit.
+          await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
+            workspaceId,
+            subjectId: initiatingHumanSubjectId,
+            updates: delivered.updates,
+          });
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
           await tx
@@ -56901,6 +57109,15 @@ export async function claimSessionWorkForAttempt(
               { supersedeGoalContinuations: true },
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
+        // Same fence advance for a queued human/API turn that coalesced child
+        // lifecycle notices into its own inference.
+        await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
+          workspaceId,
+          subjectId:
+            row.initiatingHumanSubjectId ??
+            (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
+          updates: delivered.updates,
+        });
         if (delivered.events.length > 0) {
           await tx
             .insert(schema.sessionEvents)

@@ -116,6 +116,46 @@ first-party `session_human_input_respond` tool (`sessions:control`,
 denied to every agent attempt and remain a human decision. See
 [`agent-session-authority.md`](agent-session-authority.md).
 
+## Consuming a child notice acknowledges that child
+
+A parent turn consuming a child's lifecycle update also acknowledges that child
+for the turn's initiating human, exactly as if they had viewed it. The claim
+transaction that marks the batch `delivered` and writes its
+`session_history_items` row advances that human's `session_pins`
+`acknowledged_sequence` on every child the batch reports on, to the child's
+`last_sequence` at that instant. The claim commits or rolls back with the
+acknowledgment, so a recovered or retried claim cannot leave the two out of
+step.
+
+The mechanism is keyed only on "a claimed turn consumed a child lifecycle
+update, and that turn has a frozen initiating human". There is no
+orchestrator-, goal-, or depth-specific rule, and every level of a nested chain
+behaves identically. It applies to all six child lifecycle kinds, which share
+the `childSessionId` field; several notices for one child in a single batch
+produce one acknowledgment. A turn whose frozen principal is purely a service
+(an ordinary machine-input turn with no goal continuation, schedule, xAI-user,
+or private-owner authority behind it) has no human to acknowledge for and
+writes nothing.
+
+Read state is per viewer, so this only ever changes the rail for that one
+human; another member still sees the child unread. It only ever removes noise:
+`unread` is nothing but `sessions.last_sequence > acknowledged_sequence`, so a
+child that emits one more event goes unread again with no special handling, and
+the `failed` and `requires_action` rail indicators are derived from
+`sessions.status`, rank above unread, and are untouched. The fence is monotone:
+a human who has already read further, or a racing claim that observed a later
+sequence, is never regressed, while an explicit mark-unread still wins.
+
+The write is deliberately lightweight. It takes no lock on the child session,
+turn, or attempt (only a plain workspace-RLS read of the child's
+`last_sequence` plus a monotone upsert under a temporary subject scope), and it
+does not take the `session-personal-state` advisory fence, because workspace
+membership removal takes that fence *before* the workspace/session lock prefix
+the claim already holds. Taking it there would invert the canonical order. The
+other `session_pins` writers therefore tolerate a row appearing between their
+read and their write; the acknowledgment row is pin-neutral and
+archive-neutral, so their conflict path is the same transition as their insert.
+
 ## Queue and timeline
 
 The human prompt queue and pending machine inputs remain distinct canonical
