@@ -642,6 +642,17 @@ BEGIN
       AND membership.status = 'active'
       AND membership.revoked_at IS NULL;
     IF FOUND THEN
+      -- Reactivate rather than insert blind. The rollback direction below only
+      -- marks the prior authority `revoked`; it never deletes the row, and
+      -- `organization_user_resource_authorities_resource_identity_idx` is
+      -- UNIQUE (account_id, organization_membership_id, resource_kind,
+      -- resource_id) with NO status predicate. A plain INSERT therefore made
+      -- the documented `personal -> workspace -> personal` round trip fail
+      -- permanently with 23505, which the route surfaces as an untyped 500.
+      -- `origin_workspace_id` is deliberately preserved on reactivation: it is
+      -- privacy-safe provenance of where the authority first originated, never
+      -- an ownership or authorization anchor, so it must not be rewritten to
+      -- wherever the Document happens to sit now.
       INSERT INTO organization_user_resource_authorities (
         id, account_id, organization_membership_id, resource_kind,
         resource_id, origin_workspace_id, generation, status
@@ -649,6 +660,12 @@ BEGIN
         gen_random_uuid(), account_id_value, owner_member.id, 'document',
         document_row.id, document_row.workspace_id, 1, 'active'
       )
+      ON CONFLICT (account_id, organization_membership_id, resource_kind, resource_id)
+      DO UPDATE SET
+        status = 'active',
+        generation = organization_user_resource_authorities.generation + 1,
+        revoked_at = NULL,
+        updated_at = clock_timestamp()
       RETURNING id, organization_membership_id
       INTO target_authority_id, target_owner_membership_id;
     ELSE

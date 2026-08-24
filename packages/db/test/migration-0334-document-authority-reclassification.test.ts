@@ -589,6 +589,82 @@ describe("migration 0334 Document authority reclassification", () => {
       grantGeneration: 2,
     });
 
+    // Retry the activation after the documented rollback. The identity index
+    // `organization_user_resource_authorities_resource_identity_idx` carries no
+    // status predicate and the rollback above only revokes the row, so a blind
+    // INSERT here made the round trip fail permanently with 23505 - surfaced by
+    // the Documents route as an untyped 500. The reactivation must reuse the
+    // SAME authority row, bump its generation, and clear `revoked_at`, and it
+    // must preserve `origin_workspace_id` as provenance.
+    const retryCommand = {
+      ...command,
+      operationId: crypto.randomUUID(),
+      expectedAuthority: { kind: "workspace", workspaceId, subjectId: null, authorityId: null },
+      targetAuthorityKind: "personal",
+    };
+    const retried = await withScope({ accountId, workspaceId, subjectId }, async (tx) => {
+      const [row] = await tx<Array<{ result: Record<string, unknown> }>>`
+        select reclassify_document_authority(${tx.json(retryCommand)}::jsonb) as result`;
+      return row!.result;
+    });
+    expect(retried).toMatchObject({
+      authority: { kind: "personal", workspaceId: null, subjectId },
+    });
+    const [reactivated] = await admin<
+      Array<{
+        documentKind: string;
+        documentWorkspace: string | null;
+        documentAuthorityId: string | null;
+        authorityStatus: string;
+        authorityGeneration: number;
+        authorityRevokedAt: string | null;
+        authorityOrigin: string | null;
+      }>
+    >`
+      select document.authority_kind as "documentKind",
+        document.authority_workspace_id as "documentWorkspace",
+        document.authority_id as "documentAuthorityId",
+        authority.status as "authorityStatus",
+        authority.generation::int as "authorityGeneration",
+        authority.revoked_at as "authorityRevokedAt",
+        authority.origin_workspace_id as "authorityOrigin"
+      from documents document
+      join organization_user_resource_authorities authority
+        on authority.id = ${stored!.documentAuthorityId}::uuid
+      where document.id = ${document!.id}`;
+    expect(reactivated).toEqual({
+      documentKind: "personal",
+      documentWorkspace: null,
+      // the SAME row, reused rather than duplicated
+      documentAuthorityId: stored!.documentAuthorityId,
+      authorityStatus: "active",
+      authorityGeneration: 3,
+      authorityRevokedAt: null,
+      authorityOrigin: workspaceId,
+    });
+    // Exactly one authority row exists for this identity tuple.
+    const [authorityCount] = await admin<Array<{ total: number }>>`
+      select count(*)::int as total from organization_user_resource_authorities
+      where account_id = ${accountId}::uuid and resource_kind = 'document'
+        and resource_id = ${document!.id}::uuid`;
+    expect(authorityCount!.total).toBe(1);
+
+    // Restore the rolled-back shape so the pagination assertions below still
+    // describe the same receipt history they were written against.
+    await withScope({ accountId, workspaceId, subjectId }, async (tx) => {
+      await tx`select reclassify_document_authority(${tx.json({
+        ...command,
+        operationId: crypto.randomUUID(),
+        expectedAuthority: {
+          kind: "personal",
+          workspaceId: null,
+          subjectId,
+          authorityId: stored!.documentAuthorityId,
+        },
+        targetAuthorityKind: "workspace",
+      })}::jsonb)`;
+    });
+
     const firstPage = await withScope(
       { accountId, workspaceId, subjectId },
       async (tx) =>
