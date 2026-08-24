@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterContextProvider,
+} from "@tanstack/react-router";
 import { act, type ReactNode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -67,6 +73,14 @@ mock.module("@/components/ui/confirm-dialog", () => ({
 }));
 
 const { MembersSection } = await import("./workspace-settings");
+const testRouter = createRouter({
+  routeTree: createRootRoute(),
+  history: createMemoryHistory({ initialEntries: ["/"] }),
+});
+
+function withTestRouter(children: ReactNode) {
+  return <RouterContextProvider router={testRouter}>{children}</RouterContextProvider>;
+}
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -104,7 +118,9 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
 
   async function render(nextWorkspaceId: string, nextCanManage: boolean) {
     await act(async () => {
-      root.render(<MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />);
+      root.render(
+        withTestRouter(<MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />),
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
@@ -366,11 +382,13 @@ describe("workspace members loading", () => {
     try {
       await act(async () => {
         root.render(
-          <MembersBoundaryProbe
-            workspaceId={workspaceA}
-            canManage={true}
-            onBoundaryLayout={captureBoundaryLayout}
-          />,
+          withTestRouter(
+            <MembersBoundaryProbe
+              workspaceId={workspaceA}
+              canManage={true}
+              onBoundaryLayout={captureBoundaryLayout}
+            />,
+          ),
         );
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
@@ -398,11 +416,13 @@ describe("workspace members loading", () => {
 
       act(() => {
         root.render(
-          <MembersBoundaryProbe
-            workspaceId={workspaceB}
-            canManage={true}
-            onBoundaryLayout={captureBoundaryLayout}
-          />,
+          withTestRouter(
+            <MembersBoundaryProbe
+              workspaceId={workspaceB}
+              canManage={true}
+              onBoundaryLayout={captureBoundaryLayout}
+            />,
+          ),
         );
       });
 
