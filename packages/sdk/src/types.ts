@@ -3862,6 +3862,7 @@ export type ApiKey = {
   accountId: string;
   workspaceId: string | null;
   name: string;
+  description: string | null;
   prefix: string;
   permissions: Permission[];
   expiresAt: string | null;
@@ -3873,6 +3874,7 @@ export type ApiKey = {
 
 export type CreateApiKeyRequest = {
   name: string;
+  description?: string | undefined;
   permissions: Permission[];
   expiresAt?: string | undefined;
 };

@@ -55,6 +55,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
@@ -112,6 +113,7 @@ export function WorkspaceSettingsRoute({
   const [apiKeysError, setApiKeysError] = useState<Error | null>(null);
   const [apiKeysLoaded, setApiKeysLoaded] = useState(false);
   const [apiKeyName, setApiKeyName] = useState("Default API key");
+  const [apiKeyDescription, setApiKeyDescription] = useState("");
   const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(
     () => new Set(defaultApiKeyPermissions),
   );
@@ -220,11 +222,13 @@ export function WorkspaceSettingsRoute({
     try {
       const result = await client.createApiKey(workspaceId, {
         name: apiKeyName.trim(),
+        ...(apiKeyDescription.trim() ? { description: apiKeyDescription.trim() } : {}),
         permissions: requestedPermissions,
       });
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       setCreatedToken(result.token);
       setApiKeys((current) => [result.apiKey, ...current]);
+      setApiKeyDescription("");
       setCreateKeyOpen(false);
       toast.success("API key created");
     } catch (error) {
@@ -612,6 +616,9 @@ export function WorkspaceSettingsRoute({
                   >
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{apiKey.name}</div>
+                      {apiKey.description ? (
+                        <div className="truncate text-xs text-fg-muted">{apiKey.description}</div>
+                      ) : null}
                       <div className="truncate text-2xs text-fg-subtle">
                         {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
                       </div>
@@ -644,16 +651,29 @@ export function WorkspaceSettingsRoute({
                     Create a workspace-scoped key and choose what it can access.
                   </DialogDescription>
                 </DialogHeader>
-                <div className="grid min-h-0 gap-5 overflow-y-auto pr-1">
-                  <div className="grid gap-2">
-                    <Label htmlFor="api-key-name">Name</Label>
-                    <Input
-                      id="api-key-name"
-                      autoFocus
-                      value={apiKeyName}
-                      onChange={(event) => setApiKeyName(event.target.value)}
-                      placeholder="Default API key"
-                    />
+                <div className="grid min-h-0 gap-5 overflow-y-auto px-1">
+                  <div className="grid gap-4">
+                    <div className="grid gap-2">
+                      <Label htmlFor="api-key-name">Name</Label>
+                      <Input
+                        id="api-key-name"
+                        autoFocus
+                        value={apiKeyName}
+                        onChange={(event) => setApiKeyName(event.target.value)}
+                        placeholder="Default API key"
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label htmlFor="api-key-description">Description</Label>
+                      <Textarea
+                        id="api-key-description"
+                        value={apiKeyDescription}
+                        onChange={(event) => setApiKeyDescription(event.target.value)}
+                        placeholder="What will this key be used for?"
+                        maxLength={500}
+                        rows={3}
+                      />
+                    </div>
                   </div>
                   <section className="grid gap-3" aria-labelledby="api-key-permissions-heading">
                     <div className="flex flex-wrap items-end justify-between gap-2">

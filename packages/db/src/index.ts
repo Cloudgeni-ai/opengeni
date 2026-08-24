@@ -2748,6 +2748,7 @@ export async function createApiKey(
     accountId: string;
     workspaceId?: string | null;
     name: string;
+    description?: string | null;
     prefix: string;
     keyHash: string;
     permissions: Permission[];
@@ -2764,6 +2765,7 @@ export async function createApiKey(
           accountId: input.accountId,
           workspaceId: input.workspaceId ?? null,
           name: input.name,
+          description: input.description ?? null,
           prefix: input.prefix,
           keyHash: input.keyHash,
           permissions: input.permissions,
@@ -65742,6 +65744,7 @@ function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     name: row.name,
+    description: row.description,
     prefix: row.prefix,
     permissions: row.permissions as Permission[],
     expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
