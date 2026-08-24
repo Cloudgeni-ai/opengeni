@@ -18,6 +18,8 @@ import {
   applySessionTurnSettlement,
   getSessionHumanInputRequest,
   mutateSessionControlInTransaction,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   withWorkspaceSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
@@ -540,6 +542,38 @@ describe("embedding host session authorization routes", () => {
     const turns = (await turnsResponse.json()) as Array<Record<string, unknown>>;
     expect(turns).toHaveLength(1);
     expect(turns[0]).not.toHaveProperty("modelContext");
+
+    const acceptedQueueResponse = await app.request(`${base}/queue`, { headers });
+    expect(acceptedQueueResponse.status).toBe(200);
+    const acceptedQueue = (await acceptedQueueResponse.json()) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(acceptedQueue.items).toHaveLength(0);
+
+    const queuedSubmission = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      value.grant.workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        submitHumanPromptInTransaction(db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId,
+          sessionId: value.child.id,
+          subjectId: value.grant.subjectId,
+          actor: { type: "human", subjectId: value.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "queued projection probe",
+          modelContext: "queued host-only context",
+          resources: [],
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+    );
+    expect(queuedSubmission.routing).toBe("queued_for_execution");
 
     const queueResponse = await app.request(`${base}/queue`, { headers });
     expect(queueResponse.status).toBe(200);
