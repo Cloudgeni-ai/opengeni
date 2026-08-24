@@ -179,7 +179,13 @@ const budgets = {
   // envelopes. Advance those two aggregates: raw to the next whole KiB above
   // one KiB of headroom, gzip above the observed 1.5-KiB Linux/x64 skew. Every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2118 * kib,
+  // Atomic personal Connected Machine attachment adds its authority catalog,
+  // create-time consent, and accepted-turn intent to the direct session graph.
+  // The merged macOS/arm64 production build measures 2,169,981 raw bytes.
+  // Advance only that aggregate to the next whole KiB above one KiB of
+  // headroom; gzip, file-count, initial, per-file, lazy-chunk, and CSS caps stay
+  // fixed.
+  directSessionRaw: 2121 * kib,
   directSessionGzip: 593 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,

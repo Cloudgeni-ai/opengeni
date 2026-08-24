@@ -17,16 +17,11 @@ import {
   loadPersonalResourceCatalog,
   personalSelection,
   resolvePersonalResourceOwnerScope,
+  type FixedPersonalResources,
   type PersonalAttachmentMode,
   type PersonalResourceCatalog,
 } from "./personal-resource-attachments";
 
-type FixedPersonalResources = {
-  variableSetId: string | null;
-  variableSetScope?: ResourceAuthorityScope | null | undefined;
-  rigId: string | null;
-  rigScope?: ResourceAuthorityScope | null | undefined;
-};
 type PersonalResourceAttachmentAttempt = {
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
 };
@@ -233,6 +228,7 @@ export function usePersonalResourceAttachment(input: {
     input.fixed.variableSetScope ?? "unknown",
     input.fixed.rigId ?? "",
     input.fixed.rigScope ?? "unknown",
+    input.fixed.connectedMachine?.enrollmentId ?? "",
   ].join(":");
   const selectedIdentity = `${fixedIdentity}:${selected.resourceCount}`;
   const priorSelectionIdentity = useRef(selectedIdentity);
@@ -271,12 +267,15 @@ export function usePersonalResourceAttachment(input: {
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
   const fixedResourceCount =
-    Number(input.fixed.variableSetId !== null) + Number(input.fixed.rigId !== null);
+    Number(input.fixed.variableSetId !== null) +
+    Number(input.fixed.rigId !== null) +
+    Number(input.fixed.connectedMachine !== null);
   const positivelyPersonal =
     sourceLost ||
     selected.personalResourceCount > 0 ||
     (input.fixed.variableSetId !== null && input.fixed.variableSetScope === "user") ||
-    (input.fixed.rigId !== null && input.fixed.rigScope === "user");
+    (input.fixed.rigId !== null && input.fixed.rigScope === "user") ||
+    input.fixed.connectedMachine !== null;
   const closureError = selected.closureUnverified
     ? new Error(
         "The selected personal-resource authority closure could not be verified. Retry or choose a non-personal resource.",

@@ -1332,6 +1332,7 @@ function SessionChatPane(props: {
       variableSetScope: fixedVariableSetScope,
       rigId: props.session.rigId,
       rigScope: fixedRigScope,
+      connectedMachine: null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,

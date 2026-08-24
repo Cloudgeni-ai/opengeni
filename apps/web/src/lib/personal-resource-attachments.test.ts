@@ -16,6 +16,7 @@ const workspaceId = "22222222-2222-4222-8222-222222222222";
 const personalWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const variableSetId = "44444444-4444-4444-8444-444444444444";
 const rigId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const enrollmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 function personalVariableSet() {
   return {
@@ -168,10 +169,56 @@ describe("personal resource attachment authority", () => {
     } as unknown as OpenGeniCoreClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
-    expect(personalSelection(catalog, { variableSetId, rigId: null })).toMatchObject({
+    expect(
+      personalSelection(catalog, { variableSetId, rigId: null, connectedMachine: null }),
+    ).toMatchObject({
       personalResourceCount: 1,
       resourceCount: 0,
       closureUnverified: true,
+    });
+  });
+
+  test("recognizes only an authorized selected personal Connected Machine", async () => {
+    const scope = ownerScope();
+    if (!scope) throw new Error("fixture owner scope missing");
+    const client = {
+      listVariableSets: async () => [],
+      listRigs: async () => [],
+      listUserResourceAuthorities: async (
+        _routeWorkspaceId: string,
+        options: { resourceKind: string },
+      ) => ({
+        scope: "user" as const,
+        authorities:
+          options.resourceKind === "connected_machine"
+            ? [
+                {
+                  authorityId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                  resourceKind: "connected_machine" as const,
+                  resourceId: enrollmentId,
+                  originWorkspaceId: workspaceId,
+                  generation: 1,
+                  status: "active" as const,
+                  grants: [],
+                },
+              ]
+            : [],
+        nextCursor: null,
+      }),
+    } as unknown as OpenGeniCoreClient;
+
+    const catalog = await loadPersonalResourceCatalog(client, scope);
+    expect(
+      personalSelection(catalog, {
+        variableSetId: null,
+        rigId: null,
+        connectedMachine: { enrollmentId, name: "My Mac" },
+      }),
+    ).toMatchObject({
+      connectedMachines: [{ enrollmentId, name: "My Mac" }],
+      personalResourceCount: 1,
+      resourceCount: 1,
+      closureUnverified: false,
     });
   });
 
@@ -193,7 +240,9 @@ describe("personal resource attachment authority", () => {
     } as unknown as OpenGeniCoreClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
-    expect(personalSelection(catalog, { variableSetId, rigId })).toMatchObject({
+    expect(
+      personalSelection(catalog, { variableSetId, rigId, connectedMachine: null }),
+    ).toMatchObject({
       personalResourceCount: 2,
       resourceCount: 1,
       closureUnverified: true,
@@ -226,7 +275,9 @@ describe("personal resource attachment authority", () => {
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(variablePages).toBe(4);
     expect(catalog.variableSetAuthoritiesTruncated).toBe(true);
-    expect(personalSelection(catalog, { variableSetId, rigId: null })).toMatchObject({
+    expect(
+      personalSelection(catalog, { variableSetId, rigId: null, connectedMachine: null }),
+    ).toMatchObject({
       personalResourceCount: 1,
       resourceCount: 1,
       closureUnverified: true,

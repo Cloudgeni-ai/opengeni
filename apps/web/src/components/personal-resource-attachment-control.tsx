@@ -41,6 +41,9 @@ export function PersonalResourceAttachmentControl(props: {
   const names = [
     ...controller.selected.variableSets.map((resource) => `Variable set: ${resource.name}`),
     ...controller.selected.rigs.map((resource) => `Rig: ${resource.name}`),
+    ...controller.selected.connectedMachines.map(
+      (resource) => `Connected machine: ${resource.name}`,
+    ),
   ];
   return (
     <fieldset
@@ -124,7 +127,7 @@ export function PersonalResourceAttachmentControl(props: {
       {controller.error ? (
         <div className="mt-2 flex items-center justify-between gap-3" role="alert">
           <span className="text-xs text-danger">
-            We couldn’t check access to the selected Variable Set or Rig. Try again, or choose a
+            We couldn’t check access to the selected personal resource. Try again, or choose a
             different resource.
           </span>
           <Button

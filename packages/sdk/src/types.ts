@@ -1526,7 +1526,7 @@ export type PersonalResourceAttachmentSummary = {
   mode: "once" | "session" | "always";
   context: "user_private" | "workspace_shared";
   resourceCount: number;
-  resourceKinds: Array<"variable_set" | "rig">;
+  resourceKinds: Array<"variable_set" | "rig" | "connected_machine">;
   sharedOutputWarningVersion: 1;
 };
 
