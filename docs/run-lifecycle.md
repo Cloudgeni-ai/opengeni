@@ -253,7 +253,10 @@ the worker has not claimed the physical row; it does not decide whether the user
 sees a queued prompt. Immutable `session_turns.prompt_routing` records that
 admission decision: `accepted_for_execution` and `accepted_for_steering` stay in
 chat, while only `queued_for_execution` appears in the prompt queue. Null remains
-a conservative visible-queue fallback for rolling/legacy writers. In particular,
+a conservative visible-queue fallback for rolling/legacy writers. New durable
+`user.message` and `turn.queued` events repeat the same routing fact so live
+streaming and reload reconstruction cannot briefly place a prompt on the wrong
+surface. In particular,
 human prompts preserved behind paused session/workspace gates are intentionally
 ineligible and do not schedule an activity. Fleet pressure comes from Temporal's
 dedicated `runAgentTurn` activity queue (`approximateBacklogCount` and oldest

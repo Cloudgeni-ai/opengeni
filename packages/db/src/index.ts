@@ -54128,6 +54128,7 @@ export async function initializeSessionStartAtomically(
                       ...(session.initialModelContext
                         ? { modelContext: session.initialModelContext }
                         : {}),
+                      routing: runnable ? "accepted_for_execution" : "queued_for_execution",
                       initiator: creator.initiator,
                     },
                     clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
@@ -54367,6 +54368,7 @@ export async function initializeSessionStartAtomically(
                     turnId: turn.id,
                     triggerEventId: userEvent.id,
                     source: turn.source,
+                    ...(turn.promptRouting ? { routing: turn.promptRouting } : {}),
                     initiator: creator.initiator,
                   },
                 },

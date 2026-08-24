@@ -93,7 +93,10 @@ on every native target and WASM and aggregation rejects any digest mismatch.
   The committed response includes the command receipt and admission routing. The
   same immutable decision is stored as `session_turns.prompt_routing`; physical
   `status = 'queued'` means only that the worker has not claimed the row and is
-  never itself user-visible queue authority. The browser therefore shows an idle
+  never itself user-visible queue authority. Both durable `user.message` and
+  `turn.queued` projections repeat that routing fact, so a partial stream or
+  fresh reload places the prompt correctly without a transient chat/queue flash.
+  The browser therefore shows an idle
   Send in chat, a busy or paused Send in the queue, and Steer in chat without
   guessing from a later event. A `queued_for_execution` `user.message` stays out
   of the chat timeline until its turn is claimed.
