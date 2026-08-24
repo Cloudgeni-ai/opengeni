@@ -1,4 +1,4 @@
-// The one thing `migration-0333-slack-workspace-routing.test.ts` structurally
+// The one thing `migration-0335-slack-workspace-routing.test.ts` structurally
 // cannot prove.
 //
 // `acquireSharedTestDatabase` hands out the container SUPERUSER, for whom
@@ -23,18 +23,19 @@ import { migrate } from "../src/migrate";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-const ACCOUNT = "aaaaaaaa-0333-4333-8333-aaaaaaaaaaaa";
-const WORKSPACE_A = "11111111-0333-4333-8333-aaaaaaaaaaaa";
-const WORKSPACE_B = "22222222-0333-4333-8333-bbbbbbbbbbbb";
-const CONNECTION = "33333333-0333-4333-8333-cccccccccccc";
-const INTERACTION = "44444444-0333-4333-8333-dddddddddddd";
-const ROUTE_KEY = "C0333:1700000000.0001";
-const APP_PASSWORD = "probe_app_password";
+const ACCOUNT = "aaaaaaaa-0335-4333-8333-aaaaaaaaaaaa";
+const WORKSPACE_A = "11111111-0335-4333-8333-aaaaaaaaaaaa";
+const WORKSPACE_B = "22222222-0335-4333-8333-bbbbbbbbbbbb";
+const CONNECTION = "33333333-0335-4333-8333-cccccccccccc";
+const INTERACTION = "44444444-0335-4333-8333-dddddddddddd";
+const ROUTE_KEY = "C0335:1700000000.0001";
+const PROBE_PASSWORD = "probe_role_password";
 
 let owned: OwnerMigratedTestDatabase | null = null;
 let appUrl: string | null = null;
+let probeRole: string | null = null;
 
-describe("migration 0333 tenancy probe under a non-superuser owner", () => {
+describe("migration 0335 tenancy probe under a non-superuser owner", () => {
   beforeAll(async () => {
     owned = await acquireOwnerMigratedTestDatabase("slack-tenancy-probe");
     if (!owned) {
@@ -44,22 +45,25 @@ describe("migration 0333 tenancy probe under a non-superuser owner", () => {
       return;
     }
     await migrate(owned.ownerUrl);
+    // Do NOT create or alter the cluster-global `opengeni_app` role: it is
+    // shared by every suite on this container and the harness owns it. Use a
+    // dedicated per-database login with exactly the privileges the migration
+    // grants the runtime role.
+    probeRole = `${owned.ownerRole}_probe`.slice(0, 63);
     await owned.admin.unsafe(`
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-          CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE
-            NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
-        ELSE
-          ALTER ROLE opengeni_app WITH LOGIN PASSWORD '${APP_PASSWORD}';
-        END IF;
-      END $$;
-      GRANT USAGE ON SCHEMA public TO opengeni_app;
-      GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-      GRANT SELECT ON TABLE public.slack_interactions TO opengeni_app;
-      GRANT EXECUTE ON FUNCTION
-        opengeni_private.resolve_slack_interaction_tenancy(uuid, text) TO opengeni_app;
-      GRANT EXECUTE ON FUNCTION
-        opengeni_private.slack_routing_capability_active() TO opengeni_app;
+      CREATE ROLE "${probeRole}" WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE
+        NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${PROBE_PASSWORD}';
+      GRANT USAGE ON SCHEMA public TO "${probeRole}";
+      GRANT USAGE ON SCHEMA opengeni_private TO "${probeRole}";
+      -- Mirror role provisioning for the public schema: the RESTRICTIVE
+      -- session-visibility policy on slack_interactions resolves the session
+      -- through helper routines that read sessions, exactly as it does for the
+      -- real runtime role. None of this reaches the private schema tables, so
+      -- the capability table stays unreachable, which the privilege assertions
+      -- below pin.
+      GRANT SELECT ON ALL TABLES IN SCHEMA public TO "${probeRole}";
+      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO "${probeRole}";
+      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO "${probeRole}";
     `);
     await owned.admin.unsafe(`
       insert into managed_accounts (id, name) values ('${ACCOUNT}', 'probe');
@@ -73,16 +77,23 @@ describe("migration 0333 tenancy probe under a non-superuser owner", () => {
       insert into slack_interactions
         (id, account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
          slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id, visibility)
-        values ('${INTERACTION}', '${ACCOUNT}', '${WORKSPACE_B}', '${CONNECTION}', 'T0333',
-                'C0333', '1700000000.0001', '${ROUTE_KEY}', 'Ev0333', 'user:probe', 'workspace');
+        values ('${INTERACTION}', '${ACCOUNT}', '${WORKSPACE_B}', '${CONNECTION}', 'T0335',
+                'C0335', '1700000000.0001', '${ROUTE_KEY}', 'Ev0335', 'user:probe', 'workspace');
     `);
     appUrl = owned.adminUrl.replace(
       /postgres:\/\/[^@]+@/u,
-      `postgres://opengeni_app:${APP_PASSWORD}@`,
+      `postgres://${probeRole}:${PROBE_PASSWORD}@`,
     );
   }, 900_000);
 
   afterAll(async () => {
+    // Drop the per-database probe login before the harness drops the database:
+    // its only privileges live there, so `DROP OWNED BY` leaves nothing behind.
+    if (owned && probeRole) {
+      await owned.admin
+        .unsafe(`DROP OWNED BY "${probeRole}"; DROP ROLE IF EXISTS "${probeRole}"`)
+        .catch(() => undefined);
+    }
     await owned?.release();
   });
 
@@ -128,7 +139,7 @@ describe("migration 0333 tenancy probe under a non-superuser owner", () => {
     try {
       const probed = await app.unsafe<Array<Record<string, unknown>>>(
         `select * from opengeni_private.resolve_slack_interaction_tenancy(
-           '${CONNECTION}'::uuid, 'C0333:absent')`,
+           '${CONNECTION}'::uuid, 'C0335:absent')`,
       );
       expect([...probed]).toEqual([]);
     } finally {
@@ -139,7 +150,7 @@ describe("migration 0333 tenancy probe under a non-superuser owner", () => {
     expect(leftover[0]?.n).toBe(0);
   }, 120_000);
 
-  test("denies the runtime role every direct privilege on the capability table", async () => {
+  test("denies the probe role every direct privilege on the capability table", async () => {
     if (!owned || !appUrl) return;
     const app = postgres(appUrl, { max: 1, onnotice: () => undefined });
     try {
@@ -157,5 +168,38 @@ describe("migration 0333 tenancy probe under a non-superuser owner", () => {
     } finally {
       await app.end({ timeout: 5 });
     }
+  }, 120_000);
+
+  test("grants opengeni_app the probe but never the capability table", async () => {
+    if (!owned) return;
+    // The migration's own grant block ran against the real runtime role, so
+    // assert the shape it produced through the catalog rather than by logging
+    // in as a role every other suite on this container shares.
+    const [privileges] = await owned.admin<
+      Array<{ probe: boolean; predicate: boolean; select: boolean; insert: boolean }>
+    >`
+      select
+        has_function_privilege(
+          'opengeni_app',
+          'opengeni_private.resolve_slack_interaction_tenancy(uuid, text)',
+          'EXECUTE') as probe,
+        has_function_privilege(
+          'opengeni_app',
+          'opengeni_private.slack_routing_capability_active()',
+          'EXECUTE') as predicate,
+        has_table_privilege(
+          'opengeni_app',
+          'opengeni_private.slack_routing_runtime_capabilities',
+          'SELECT') as select,
+        has_table_privilege(
+          'opengeni_app',
+          'opengeni_private.slack_routing_runtime_capabilities',
+          'INSERT') as insert`;
+    expect(privileges).toEqual({
+      probe: true,
+      predicate: true,
+      select: false,
+      insert: false,
+    });
   }, 120_000);
 });

@@ -1,4 +1,4 @@
-// Migration 0333 adds per-channel and per-DM Slack workspace routing as four
+// Migration 0335 adds per-channel and per-DM Slack workspace routing as four
 // FORCE-RLS tables plus additive inbox/interaction columns. Nothing reads them
 // yet, so the proof that matters here is structural: tenant isolation, the
 // same-organization fence, the composite target FK, the inbox's legacy arm, and
@@ -9,17 +9,17 @@ import postgres from "postgres";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
-const migrationUrl = new URL("../drizzle/0333_slack_workspace_routing.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0335_slack_workspace_routing.sql", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-const ACCOUNT = "aaaaaaaa-0333-4333-8333-aaaaaaaaaaaa";
-const OTHER_ACCOUNT = "bbbbbbbb-0333-4333-8333-bbbbbbbbbbbb";
-const HOME_WORKSPACE = "11111111-0333-4333-8333-111111111111";
-const TARGET_WORKSPACE = "22222222-0333-4333-8333-222222222222";
-const OTHER_WORKSPACE = "33333333-0333-4333-8333-333333333333";
-const CASCADE_WORKSPACE = "44444444-0333-4333-8333-444444444444";
-const FOREIGN_WORKSPACE = "55555555-0333-4333-8333-555555555555";
-const CONNECTION = "66666666-0333-4333-8333-666666666666";
+const ACCOUNT = "aaaaaaaa-0335-4333-8333-aaaaaaaaaaaa";
+const OTHER_ACCOUNT = "bbbbbbbb-0335-4333-8333-bbbbbbbbbbbb";
+const HOME_WORKSPACE = "11111111-0335-4333-8333-111111111111";
+const TARGET_WORKSPACE = "22222222-0335-4333-8333-222222222222";
+const OTHER_WORKSPACE = "33333333-0335-4333-8333-333333333333";
+const CASCADE_WORKSPACE = "44444444-0335-4333-8333-444444444444";
+const FOREIGN_WORKSPACE = "55555555-0335-4333-8333-555555555555";
+const CONNECTION = "66666666-0335-4333-8333-666666666666";
 
 const ROUTING_TABLES = [
   "slack_channel_routes",
@@ -59,11 +59,11 @@ async function captureSqlState(run: () => Promise<unknown>): Promise<string | nu
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0333-slack-workspace-routing");
+  shared = await acquireSharedTestDatabase("migration-0335-slack-workspace-routing");
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0333-slack-workspace-routing] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0335-slack-workspace-routing] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     return;
@@ -92,7 +92,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0333 Slack workspace routing", () => {
+describe("migration 0335 Slack workspace routing", () => {
   test("declares a rolling additive migration that leaves installation authority alone", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -199,8 +199,8 @@ describe("migration 0333 Slack workspace routing", () => {
         target_account_id, target_workspace_id, decided_by_subject_id,
         decided_by_slack_user_id, source
       ) values (
-        ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0333', 'C-ISOLATION',
-        ${ACCOUNT}, ${TARGET_WORKSPACE}, 'user:isolation', 'U0333', 'picker'
+        ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0335', 'C-ISOLATION',
+        ${ACCOUNT}, ${TARGET_WORKSPACE}, 'user:isolation', 'U0335', 'picker'
       )`;
     });
 
@@ -232,8 +232,8 @@ describe("migration 0333 Slack workspace routing", () => {
             target_account_id, target_workspace_id, decided_by_subject_id,
             decided_by_slack_user_id, source
           ) values (
-            ${ACCOUNT}, ${OTHER_WORKSPACE}, ${CONNECTION}, 'T0333', 'C-SMUGGLED',
-            ${ACCOUNT}, ${TARGET_WORKSPACE}, 'user:isolation', 'U0333', 'picker'
+            ${ACCOUNT}, ${OTHER_WORKSPACE}, ${CONNECTION}, 'T0335', 'C-SMUGGLED',
+            ${ACCOUNT}, ${TARGET_WORKSPACE}, 'user:isolation', 'U0335', 'picker'
           )`,
       ),
     );
@@ -249,8 +249,8 @@ describe("migration 0333 Slack workspace routing", () => {
           target_account_id, target_workspace_id, decided_by_subject_id,
           decided_by_slack_user_id, source
         ) values (
-          ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0333', 'C-CROSS-ORG',
-          ${OTHER_ACCOUNT}, ${FOREIGN_WORKSPACE}, 'user:cross', 'U0333', 'admin'
+          ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0335', 'C-CROSS-ORG',
+          ${OTHER_ACCOUNT}, ${FOREIGN_WORKSPACE}, 'user:cross', 'U0335', 'admin'
         )`,
     );
     expect(crossOrganization).toBe("23514");
@@ -262,8 +262,8 @@ describe("migration 0333 Slack workspace routing", () => {
           target_account_id, target_workspace_id, decided_by_subject_id,
           decided_by_slack_user_id, source
         ) values (
-          ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0333', 'U-BAD-SOURCE',
-          ${ACCOUNT}, ${TARGET_WORKSPACE}, 'user:cross', 'U0333', 'guessed'
+          ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0335', 'U-BAD-SOURCE',
+          ${ACCOUNT}, ${TARGET_WORKSPACE}, 'user:cross', 'U0335', 'guessed'
         )`,
     );
     expect(unknownSource).toBe("23514");
@@ -275,8 +275,8 @@ describe("migration 0333 Slack workspace routing", () => {
           target_account_id, target_workspace_id, decided_by_subject_id,
           decided_by_slack_user_id, source
         ) values (
-          ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0333', 'U-CROSS-ORG',
-          ${OTHER_ACCOUNT}, ${FOREIGN_WORKSPACE}, 'user:cross', 'U0333', 'picker'
+          ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0335', 'U-CROSS-ORG',
+          ${OTHER_ACCOUNT}, ${FOREIGN_WORKSPACE}, 'user:cross', 'U0335', 'picker'
         )`,
     );
     expect(crossOrganizationDm).toBe("23514");
@@ -288,7 +288,7 @@ describe("migration 0333 Slack workspace routing", () => {
       trigger_kind, request_text, has_files, message_operation_id, status, expires_at
     ) values (
       ${promptId}, ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, ${crypto.randomUUID()},
-      'T0333', 'U0333', 'C-PROMPT-ORG', '1.0', ${`ev-org-${promptId}`},
+      'T0335', 'U0335', 'C-PROMPT-ORG', '1.0', ${`ev-org-${promptId}`},
       'app_mention', 'do it', false, ${crypto.randomUUID()}, 'pending', now() + interval '10 minutes'
     )`;
     const crossOrganizationOption = await captureSqlState(
@@ -304,8 +304,6 @@ describe("migration 0333 Slack workspace routing", () => {
     expect(crossOrganizationOption).toBe("23514");
   });
 
-
-
   test("cascades a route away with its target workspace through the composite FK", async () => {
     if (!shared) return;
     await shared.admin`insert into slack_channel_routes (
@@ -313,8 +311,8 @@ describe("migration 0333 Slack workspace routing", () => {
       target_account_id, target_workspace_id, decided_by_subject_id,
       decided_by_slack_user_id, source
     ) values (
-      ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0333', 'C-CASCADE',
-      ${ACCOUNT}, ${CASCADE_WORKSPACE}, 'user:cascade', 'U0333', 'admin'
+      ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0335', 'C-CASCADE',
+      ${ACCOUNT}, ${CASCADE_WORKSPACE}, 'user:cascade', 'U0335', 'admin'
     )`;
     await shared.admin`delete from workspaces where id = ${CASCADE_WORKSPACE}`;
     const [{ remaining } = { remaining: "1" }] = await shared.admin<Array<{ remaining: string }>>`
@@ -336,8 +334,8 @@ describe("migration 0333 Slack workspace routing", () => {
           slack_team_id, slack_user_id, slack_channel_id, slack_message_ts, trigger_kind,
           text${routeColumns}
         ) values (
-          '${ACCOUNT}', '${HOME_WORKSPACE}', '${CONNECTION}', 'Ev0333-${suffix}',
-          'Msg0333-${suffix}', 'T0333', 'U0333', 'C0333', '1700000000.0001',
+          '${ACCOUNT}', '${HOME_WORKSPACE}', '${CONNECTION}', 'Ev0335-${suffix}',
+          'Msg0335-${suffix}', 'T0335', 'U0335', 'C0335', '1700000000.0001',
           'app_mention', 'route check'${routeValues}
         )`);
 
@@ -395,9 +393,9 @@ describe("migration 0333 Slack workspace routing", () => {
       where connection_id = ${CONNECTION}
       order by provider_event_id`;
     expect([...rows]).toEqual([
-      { providerEventId: "Ev0333-awaiting", routeState: "awaiting_choice" },
-      { providerEventId: "Ev0333-legacy", routeState: null },
-      { providerEventId: "Ev0333-resolved", routeState: "resolved" },
+      { providerEventId: "Ev0335-awaiting", routeState: "awaiting_choice" },
+      { providerEventId: "Ev0335-legacy", routeState: null },
+      { providerEventId: "Ev0335-resolved", routeState: "resolved" },
     ]);
   });
 
@@ -409,8 +407,8 @@ describe("migration 0333 Slack workspace routing", () => {
         slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id,
         visibility, routed_workspace_label
       ) values (
-        ${ACCOUNT}, ${TARGET_WORKSPACE}, ${CONNECTION}, 'T0333', 'C0333',
-        '1700000000.0002', ${routeKey}, 'Ev0333-interaction', 'user:label',
+        ${ACCOUNT}, ${TARGET_WORKSPACE}, ${CONNECTION}, 'T0335', 'C0335',
+        '1700000000.0002', ${routeKey}, 'Ev0335-interaction', 'user:label',
         'workspace', ${label}
       )`;
 
