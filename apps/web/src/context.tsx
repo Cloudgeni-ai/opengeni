@@ -550,9 +550,7 @@ export function RootRouteComponent() {
   // always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
     import.meta.env.DEV &&
-    (pathname === "/dev/composer-chrome" ||
-      pathname === "/dev/agent-topology" ||
-      pathname === "/dev/capability-ux-v4");
+    (pathname === "/dev/composer-chrome" || pathname === "/dev/agent-topology");
   const isPublicAuthRoute = pathname === "/reset-password" || isPublicDevHarness;
   useEffect(() => {
     if (

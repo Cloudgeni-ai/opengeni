@@ -24,7 +24,6 @@
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
-//   /dev/capability-ux-v4                     → DEV-only capability/settings prototype
 import {
   Navigate,
   RouterProvider,
@@ -106,10 +105,6 @@ const LazyComposerChromeGalleryRoute = lazyRouteComponent(
   () => import("@/routes/composer-chrome"),
   "ComposerChromeGalleryRoute",
 );
-const LazyCapabilityUxV4Route = lazyRouteComponent(
-  () => import("@/routes/capability-ux-v4"),
-  "CapabilityUxV4Route",
-);
 
 const rootRoute = createRootRoute({
   component: RootRouteComponent,
@@ -172,11 +167,6 @@ const agentTopologyPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/agent-topology",
   component: AgentTopologyPreview,
-});
-const capabilityUxV4Route = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "dev/capability-ux-v4",
-  component: CapabilityUxV4,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -382,7 +372,7 @@ const routeTree = rootRoute.addChildren([
   deviceRoute,
   resetPasswordRoute,
   ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, capabilityUxV4Route]
+    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute]
     : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
@@ -634,10 +624,6 @@ function ComposerChromeGallery() {
 
 function AgentTopologyPreview() {
   return <LazyAgentTopologyPreviewRoute />;
-}
-
-function CapabilityUxV4() {
-  return <LazyCapabilityUxV4Route />;
 }
 
 function BillingReturnRoute() {
