@@ -12,7 +12,6 @@ import {
   Loader2Icon,
   PencilIcon,
   PlusIcon,
-  SettingsIcon,
   ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -32,11 +31,10 @@ import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
 import { LoadErrorState } from "@/components/common";
-import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import {
-  WORKSPACE_BROWSE_ITEMS,
-  type WorkspaceConfigItem,
-} from "@/components/rail/workspace-nav-data";
+  WorkspaceSettingsShell,
+  type WorkspaceSettingsSection,
+} from "@/components/settings/workspace-settings-shell";
 import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
@@ -53,12 +51,10 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
-import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { cn } from "@/lib/utils";
 import {
   apiKeyPermissionGroups,
   defaultApiKeyPermissions,
@@ -69,28 +65,13 @@ import {
 } from "@/lib/permissions";
 import type { ApiKey, SlackUserLinkAccessRequest, WorkspaceMember } from "@/types";
 
-function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boolean }) {
-  const items = WORKSPACE_BROWSE_ITEMS.filter(
-    (item: WorkspaceConfigItem) => !item.requiresAdmin || props.canReadInsights,
-  );
-  return (
-    <nav aria-label="Browse workspace" className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
-      <span className="mr-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-        Browse
-      </span>
-      {items.map((item) => (
-        <WorkspaceConfigLink
-          key={item.to}
-          item={item}
-          workspaceId={props.workspaceId}
-          variant="browse"
-        />
-      ))}
-    </nav>
-  );
-}
-
-export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string }) {
+export function WorkspaceSettingsRoute({
+  workspaceId,
+  section,
+}: {
+  workspaceId: string;
+  section: WorkspaceSettingsSection;
+}) {
   const context = useAppContext();
   const client = context.client;
   const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
@@ -135,7 +116,6 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
-  const [apiKeysOpen, setApiKeysOpen] = useState(false);
   const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
@@ -220,7 +200,6 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       setCreatedToken(result.token);
       setApiKeys((current) => [result.apiKey, ...current]);
-      setApiKeysOpen(true);
       toast.success("API key created");
     } catch (error) {
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
@@ -313,180 +292,172 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   }
 
   return (
-    <ContentPage width="standard">
-      <section className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-6 text-left">
-        <header className="grid min-w-0 gap-3 border-b border-border pb-4">
-          <div className="flex min-w-0 items-center gap-2 text-sm text-fg-muted">
-            <SettingsIcon className="size-4 shrink-0 text-brand" />
-            <span>Workspace</span>
-            <span className="text-fg-subtle">·</span>
-            <span className="truncate">{organizationLabel}</span>
-          </div>
-          <div className="flex min-w-0 items-center gap-2">
-            {editingName && canRename ? (
-              <form
-                className="flex min-w-0 flex-1 items-center gap-2"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void finishRename();
-                }}
-              >
-                <Input
-                  autoFocus
-                  value={nameDraft}
-                  onChange={(event) => setNameDraft(event.target.value)}
-                  onBlur={() => void finishRename()}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      setNameDraft(activeWorkspace?.name ?? "");
-                      setEditingName(false);
-                    }
-                  }}
-                  className="h-9 max-w-md text-base font-semibold"
-                  placeholder="Workspace name"
-                  aria-label="Workspace name"
-                />
-                <Button
-                  type="submit"
-                  size="icon-sm"
-                  variant="ghost"
-                  disabled={renaming || !nameDraft.trim()}
-                  aria-label="Save workspace name"
-                >
-                  {renaming ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : (
-                    <CheckIcon className="size-3.5" />
-                  )}
-                </Button>
-              </form>
-            ) : (
-              <>
-                <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
-                  {activeWorkspace?.name ?? "Workspace"}
-                </h1>
-                {personal ? <PersonalWorkspaceBadge /> : null}
-                {canRename ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Rename workspace"
-                    onClick={() => {
-                      setNameDraft(activeWorkspace?.name ?? "");
-                      setEditingName(true);
+    <WorkspaceSettingsShell
+      workspaceId={workspaceId}
+      workspaceName={activeWorkspace?.name ?? "Workspace"}
+      organizationLabel={organizationLabel}
+      section={section}
+    >
+      <section className="grid min-w-0 gap-6 text-left">
+        {section === "general" ? (
+          <>
+            <section className="grid gap-3 rounded-lg border border-border p-4">
+              <div>
+                <h2 className="text-sm font-medium">Workspace</h2>
+                <p className="mt-1 text-xs text-fg-muted">Shown throughout {organizationLabel}.</p>
+              </div>
+              <div className="flex min-w-0 items-center gap-2">
+                {editingName && canRename ? (
+                  <form
+                    className="flex min-w-0 flex-1 items-center gap-2"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void finishRename();
                     }}
                   >
-                    <PencilIcon className="size-3.5" />
-                  </Button>
-                ) : null}
-              </>
-            )}
-          </div>
-          <BrowseWorkspaceStrip workspaceId={workspaceId} canReadInsights={canDeleteWorkspace} />
-        </header>
+                    <Input
+                      autoFocus
+                      value={nameDraft}
+                      onChange={(event) => setNameDraft(event.target.value)}
+                      onBlur={() => void finishRename()}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          setNameDraft(activeWorkspace?.name ?? "");
+                          setEditingName(false);
+                        }
+                      }}
+                      className="h-9 max-w-md text-sm font-medium"
+                      placeholder="Workspace name"
+                      aria-label="Workspace name"
+                    />
+                    <Button
+                      type="submit"
+                      size="icon-sm"
+                      variant="ghost"
+                      disabled={renaming || !nameDraft.trim()}
+                      aria-label="Save workspace name"
+                    >
+                      {renaming ? (
+                        <Loader2Icon className="size-3.5 animate-spin" />
+                      ) : (
+                        <CheckIcon className="size-3.5" />
+                      )}
+                    </Button>
+                  </form>
+                ) : (
+                  <>
+                    <span className="min-w-0 truncate text-sm font-medium">
+                      {activeWorkspace?.name ?? "Workspace"}
+                    </span>
+                    {personal ? <PersonalWorkspaceBadge /> : null}
+                    {canRename ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label="Rename workspace"
+                        onClick={() => {
+                          setNameDraft(activeWorkspace?.name ?? "");
+                          setEditingName(true);
+                        }}
+                      >
+                        <PencilIcon className="size-3.5" />
+                      </Button>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            </section>
 
-        {personal ? (
-          <section
-            aria-labelledby="personal-workspace-heading"
-            className="grid gap-2 rounded-lg border border-brand/25 bg-brand/5 p-4"
-          >
-            <h2
-              id="personal-workspace-heading"
-              className="flex items-center gap-2 text-sm font-medium"
-            >
-              <UserIcon className="size-3.5 text-brand" />
-              Personal workspace
-              <PersonalWorkspaceBadge decorative />
-            </h2>
-            <p className="text-xs text-fg-muted">
-              This workspace is your owner-only context inside {organizationLabel}. Organization
-              administrators and other members do not gain access to its sessions or content.
-            </p>
-          </section>
-        ) : (
-          <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
-        )}
+            {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
 
-        <section
-          aria-labelledby="workspace-preferences-heading"
-          className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1"
-        >
-          <h2 id="workspace-preferences-heading" className="text-sm font-medium">
-            Preferences
-          </h2>
-          <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-            <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-            <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-            <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-            <VideoGenerationPreferenceRow
+            <section aria-labelledby="workspace-preferences-heading" className="grid min-w-0 gap-2">
+              <div>
+                <h2 id="workspace-preferences-heading" className="text-sm font-medium">
+                  Session defaults
+                </h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Applied when someone starts a new session in this workspace.
+                </p>
+              </div>
+              <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
+                <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <VideoGenerationPreferenceRow
+                  workspaceId={workspaceId}
+                  canManage={canDeleteWorkspace}
+                  refreshKey={gatewayRevision}
+                />
+                <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+              </div>
+            </section>
+          </>
+        ) : null}
+
+        {section === "members" ? (
+          personal ? (
+            <PersonalWorkspaceNotice organizationLabel={organizationLabel} />
+          ) : (
+            <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
+          )
+        ) : null}
+
+        {section === "capabilities" ? (
+          <WorkspaceCapabilityDefaults workspaceId={workspaceId} canManage={canRename} />
+        ) : null}
+
+        {section === "models" ? (
+          <ModelAccessPolicySection
+            key={`model-access:${workspaceId}`}
+            workspaceId={workspaceId}
+            canManage={canDeleteWorkspace}
+          />
+        ) : null}
+
+        {section === "connections" ? (
+          <>
+            {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
+            <CodexSubscriptionsCard
+              key={`codex-subscriptions:${workspaceId}`}
               workspaceId={workspaceId}
               canManage={canDeleteWorkspace}
-              refreshKey={gatewayRevision}
             />
-            <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-          </div>
-        </section>
-
-        <WorkspaceCapabilityDefaults workspaceId={workspaceId} canManage={canRename} />
-
-        <ModelAccessPolicySection
-          key={`model-access:${workspaceId}`}
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-        />
-
-        {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
-        <CodexSubscriptionsCard
-          key={`codex-subscriptions:${workspaceId}`}
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-        />
-
-        <SuperGrokSubscriptionsCard
-          key={`supergrok:${workspaceId}`}
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-        />
-
-        <AiGatewayConnectionCard
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-          onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-        />
-
-        <details
-          className="rounded-lg border border-border"
-          open={apiKeysOpen || createdToken != null}
-          onToggle={(event) => {
-            const next = event.currentTarget.open;
-            if (createdToken != null && !next) {
-              event.currentTarget.open = true;
-              return;
-            }
-            setApiKeysOpen(next);
-          }}
-        >
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
-            <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
-            <span className="min-w-0 flex-1 text-sm font-medium">OpenGeni API Keys</span>
-            <span className="text-2xs text-fg-subtle">
-              {!apiKeysLoaded
-                ? "…"
-                : activeApiKeyCount === 0
-                  ? "None"
-                  : `${activeApiKeyCount} active`}
-            </span>
-            <ChevronDownIcon
-              className={cn(
-                "size-4 shrink-0 text-fg-subtle transition-transform",
-                apiKeysOpen || createdToken != null ? "rotate-180" : "",
-              )}
+            <SuperGrokSubscriptionsCard
+              key={`supergrok:${workspaceId}`}
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
             />
-          </summary>
-          <div className="grid gap-3 border-t border-border px-3 py-3">
+            <AiGatewayConnectionCard
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
+              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+            />
+          </>
+        ) : null}
+
+        {section === "api-keys" ? (
+          <section className="grid gap-4 rounded-lg border border-border p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-medium">
+                  <KeyRoundIcon className="size-3.5 text-brand" />
+                  OpenGeni API keys
+                </h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Workspace-scoped keys for calling OpenGeni from another product.
+                </p>
+              </div>
+              <span className="shrink-0 text-2xs text-fg-subtle">
+                {!apiKeysLoaded
+                  ? "Loading…"
+                  : activeApiKeyCount === 0
+                    ? "None"
+                    : `${activeApiKeyCount} active`}
+              </span>
+            </div>
             <p className="text-2xs text-fg-subtle">
-              Workspace-scoped keys for calling OpenGeni from another product.
+              A key can only carry permissions your own grant can delegate.
             </p>
             {createdToken ? (
               <Notice tone="success" title="Copy this token now — it won't be shown again.">
@@ -523,10 +494,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                     Create
                   </Button>
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-xs text-fg-subtle">
-                    A key can only carry permissions your own grant can delegate.
-                  </p>
+                <div className="flex flex-wrap items-center justify-end gap-2">
                   <Button
                     type="button"
                     variant="ghost"
@@ -607,8 +575,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                 ))
               )}
             </div>
-          </div>
-        </details>
+          </section>
+        ) : null}
 
         <ConfirmDialog
           open={revokingKey !== null}
@@ -619,14 +587,35 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           onConfirm={() => (revokingKey ? revokeKey(revokingKey.id) : false)}
         />
 
-        <DangerZone
-          workspaceName={activeWorkspace?.name ?? ""}
-          canDelete={canDeleteWorkspace}
-          isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
-          onDelete={deleteWorkspace}
-        />
+        {section === "danger" ? (
+          <DangerZone
+            workspaceName={activeWorkspace?.name ?? ""}
+            canDelete={canDeleteWorkspace}
+            isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
+            onDelete={deleteWorkspace}
+          />
+        ) : null}
       </section>
-    </ContentPage>
+    </WorkspaceSettingsShell>
+  );
+}
+
+function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: string }) {
+  return (
+    <section
+      aria-labelledby="personal-workspace-heading"
+      className="grid gap-2 rounded-lg border border-brand/25 bg-brand/5 p-4"
+    >
+      <h2 id="personal-workspace-heading" className="flex items-center gap-2 text-sm font-medium">
+        <UserIcon className="size-3.5 text-brand" />
+        Personal workspace
+        <PersonalWorkspaceBadge decorative />
+      </h2>
+      <p className="text-xs text-fg-muted">
+        This workspace is your owner-only context inside {organizationLabel}. Organization
+        administrators and other members do not gain access to its sessions or content.
+      </p>
+    </section>
   );
 }
 

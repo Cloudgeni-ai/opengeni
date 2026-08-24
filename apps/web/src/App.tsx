@@ -39,6 +39,14 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 
 type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
+type WorkspaceSettingsSection =
+  | "general"
+  | "members"
+  | "capabilities"
+  | "models"
+  | "connections"
+  | "api-keys"
+  | "danger";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
 
@@ -303,6 +311,19 @@ const workspaceMemoryRoute = createRoute({
 const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "settings",
+  validateSearch: (search: Record<string, unknown>): { section?: WorkspaceSettingsSection } => {
+    const section =
+      search.section === "general" ||
+      search.section === "members" ||
+      search.section === "capabilities" ||
+      search.section === "models" ||
+      search.section === "connections" ||
+      search.section === "api-keys" ||
+      search.section === "danger"
+        ? search.section
+        : undefined;
+    return section ? { section } : {};
+  },
   component: WorkspaceSettings,
 });
 const workspaceStateRoute = createRoute({
@@ -371,9 +392,7 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
-  ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute]
-    : []),
+  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, agentTopologyPreviewRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -568,7 +587,8 @@ function Memory() {
 
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
-  return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} />;
+  const { section } = workspaceSettingsRoute.useSearch();
+  return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} section={section ?? "general"} />;
 }
 
 function WorkspaceState() {

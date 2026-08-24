@@ -2,7 +2,7 @@
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
 import { OpenGeniProvider } from "@opengeni/react";
-import { Link, Outlet, useNavigate } from "@tanstack/react-router";
+import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -436,6 +436,9 @@ function AuthorizedWorkspaceShell({
   children: ReactNode;
   onMount?: () => void;
 }) {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const usesDedicatedSettingsShell =
+    pathname === `/workspaces/${encodeURIComponent(workspaceId)}/settings`;
   useEffect(() => {
     onMount?.();
   }, [onMount]);
@@ -445,9 +448,13 @@ function AuthorizedWorkspaceShell({
       workspaceId={workspaceId}
       onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
     >
-      <RailProvider workspaceId={workspaceId}>
-        <RailShell>{children}</RailShell>
-      </RailProvider>
+      {usesDedicatedSettingsShell ? (
+        children
+      ) : (
+        <RailProvider workspaceId={workspaceId}>
+          <RailShell>{children}</RailShell>
+        </RailProvider>
+      )}
     </OpenGeniProvider>
   );
 }
