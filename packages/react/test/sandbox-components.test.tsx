@@ -5,6 +5,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import type { DesktopRfbFactory, DesktopRfbLike } from "@opengeni/sdk";
+import { useState } from "react";
 import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 import { fakeCapabilities, fakeFileDiff, fakeHeadlessCapabilities } from "./sandbox-fixtures";
 import { desktopPrimaryShortcut, DesktopViewer } from "../src/components/desktop-viewer";
@@ -86,6 +87,82 @@ function fileButton(container: HTMLElement, name: string): HTMLButtonElement {
   return button;
 }
 
+function treeItem(container: HTMLElement, name: string): HTMLElement {
+  const item = Array.from(container.querySelectorAll<HTMLElement>("[role=treeitem]")).find(
+    (candidate) => candidate.querySelector("button")?.textContent?.trim() === name,
+  );
+  if (!item) {
+    throw new Error(`Missing tree item: ${name}`);
+  }
+  return item;
+}
+
+const DEEP_FILE = "/repo/src/features/app.ts";
+
+function LazyRevealHarness({
+  requestId,
+  expandCalls,
+}: {
+  requestId: number;
+  expandCalls: string[];
+}) {
+  const [phase, setPhase] = useState(0);
+  const tree: UseSandboxFilesResult["tree"] = [
+    {
+      path: "/repo",
+      name: "repo",
+      kind: "dir",
+      children:
+        phase >= 1
+          ? [
+              {
+                path: "/repo/src",
+                name: "src",
+                kind: "dir",
+                children:
+                  phase >= 2
+                    ? [
+                        {
+                          path: "/repo/src/features",
+                          name: "features",
+                          kind: "dir",
+                          children:
+                            phase >= 3
+                              ? [
+                                  {
+                                    path: DEEP_FILE,
+                                    name: "app.ts",
+                                    kind: "file",
+                                  },
+                                ]
+                              : undefined,
+                        },
+                      ]
+                    : undefined,
+              },
+            ]
+          : undefined,
+    },
+  ];
+  return (
+    <FileBrowser
+      result={filesResult({
+        tree,
+        expand: async (path) => {
+          expandCalls.push(path);
+          if (path === "/repo") setPhase((current) => Math.max(current, 1));
+          if (path === "/repo/src") setPhase((current) => Math.max(current, 2));
+          if (path === "/repo/src/features") setPhase((current) => Math.max(current, 3));
+        },
+      })}
+      selectedPath={DEEP_FILE}
+      revealPath={DEEP_FILE}
+      revealPathRequestId={requestId}
+      editable={false}
+    />
+  );
+}
+
 describe("FileBrowser", () => {
   test("renders the tree from useSandboxFiles data", async () => {
     const r = await renderComponent(<FileBrowser result={filesResult()} />);
@@ -127,6 +204,92 @@ describe("FileBrowser", () => {
     expect(r.container.textContent).toContain("README.md");
     expect(r.container.querySelector('button[aria-label="New file"]')).toBeNull();
     expect(r.container.querySelector('button[aria-label="Delete"]')).toBeNull();
+    await r.unmount();
+  });
+
+  test("a guarded reveal lazily expands every authoritative ancestor and shows the exact file", async () => {
+    const expandCalls: string[] = [];
+    const scrolled: Element[] = [];
+    const originalScrollIntoView = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = function () {
+      scrolled.push(this);
+    };
+    try {
+      const r = await renderComponent(
+        <LazyRevealHarness requestId={1} expandCalls={expandCalls} />,
+      );
+      try {
+        await flush(20);
+
+        expect(expandCalls).toEqual(["/repo", "/repo/src", "/repo/src/features"]);
+        expect(treeItem(r.container, "repo").getAttribute("aria-expanded")).toBe("true");
+        expect(treeItem(r.container, "src").getAttribute("aria-expanded")).toBe("true");
+        expect(treeItem(r.container, "features").getAttribute("aria-expanded")).toBe("true");
+        expect(treeItem(r.container, "app.ts").getAttribute("aria-selected")).toBe("true");
+        expect(scrolled.some((element) => element.textContent?.includes("app.ts"))).toBe(true);
+      } finally {
+        await r.unmount();
+      }
+    } finally {
+      HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+    }
+  });
+
+  test("reveal identity reopens a collapsed path while the same request leaves user state alone", async () => {
+    const expandCalls: string[] = [];
+    const r = await renderComponent(<LazyRevealHarness requestId={1} expandCalls={expandCalls} />);
+    await flush(20);
+    await actRun(() => fileButton(r.container, "repo").click());
+    expect(treeItem(r.container, "repo").getAttribute("aria-expanded")).toBe("false");
+
+    await r.rerender(<LazyRevealHarness requestId={1} expandCalls={expandCalls} />);
+    await flush();
+    expect(treeItem(r.container, "repo").getAttribute("aria-expanded")).toBe("false");
+
+    await r.rerender(<LazyRevealHarness requestId={2} expandCalls={expandCalls} />);
+    await flush();
+    expect(treeItem(r.container, "repo").getAttribute("aria-expanded")).toBe("true");
+    expect(treeItem(r.container, "app.ts").getAttribute("aria-selected")).toBe("true");
+    expect(expandCalls).toEqual(["/repo", "/repo/src", "/repo/src/features"]);
+    await r.unmount();
+  });
+
+  test("reveal follows target-owned backslash boundaries without rewriting the path", async () => {
+    const expandCalls: string[] = [];
+    const target = "C:\\repo\\src\\app.ts";
+    const r = await renderComponent(
+      <FileBrowser
+        result={filesResult({
+          tree: [
+            {
+              path: "C:\\repo",
+              name: "repo",
+              kind: "dir",
+              children: [
+                {
+                  path: "C:\\repo\\src",
+                  name: "src",
+                  kind: "dir",
+                  children: undefined,
+                },
+              ],
+            },
+          ],
+          expand: async (path) => {
+            expandCalls.push(path);
+          },
+        })}
+        selectedPath={target}
+        revealPath={target}
+        revealPathRequestId={1}
+        editable={false}
+      />,
+    );
+    await flush();
+
+    expect(expandCalls).toEqual(["C:\\repo\\src"]);
+    expect(treeItem(r.container, "repo").getAttribute("aria-expanded")).toBe("true");
+    expect(treeItem(r.container, "src").getAttribute("aria-expanded")).toBe("true");
     await r.unmount();
   });
 
@@ -372,6 +535,140 @@ describe("SandboxFiles guarded-file routing", () => {
     const focused = r.container.querySelector("[data-opengeni-focus-line]");
     expect(focused?.getAttribute("data-opengeni-file-line")).toBe("3");
     expect(focused?.textContent).toContain("gamma");
+    await r.unmount();
+  });
+
+  test("an out-of-range requested line remains a truthful visible state", async () => {
+    const files = filesResult({
+      readFile: async (path) => ({
+        path,
+        encoding: "utf8",
+        content: "alpha\nbeta\n",
+        sizeBytes: 11,
+        truncated: false,
+        isBinary: false,
+        revision: 0,
+      }),
+    });
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={gitResult()}
+        requestedPath="README.md"
+        requestedLine={99}
+        requestedPathRequestId={1}
+      />,
+    );
+    await flush();
+    const status = r.container.querySelector('[role="status"]');
+    expect(status?.textContent).toContain("Line 99 is past the end of this file");
+    expect(r.container.querySelector("[data-opengeni-focus-line]")).toBeNull();
+    await r.unmount();
+  });
+
+  test("a requested path read failure is explicit instead of an empty viewer", async () => {
+    const path = "/projects/example/missing.ts";
+    const r = await renderComponent(
+      <SandboxFiles
+        files={filesResult({
+          readFile: async () => {
+            throw new Error("file is unavailable");
+          },
+        })}
+        git={gitResult()}
+        requestedPath={path}
+        requestedPathRequestId={1}
+      />,
+    );
+    await flush();
+    const alert = r.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain(`Could not open ${path}: file is unavailable`);
+    await r.unmount();
+  });
+
+  test("a repeated request retries the same file after a read failure", async () => {
+    let reads = 0;
+    const files = filesResult({
+      readFile: async (path) => {
+        reads += 1;
+        if (reads === 1) throw new Error("temporary read failure");
+        return {
+          path,
+          encoding: "utf8",
+          content: "recovered\n",
+          sizeBytes: 10,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
+      },
+    });
+    const git = gitResult();
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={git}
+        requestedPath="README.md"
+        requestedPathRequestId={1}
+        usePierre={false}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector('[role="alert"]')?.textContent).toContain(
+      "temporary read failure",
+    );
+
+    await r.rerender(
+      <SandboxFiles
+        files={files}
+        git={git}
+        requestedPath="README.md"
+        requestedPathRequestId={2}
+        usePierre={false}
+      />,
+    );
+    await flush();
+    expect(reads).toBe(2);
+    expect(r.container.textContent).toContain("recovered");
+    expect(r.container.querySelector('[role="alert"]')).toBeNull();
+    await r.unmount();
+  });
+
+  test("a new path-only request for the same file clears an earlier line focus", async () => {
+    const files = filesResult({
+      readFile: async (path) => ({
+        path,
+        encoding: "utf8",
+        content: "alpha\nbeta\ngamma\ndelta\n",
+        sizeBytes: 24,
+        truncated: false,
+        isBinary: false,
+        revision: 0,
+      }),
+    });
+    const git = gitResult();
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={git}
+        requestedPath="README.md"
+        requestedLine={3}
+        requestedPathRequestId={1}
+      />,
+    );
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md:3");
+    expect(r.container.querySelector("[data-opengeni-focus-line]")).not.toBeNull();
+    const viewer = r.container.querySelector<HTMLElement>("[data-opengeni-file-viewer-scroll]")!;
+    viewer.scrollTop = 77;
+
+    await r.rerender(
+      <SandboxFiles files={files} git={git} requestedPath="README.md" requestedPathRequestId={2} />,
+    );
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md");
+    expect(r.container.querySelector("[data-opengeni-focus-line]")).toBeNull();
+    expect(viewer.scrollTop).toBe(0);
     await r.unmount();
   });
 });

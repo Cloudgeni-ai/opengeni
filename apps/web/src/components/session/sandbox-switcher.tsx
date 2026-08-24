@@ -6,7 +6,7 @@
 //
 // Degrades gracefully: when selfhosted is disabled the machines API 404s and
 // `fleet.machines` is empty, so this falls back to a static compute label.
-import { useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
 import { CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
 
@@ -42,7 +42,7 @@ export function SessionSandboxSwitcher({
   sessionId: string;
   sandboxBackend: SandboxBackend;
 }) {
-  const fleet = useMachines({ sessionId, pollIntervalMs: 5000 });
+  const fleet = useMachines({ sessionId, pollIntervalMs: MACHINES_SESSION_POLL_MS });
   const machines = fleet.machines;
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const activeName =

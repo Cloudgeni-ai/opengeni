@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+  agentAuthoredDurableTextTooLongMessage,
+} from "@opengeni/contracts";
+import {
   activateWorkspaceLearningPolicyRevision,
   appendKnowledgeClaim,
   appendKnowledgeClaimEvidence,
@@ -134,12 +139,13 @@ async function fixture(mode: "suggest" | "automatic") {
 async function noteRequest(
   f: Awaited<ReturnType<typeof fixture>>,
   destination: "preference" | "knowledge" | "instruction_policy",
+  text = `Router source ${crypto.randomUUID()}`,
 ) {
   const note = await createTaskNote(client!.db, {
     ...f.attempt,
     operationId: crypto.randomUUID(),
     kind: "decision",
-    text: `Router source ${crypto.randomUUID()}`,
+    text,
     expiresInDays: 7,
   });
   const common = {
@@ -274,6 +280,71 @@ describe("Company Brain learning-policy router (real PostgreSQL)", () => {
       limit: 10,
     });
     expect(history.activations).toEqual([]);
+  }, 180_000);
+
+  test("a note longer than the destination budget cannot be promoted into a rule", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("automatic");
+    const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
+    // A task note is bounded only by TASK_NOTE_TEXT_MAX_BYTES, and promotion
+    // lands in exactly the same destination as `propose_instruction_policy`,
+    // so without a budget here the note is a way around the rule cap.
+    const essay = "x".repeat(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS + 1);
+    const request = await noteRequest(f, "instruction_policy", essay);
+    await expect(router.write({ attempt: f.attempt, request })).rejects.toThrow(
+      agentAuthoredDurableTextTooLongMessage({
+        kind: "instruction_policy",
+        actualChars: essay.length,
+      }),
+    );
+    // Rejected before anything durable: no proposal and no decision receipt.
+    const decisions = await listGovernedLearningDecisionReceipts(client.db, {
+      workspaceId: f.grant.workspaceId,
+      subjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      limit: 10,
+    });
+    expect(decisions.receipts).toEqual([]);
+    // The note itself is untouched: it stays exact evidence.
+    const [note] = await shared.admin<Array<{ text: string }>>`
+      select text from task_notes where id = ${request.noteId}
+    `;
+    expect(note!.text).toBe(essay);
+    // A rule that fits still promotes.
+    expect(
+      (
+        await router.write({
+          attempt: f.attempt,
+          request: await noteRequest(f, "instruction_policy", "Never push directly to main."),
+        })
+      ).write?.destination,
+    ).toBe("instruction_policy");
+  }, 180_000);
+
+  test("a note longer than the destination budget cannot be promoted into a preference", async () => {
+    if (!shared || !client) return;
+    const f = await fixture("automatic");
+    const router = createCompanyBrainLearningPolicyRouter({ db: client.db });
+    const essay = "y".repeat(AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS + 1);
+    await expect(
+      router.write({ attempt: f.attempt, request: await noteRequest(f, "preference", essay) }),
+    ).rejects.toThrow(
+      agentAuthoredDurableTextTooLongMessage({ kind: "preference", actualChars: essay.length }),
+    );
+    // A note that would be too long for a rule is still fine as a preference,
+    // because the budgets follow the destination rather than the note.
+    expect(
+      (
+        await router.write({
+          attempt: f.attempt,
+          request: await noteRequest(
+            f,
+            "preference",
+            "z".repeat(AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS + 1),
+          ),
+        })
+      ).write?.destination,
+    ).toBe("preference");
   }, 180_000);
 
   test("Knowledge promotions are proposal-only even under automatic", async () => {

@@ -1,7 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -105,7 +105,6 @@ import {
 } from "@/lib/session-attention";
 import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
-import { downloadSandboxFileArtifact } from "@/lib/sandbox-artifact-download";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
 import {
@@ -622,20 +621,19 @@ export function SessionRoute({
   const sandboxFileRequestSeq = useRef(0);
   const [sandboxFileRequest, setSandboxFileRequest] = useState<{
     path: string;
-    line: number;
+    line?: number;
     requestId: number;
   } | null>(null);
   useEffect(() => {
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
-  const openSandboxFileAtLine = useCallback(
-    (path: string, line: number) => {
-      sandboxFileRequestSeq.current += 1;
+  const openSandboxFile = useCallback(
+    (path: string, line?: number) => {
       setSandboxFileRequest({
         path,
         line,
-        requestId: sandboxFileRequestSeq.current,
+        requestId: ++sandboxFileRequestSeq.current,
       });
       setInspectorOpen(true);
     },
@@ -726,7 +724,7 @@ export function SessionRoute({
       onReconnect={onReconnect}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
-      onOpenSandboxFile={openSandboxFileAtLine}
+      onOpenSandboxFile={openSandboxFile}
     />
   );
 
@@ -1004,13 +1002,13 @@ function SessionChatPane(props: {
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
-  onOpenSandboxFile: (path: string, line: number) => void;
+  onOpenSandboxFile: (path: string, line?: number) => void;
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
   const fleet = useMachines({
     sessionId: props.session.id,
-    pollIntervalMs: 5000,
+    pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });
   const computeLabel =
     fleet.machines.find((machine) => machine.active)?.name ?? CLOUD_SANDBOX_LABEL;
@@ -1030,28 +1028,6 @@ function SessionChatPane(props: {
   const loadVideoArtifactPlayback = useMemo(
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
-  );
-  const downloadSandboxFile = useCallback(
-    async (path: string) => {
-      await downloadSandboxFileArtifact(
-        context.client,
-        props.session.workspaceId,
-        props.session.id,
-        path,
-      );
-    },
-    [context.client, props.session.id, props.session.workspaceId],
-  );
-  const onOpenSandboxFile = props.onOpenSandboxFile;
-  const handleSandboxFile = useCallback(
-    async (path: string, line?: number) => {
-      if (line != null && line > 0) {
-        onOpenSandboxFile(path, line);
-        return;
-      }
-      await downloadSandboxFile(path);
-    },
-    [downloadSandboxFile, onOpenSandboxFile],
   );
   const terminal = isTerminalSessionStatus(props.session.status);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -1532,11 +1508,15 @@ function SessionChatPane(props: {
       }
       return (
         <div data-testid="assistant-markdown">
-          <MarkdownText text={text} streaming={item.streaming} onSandboxFile={handleSandboxFile} />
+          <MarkdownText
+            text={text}
+            streaming={item.streaming}
+            onSandboxFile={props.onOpenSandboxFile}
+          />
         </div>
       );
     },
-    [handleSandboxFile, props.session.workspaceId],
+    [props.onOpenSandboxFile, props.session.workspaceId],
   );
 
   return (

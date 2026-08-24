@@ -171,6 +171,15 @@ function browserSession(
   };
 }
 
+function lostConnectedBrowser(): BrowserSession {
+  return {
+    ...browserSession(),
+    lifecycle: "lost",
+    failureCode: "source_placement_changed",
+    placement: { kind: "connected_machine", sandboxId: SANDBOX_GROUP_ID },
+  };
+}
+
 function browserIdentity(): BrowserIdentity {
   return {
     id: BROWSER_IDENTITY_ID,
@@ -1022,6 +1031,57 @@ describe("BrowserSession frame stream", () => {
 });
 
 describe("BrowserViewer", () => {
+  test("retires a stale Connected Machine browser and stops polling the permanent conflict", async () => {
+    const stale = {
+      ...browserSession(),
+      placement: {
+        kind: "connected_machine" as const,
+        sandboxId: SANDBOX_GROUP_ID,
+      },
+    };
+    const lost = lostConnectedBrowser();
+    let catalogCalls = 0;
+    let targetCalls = 0;
+    const client = fakeClient({
+      listBrowserSessions: async () => ({
+        revision: ++catalogCalls,
+        sessions: catalogCalls === 1 ? [stale] : [lost],
+      }),
+      getBrowserSession: async () => stale,
+      listBrowserTargets: async () => {
+        targetCalls += 1;
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({
+            error: {
+              status: 409,
+              code: "conflict",
+              message: "This browser belonged to a previous task placement and was retired.",
+              retryable: false,
+              outcomeUnknown: false,
+              details: {
+                interactionResource: "browser_session",
+                interactionFailureCode: "source_placement_changed",
+                interactionLifecycle: "lost",
+              },
+            },
+          }),
+        );
+      },
+    });
+
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(120);
+    expect(catalogCalls).toBeGreaterThanOrEqual(2);
+    expect(targetCalls).toBe(1);
+    expect(rendered.container.textContent).toContain("No browser open");
+    await flush(900);
+    expect(targetCalls).toBe(1);
+    await rendered.unmount();
+  });
+
   test("restores the task's last selected BrowserSession", async () => {
     const current = browserSession();
     const peer = browserSession(PEER_BROWSER_SESSION_ID, PEER_SESSION_ID, "Peer browser");

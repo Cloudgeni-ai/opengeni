@@ -209,12 +209,12 @@ DISCOVER   probe server URL unauthenticated
            → pick AS; RFC 8414 / OIDC-discovery metadata (both well-known path orders)
            → REQUIRE code_challenge_methods_supported ∋ S256, else abort with clear error
 REGISTER   priority: (1) operator pre-registered creds for this AS
-           (2) CIMD if client_id_metadata_document_supported — client_id is our hosted
-               metadata URL (§5.3), unless this AS is in the DCR-compatibility
-               override set
-           (3) DCR (RFC 7591) if registration_endpoint — minted client_id stored per AS
+           (2) DCR (RFC 7591) if registration_endpoint — minted client_id stored per AS
                and registered with the same resolved scope used for authorization
+           (3) CIMD if it is the only advertised self-registration mechanism — client_id
+               is our hosted metadata URL (§5.3)
            (4) manual client-credential entry in UI
+           A reviewed provider profile may explicitly force DCR or CIMD.
 AUTHORIZE  authorize URL: PKCE S256, state = signed payload (§5.2),
            resource = canonical MCP server URI (RFC 8707, ALWAYS sent),
            scope = requestedScopes when supplied (step-up), else 401-challenge
@@ -239,7 +239,7 @@ The callback route must NOT call `requireAccessGrant` — a browser redirect car
 
 DCR-minted OAuth clients are deployment-wide authorization-server identity, not per-workspace user credentials. They live in `integration_oauth_clients`, keyed by AS issuer, with `client_secret` encrypted under the variable-sets key when present. This keeps one DCR client reusable across many workspace connections to the same AS, while the actual access/refresh tokens remain in workspace-scoped `connections.credential_encrypted`. Operator pre-registered clients are read from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` and are not copied into Postgres.
 
-Some authorization servers advertise both CIMD and DCR but only issue MCP-accepted tokens to DCR clients. Linear's MCP server (`https://mcp.linear.app`) is in this compatibility set: operator credentials still win when configured, otherwise OpenGeni dynamically registers and reuses a confidential DCR client with Linear's resolved `read write` MCP scope even though Linear's metadata also says `client_id_metadata_document_supported=true`. Stale Linear DCR clients registered before that policy are replaced on the next connect attempt. The override is data twice over: Linear's curated catalog row carries `oauthProfile.clientSource: "dcr"`, and the OAuth client keeps the issuer on its prefer-DCR list for deployments with a stale catalog (§5.2.2).
+Some authorization servers advertise both CIMD and DCR but reject a metadata-document URL as the authorization `client_id`. OpenGeni therefore prefers the authorization-server-issued DCR identity whenever both mechanisms are advertised. The DCR client is reused deployment-wide and replaced when its registered endpoints, redirect URI, or scope policy becomes stale. A reviewed provider profile may explicitly force CIMD when a server's advertised registration endpoint is unsuitable (§5.2.2).
 
 ### 5.2.2 Provider OAuth quirks as data (profiles)
 
@@ -259,8 +259,8 @@ catalog, then default:
 
 - **Built-in profiles** (hosted Slack MCP, official Gmail) live in code as data
   because their fences are security invariants that must not depend on catalog
-  import state. Reserved authorization servers (Google's) and the DCR
-  compatibility issuer list are adjacent data tables. Deployment-managed client
+  import state. Reserved authorization servers (Google's) are an adjacent data
+  table. Deployment-managed client
   credentials (Slack's `OPENGENI_SLACK_CLIENT_ID`/`SECRET`) resolve through a
   keyed table that only built-in profiles can reference.
 - **Catalog profiles** ride a global catalog row as `metadata.oauthProfile`

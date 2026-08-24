@@ -175,7 +175,14 @@ being observed.
 | `onNotify` | host-routed `{ kind: "error" \| "info"; message }` — the package has no toast dependency, so you decide how errors surface. |
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
 | `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |
+| `openFileRequest` | a host request `{ path, line?, requestId }` that opens Files, passes the exact path to the selected session target, reveals its lazy tree ancestors, selects and scrolls the file, and optionally focuses a 1-based line. Change `requestId` to repeat the same open. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
+
+For chat or timeline Markdown, wire `Markdown.onSandboxFile` to
+`SandboxWorkspace.openFileRequest`. `sandbox:` is an application protocol, not a
+browser URL: the callback receives its percent-decoded path unchanged. A request
+without a line opens the top of the file. Publication and download remain
+separate, explicit retained-artifact actions.
 
 Workspace surfaces use a vertical, keyboard-navigable activity rail. Up/Down
 move between panels and Home/End jump to the ends. The rail becomes icon-first

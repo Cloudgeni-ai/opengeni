@@ -65,7 +65,8 @@ export type SandboxWriteFileOptions = {
 /** A node in the Pierre file tree. `children === undefined` ⇒ an unexpanded dir
  *  (lazy treeMode); `children: []` ⇒ an expanded-but-empty dir. */
 export type FileTreeNode = {
-  path: string; // workspace-relative POSIX
+  /** Opaque path returned by the selected target's FileSystem boundary. */
+  path: string;
   name: string;
   kind: "file" | "dir";
   children?: FileTreeNode[] | undefined;
@@ -162,16 +163,21 @@ export type SandboxFilesGitSummary = {
 };
 
 function normalizeRoot(root: string): string {
-  const normalized = root
-    .replaceAll("\\", "/")
-    .replace(/^\.\/+/, "")
-    .replace(/\/+$/, "");
+  const slashNormalized = root.replaceAll("\\", "/").replace(/^\.\/+/, "");
+  if (slashNormalized === "/") return "/";
+  const normalized = slashNormalized.replace(/\/+$/, "");
   return normalized === "." ? "" : normalized;
 }
 
-function qualifyStatusPath(root: string, path: string): string {
+function joinTreeRoot(root: string, path: string): string {
+  if (!root || path.startsWith("/")) return path;
+  return root === "/" ? `/${path}` : `${root}/${path}`;
+}
+
+function qualifyStatusPath(root: string, path: string, treeRoot: string): string {
   const normalized = normalizeRoot(root);
-  return normalized ? `${normalized}/${path}` : path;
+  const workspaceRelative = joinTreeRoot(normalized, path);
+  return joinTreeRoot(normalizeRoot(treeRoot), workspaceRelative);
 }
 
 function summarizeStatuses(
@@ -192,6 +198,11 @@ function summarizeStatuses(
 function parentOf(path: string): string {
   const i = path.lastIndexOf("/");
   return i <= 0 ? "" : path.slice(0, i);
+}
+
+function parentWithinTree(path: string, rootPath: string): string {
+  const parent = parentOf(path);
+  return parent === "" && normalizeRoot(rootPath) === "/" && path.startsWith("/") ? "/" : parent;
 }
 
 /** The leaf name of a POSIX path. */
@@ -288,13 +299,16 @@ const FS_LIST_BATCH_REQUEST_LIMIT = 16;
  * bounded initial lazy-tree frontier. Listing their ancestors concurrently with
  * the root avoids a root → repositories → repo remote waterfall. */
 function initialDirectoryFrontier(rootPath: string, repoPaths: readonly string[]): string[] {
-  const rootParts = normalizeRoot(rootPath).split("/").filter(Boolean);
+  const root = normalizeRoot(rootPath);
+  const rootParts = root.split("/").filter(Boolean);
   const paths = new Set<string>();
   for (const repoPath of repoPaths) {
-    const parts = normalizeRoot(repoPath).split("/").filter(Boolean);
+    const canonicalRepoPath = joinTreeRoot(root, normalizeRoot(repoPath));
+    const parts = canonicalRepoPath.split("/").filter(Boolean);
     if (rootParts.some((part, index) => parts[index] !== part)) continue;
     for (let depth = rootParts.length + 1; depth <= parts.length; depth += 1) {
-      paths.add(parts.slice(0, depth).join("/"));
+      const path = parts.slice(0, depth).join("/");
+      paths.add(root.startsWith("/") ? `/${path}` : path);
     }
   }
   // A workspace with hundreds of repositories should remain lazy. This still
@@ -319,8 +333,8 @@ function initialDirectoryFrontier(rootPath: string, repoPaths: readonly string[]
 
 /** True when `parent` is the root ("") or a dir node that is actually present in
  *  the loaded tree (so an insert/remove there would be visible). */
-function parentIsLoaded(nodes: FileTreeNode[], parent: string): boolean {
-  if (parent === "") return true;
+function parentIsLoaded(nodes: FileTreeNode[], parent: string, rootPath = ""): boolean {
+  if (parent === normalizeRoot(rootPath)) return true;
   const node = findNodeByPath(nodes, parent);
   return Boolean(node && node.kind === "dir" && node.children !== undefined);
 }
@@ -328,8 +342,13 @@ function parentIsLoaded(nodes: FileTreeNode[], parent: string): boolean {
 /** Insert `child` under `parent` (immutably), keeping siblings sorted. A no-op
  *  (returns the same array) when the parent isn't a loaded dir or the child
  *  already exists. */
-function insertNode(nodes: FileTreeNode[], parent: string, child: FileTreeNode): FileTreeNode[] {
-  if (parent === "") {
+function insertNode(
+  nodes: FileTreeNode[],
+  parent: string,
+  child: FileTreeNode,
+  rootPath = "",
+): FileTreeNode[] {
+  if (parent === normalizeRoot(rootPath)) {
     if (nodes.some((n) => n.path === child.path)) return nodes;
     return sortNodes([...nodes, child]);
   }
@@ -340,16 +359,16 @@ function insertNode(nodes: FileTreeNode[], parent: string, child: FileTreeNode):
       return { ...node, children: sortNodes([...node.children, child]) };
     }
     if (node.kind === "dir" && node.children && parent.startsWith(`${node.path}/`)) {
-      return { ...node, children: insertNode(node.children, parent, child) };
+      return { ...node, children: insertNode(node.children, parent, child, rootPath) };
     }
     return node;
   });
 }
 
 /** Remove the node at `path` (immutably). No-op when it isn't in the tree. */
-function removeNode(nodes: FileTreeNode[], path: string): FileTreeNode[] {
-  const parent = parentOf(path);
-  if (parent === "") {
+function removeNode(nodes: FileTreeNode[], path: string, rootPath = ""): FileTreeNode[] {
+  const parent = parentWithinTree(path, rootPath);
+  if (parent === normalizeRoot(rootPath)) {
     if (!nodes.some((n) => n.path === path)) return nodes;
     return nodes.filter((n) => n.path !== path);
   }
@@ -362,7 +381,7 @@ function removeNode(nodes: FileTreeNode[], path: string): FileTreeNode[] {
       };
     }
     if (node.kind === "dir" && node.children && parent.startsWith(`${node.path}/`)) {
-      return { ...node, children: removeNode(node.children, path) };
+      return { ...node, children: removeNode(node.children, path, rootPath) };
     }
     return node;
   });
@@ -639,7 +658,7 @@ export function useSandboxFiles(
           for (const file of status.files) {
             const code = file.worktree ?? file.index;
             const mapped = code ? GIT_STATUS_TO_TREE[code] : undefined;
-            if (mapped) overlay.set(qualifyStatusPath(root, file.path), mapped);
+            if (mapped) overlay.set(qualifyStatusPath(root, file.path, rootPath), mapped);
           }
         }
         statusRef.current = overlay;
@@ -853,13 +872,14 @@ export function useSandboxFiles(
         : identitySignal;
       // Skip parents that aren't currently loaded/expanded in the tree (nothing
       // visible to update; they re-list fresh on the next expand).
-      if (!parentIsLoaded(treeRef.current, path)) return;
+      if (!parentIsLoaded(treeRef.current, path, rootPath)) return;
       try {
         const listed = await client.fsList(workspaceId, sessionId, { path, depth: 1 }, { signal });
         if (identityGenerationRef.current !== identityGeneration) return;
         const children = (listed.root.children ?? []).map((node) => fsNodeToTree(node));
-        if (path === "") setTree((prev) => applyStatus(mergeRootChildren(prev, children)));
-        else
+        if (path === normalizeRoot(rootPath)) {
+          setTree((prev) => applyStatus(mergeRootChildren(prev, children)));
+        } else
           setTree((prev) => {
             const existing = findNodeByPath(prev, path);
             const merged = existing?.children
@@ -872,7 +892,7 @@ export function useSandboxFiles(
         // root-refresh here (that would collapse the tree the user is working in).
       }
     },
-    [client, workspaceId, sessionId, applyStatus],
+    [client, workspaceId, sessionId, rootPath, applyStatus],
   );
 
   // Reconcile the visible directory frontier through bounded batch requests.
@@ -887,7 +907,7 @@ export function useSandboxFiles(
         ? AbortSignal.any([identitySignal, requestSignal])
         : identitySignal;
       const paths = [...new Set(requestedPaths)].filter((path) =>
-        parentIsLoaded(treeRef.current, path),
+        parentIsLoaded(treeRef.current, path, rootPath),
       );
       for (let offset = 0; offset < paths.length; offset += FS_LIST_BATCH_REQUEST_LIMIT) {
         const chunk = paths.slice(offset, offset + FS_LIST_BATCH_REQUEST_LIMIT);
@@ -905,7 +925,7 @@ export function useSandboxFiles(
               const result = listed.results[index];
               if (!result) continue;
               const children = (result.root.children ?? []).map((node) => fsNodeToTree(node));
-              if (path === "") {
+              if (path === normalizeRoot(rootPath)) {
                 next = mergeRootChildren(next, children);
               } else {
                 const existing = findNodeByPath(next, path);
@@ -923,7 +943,7 @@ export function useSandboxFiles(
         }
       }
     },
-    [client, workspaceId, sessionId, applyStatus],
+    [client, workspaceId, sessionId, rootPath, applyStatus],
   );
 
   // Run a Channel-A op behind an OPTIMISTIC tree edit. `apply` splices the change
@@ -988,7 +1008,7 @@ export function useSandboxFiles(
       if (!sessionId) throw new Error("no session");
       const identityGeneration = identityGenerationRef.current;
       const identitySignal = identityAbortRef.current.signal;
-      const parent = parentOf(path);
+      const parent = parentWithinTree(path, rootPath);
       // Splice a new file node in immediately ONLY when the path doesn't already
       // exist in a loaded parent (an editor SAVE to an existing file mutates no
       // tree shape — just content — so it needs no optimistic node, no reconcile).
@@ -1001,7 +1021,7 @@ export function useSandboxFiles(
       };
       return await runOptimistic(
         "write",
-        (nodes) => (exists ? nodes : insertNode(nodes, parent, node)),
+        (nodes) => (exists ? nodes : insertNode(nodes, parent, node, rootPath)),
         async () => {
           if (!writeOptions.force && writeOptions.expectedContent !== undefined) {
             const live = await client.fsRead(
@@ -1031,13 +1051,13 @@ export function useSandboxFiles(
         exists ? [] : [parent],
       );
     },
-    [client, workspaceId, sessionId, tree, runOptimistic],
+    [client, workspaceId, sessionId, tree, rootPath, runOptimistic],
   );
 
   const createFile = useCallback(
     async (path: string): Promise<void> => {
       if (!sessionId) throw new Error("no session");
-      const parent = parentOf(path);
+      const parent = parentWithinTree(path, rootPath);
       const node: FileTreeNode = {
         path,
         name: leafOf(path),
@@ -1046,7 +1066,7 @@ export function useSandboxFiles(
       };
       await runOptimistic(
         "create file",
-        (nodes) => insertNode(nodes, parent, node),
+        (nodes) => insertNode(nodes, parent, node, rootPath),
         () =>
           client.fsWrite(workspaceId, sessionId, {
             path,
@@ -1056,13 +1076,13 @@ export function useSandboxFiles(
         [parent],
       );
     },
-    [client, workspaceId, sessionId, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, runOptimistic],
   );
 
   const createDir = useCallback(
     async (path: string): Promise<void> => {
       if (!sessionId) throw new Error("no session");
-      const parent = parentOf(path);
+      const parent = parentWithinTree(path, rootPath);
       // A freshly-created dir is empty + expanded: children:[] (not undefined, so
       // it doesn't show the lazy-expand marker over a dir we KNOW is empty).
       const node: FileTreeNode = {
@@ -1073,12 +1093,12 @@ export function useSandboxFiles(
       };
       await runOptimistic(
         "create folder",
-        (nodes) => insertNode(nodes, parent, node),
+        (nodes) => insertNode(nodes, parent, node, rootPath),
         () => client.fsMkdir(workspaceId, sessionId, { path, recursive: true }),
         [parent],
       );
     },
-    [client, workspaceId, sessionId, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, runOptimistic],
   );
 
   const deleteEntry = useCallback(
@@ -1086,19 +1106,19 @@ export function useSandboxFiles(
       if (!sessionId) throw new Error("no session");
       await runOptimistic(
         "delete",
-        (nodes) => removeNode(nodes, path),
+        (nodes) => removeNode(nodes, path, rootPath),
         () => client.fsDelete(workspaceId, sessionId, { path, recursive }),
-        [parentOf(path)],
+        [parentWithinTree(path, rootPath)],
       );
     },
-    [client, workspaceId, sessionId, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, runOptimistic],
   );
 
   const moveEntry = useCallback(
     async (path: string, newPath: string, opts?: { overwrite?: boolean }): Promise<void> => {
       if (!sessionId) throw new Error("no session");
-      const from = parentOf(path);
-      const to = parentOf(newPath);
+      const from = parentWithinTree(path, rootPath);
+      const to = parentWithinTree(newPath, rootPath);
       await runOptimistic(
         "move",
         (nodes) => {
@@ -1106,7 +1126,7 @@ export function useSandboxFiles(
           if (!moving) return nodes; // not loaded — let the reconcile pick it up
           // Re-path the moved subtree, drop it from its old parent, splice into new.
           const moved = repathNode(moving, path, newPath);
-          return insertNode(removeNode(nodes, path), to, moved);
+          return insertNode(removeNode(nodes, path, rootPath), to, moved, rootPath);
         },
         () =>
           client.fsMove(workspaceId, sessionId, {
@@ -1117,7 +1137,7 @@ export function useSandboxFiles(
         to === from ? [from] : [from, to],
       );
     },
-    [client, workspaceId, sessionId, runOptimistic],
+    [client, workspaceId, sessionId, rootPath, runOptimistic],
   );
 
   // Initial paint + reset on identity change. Source selection:
@@ -1235,7 +1255,7 @@ export function useSandboxFiles(
           for (const file of status.files) {
             const code = file.worktree ?? file.index;
             const mapped = code ? GIT_STATUS_TO_TREE[code] : undefined;
-            if (mapped) overlay.set(qualifyStatusPath(root, file.path), mapped);
+            if (mapped) overlay.set(qualifyStatusPath(root, file.path, rootPath), mapped);
           }
         }
         statusRef.current = overlay;
@@ -1247,7 +1267,7 @@ export function useSandboxFiles(
         if (identityGenerationRef.current === identityGeneration) setGitLoading(false);
       }
     },
-    [client, workspaceId, sessionId, repoPaths, applyStatus],
+    [client, workspaceId, sessionId, repoPaths, rootPath, applyStatus],
   );
 
   const performEventReconcile = useCallback(async () => {
@@ -1334,8 +1354,10 @@ export function useSandboxFiles(
           continue;
         contentChanged = true;
         for (const change of payload.changes ?? []) {
-          pendingParentsRef.current.add(parentOf(change.path));
-          if (change.oldPath) pendingParentsRef.current.add(parentOf(change.oldPath));
+          pendingParentsRef.current.add(parentWithinTree(change.path, rootPath));
+          if (change.oldPath) {
+            pendingParentsRef.current.add(parentWithinTree(change.oldPath, rootPath));
+          }
         }
       } else if (event.type === "git.changed") {
         sawNew = true;
@@ -1371,7 +1393,7 @@ export function useSandboxFiles(
       }
       void reconcilePendingEvents();
     }, 150);
-  }, [enabled, active, acceptsEventReads, events, reconcilePendingEvents]);
+  }, [enabled, active, acceptsEventReads, events, rootPath, reconcilePendingEvents]);
 
   useEffect(() => {
     if (active && acceptsEventReads) return;

@@ -312,11 +312,8 @@ describe("curated fields flow through import normalization", () => {
     const dbInput = catalogRowToDbInput(linear, { importBatchId: "batch-1" });
     expect(dbInput.category).toBe("project-management");
     expect(dbInput.metadata).toMatchObject({ curation: { featured: true, official: true } });
-    // The committed overlay expresses Linear's DCR-compatibility override as
-    // profile data, and the importer carries it into the row metadata the
-    // OAuth client resolves at start time.
-    expect(linear.oauthProfile).toEqual({ clientSource: "dcr" });
-    expect(dbInput.metadata).toMatchObject({ oauthProfile: { clientSource: "dcr" } });
+    expect(linear.oauthProfile).toBeUndefined();
+    expect(dbInput.metadata).not.toHaveProperty("oauthProfile");
   });
 
   test("the curated Gmail presentation flows through normalization into the DB metadata", () => {

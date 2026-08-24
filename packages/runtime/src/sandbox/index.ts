@@ -511,6 +511,7 @@ export { nextDurableOpId, runWithToolCallCorrelation, sanitizeOpIdToken } from "
 export {
   negotiateSelfhostedCapabilities,
   selfhostedLiveness,
+  selfhostedHeartbeatLiveness,
   SELFHOSTED_RECONNECT_WINDOW_MS,
   type SelfhostedNegotiationInput,
   type SelfhostedLivenessState,

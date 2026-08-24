@@ -51,7 +51,6 @@ import { ApiHttpError } from "../http/api-error";
 import {
   DEFAULT_OAUTH_PROFILE,
   DEPLOYMENT_MANAGED_CLIENTS,
-  PREFER_DCR_ISSUERS,
   builtInOAuthProfileByKey,
   assertAuthorizationServerNotReserved,
   assertAuthorizationServerPins,
@@ -991,11 +990,8 @@ async function registerOAuthClient(
   if (operator) {
     return operator;
   }
-  // Some issuers (Linear) advertise CIMD but reject its client metadata URL at
-  // the authorization endpoint while documenting DCR as their interactive
-  // setup; both the issuer list and a catalog profile's `clientSource: "dcr"`
-  // prefer the simultaneously advertised registration endpoint.
-  if (profile.clientSource === "dcr" || prefersDynamicClientRegistration(as)) {
+  const selfRegistration = preferredOAuthSelfRegistration(as, profile.clientSource);
+  if (selfRegistration === "dcr") {
     return await getOrCreateDynamicClientRegistration(
       db,
       settings,
@@ -1005,7 +1001,7 @@ async function registerOAuthClient(
       signal,
     );
   }
-  if (as.clientIdMetadataDocumentSupported) {
+  if (selfRegistration === "cimd") {
     return {
       method: "cimd",
       issuer: as.issuer,
@@ -1030,8 +1026,22 @@ async function registerOAuthClient(
   return await getOrCreateDynamicClientRegistration(db, settings, as, redirectUri, scopes, signal);
 }
 
-function prefersDynamicClientRegistration(as: AuthorizationServerMetadata): boolean {
-  return Boolean(as.registrationEndpoint && PREFER_DCR_ISSUERS.has(normalizedIssuerKey(as.issuer)));
+export function preferredOAuthSelfRegistration(
+  as: Pick<
+    AuthorizationServerMetadata,
+    "clientIdMetadataDocumentSupported" | "registrationEndpoint"
+  >,
+  clientSource: OAuthProviderProfile["clientSource"],
+): "cimd" | "dcr" | null {
+  if (clientSource === "dcr") return "dcr";
+  if (clientSource === "cimd" && as.clientIdMetadataDocumentSupported) return "cimd";
+  // DCR produces an authorization-server-issued client id and is therefore the
+  // interoperable default whenever the server advertises both registration
+  // mechanisms. A reviewed provider profile may explicitly force CIMD for a
+  // server whose registration endpoint is unsuitable.
+  if (clientSource !== "cimd" && as.registrationEndpoint) return "dcr";
+  if (as.clientIdMetadataDocumentSupported) return "cimd";
+  return null;
 }
 
 async function getOrCreateDynamicClientRegistration(

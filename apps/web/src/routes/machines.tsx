@@ -11,6 +11,7 @@ import {
   MachinesDashboard,
   connectionStatusForState,
   useMachines,
+  MACHINES_DASHBOARD_POLL_MS,
   type DeviceFlowPhase,
   type MetricSample,
   type MetricWindow,
@@ -66,7 +67,7 @@ async function copyToClipboard(text: string, successMessage: string) {
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const { client } = useAppContext();
-  const machines = useMachines({ pollIntervalMs: 5000 });
+  const machines = useMachines({ pollIntervalMs: MACHINES_DASHBOARD_POLL_MS });
   const pageLive = usePageLiveActivity();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);

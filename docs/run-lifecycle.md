@@ -390,10 +390,13 @@ recovery-safe. That narrow exception does not apply to external MCP servers,
 tool invocation, explicit non-404 client responses, or typed
 protocol/programming failures. The retry classifier records typed out-of-band
 category metadata without rewriting the exact source diagnostic retained by
-OpenGeni. Only genuinely public SDK/console diagnostics receive a fixed
-structural projection; raw transport messages, URLs, and response bodies remain
-exact on internal data paths. Other HTTP client failures and unknown provider
-codes remain authoritative and terminal. Hitting an explicitly configured
+OpenGeni. A failed MCP request records its HTTP method, parsed JSON-RPC method
+when available, and a bounded exact source/cause chain in the durable recovery
+detail before SDK layers can flatten the transport error. Only genuinely public
+SDK/console diagnostics receive a fixed structural projection; raw transport
+messages, URLs, and response bodies remain exact on internal data paths. Other
+HTTP client failures and unknown provider codes remain authoritative and
+terminal. Hitting an explicitly configured
 model-call cap and budget/credit exhaustion ends the current turn gracefully;
 an active goal may create a later continuation, while an otherwise idle session
 waits for the next user message. For an MCP timeout that escapes after a

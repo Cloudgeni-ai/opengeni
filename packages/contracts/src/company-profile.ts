@@ -1,4 +1,10 @@
 import { z } from "zod";
+import {
+  AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
+  AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS,
+  AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS,
+  AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE,
+} from "./agent-authored-durable-text";
 import { HumanInputQuestion } from "./index";
 
 export const COMPANY_PROFILE_SCALAR_MAX_CHARS = 2_048;
@@ -100,6 +106,47 @@ export const CompanyProfileContent = z
     }
   });
 export type CompanyProfileContent = z.infer<typeof CompanyProfileContent>;
+
+/**
+ * The same profile, bounded for an **agent** author. The human `account:admin`
+ * route keeps `CompanyProfileContent` and its wider limits; this is the shape
+ * the first-party `company_profile_propose` tool accepts, because the profile is
+ * the largest always-on prompt surface in the product and a model left to its
+ * own judgement fills every field to the ceiling.
+ */
+export const AgentAuthoredCompanyProfileContent = CompanyProfileContent.superRefine(
+  (value, context) => {
+    for (const field of ["identity", "mission"] as const) {
+      const scalar = value[field];
+      if (scalar !== null && scalar.length > AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: `${field} is ${scalar.length} characters. ${AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE}`,
+        });
+      }
+    }
+    for (const field of ["products", "customers", "goals", "constraints"] as const) {
+      for (const [index, entry] of value[field].entries()) {
+        if (entry.content.length > AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS) {
+          context.addIssue({
+            code: "custom",
+            path: [field, index, "content"],
+            message: `this entry is ${entry.content.length} characters. ${AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE}`,
+          });
+        }
+      }
+    }
+    const contentBytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    if (contentBytes > AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `this profile is ${contentBytes} UTF-8 bytes. ${AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE}`,
+      });
+    }
+  },
+);
+export type AgentAuthoredCompanyProfileContent = z.infer<typeof AgentAuthoredCompanyProfileContent>;
 
 export const CompanyProfileRevisionIntent = z.enum(["active", "proposal"]);
 export type CompanyProfileRevisionIntent = z.infer<typeof CompanyProfileRevisionIntent>;

@@ -92,6 +92,10 @@ const budgets = {
   // 588,276 gzip bytes on a direct session load. Advance only those four
   // aggregate envelopes to the next whole KiB; all per-file and unrelated
   // graph limits stay fixed.
+  // Heartbeat-backed machine liveness plus canonical filesystem-root links
+  // measure 2,134,519 raw / 593,854 gzip bytes on a direct session load. Move
+  // only the exceeded raw aggregate to its next whole-KiB envelope; compressed,
+  // file-count, initial, per-file, lazy-chunk, and CSS limits remain unchanged.
   initialRaw: 1485 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
@@ -142,7 +146,7 @@ const budgets = {
   // gzip to the next whole KiB above 1.5 KiB of headroom for the Linux/x64
   // skew; every initial, per-file, file-count, lazy-chunk, and CSS cap stays
   // fixed.
-  directSessionRaw: 2081 * kib,
+  directSessionRaw: 2085 * kib,
   directSessionGzip: 580 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,

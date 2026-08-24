@@ -8,8 +8,27 @@ import type {
   UpdateMachineAgentResponse,
 } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
-import { useMutationRunner, usePolledValue } from "./internal";
+import { useMutationRunner } from "./internal";
+import { EMPTY_MACHINES, useSharedMachinesList } from "./shared-machines-list";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
+
+/** Dashboard list: cheap heartbeat read, keep the pill reasonably fresh. */
+export const MACHINES_DASHBOARD_POLL_MS = 10_000;
+/** Session surfaces share one poll for the same workspace+session. */
+export const MACHINES_SESSION_POLL_MS = 15_000;
+/** Composer polls after the first load shows a machine, or to retry a real error. */
+export const MACHINES_COMPOSER_POLL_MS = 30_000;
+
+const machinesClientIds = new WeakMap<object, number>();
+let nextMachinesClientId = 1;
+
+function machinesClientId(client: object): number {
+  const existing = machinesClientIds.get(client);
+  if (existing !== undefined) return existing;
+  const id = nextMachinesClientId++;
+  machinesClientIds.set(client, id);
+  return id;
+}
 
 /**
  * The slice of the SDK client the Machines surface needs. The method NAMES +
@@ -126,8 +145,6 @@ export type UseMachinesResult = {
   clearMutationError: () => void;
 };
 
-const EMPTY: MachinesResponse = { activeSandboxId: null, activeEpoch: 0, machines: [] };
-
 function swapFailureMessage(result: SwapActiveSandboxResponse): string {
   if (result.reason?.trim()) return result.reason;
   switch (result.code) {
@@ -159,7 +176,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   const machinesClient = (options.machinesClient ??
     (client as unknown as MachinesClientLike)) satisfies MachinesClientLike;
   const sessionId = options.sessionId;
-  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}`;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${machinesClientId(machinesClient)}`;
   const identityRef = useRef(identityKey);
   identityRef.current = identityKey;
 
@@ -178,7 +195,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     loading,
     error,
     refresh,
-  } = usePolledValue(load, {
+  } = useSharedMachinesList(identityKey, load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
@@ -208,7 +225,7 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
   const updatingOperationPolicyEnrollmentId =
     operationPolicyState.identity === identityKey ? operationPolicyState.enrollmentId : null;
 
-  const data = loadedData ?? EMPTY;
+  const data = loadedData ?? EMPTY_MACHINES;
   // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
   // the default `swapActiveSandbox` path is wired whenever a sessionId is in
   // scope. Either way attach needs a sessionId to point at.

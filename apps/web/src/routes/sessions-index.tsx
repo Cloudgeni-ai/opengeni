@@ -23,7 +23,7 @@ import {
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
-import { useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
   RealtimeVoiceModelPanel,
@@ -1259,11 +1259,11 @@ function ComputeTargetControl(props: {
   selectionHistory: NewSessionSelectionHistory;
 }) {
   const { draft, onChange } = props;
-  // The workspace fleet (no sessionId → no swap; just the picker source). Degrades
-  // gracefully: when selfhosted is disabled the API 404s → `machines` is empty and
-  // the Connected Machine kind is offered only as a disabled "enroll a machine"
-  // affordance, never blocking session creation.
-  const fleet = useMachines({ pollIntervalMs: 10000 });
+  // One load to learn whether any machine exists. Poll only while the compute
+  // picker is shown, or while a real load error should retry. A 404 (feature
+  // off) stays a single read. The list is a heartbeat read, not a live ping.
+  const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
+  const fleet = useMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const fleetEmpty = machines.length === 0;
   // A 404 is the expected "self-hosted machines are disabled here" signal, not a
@@ -1271,6 +1271,10 @@ function ComputeTargetControl(props: {
   // option isn't silently swallowed by a transient outage (states #4).
   const fleetLoadFailed =
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
+  useEffect(() => {
+    if (fleet.loading) return;
+    setFleetPollMs(!fleetEmpty || fleetLoadFailed ? MACHINES_COMPOSER_POLL_MS : undefined);
+  }, [fleet.loading, fleetEmpty, fleetLoadFailed]);
   // The Connected Machine path is OPT-IN. With an EMPTY self-hosted fleet and no
   // explicit opt-in, the segmented control is not rendered at all — the composer
   // shows the clean sandbox-only flow (byte-identical submission to before this

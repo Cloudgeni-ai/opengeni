@@ -780,6 +780,59 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(list.root.children?.map((node) => node.path)).toEqual([".git", "modal-class-proof.txt"]);
   });
 
+  test("fsList keeps provider-native entries in the canonical absolute namespace", async () => {
+    const requested: string[] = [];
+    const svc = new SandboxChannelAService({
+      workspaceRoot: "/workspace",
+      session: {
+        listDir: async ({ path }) => {
+          requested.push(path);
+          return [{ name: "app.ts", path: "deep/src/app.ts", type: "file" }];
+        },
+      },
+    });
+
+    const list = await svc.fsList({
+      path: "/workspace/deep/src",
+      depth: 1,
+      maxEntries: 10,
+      includeHidden: true,
+    });
+    expect(requested).toEqual(["/workspace/deep/src"]);
+    expect(list.root.path).toBe("/workspace/deep/src");
+    expect(list.root.children?.map((node) => node.path)).toEqual(["/workspace/deep/src/app.ts"]);
+  });
+
+  test("fsList keeps relative browsing relative when a provider echoes absolute paths", async () => {
+    const svc = new SandboxChannelAService({
+      workspaceRoot: "/workspace",
+      session: {
+        listDir: async () => [
+          { name: "src", path: "/workspace/src", type: "dir" },
+          { name: "README.md", path: "/workspace/README.md", type: "file" },
+        ],
+      },
+    });
+
+    const list = await svc.fsList({ path: "", depth: 1, maxEntries: 10, includeHidden: true });
+    expect(list.root.path).toBe("");
+    expect(list.root.children?.map((node) => node.path)).toEqual(["src", "README.md"]);
+
+    const machine = new SandboxChannelAService({
+      workspaceRoot: "/",
+      session: {
+        listDir: async () => [{ name: "Users", path: "/Users", type: "dir" }],
+      },
+    });
+    const machineList = await machine.fsList({
+      path: "",
+      depth: 1,
+      maxEntries: 10,
+      includeHidden: true,
+    });
+    expect(machineList.root.children?.map((node) => node.path)).toEqual(["Users"]);
+  });
+
   test("fsList accepts a trusted success record after provider prelude output", async () => {
     let calls = 0;
     const svc = new SandboxChannelAService({
@@ -887,6 +940,50 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
       svc.fsList({ path: "../escape", depth: 1, maxEntries: 10, includeHidden: true }),
     ).rejects.toThrow(/traversal/);
     await expect(svc.gitStatus({ path: "../escape" })).rejects.toThrow(/traversal/);
+  });
+
+  test("canonical absolute paths stay exact inside the configured workspace root", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session, workspaceRoot: "/workspace" });
+    await svc.fsWrite({
+      path: "/workspace/deep/src/app.ts",
+      encoding: "utf8",
+      content: "export const canonical = true;\n",
+      overwrite: true,
+      createParents: true,
+    });
+
+    const root = await svc.fsList({
+      path: "/workspace",
+      depth: 1,
+      maxEntries: 20,
+      includeHidden: true,
+    });
+    expect(root.root.path).toBe("/workspace");
+    expect(root.root.children?.find((entry) => entry.name === "deep")?.path).toBe(
+      "/workspace/deep",
+    );
+
+    const deep = await svc.fsList({
+      path: "/workspace/deep/src",
+      depth: 1,
+      maxEntries: 20,
+      includeHidden: true,
+    });
+    expect(deep.root.children?.find((entry) => entry.name === "app.ts")?.path).toBe(
+      "/workspace/deep/src/app.ts",
+    );
+
+    const read = await svc.fsRead({
+      path: "/workspace/deep/src/app.ts",
+      encoding: "utf8",
+      maxBytes: 1_024,
+    });
+    expect(read.path).toBe("/workspace/deep/src/app.ts");
+    expect(read.content).toBe("export const canonical = true;\n");
+    await expect(
+      svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 }),
+    ).rejects.toThrow(/outside the workspace root/);
   });
 
   test("reads an internal symlink but rejects an escaping symlink", async () => {

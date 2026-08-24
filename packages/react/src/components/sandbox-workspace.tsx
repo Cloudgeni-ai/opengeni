@@ -55,7 +55,7 @@ import {
 import { useSandboxTerminal } from "../hooks/use-sandbox-terminal";
 import { useWorkspaceCapture } from "../hooks/use-workspace-capture";
 import { useMachineChip, type MachineChip } from "../hooks/use-machine-chip";
-import { useMachines } from "../hooks/use-machines";
+import { MACHINES_SESSION_POLL_MS, useMachines } from "../hooks/use-machines";
 import type { MachineView } from "../types/machines";
 import { SandboxFiles } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
@@ -434,11 +434,11 @@ export function useSandboxWorkspaceTabs(
   }, [requestWarmIntent, requestedFilePath, requestedFileRequestId]);
 
   // The session's machine fleet + the active-sandbox pointer. Drives the header
-  // chip (which machine + its connection state). Polls slowly — ambient context.
+  // chip (which machine + its connection state). Shares the session list poll.
   const machines = useMachines({
     workspaceId,
     sessionId,
-    pollIntervalMs: 8000,
+    pollIntervalMs: MACHINES_SESSION_POLL_MS,
     enabled: machineSurfaceEnabled,
   });
   const activeMachine: MachineView | null =
@@ -568,6 +568,11 @@ export function useSandboxWorkspaceTabs(
     // this fence at turn scope also avoids unsafe millisecond gaps between
     // sequential tool calls; rendered state and explicit user actions remain.
     active: filesActive && !turnInFlight,
+    // A deliberate canonical absolute-path open browses in the selected target's
+    // advertised namespace, so the authoritative tree and link share exact paths.
+    ...(requestedFilePath?.startsWith("/") && capabilities?.FileSystem.root
+      ? { rootPath: capabilities.FileSystem.root }
+      : {}),
     repoPaths,
     liveness: liveIoLiveness,
     capture: captureState.capture,
@@ -1058,12 +1063,11 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
   const activeTabHint = selectedTab ?? initialTab ?? leadingTabs?.[0]?.id ?? null;
   const openFile = useCallback(
     (path: string, line?: number | null) => {
-      nextFileRequestId.current += 1;
       setRequestedFile({
         sessionId,
         path,
         line: line != null && line > 0 ? line : null,
-        requestId: nextFileRequestId.current,
+        requestId: ++nextFileRequestId.current,
       });
       setStoredSelection({ sessionId, tab: WORKBENCH_TAB_FILES });
       onActiveTabChange?.(WORKBENCH_TAB_FILES);
@@ -1077,7 +1081,7 @@ export function SandboxWorkspace(props: SandboxWorkspaceProps): ReactNode {
     if (!openFileRequest) return;
     if (handledOpenFileRequestId.current === openFileRequest.requestId) return;
     handledOpenFileRequestId.current = openFileRequest.requestId;
-    openFile(openFileRequest.path, openFileRequest.line ?? null);
+    openFile(openFileRequest.path, openFileRequest.line);
   }, [openFile, openFileRequest]);
   const openComputer = useCallback(
     (computerSessionId: string) => {

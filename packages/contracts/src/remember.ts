@@ -1,12 +1,17 @@
 import { z } from "zod";
 import {
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+  AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+} from "./agent-authored-durable-text";
+import {
   CompanyBrainLearningDecisionSummary,
   CompanyBrainLearningStepFailure,
 } from "./company-brain-governed-writes";
 import { GovernedLearningActivationDestination } from "./governed-learning-activation";
 import { HumanInputQuestion } from "./index";
 import {
-  PREFERENCE_REGISTRY_CONTENT_MAX_CHARS,
   PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS,
   PREFERENCE_REGISTRY_TITLE_MAX_CHARS,
   PreferenceRegistryStableKey,
@@ -30,6 +35,12 @@ export type RememberLane = z.infer<typeof RememberLane>;
 export const RememberScope = z.enum(["workspace"]);
 export type RememberScope = z.infer<typeof RememberScope>;
 
+/**
+ * Ceiling for the Knowledge lane, which is retrieval evidence rather than
+ * always-composed prompt text. The prompt-composed lanes are bounded far more
+ * tightly: see `AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS` and
+ * `AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS`.
+ */
 export const REMEMBER_CONTENT_MAX_CHARS = 4_000;
 
 const rememberBase = {
@@ -46,6 +57,18 @@ export const RememberRequest = z.discriminatedUnion("lane", [
     .object({
       ...rememberBase,
       lane: z.literal("preference"),
+      // Only the short title/description descriptors are prompt-composed; the
+      // content is retrieved on demand, so this length is retrieval cost rather
+      // than standing prompt cost, and gets more room than a rule rather than
+      // less.
+      content: z
+        .string()
+        .trim()
+        .min(1)
+        .max(
+          AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS,
+          AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
+        ),
       stableKey: PreferenceRegistryStableKey,
       title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
       description: z
@@ -54,15 +77,22 @@ export const RememberRequest = z.discriminatedUnion("lane", [
         .min(1)
         .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
     })
-    .strict()
-    .refine((value) => value.content.length <= PREFERENCE_REGISTRY_CONTENT_MAX_CHARS, {
-      message: "preference content exceeds the registry limit",
-      path: ["content"],
-    }),
+    .strict(),
   z
     .object({
       ...rememberBase,
       lane: z.literal("instruction_policy"),
+      // A mandatory rule is composed verbatim into the prompt of every session
+      // it applies to, for as long as it stays active, so this is the tightest
+      // agent budget in the Company Brain.
+      content: z
+        .string()
+        .trim()
+        .min(1)
+        .max(
+          AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
+          AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE,
+        ),
       target: WorkspaceInstructionPolicyTarget.default({
         kind: "policy",
         scope: "global",

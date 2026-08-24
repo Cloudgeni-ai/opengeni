@@ -133,6 +133,7 @@ import {
   touchBrowserSessionController,
   verifyAuthRun,
   settleBrowserDownloadSaveFailure,
+  terminalizeStaleConnectedInteractionPlacement,
   type BrowserSessionControlRecord,
   type BrowserPrivateCheckpointAuthority,
   type BrowserRevisionArtifactAuthority,
@@ -205,6 +206,7 @@ import {
 } from "../browser-auth-broker";
 import { managedNetworkRouteForPlacement } from "../browser-network-route";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { ApiHttpError } from "../http/api-error";
 import { interactionControlApiError } from "../http/interaction-control-error";
 import {
   createInteractionFrameProxyAttachment,
@@ -2780,8 +2782,10 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             resolved.kind !== "selfhosted" ||
             resolved.sandboxId !== expectedPlacement.sandboxId
           ) {
-            throw new BrowserSessionStateError(
-              "BrowserSession Connected Machine is not the active placement",
+            return await throwBrowserSourcePlacementChanged(
+              grant,
+              sourceSession.id,
+              expectedPlacement.sandboxId,
             );
           }
           const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
@@ -3023,6 +3027,17 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         record.sourceSessionId,
         authorizationOperation,
       );
+      let sourceSession: Session | null = null;
+      if (record.session.placement?.kind === "connected_machine") {
+        sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+        if (sourceSession.activeSandboxId !== record.session.placement.sandboxId) {
+          return await throwBrowserSourcePlacementChanged(
+            grant,
+            record.sourceSessionId,
+            record.session.placement.sandboxId,
+          );
+        }
+      }
       if (record.session.lifecycle !== "active" || !record.session.controller) {
         throw new BrowserSessionStateError("BrowserSession is not active");
       }
@@ -3107,7 +3122,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         }
       }
 
-      const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+      sourceSession ??= await requireSourceSession(deps, workspaceId, record.sourceSessionId);
       return await withBrowserPlacement(
         sourceSession,
         grant,
@@ -3125,6 +3140,25 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     } catch (error) {
       throw browserRouteError(error);
     }
+  }
+
+  async function throwBrowserSourcePlacementChanged(
+    grant: AccessGrant,
+    sourceSessionId: string,
+    connectedSandboxId: string,
+  ): Promise<never> {
+    const reconciliation = await terminalizeStaleConnectedInteractionPlacement(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceSessionId,
+      connectedSandboxId,
+    });
+    if (reconciliation.sourcePlacementChanged) {
+      throw sourcePlacementChangedApiError("browser_session");
+    }
+    throw new BrowserSessionStateError(
+      "BrowserSession source placement changed during the request; retry",
+    );
   }
 
   async function recoverActiveBrowserController(
@@ -3225,6 +3259,21 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       record.controllerHostSandboxGroupId,
     );
   }
+}
+
+function sourcePlacementChangedApiError(interactionResource: "browser_session"): ApiHttpError {
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message:
+      "This browser belonged to a previous task placement and was retired. Open a new browser.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: {
+      interactionResource,
+      interactionFailureCode: "source_placement_changed",
+      interactionLifecycle: "lost",
+    },
+  });
 }
 
 function browserCreateInput(

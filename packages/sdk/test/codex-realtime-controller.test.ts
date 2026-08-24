@@ -5,6 +5,7 @@ import {
   projectSessionRealtimeLifecycle,
 } from "../src/codex-realtime-controller";
 import { CODEX_REALTIME_V3_PENDING_MAX_BYTES } from "../src/codex-realtime-v3";
+import type { SessionRealtimeLifecycleProjection } from "../src/codex-realtime-lifecycle";
 import { OpenGeniApiError } from "../src/errors";
 import type {
   CodexRealtimeWebrtcRequest,
@@ -658,6 +659,7 @@ describe("Codex realtime browser controller", () => {
       workspaceId: WORKSPACE_ID,
       sessionId: SESSION_ID,
       storage: storageFixture(),
+      now: () => new Date("2026-07-29T07:00:00.000Z"),
       randomUUID: uuidSource(),
       ...noIntervals(),
       client: {
@@ -702,6 +704,57 @@ describe("Codex realtime browser controller", () => {
     ]);
     await controller.observeLifecycle(ended);
     expect(controller.snapshot().status).toBe("idle");
+  });
+
+  test("releases a foreign browser owner exactly when its lease expires", async () => {
+    const timers = timerFixture();
+    let beginCalls = 0;
+    const controller = createCodexRealtimeController({
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      now: () => new Date("2026-07-29T07:00:00.000Z"),
+      randomUUID: uuidSource(),
+      ...timers,
+      client: {
+        beginSessionRealtime: async () => {
+          beginCalls += 1;
+          throw new Error("new owner began");
+        },
+        negotiateCodexRealtimeWebrtc: async () => {
+          throw new Error("must not negotiate");
+        },
+        activateCodexRealtimeConnection: async () => {
+          throw new Error("must not activate");
+        },
+        heartbeatSessionRealtime: async () => ({ mode: mode(), replay: true }),
+        syncSessionRealtimeLedger: async () => ({ accepted: [], outbound: [] }),
+        endSessionRealtime: async () => ({ mode: mode({ state: "ended" }), replay: true }),
+      },
+    });
+    const lifecycle: SessionRealtimeLifecycleProjection = {
+      state: "active",
+      realtimeId: REALTIME_ID,
+      operationId: "11111111-1111-4111-8111-111111111111",
+      model: "gpt-live-1-boulder-alpha",
+      version: 4,
+      connectionEpoch: 2,
+      leaseExpiresAt: "2026-07-29T07:00:30.000Z",
+    };
+
+    await controller.observeLifecycle(lifecycle);
+    expect(controller.snapshot().status).toBe("lost_owner");
+    expect(timers.timeoutDelays()).toContain(30_000);
+    timers.runTimeout(30_000);
+    expect(controller.snapshot()).toMatchObject({ status: "idle", realtimeId: null });
+    await expect(controller.start()).rejects.toThrow("new owner began");
+    expect(beginCalls).toBe(1);
+
+    await controller.observeLifecycle({
+      ...lifecycle,
+      leaseExpiresAt: "2026-07-29T06:59:59.000Z",
+    });
+    expect(controller.snapshot()).toMatchObject({ status: "idle", realtimeId: null });
   });
 
   test("replays persisted same-browser ownership and rotates the dead browser connection", async () => {

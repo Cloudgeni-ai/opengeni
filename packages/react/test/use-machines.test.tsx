@@ -128,6 +128,128 @@ describe("useMachines", () => {
     await hook.unmount();
   });
 
+  test("two hooks on the same workspace share one list request", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        return response;
+      },
+    };
+    const hook = await renderHook(() => {
+      const a = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
+      const b = useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient });
+      return { a, b };
+    }, undefined);
+    await flush();
+    expect(lists).toBe(1);
+    expect(hook.result.current.a.machines.length).toBe(2);
+    expect(hook.result.current.b.activeSandboxId).toBe("modal-box");
+    await hook.unmount();
+  });
+
+  test("a late second hook reuses a warm list instead of refetching", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        return response;
+      },
+    };
+    const first = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      undefined,
+    );
+    await flush();
+    expect(lists).toBe(1);
+    const second = await renderHook(
+      () => useMachines({ client, workspaceId: WORKSPACE_ID, machinesClient }),
+      undefined,
+    );
+    await flush();
+    expect(lists).toBe(1);
+    expect(second.result.current.machines.length).toBe(2);
+    await first.unmount();
+    await second.unmount();
+  });
+
+  test("changing the poll interval keeps the cached fleet", async () => {
+    let lists = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        return response;
+      },
+    };
+    const hook = await renderHook(
+      (props: { pollIntervalMs?: number | undefined }) =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          machinesClient,
+          pollIntervalMs: props.pollIntervalMs,
+        }),
+      {},
+    );
+    await flush();
+    expect(lists).toBe(1);
+    expect(hook.result.current.machines.length).toBe(2);
+    await hook.rerender({ pollIntervalMs: 30_000 });
+    await flush();
+    expect(lists).toBe(1);
+    expect(hook.result.current.loading).toBe(false);
+    expect(hook.result.current.machines.length).toBe(2);
+    await hook.unmount();
+  });
+
+  test("attach queues a trailing refresh when a list request is already in flight", async () => {
+    let lists = 0;
+    let releasePoll: (() => void) | undefined;
+    let current = response;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => {
+        lists += 1;
+        if (lists === 2) {
+          await new Promise<void>((resolve) => {
+            releasePoll = resolve;
+          });
+        }
+        return current;
+      },
+      swapActiveSandbox: async (_ws, _sessionId, request) => {
+        current = { ...response, activeSandboxId: request.target, activeEpoch: 4 };
+        return { swapped: true, activeSandboxId: request.target, activeEpoch: 4 };
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          machinesClient,
+          sessionId: "sess-1",
+          pollIntervalMs: 20,
+        }),
+      undefined,
+    );
+    await flush(50);
+    expect(lists).toBe(2);
+    expect(hook.result.current.activeSandboxId).toBe("modal-box");
+
+    let attached!: Promise<boolean>;
+    await actRun(() => {
+      attached = hook.result.current.attach("sh-1");
+    });
+    await flush();
+    releasePoll?.();
+    const ok = await actRun(async () => attached);
+    await flush();
+    expect(ok).toBe(true);
+    expect(lists).toBe(3);
+    expect(hook.result.current.activeSandboxId).toBe("sh-1");
+    await hook.unmount();
+  });
+
   test("loads the fleet + active pointer from the structural client", async () => {
     const machinesClient: MachinesClientLike = {
       listMachines: async () => response,

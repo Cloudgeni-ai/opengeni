@@ -535,10 +535,9 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
 
   test("clean going-offline round-trip: online → GoingOffline reads OFFLINE immediately (probe still responds) → heartbeat reads ONLINE again", async () => {
     if (!available) return;
-    // seed() registers a ping responder (online) + a fresh last_seen, so WITHOUT a
-    // marker the machine reads online. This proves the marker takes precedence over
-    // BOTH a still-responding probe and a still-fresh last_seen — the #348 fix —
-    // end-to-end through the real ingestion consumer + derivation + endpoint.
+    // seed() stamps a fresh last_seen, so WITHOUT a marker the list reads online.
+    // This proves the goodbye marker takes precedence over a still-fresh heartbeat
+    // — the #348 fix — through the real ingestion consumer + list derivation.
     const { accountId, workspaceId, enrollment, bus } = await seed();
     const app = appFor(bus);
     const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
@@ -551,12 +550,12 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       return body.machines[0]!.state;
     };
 
-    // 1. Online: probe responds + last_seen fresh.
+    // 1. Online: last_seen fresh (list is heartbeat-only; no live ping).
     await emitHeartbeat(bus, workspaceId, enrollment.id, 10);
     expect(await stateNow()).toBe("online");
 
-    // 2. Clean GoingOffline → OFFLINE immediately, though the probe STILL responds
-    //    and last_seen is still fresh (the marker wins).
+    // 2. Clean GoingOffline → OFFLINE immediately, even though last_seen is
+    //    still fresh (the marker wins).
     await emitGoingOffline(
       bus,
       workspaceId,
@@ -584,7 +583,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(after?.lastSeenAt).not.toBeNull();
   }, 90_000);
 
-  test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when no responder", async () => {
+  test("state matrix: displayed-but-unconsented is ONLINE (view/control decoupled); offline when last_seen is missing", async () => {
     if (!available) return;
     // A displayed machine whose SCREEN CONTROL isn't consented is still ONLINE:
     // compute + read-only viewing work; only INPUT is withheld (surfaced via the
@@ -604,8 +603,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       expect(body.machines[0]!.state).toBe("online");
       expect(body.machines[0]!.allowScreenControl).toBe(false);
     }
-    // offline: online=false → no responder → the probe misses; lastSeenAt is recent
-    // BUT we clear it so it is hard-offline.
+    // offline: list has no live ping; a missing lastSeenAt is hard-offline.
     {
       const { accountId, workspaceId, enrollment, bus } = await seed({ online: false });
       await admin`update enrollments set last_seen_at = null where id = ${enrollment.id}`;
@@ -635,7 +633,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     }
   }, 120_000);
 
-  test("probes enrolled machines in parallel while preserving sandbox order", async () => {
+  test("lists enrolled machines from durable state without a ControlRpc probe", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
     const enrollments = [];
@@ -651,6 +649,7 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
         arch: "x86_64",
       });
       enrollments.push(enrollment);
+      await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;
       await claimConnection(workspaceId, enrollment.id);
       await createSandbox(db, {
         accountId,
@@ -680,14 +679,9 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { machines: Array<{ sandboxId: string }> };
     expect(body.machines.map((machine) => machine.sandboxId)).toEqual(expectedOrder);
-    expect(bus.startedSubjects.length).toBe(3);
-    expect(bus.completed).toBe(3);
-    // This is the deterministic concurrency proof: each request increments the
-    // in-flight counter before its artificial delay. A serial implementation can
-    // never observe all three outstanding together. Do not replace this with an
-    // endpoint wall-clock budget, which also measures unrelated database
-    // contention and turns host load into a false performance regression.
-    expect(bus.maxInFlight).toBe(3);
+    expect(bus.startedSubjects).toEqual([]);
+    expect(bus.completed).toBe(0);
+    expect(bus.maxInFlight).toBe(0);
   }, 30_000);
 });
 

@@ -28,6 +28,7 @@
 // `@opengeni/db`.
 
 import type { ExposedPortEndpoint } from "../stream-port";
+import { CAPABILITY_DESCRIPTORS, type SandboxBackend } from "@opengeni/contracts";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import {
@@ -1569,6 +1570,28 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
       return s.readFile(args);
     });
+  }
+
+  /** Resolve the FileSystem root from the exact backend selected for this call.
+   * Channel A uses this authority to validate canonical absolute paths without
+   * teaching the renderer or host about provider-specific filesystem layouts. */
+  async fileSystemRoot(): Promise<string> {
+    const backend = await this.resolve();
+    if (backend.kind === "selfhosted") return "/";
+    const state = backend.session.state as { manifest?: { root?: unknown } } | undefined;
+    const manifestRoot = state?.manifest?.root;
+    if (typeof manifestRoot === "string" && manifestRoot.startsWith("/")) {
+      return manifestRoot === "/" ? "/" : manifestRoot.replace(/\/+$/, "");
+    }
+    const descriptor =
+      CAPABILITY_DESCRIPTORS[backend.kind as SandboxBackend] ??
+      Object.values(CAPABILITY_DESCRIPTORS).find(
+        (candidate) => candidate.backendId === backend.kind,
+      );
+    if (!descriptor) {
+      throw new RoutingUnsupportedError("fileSystemRoot", backend.kind);
+    }
+    return descriptor.workspaceRoot;
   }
 
   async writeFile(args: unknown): Promise<unknown> {
