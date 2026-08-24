@@ -189,7 +189,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0336_tenancy_backfill_activation_evidence.sql",
       ),
     ).toMatchObject({
-      sha256: "4ddca9b2b18ff10c3d7f3500712a9853f034848a015d5fe18b028672b145cc24",
+      sha256: "9bf2ffd1e75cd84e8426759a03393e1c4df626db5a8a3c1c3cfd63390c623e2d",
       deploymentMode: "rolling",
     });
     expect(

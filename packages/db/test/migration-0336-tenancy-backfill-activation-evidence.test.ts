@@ -31,7 +31,7 @@ describe("migration 0336 tenancy backfill activation evidence", () => {
     ]) {
       expect(source).toContain(`'${reason}'`);
     }
-    expect(source).toContain("cardinality(backfill_receipt_ids) IN (0, 5, 6)");
+    expect(source).toContain("cardinality(backfill_receipt_ids) IN (0, 6)");
     expect(source).toContain("'connections'::text");
     expect(source).toContain("check_tenancy_backfill_activation_evidence(uuid)");
     expect(source).toContain("activate_session_tenancy_product(uuid, text, text, text, text[])");

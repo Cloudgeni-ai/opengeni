@@ -1247,6 +1247,29 @@ workspace reference without an exact connection id before resolving any
 credential. Pre-activation behavior remains unchanged, so rollback is still
 permitted until the activation receipt is written.
 
+Both of those paths depend on one seam,
+`opengeni_private.bind_connection_owner_authority`, and it exists because
+`organization_memberships` and `organization_user_resource_authorities` are
+`FORCE ROW LEVEL SECURITY` and OpenGeni runs its SECURITY DEFINER routines as a
+NON-superuser owner without `BYPASSRLS`. Migration 0256's inline
+`SELECT ... FOR SHARE` plus authority `INSERT` therefore matched nothing on
+every real deployment: a personal connection whose subject *did* hold a live
+membership silently degraded to `legacy_user`, and 0336's convergence would
+have raised `42501 connection backfill membership authority is unavailable` on
+every deterministic candidate. The seam opens one read-only
+`connection_authority_binding` marker window - owner-only policies on two
+tables that carry zero runtime privileges - takes the row lock, mints the
+authority row, and restores the previous marker on every exit. The marker gates
+narrow dedicated policies rather than new entries in the shared
+`organization_tenancy_lifecycle` list, so a later migration restating that list
+cannot silently drop connection binding. Note the PostgreSQL rule that made
+this invisible: `SELECT ... FOR SHARE` is gated on the UPDATE/ALL policy
+`USING` clause as well as the SELECT one, so a capability policy declared only
+`FOR SELECT` leaves a row-locking lookup blind. See
+[`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) and the
+production-posture regression harness
+`packages/db/test/migration-0336-owner-migrated-tenancy-cutover.test.ts`.
+
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>
 [--run-key <key>]` proves per row that each Variable Set, Rig, and Connected
@@ -1859,11 +1882,11 @@ That startup interlock is forward-only posture, not a rollback mechanism.
 Migration 0336 preserves the activation command and database function
 signatures while adding the settled-backfill proof above. New activation rows
 bind the six exact receipt ids. Older activation rows retain their existing
-zero- or five-receipt evidence and remain replayable only for their identical
-stored inventory/parity digests; the migration never invents historical
-evidence. The database recomputes inventory, parity, and receipt evidence while
-holding the complete source-table fence and rejects a stale or fabricated
-supplied digest with SQLSTATE `40001`.
+zero-receipt evidence and remain replayable only for their identical stored
+inventory/parity digests; the migration never invents historical evidence. The
+database recomputes inventory, parity, and receipt evidence while holding the
+complete source-table fence and rejects a stale or fabricated supplied digest
+with SQLSTATE `40001`.
 
 Migration 0336 also freezes the deployment-wide advisory boundary
 `session-tenancy-canonical-boundary:v1` behind the owner-only

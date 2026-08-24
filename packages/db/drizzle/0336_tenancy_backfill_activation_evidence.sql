@@ -2,8 +2,9 @@
 -- Complete the organization-tenancy evidence chain, converge the final
 -- deterministic connection compatibility population, and make activation
 -- consume one fenced evidence snapshot. This migration activates no tenant.
--- Existing 0/5-receipt activations stay replayable; new activations require
--- six exact receipts, including connection convergence.
+-- Existing zero-receipt activations stay replayable; new activations require
+-- six exact receipts, including connection convergence. Five was never a
+-- shipped cardinality, so the constraint does not tolerate it.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -24,7 +25,7 @@ ALTER TABLE tenancy_backfill_unresolved_rows
 ALTER TABLE session_tenancy_activations
   ADD COLUMN backfill_receipt_ids uuid[] NOT NULL DEFAULT ARRAY[]::uuid[],
   ADD CONSTRAINT session_tenancy_activation_backfill_receipts_check CHECK (
-    cardinality(backfill_receipt_ids) IN (0, 5, 6)
+    cardinality(backfill_receipt_ids) IN (0, 6)
   );
 
 -- An application-controlled GUC is not a write capability. The exact
@@ -57,32 +58,177 @@ REVOKE ALL ON FUNCTION
   opengeni_private.connection_tenancy_backfill_capability_active(uuid) FROM PUBLIC;
 
 -- FORCE-RLS visibility exists only while the SECURITY DEFINER classifier or
--- upgrader holds its unforgeable transaction capability. Direct runtime DML
--- cannot create the capability row.
-CREATE POLICY connection_tenancy_backfill_read ON organization_memberships
-  FOR SELECT USING (
-    opengeni_private.connection_tenancy_backfill_capability_active(account_id)
+-- upgrader holds its unforgeable transaction capability, and only for the
+-- migration owner the reviewed seams run as (0285/0298's conjunct). Direct
+-- runtime DML cannot create the capability row.
+DO $connection_tenancy_backfill_capability_policies$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+  migration_owner text := current_user;
+BEGIN
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_tenancy_backfill_read ON %I.organization_memberships '
+      || 'FOR SELECT USING (current_user = %L AND '
+      || 'opengeni_private.connection_tenancy_backfill_capability_active(account_id))',
+    data_schema, migration_owner
   );
-CREATE POLICY connection_tenancy_backfill_read ON connections
-  FOR SELECT USING (
-    opengeni_private.connection_tenancy_backfill_capability_active(account_id)
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_tenancy_backfill_read ON %I.connections '
+      || 'FOR SELECT USING (current_user = %L AND '
+      || 'opengeni_private.connection_tenancy_backfill_capability_active(account_id))',
+    data_schema, migration_owner
   );
-CREATE POLICY connection_tenancy_backfill_update ON connections
-  FOR UPDATE USING (
-    opengeni_private.connection_tenancy_backfill_capability_active(account_id)
-  ) WITH CHECK (
-    opengeni_private.connection_tenancy_backfill_capability_active(account_id)
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_tenancy_backfill_update ON %I.connections '
+      || 'FOR UPDATE USING (current_user = %L AND '
+      || 'opengeni_private.connection_tenancy_backfill_capability_active(account_id)) '
+      || 'WITH CHECK (current_user = %L AND '
+      || 'opengeni_private.connection_tenancy_backfill_capability_active(account_id))',
+    data_schema, migration_owner, migration_owner
   );
-CREATE POLICY connection_tenancy_backfill_read ON organization_user_resource_authorities
-  FOR SELECT USING (
-    resource_kind = 'connection'
-    AND opengeni_private.connection_tenancy_backfill_capability_active(account_id)
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_tenancy_backfill_read '
+      || 'ON %I.organization_user_resource_authorities '
+      || 'FOR SELECT USING (resource_kind = ''connection'' AND current_user = %L AND '
+      || 'opengeni_private.connection_tenancy_backfill_capability_active(account_id))',
+    data_schema, migration_owner
   );
-CREATE POLICY connection_tenancy_backfill_insert ON organization_user_resource_authorities
-  FOR INSERT WITH CHECK (
-    resource_kind = 'connection'
-    AND opengeni_private.connection_tenancy_backfill_capability_active(account_id)
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_tenancy_backfill_insert '
+      || 'ON %I.organization_user_resource_authorities '
+      || 'FOR INSERT WITH CHECK (resource_kind = ''connection'' AND current_user = %L AND '
+      || 'opengeni_private.connection_tenancy_backfill_capability_active(account_id))',
+    data_schema, migration_owner
   );
+END
+$connection_tenancy_backfill_capability_policies$;
+
+-- Owner-only marker policies for the connection owner-authority binding below.
+--
+-- `organization_memberships` and `organization_user_resource_authorities` are
+-- FORCE ROW LEVEL SECURITY with ZERO runtime table privileges, so the marker is
+-- unreachable as an application write vector - it is exactly the gate the
+-- existing `organization_tenancy_lifecycle` policies on both tables already
+-- use - and the `current_user` conjunct keeps every branch owner-only besides.
+-- They are separate narrow policies rather than new markers on the shared
+-- lifecycle policy so a later migration restating that policy's list cannot
+-- silently drop connection binding (0305 dropped 0290's marker exactly that
+-- way).
+--
+-- The `FOR UPDATE` policy on `organization_memberships` is not a write grant to
+-- the binding: PostgreSQL evaluates the UPDATE/ALL policy USING clause for
+-- `SELECT ... FOR SHARE` as well as the SELECT one, so a row-locking lookup is
+-- blind without it.
+DO $connection_authority_binding_policies$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+  migration_owner text := current_user;
+  -- Tenant-fenced in the policy itself, not only in the seam: the window can
+  -- never widen into an organization-wide membership or authority read.
+  marker constant text :=
+    'current_setting(''opengeni.organization_tenancy_lifecycle'', true) '
+      || '= ''connection_authority_binding'' AND account_id = nullif('
+      || 'current_setting(''opengeni.account_id'', true), '''')::uuid';
+BEGIN
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_authority_binding_read ON %I.organization_memberships '
+      || 'FOR SELECT USING (current_user = %L AND %s)',
+    data_schema, migration_owner, marker
+  );
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_authority_binding_lock ON %I.organization_memberships '
+      || 'FOR UPDATE USING (current_user = %L AND %s)',
+    data_schema, migration_owner, marker
+  );
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY connection_authority_binding_insert '
+      || 'ON %I.organization_user_resource_authorities '
+      || 'FOR INSERT WITH CHECK (resource_kind = ''connection'' AND current_user = %L AND %s)',
+    data_schema, migration_owner, marker
+  );
+END
+$connection_authority_binding_policies$;
+
+-- The single owner-authority seam both connection-binding branches use.
+-- `organization_memberships` and `organization_user_resource_authorities` are
+-- FORCE ROW LEVEL SECURITY, and OpenGeni migrates and runs its SECURITY DEFINER
+-- routines as a NON-superuser owner without BYPASSRLS, so the owner is
+-- policy-bound too. 0256's inline `SELECT ... FOR SHARE` plus authority INSERT
+-- therefore could not work on any production deployment: the mint path silently
+-- degraded every personal connection to `legacy_user`, and 0336's backfill
+-- verification would have raised `42501` on every deterministic candidate.
+-- Opening the reviewed marker window for exactly this binding is 0263's
+-- `assert_active_managed_human_organization_membership` pattern, restored on
+-- every exit. The row lock is kept: it serializes the mint and the bounded
+-- upgrade against a concurrent membership revocation.
+--
+-- Tenant-fenced, so it never becomes a cross-organization membership oracle.
+-- It is a resolver, never an authorization: the trigger still owns the decision
+-- that the caller IS this subject. `provision-roles` blanket-grants EXECUTE on
+-- every `opengeni_private` routine to the runtime role, and the four authority
+-- tables must keep ZERO direct application DML, so the seam additionally
+-- refuses to do anything outside a trigger: a direct call by the application
+-- role can neither read a membership nor mint an authority row.
+CREATE FUNCTION opengeni_private.bind_connection_owner_authority(
+  p_account_id uuid,
+  p_subject_id text,
+  p_connection_id uuid DEFAULT NULL,
+  p_workspace_id uuid DEFAULT NULL,
+  OUT membership_id uuid,
+  OUT authority_id uuid
+) RETURNS record
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $owner_authority$
+DECLARE
+  previous_lifecycle text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
+BEGIN
+  membership_id := NULL;
+  authority_id := NULL;
+  IF pg_catalog.pg_trigger_depth() = 0
+    OR p_account_id IS NULL OR p_subject_id IS NULL
+    OR p_account_id IS DISTINCT FROM nullif(
+      pg_catalog.current_setting('opengeni.account_id', true), ''
+    )::uuid
+  THEN
+    RETURN;
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', 'connection_authority_binding', true
+  );
+  SELECT membership.id INTO membership_id
+  FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = p_subject_id
+    AND membership.status = 'active' AND membership.revoked_at IS NULL
+  FOR SHARE;
+  IF membership_id IS NOT NULL AND p_connection_id IS NOT NULL
+    AND p_workspace_id IS NOT NULL
+  THEN
+    authority_id := pg_catalog.gen_random_uuid();
+    INSERT INTO organization_user_resource_authorities (
+      id, account_id, organization_membership_id, resource_kind, resource_id,
+      origin_workspace_id, generation, status
+    ) VALUES (
+      authority_id, p_account_id, membership_id, 'connection', p_connection_id,
+      p_workspace_id, 1, 'active'
+    );
+  END IF;
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
+  );
+  RETURN;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
+  );
+  RAISE;
+END
+$owner_authority$;
+REVOKE ALL ON FUNCTION
+  opengeni_private.bind_connection_owner_authority(uuid, text, uuid, uuid) FROM PUBLIC;
 
 -- Exact-scoped activation lookup used by the connection/writer triggers. The
 -- account must already be the transaction tenant: this keeps the helper safe
@@ -131,12 +277,11 @@ BEGIN
       RAISE EXCEPTION 'personal connection owner must be the authenticated subject'
         USING ERRCODE = '42501';
     END IF;
-    SELECT membership.id INTO membership_id
-    FROM organization_memberships membership
-    WHERE membership.account_id = NEW.account_id
-      AND membership.subject_id = caller_subject
-      AND membership.status = 'active' AND membership.revoked_at IS NULL
-    FOR SHARE;
+    SELECT binding.membership_id, binding.authority_id
+      INTO membership_id, authority_value
+    FROM opengeni_private.bind_connection_owner_authority(
+      NEW.account_id, caller_subject, NEW.id, NEW.workspace_id
+    ) binding;
     IF membership_id IS NULL THEN
       IF opengeni_private.session_tenancy_account_activated(NEW.account_id) THEN
         RAISE EXCEPTION 'activated organization requires connection membership authority'
@@ -147,14 +292,6 @@ BEGIN
       NEW.owner_organization_membership_id := NULL;
       RETURN NEW;
     END IF;
-    authority_value := pg_catalog.gen_random_uuid();
-    INSERT INTO organization_user_resource_authorities (
-      id, account_id, organization_membership_id, resource_kind, resource_id,
-      origin_workspace_id, generation, status
-    ) VALUES (
-      authority_value, NEW.account_id, membership_id, 'connection', NEW.id,
-      NEW.workspace_id, 1, 'active'
-    );
     NEW.authority_scope := 'user';
     NEW.authority_id := authority_value;
     NEW.owner_organization_membership_id := membership_id;
@@ -186,13 +323,11 @@ BEGIN
     IF NOT backfill_transition THEN
       RAISE EXCEPTION 'connection owner authority is immutable' USING ERRCODE = '23514';
     END IF;
-    PERFORM 1 FROM organization_memberships membership
-    WHERE membership.id = NEW.owner_organization_membership_id
-      AND membership.account_id = NEW.account_id
-      AND membership.subject_id = NEW.subject_id
-      AND membership.status = 'active' AND membership.revoked_at IS NULL
-    FOR SHARE;
-    IF NOT FOUND THEN
+    SELECT binding.membership_id INTO membership_id
+    FROM opengeni_private.bind_connection_owner_authority(
+      NEW.account_id, NEW.subject_id
+    ) binding;
+    IF membership_id IS DISTINCT FROM NEW.owner_organization_membership_id THEN
       RAISE EXCEPTION 'connection backfill membership authority is unavailable'
         USING ERRCODE = '42501';
     END IF;
@@ -505,15 +640,49 @@ REVOKE ALL ON FUNCTION backfill_organization_connection_authority(uuid, integer,
 -- Once activated, surviving legacy_user rows are invisible to runtime reads.
 -- This also fences an old worker that bypasses accepted-use resolution. The
 -- audited inventory/parity/backfill capabilities retain recovery visibility.
-CREATE POLICY connection_tenancy_legacy_retirement ON connections
-  AS RESTRICTIVE FOR SELECT
-  USING (
-    authority_scope <> 'legacy_user'
-    OR NOT session_tenancy_product_activated(account_id, 1)
-    OR opengeni_private.connection_tenancy_backfill_capability_active(account_id)
-    OR opengeni_private.organization_tenancy_inventory_capability_active()
-    OR opengeni_private.organization_tenancy_parity_capability_active()
-  );
+--
+-- Two constraints shape how this policy is created:
+--
+--   * `connections.authority_scope` arrives in 0256, and a partial-history
+--     replay can legitimately defer that migration past this point (0249's
+--     upgrade fixture does exactly that). Creating a policy over an absent
+--     column aborts the whole chain there, so the creation is existence-guarded
+--     exactly like 0298's parity capability policies. Such a database simply
+--     cannot execute the connection lane, which is already true of every other
+--     reader of that column.
+--   * Every predicate a `connections` policy calls must live in
+--     `opengeni_private` (`workspace_rls_visible` is the established example).
+--     EXECUTE on the data-schema `session_tenancy_product_activated` is revoked
+--     from PUBLIC and granted only to the runtime role, so calling it here
+--     would make an unrelated SECURITY DEFINER owner of `connections` fail with
+--     `42501` on an ordinary read. `opengeni_private.session_tenancy_account_activated`
+--     is the byte-identical private predicate (same account-GUC fence, version 1).
+DO $connection_tenancy_legacy_retirement$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_catalog.pg_attribute attribute
+    WHERE attribute.attrelid = pg_catalog.to_regclass(
+        pg_catalog.format('%I.%I', data_schema, 'connections')
+      )
+      AND attribute.attname = 'authority_scope'
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
+  ) THEN
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY connection_tenancy_legacy_retirement ON %I.connections '
+        || 'AS RESTRICTIVE FOR SELECT USING ('
+        || 'authority_scope <> ''legacy_user'''
+        || ' OR NOT opengeni_private.session_tenancy_account_activated(account_id)'
+        || ' OR opengeni_private.connection_tenancy_backfill_capability_active(account_id)'
+        || ' OR opengeni_private.organization_tenancy_inventory_capability_active()'
+        || ' OR opengeni_private.organization_tenancy_parity_capability_active())',
+      data_schema
+    );
+  END IF;
+END
+$connection_tenancy_legacy_retirement$;
 
 -- Pre-0277 binaries/turns can omit attribution and land on the explicit
 -- legacy default before activation. Afterwards a new legacy admission or
@@ -1016,6 +1185,10 @@ BEGIN
       || 'SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema
   );
   EXECUTE pg_catalog.format(
+    'ALTER FUNCTION opengeni_private.bind_connection_owner_authority(uuid,text,uuid,uuid) '
+      || 'SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema
+  );
+  EXECUTE pg_catalog.format(
     'ALTER FUNCTION opengeni_private.bind_connection_authority() '
       || 'SET search_path = pg_catalog, %I, opengeni_private, pg_temp', data_schema
   );
@@ -1057,6 +1230,14 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT EXECUTE ON FUNCTION
       opengeni_private.connection_tenancy_backfill_capability_active(uuid)
+      TO opengeni_app;
+    -- Referenced by the RESTRICTIVE `connections` retirement policy, so the
+    -- runtime role must be able to evaluate it on every ordinary read even in
+    -- the migrate-without-reprovision order.
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.session_tenancy_account_activated(uuid) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.bind_connection_owner_authority(uuid, text, uuid, uuid)
       TO opengeni_app;
     EXECUTE pg_catalog.format(
       'GRANT EXECUTE ON FUNCTION %I.classify_organization_connection_authority(uuid,text) TO opengeni_app',

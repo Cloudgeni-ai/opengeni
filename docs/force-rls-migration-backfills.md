@@ -81,6 +81,32 @@ A migration-time backfill over a FORCE-RLS table must do one of:
 A convergence assertion is not a substitute for any of the above: put the
 assertion *inside* the window so a silent no-op fails loudly.
 
+### The runtime sibling: SECURITY DEFINER reads and row locks
+
+The same binding applies at *runtime*, not only during a migration. A SECURITY
+DEFINER routine owned by the schema owner is policy-bound on a FORCE-RLS table
+exactly like an ordinary caller, so a definer that reads a tenancy table needs a
+policy branch it can actually satisfy - a capability row, or one of the
+`opengeni.organization_tenancy_lifecycle` markers the authority tables already
+gate on (`0263`'s `assert_active_managed_human_organization_membership` is the
+worked example, and `0336`'s
+`opengeni_private.bind_connection_owner_authority` is the newer one).
+
+One PostgreSQL rule makes this class especially easy to miss: **`SELECT ... FOR
+UPDATE/SHARE` is gated on the UPDATE/ALL policy `USING` clause in addition to
+the SELECT one.** A capability policy declared only `FOR SELECT` therefore lets
+a plain read through and silently returns **zero rows** for the identical query
+with a row lock on it. That is exactly how migration 0256's connection
+owner-membership lookup became blind on every production deployment while its
+sibling classifier - the same join without `FOR SHARE` - kept working.
+
+`packages/db/test/migration-0336-owner-migrated-tenancy-cutover.test.ts` is the
+regression harness for the runtime half, the way
+`migration-0296-force-rls-backfill-repair.test.ts` is for the migration half.
+Note that `scripts/check-migration-rls-backfills.ts` strips `CREATE FUNCTION`
+bodies by design, so it cannot see either of these - only a test through
+`acquireOwnerMigratedTestDatabase` can.
+
 ### Enforcement
 
 - `bun run check:migration-rls-backfills` (`scripts/check-migration-rls-backfills.ts`,
