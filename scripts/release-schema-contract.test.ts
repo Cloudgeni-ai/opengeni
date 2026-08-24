@@ -164,6 +164,8 @@ describe("release schema contract", () => {
       "0328_session_background_commands.sql",
       "0329_slack_orchestration_delivery_events.sql",
       "0330_api_key_descriptions.sql",
+      "0331_managed_organization_creation.sql",
+      "0332_organization_shared_workspace_control_plane.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
