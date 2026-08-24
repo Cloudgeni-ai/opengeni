@@ -648,6 +648,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
+        ...(activeSandboxBackend === "selfhosted" && sandboxState.machinePrimarySession
+          ? { sandboxWorkspaceRoot: sandboxState.machinePrimarySession.workspaceRoot }
+          : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,

@@ -43,6 +43,7 @@ import {
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
+  ActiveBackendUnresolvableError,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
@@ -52,6 +53,7 @@ import {
   RoutingBackendRecoveryRequiredError,
   RoutingSandboxSession,
   resolveModalCheckpointProviderBindingForSession,
+  resolveConnectedMachineWorkspaceRoot,
   sandboxProviderInstanceIdFromEnvelope,
   sandboxBackendForSdkBackendId,
   selectBackend,
@@ -1192,6 +1194,8 @@ export type SelfhostedTurnSessionArgs = {
   transientExecEnvironment?: () => Readonly<Record<string, string>>;
   /** The session working directory (per-session pointer). Null ⇒ workspace_root. */
   workingDir: string | null;
+  /** Effective absolute host-native root frozen for this attempt. */
+  workspaceRoot: string;
   /** Present only for a user-owned machine. Every provider operation rechecks
    * this frozen accepted-attempt authority immediately before dispatch. */
   personalMachineAttempt?: NonNullable<RoutingWiringIds["personalMachineAttempt"]> & {
@@ -1248,6 +1252,7 @@ function connectionBindingFor(
   return {
     workspaceId: enrollment.workspaceId,
     connectionInstanceId: enrollment.connectionInstanceId,
+    workspaceRoot: enrollment.workspaceRoot,
     ...(opStream !== undefined ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
@@ -1307,6 +1312,7 @@ export async function establishSelfhostedTurnSession(
       : {}),
     agentId: args.agentId,
     connectionInstanceId: args.connectionInstanceId,
+    workspaceRoot: args.workspaceRoot,
     relay: relayConfigFromSettings(settings),
     controlRpcFactory: controlRpcFactory(bus),
     epoch: args.epoch,
@@ -1314,7 +1320,6 @@ export async function establishSelfhostedTurnSession(
     ...(args.transientExecEnvironment !== undefined
       ? { transientExecEnvironment: args.transientExecEnvironment }
       : {}),
-    workingDir: args.workingDir,
     // Give this turn's exec ops the long deadline (control ops stay short) so a real
     // command is not killed at the control wall.
     timeoutMs,
@@ -1340,7 +1345,18 @@ export async function establishSelfhostedTurnSession(
             args.controlWorkspaceId ?? args.workspaceId,
             args.agentId,
           );
-      return connectionBindingFor(services, enrollment);
+      const binding = connectionBindingFor(services, enrollment);
+      if (!binding) return null;
+      if (!binding.workspaceRoot) {
+        throw new ActiveBackendUnresolvableError(
+          "workspace_root_unavailable",
+          "Connected Machine no longer has a reported workspace root",
+        );
+      }
+      return {
+        ...binding,
+        workspaceRoot: resolveConnectedMachineWorkspaceRoot(binding.workspaceRoot, args.workingDir),
+      };
     },
     ...(args.backgroundCommandAttempt
       ? {

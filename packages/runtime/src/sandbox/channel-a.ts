@@ -365,7 +365,6 @@ const PORTABLE_DESCRIPTOR_FUNCTIONS = [
 ].join("\n");
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
-const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
 
 /**
  * Preserve Promise.all's ordered values and failure propagation without
@@ -2521,12 +2520,6 @@ export class SandboxChannelAService {
   }
 
   private terminalWorkdir(cwd: string): string | undefined {
-    // Model-facing terminal tools may send the manifest-rooted virtual frame.
-    // Preserve it for sessions like selfhosted whose own adapter maps it onto
-    // the real machine working dir; repo-relative dock fs/git still use repoWorkdir.
-    if (cwd === SELFHOSTED_VIRTUAL_ROOT || cwd.startsWith(`${SELFHOSTED_VIRTUAL_ROOT}/`)) {
-      return cwd;
-    }
     return this.repoWorkdir(cwd);
   }
 

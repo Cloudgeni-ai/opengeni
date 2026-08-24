@@ -1582,6 +1582,9 @@ export type BuildAgentOptions = {
   // unchanged and a session whose HOME backend is "selfhosted" is gated with no
   // caller change.
   activeSandboxBackend?: Settings["sandboxBackend"];
+  /** Exact host-native root for an active Connected Machine. Required when the
+   * effective backend is selfhosted so the model sees the real filesystem. */
+  sandboxWorkspaceRoot?: string;
   fileResourceDownloads?: SandboxFileDownload[];
   mcpServers?: MCPServer[];
   /** Exact prepared tool authority used to admit tool-bound native Skills. */
@@ -2294,6 +2297,9 @@ export function buildOpenGeniAgent(
     videoGeneration:
       Boolean(options.videoGeneration) && options.activeSandboxBackend !== "selfhosted",
   });
+  if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
+    throw new Error("A Connected Machine agent requires its reported workspace root");
+  }
   const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
@@ -2302,6 +2308,12 @@ export function buildOpenGeniAgent(
       resources,
       options.sandboxEnvironment,
       options.fileResourceDownloads,
+      options.activeSandboxBackend === "selfhosted"
+        ? {
+            root: options.sandboxWorkspaceRoot!,
+            includeResourceEntries: false,
+          }
+        : undefined,
     ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
@@ -7435,6 +7447,7 @@ export function buildManifest(
   resources: ResourceRef[],
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
+  options: { root?: string; includeResourceEntries?: boolean } = {},
 ): Manifest {
   assertUniqueResourceMountPaths(resources);
   const entries: Record<string, any> = {};
@@ -7444,7 +7457,7 @@ export function buildManifest(
       download,
     ]),
   );
-  for (const resource of resources) {
+  for (const resource of options.includeResourceEntries === false ? [] : resources) {
     if (resource.kind === "repository") {
       const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
@@ -7472,7 +7485,7 @@ export function buildManifest(
   // sandbox-safe in-memory or staged local-dir sources, so no host path grant
   // is required here.
   return new Manifest({
-    root: "/workspace",
+    root: options.root ?? "/workspace",
     entries,
     environment,
   });
@@ -7491,9 +7504,9 @@ export function repositoryWorkspaceSkillPathsOption(resources: readonly Resource
   const add = (path: string, source: string): void => {
     if (!paths.has(path)) paths.set(path, { path, source });
   };
-  // A Connected Machine maps /workspace to its configured working directory,
-  // which may itself be the selected repository. Managed sandboxes normally use
-  // the repository mount paths below. Checking both keeps the rule portable.
+  // A Connected Machine starts in its truthful host-native root, which may
+  // itself be the selected repository. Managed sandboxes normally use the
+  // repository mount paths below. Checking both keeps the rule portable.
   add(".agents/skills", "workspace .agents/skills");
   add(".claude/skills", "workspace .claude/skills");
   for (const repository of repositories) {

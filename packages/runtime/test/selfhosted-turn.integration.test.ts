@@ -89,6 +89,7 @@ async function runPinnedToVmTurn(
   });
   const self = new SelfhostedSession({
     workspaceId: WS,
+    workspaceRoot: "/home/user/project",
     agentId: "enroll-1",
     connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: stream.controlRpc,
@@ -100,8 +101,11 @@ async function runPinnedToVmTurn(
   // The routing proxy: DEFAULT is the group box (createEditor-bearing), but the
   // pointer is PINNED to the selfhosted machine from turn start (epoch 1). Every
   // op the agent loop dispatches lands on the selfhosted backend.
+  const machinePrimary = opts.activeSandboxBackend === "selfhosted";
   const proxy = new RoutingSandboxSession({
-    defaultResolved: { session: groupSession as never, sandboxId: null, kind: "modal" },
+    defaultResolved: machinePrimary
+      ? { session: self as never, sandboxId: "sbx-self", kind: "selfhosted" }
+      : { session: groupSession as never, sandboxId: null, kind: "modal" },
     readPointer: async () => ({ activeSandboxId: "sbx-self", activeEpoch: 1 }),
     resolveActiveBackend: async () => ({
       session: self as never,
@@ -119,7 +123,14 @@ async function runPinnedToVmTurn(
           codemodeTokenSessionId: "session-selfhosted",
         }
       : {}),
-    ...(opts.activeSandboxBackend ? { activeSandboxBackend: opts.activeSandboxBackend } : {}),
+    ...(opts.activeSandboxBackend
+      ? {
+          activeSandboxBackend: opts.activeSandboxBackend,
+          ...(opts.activeSandboxBackend === "selfhosted"
+            ? { sandboxWorkspaceRoot: self.workspaceRoot }
+            : {}),
+        }
+      : {}),
   });
   const result = await runAgentStream(agent, "run echo on the vm", settings, {
     ownedSandbox: { client: client as never, session: proxy as never },
@@ -218,6 +229,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     });
     const self = new SelfhostedSession({
       workspaceId: WS,
+      workspaceRoot: "/home/user/project",
       agentId: "enroll-1",
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: stream.controlRpc,
@@ -244,6 +256,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // (which run it through the SDK manager); here we pin the load-bearing property.
     const self = new SelfhostedSession({
       workspaceId: WS,
+      workspaceRoot: "/home/user/project",
       agentId: "enroll-1",
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
@@ -255,6 +268,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // The negotiation/test path (no env) still yields a defined object, never undefined.
     const bare = new SelfhostedSession({
       workspaceId: WS,
+      workspaceRoot: "/home/user/project",
       agentId: "enroll-1",
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
@@ -269,6 +283,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // editor (injected applyDiff + NATS writeFile) creates a file the machine then holds.
     const self = new SelfhostedSession({
       workspaceId: WS,
+      workspaceRoot: "/home/user/project",
       agentId: "enroll-1",
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: new MockAgentResponder(),
@@ -289,6 +304,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const mock = new MockAgentResponder();
     const self = new SelfhostedSession({
       workspaceId: WS,
+      workspaceRoot: "/home/user/project",
       agentId: "enroll-1",
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,
@@ -307,6 +323,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     const mock = new MockAgentResponder();
     const self = new SelfhostedSession({
       workspaceId: WS,
+      workspaceRoot: "/home/user/project",
       agentId: "enroll-1",
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: mock,

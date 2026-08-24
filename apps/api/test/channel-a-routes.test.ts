@@ -13,6 +13,7 @@ import {
   ChannelAUnavailableError,
   ChannelAValidationError,
   BrowserControlTransportError,
+  RoutingWorkspaceRootChangedError,
 } from "@opengeni/runtime/sandbox";
 import {
   channelAOperationFailureDiagnostic,
@@ -269,6 +270,16 @@ describe("P4.4 Channel-A route discipline", () => {
       );
       expect(mapped).toMatchObject({ code: "conflict", retryable: true });
     }
+
+    const rootChanged = new RoutingWorkspaceRootChangedError("/workspace", "/srv/project");
+    expect(channelAOperationFailureDiagnostic(rootChanged)).toEqual({
+      reason: "lifecycle_conflict",
+      status: 409,
+      errorCode: "sandbox_channel_a_lifecycle_conflict",
+    });
+    const mapped = mapChannelAError(rootChanged);
+    expect(mapped).toBeInstanceOf(HTTPException);
+    expect(mapped).toMatchObject({ status: 409, code: "conflict", retryable: true });
   });
 
   test("an unrelated provider AbortError is not misreported as a client cancellation", () => {

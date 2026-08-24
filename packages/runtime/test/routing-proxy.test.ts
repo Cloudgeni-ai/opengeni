@@ -24,6 +24,7 @@ import {
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
+  RoutingWorkspaceRootChangedError,
   RoutingUnsupportedError,
   makeActiveBackendResolver,
   ActiveBackendUnresolvableError,
@@ -45,6 +46,7 @@ const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const connectionInstanceId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const resolveSelfhostedConnection = async () => ({
   connectionInstanceId,
+  workspaceRoot: "/home/user/project",
   operationResourcePolicy: {
     memoryMaxBytes: null,
     memoryHighBytes: null,
@@ -998,7 +1000,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
 
     expect(await proxy.fileSystemRoot()).toBe("/workspace");
     kind = "selfhosted";
-    expect(await proxy.fileSystemRoot()).toBe("/");
+    expect(await proxy.fileSystemRoot()).toBe(".");
     expect(operations).toBe(0);
   });
 
@@ -1542,6 +1544,42 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(selfhosted.calls).toEqual(["c"]);
   });
 
+  test("a mid-attempt route with a different workspace root stops before dispatch", async () => {
+    const ptr = mutablePointer();
+    const oldCalls: string[] = [];
+    const newCalls: string[] = [];
+    const oldBackend: RoutableBackendSession = {
+      state: { manifest: { root: "/workspace" } },
+      exec: async () => {
+        oldCalls.push("exec");
+        return { stdout: "old", exitCode: 0 };
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      state: { manifest: { root: "/home/user/project" } },
+      exec: async () => {
+        newCalls.push("exec");
+        return { stdout: "new", exitCode: 0 };
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: oldBackend, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: async (pointer) =>
+        pointer.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "selfhosted" },
+    });
+
+    await expect(proxy.exec({ cmd: "before" })).resolves.toMatchObject({ stdout: "old" });
+    ptr.swap("machine");
+    await expect(proxy.exec({ cmd: "after" })).rejects.toBeInstanceOf(
+      RoutingWorkspaceRootChangedError,
+    );
+    expect(oldCalls).toEqual(["exec"]);
+    expect(newCalls).toEqual([]);
+  });
+
   test("(2) stale-epoch in-flight read: the backend fences a stale epoch -> the proxy retries against the new active sandbox", async () => {
     // The default (modal) box fences any op while the pointer is still at epoch 0
     // (simulating an in-flight op the active_epoch bumped under). After a swap to
@@ -1881,7 +1919,7 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
       }
     ).state.manifest;
     expect(await manifest.resolveEnvironment()).toEqual(env);
-    expect(manifest.root).toBe("/workspace");
+    expect(manifest.root).toBe("/home/user/project");
   });
 
   test("the resolver threads renewed transient values only into selfhosted exec", async () => {
