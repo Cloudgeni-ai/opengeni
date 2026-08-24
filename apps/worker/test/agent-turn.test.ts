@@ -3008,6 +3008,27 @@ describe("lazy sandbox provisioner single-flight", () => {
     );
   });
 
+  test("lazy tool readiness installs its rejection handler before publishing the promise", async () => {
+    const toolsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
+    ).text();
+    const readinessAt = toolsSource.indexOf(
+      "const toolPreparationReady = eventing.preparedTools.ready.then",
+    );
+    const handledAt = toolsSource.indexOf(
+      "void toolPreparationReady.catch(() => undefined)",
+      readinessAt,
+    );
+    const publishedAt = toolsSource.indexOf(
+      "eventing.toolPreparationReady = toolPreparationReady",
+      handledAt,
+    );
+
+    expect(readinessAt).toBeGreaterThan(-1);
+    expect(handledAt).toBeGreaterThan(readinessAt);
+    expect(publishedAt).toBeGreaterThan(handledAt);
+  });
+
   test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({
