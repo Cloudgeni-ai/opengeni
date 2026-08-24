@@ -1,9 +1,7 @@
-//! Legacy-op adapters: the monolithic request/reply ops served OVER the op
-//! engine (ENGINE-INTEGRATION.md §Supervisor rework).
+//! Request/reply Git adapter served over the op engine
+//! (ENGINE-INTEGRATION.md §Supervisor rework).
 //!
-//! The wire shape is unchanged forever (compatibility contract): one
-//! `ControlRequest{exec}` in, one assembled `ControlResponse` out. Underneath,
-//! the command now runs as an engine job — same registry (duplicate request
+//! The command runs as an engine job — same registry (duplicate request
 //! ids attach to the stashed reply instead of re-running), same containment,
 //! same retention/credit plumbing — with a BUFFERING consumer in place of a
 //! remote one: the emit hook assembles the reply and self-acks cumulatively so
@@ -19,7 +17,6 @@
 
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 use opengeni_agent_engine::admission::JobClass;
 use opengeni_agent_engine::registry::QueryAnswer;
@@ -73,148 +70,6 @@ impl Drop for CancelOnDrop {
 /// to a legacy job (its op id never reaches the op-stream surface), so a
 /// constant generation is correct.
 const LOCAL_GENERATION: u64 = 1;
-
-/// Serves a legacy `exec` request over the op engine and returns the assembled
-/// wire reply. Admission, idempotent begin, containment, deadline enforcement
-/// (`timeout_ms` — caller-owned, rule C), and typed failures all ride the
-/// engine; the reply is byte-compatible with the pre-engine implementation.
-#[cfg(test)]
-pub async fn serve_exec<P: Platform>(
-    engine: &Arc<Engine>,
-    platform: &Arc<P>,
-    request_id: String,
-    req: v1::ExecRequest,
-) -> ControlResponse {
-    serve_exec_scoped(engine, platform, "default", request_id, req).await
-}
-
-/// Multi-connection form of [`serve_exec`].
-#[cfg(test)]
-pub async fn serve_exec_scoped<P: Platform>(
-    engine: &Arc<Engine>,
-    platform: &Arc<P>,
-    scope: &str,
-    request_id: String,
-    req: v1::ExecRequest,
-) -> ControlResponse {
-    serve_exec_scoped_with_policy(engine, platform, scope, request_id, req, None).await
-}
-
-/// Policy-aware legacy exec adapter. A configured policy is enforced by the
-/// same containment primitive as op-stream; older request/reply semantics change
-/// neither operation identity nor output assembly.
-pub async fn serve_exec_scoped_with_policy<P: Platform>(
-    engine: &Arc<Engine>,
-    platform: &Arc<P>,
-    scope: &str,
-    request_id: String,
-    mut req: v1::ExecRequest,
-    resource_policy: Option<v1::OperationResourcePolicy>,
-) -> ControlResponse {
-    crate::codemode::expose_native_client(&mut req);
-    let op_id = scoped_op_id(scope, &request_id);
-    let origin = scoped_origin(scope, LEGACY_ORIGIN);
-    let ticket = match engine.admit(&op_id, JobClass::Heavy, &origin).await {
-        Ok(ticket) => ticket,
-        Err(reason) => return crate::dispatch::breaker_reply_error(request_id, "exec", reason),
-    };
-
-    let breaker = engine.budgets().legacy_buffer_max_bytes;
-    let buffers = Arc::new(Mutex::new(ReplyBuffers::default()));
-    // The emit hook needs the job's own mailbox for self-acks, but the mailbox
-    // only exists once the job starts — a cell closes the loop. No frame can
-    // be emitted before the Attach we send after filling it.
-    let mailbox_cell: Arc<OnceLock<tokio::sync::mpsc::Sender<JobCommand>>> =
-        Arc::new(OnceLock::new());
-    let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
-    let emit = buffering_emit(buffers.clone(), mailbox_cell.clone(), breaker);
-
-    // The caller's deadline (rule C) starts at execution, not while queued.
-    let deadline = (req.timeout_ms > 0)
-        .then(|| tokio::time::Instant::now() + Duration::from_millis(u64::from(req.timeout_ms)));
-    let stdin = req.stdin.to_vec();
-
-    let outcome = engine.start_job(
-        &op_id,
-        ticket,
-        stdin,
-        deadline,
-        || platform.spawn_exec_with_policy(&req, resource_policy.as_ref()),
-        emit,
-        // The legacy consumer never replays the Exit frame; its record flows
-        // through the on_exit oneshot. An empty retained payload is enough.
-        |_exit| Vec::new(),
-        move |_exit_seq, exit: &JobExit| {
-            let _ = exit_tx.send(exit.clone());
-        },
-    );
-
-    match outcome {
-        StartOutcome::Started(started) => {
-            let mut guard = CancelOnDrop::new(engine.clone(), op_id);
-            let _ = mailbox_cell.set(started.mailbox.clone());
-            let _ = started
-                .mailbox
-                .send(JobCommand::Attach {
-                    generation: LOCAL_GENERATION,
-                    from_seq: 0,
-                    window_bytes: breaker,
-                })
-                .await;
-
-            let Ok(record) = exit_rx.await else {
-                // The pump task died without a terminal record — a runner bug,
-                // reported typed rather than a caller timeout.
-                guard.disarm();
-                return error_reply(
-                    request_id,
-                    ErrorCode::Os,
-                    "the exec job ended without producing a terminal record",
-                    false,
-                );
-            };
-            guard.disarm();
-
-            // Release the job for fast GC: local consumption IS the final ack.
-            let acked = started.handles.watermark.load(Ordering::Relaxed);
-            let _ = started
-                .mailbox
-                .send(JobCommand::Ack {
-                    generation: LOCAL_GENERATION,
-                    acked_seq: acked,
-                    credit_bytes: breaker,
-                    final_ack: true,
-                })
-                .await;
-
-            let taken = std::mem::take(&mut *buffers.lock().expect("reply buffer lock"));
-            let response = build_reply(request_id, &record, taken, breaker);
-            // Stash the encoded reply so a duplicate delivery of the same
-            // request id answers from here instead of re-running (bounded by
-            // registry GC — ruling M6).
-            let _ = started.handles.legacy_reply.set(response.encode_to_vec());
-            response
-        }
-        StartOutcome::SpawnFailed { error, handles } => {
-            let response = ControlResponse {
-                request_id,
-                error: Some(error.to_agent_error()),
-                result: None,
-            };
-            let _ = handles.legacy_reply.set(response.encode_to_vec());
-            response
-        }
-        StartOutcome::Known { answer, handles } => {
-            duplicate_reply(request_id, answer, handles.as_ref())
-        }
-        StartOutcome::BornCancelled => error_reply(
-            request_id,
-            ErrorCode::Os,
-            "the op was cancelled before it began (cancel tombstone)",
-            false,
-        ),
-    }
-}
 
 /// Serves a legacy `git` request over the op engine — same wire shape as the
 /// pre-engine implementation (porcelain status parse included via the shared
@@ -445,53 +300,6 @@ fn duplicate_reply(
     }
 }
 
-/// Assembles the wire reply from the terminal record + captured output —
-/// byte-compatible with the pre-engine exec (timeouts discard output and
-/// report `stderr = "timed out"`, exactly as before).
-fn build_reply(
-    request_id: String,
-    exit: &JobExit,
-    buffers: ReplyBuffers,
-    breaker: u64,
-) -> ControlResponse {
-    match &exit.outcome {
-        JobOutcome::Exited { exit_code } => {
-            if buffers.overflowed {
-                return overflow_reply(request_id, buffers.total_bytes, breaker);
-            }
-            ControlResponse {
-                request_id,
-                error: None,
-                result: Some(RespResult::Exec(v1::ExecResponse {
-                    exit_code: *exit_code,
-                    stdout: prost::bytes::Bytes::from(buffers.stdout),
-                    stderr: prost::bytes::Bytes::from(buffers.stderr),
-                    timed_out: false,
-                    duration_ms: exit.duration_ms,
-                })),
-            }
-        }
-        JobOutcome::TimedOut => ControlResponse {
-            request_id,
-            error: None,
-            result: Some(RespResult::Exec(v1::ExecResponse {
-                exit_code: -1,
-                stdout: prost::bytes::Bytes::new(),
-                stderr: prost::bytes::Bytes::from_static(b"timed out"),
-                timed_out: true,
-                duration_ms: exit.duration_ms,
-            })),
-        },
-        JobOutcome::Cancelled => error_reply(
-            request_id,
-            ErrorCode::Os,
-            "the command was cancelled before completion",
-            false,
-        ),
-        JobOutcome::Failed(failure) => failed_reply(request_id, exit, failure),
-    }
-}
-
 /// The typed oversize error for output past the reply-assembly breaker. The
 /// four in-band fields (FAILURE-VISIBILITY.md): what happened, what was
 /// preserved, whose fault, what to try.
@@ -634,109 +442,6 @@ mod tests {
         Arc::new(NativePlatform::with_root(std::env::temp_dir()))
     }
 
-    fn exec_req(command: &[&str], shell: bool) -> v1::ExecRequest {
-        v1::ExecRequest {
-            command: command.iter().map(ToString::to_string).collect(),
-            shell,
-            ..Default::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_round_trips_output_and_exit_code() {
-        let (engine, _dir) = test_engine();
-        let platform = native();
-        let req = exec_req(&["printf hi; printf err >&2; exit 3"], true);
-        let resp = serve_exec(&engine, &platform, "r-1".to_string(), req).await;
-        assert_eq!(resp.request_id, "r-1");
-        assert!(resp.error.is_none(), "clean run: {:?}", resp.error);
-        match resp.result {
-            Some(RespResult::Exec(e)) => {
-                assert_eq!(e.exit_code, 3);
-                assert_eq!(&e.stdout[..], b"hi");
-                assert_eq!(&e.stderr[..], b"err");
-                assert!(!e.timed_out);
-            }
-            other => panic!("expected Exec result, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_stdin_is_fed() {
-        let (engine, _dir) = test_engine();
-        let platform = native();
-        let mut req = exec_req(&["cat"], true);
-        req.stdin = prost::bytes::Bytes::from_static(b"fed-bytes");
-        let resp = serve_exec(&engine, &platform, "r-stdin".to_string(), req).await;
-        match resp.result {
-            Some(RespResult::Exec(e)) => assert_eq!(&e.stdout[..], b"fed-bytes"),
-            other => panic!("expected Exec result, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_timeout_matches_the_legacy_shape() {
-        let (engine, _dir) = test_engine();
-        let platform = native();
-        let mut req = exec_req(&["printf early; sleep 30"], true);
-        req.timeout_ms = 300;
-        let resp = serve_exec(&engine, &platform, "r-timeout".to_string(), req).await;
-        match resp.result {
-            Some(RespResult::Exec(e)) => {
-                // The legacy contract: a timeout DISCARDS captured output and
-                // reports the sentinel stderr.
-                assert_eq!(e.exit_code, -1);
-                assert!(e.timed_out);
-                assert!(e.stdout.is_empty());
-                assert_eq!(&e.stderr[..], b"timed out");
-            }
-            other => panic!("expected Exec result, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn exec_spawn_failure_maps_to_the_typed_platform_error() {
-        let (engine, _dir) = test_engine();
-        let platform = native();
-        // Non-shell exec of a program that does not exist.
-        let req = exec_req(&["/nonexistent/definitely-not-a-program"], false);
-        let resp = serve_exec(&engine, &platform, "r-nf".to_string(), req).await;
-        let err = resp.error.expect("typed spawn error");
-        assert_eq!(err.code, ErrorCode::NotFound as i32, "{err:?}");
-    }
-
-    #[tokio::test]
-    async fn duplicate_request_id_replays_the_settled_reply_without_rerunning() {
-        let (engine, _dir) = test_engine();
-        let platform = native();
-        let dir = tempfile::tempdir().expect("tempdir");
-        let marker = dir.path().join("ran");
-        let script = format!("echo x >> {}; printf done", marker.display());
-
-        let first = serve_exec(
-            &engine,
-            &platform,
-            "r-dup".to_string(),
-            exec_req(&[script.as_str()], true),
-        )
-        .await;
-        assert!(first.error.is_none());
-
-        let second = serve_exec(
-            &engine,
-            &platform,
-            "r-dup".to_string(),
-            exec_req(&[script.as_str()], true),
-        )
-        .await;
-        assert_eq!(
-            first, second,
-            "a duplicate request id replays the stashed reply"
-        );
-        let runs = std::fs::read_to_string(&marker).expect("marker written");
-        assert_eq!(runs.lines().count(), 1, "the command ran exactly once");
-    }
-
     /// Whether a usable `git` exists on this host (tests skip cleanly if not).
     fn git_available() -> bool {
         std::process::Command::new("git")
@@ -800,59 +505,6 @@ mod tests {
             }
             other => panic!("expected Git result, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn aborting_the_adapter_cancels_the_legacy_child() {
-        // Legacy ops are generation-scoped: a JoinSet abort at generation end
-        // must kill the in-flight child (the pre-engine semantics). The
-        // engine's routing map keeps the pump mailbox alive, so the adapter's
-        // cancel-on-drop guard is what carries this — pinned here (found live
-        // by the chaos-nats harness scenario after the engine rework).
-        let (engine, _dir) = test_engine();
-        let platform = native();
-        let op_id = scoped_op_id("default", "r-abort");
-        let engine2 = engine.clone();
-        let platform2 = platform.clone();
-        let task = tokio::spawn(async move {
-            serve_exec(
-                &engine2,
-                &platform2,
-                "r-abort".to_string(),
-                exec_req(&["sleep 30"], true),
-            )
-            .await
-        });
-        // Wait until the job is running, then abort the adapter (the
-        // generation-end JoinSet shutdown).
-        for _ in 0..200 {
-            if matches!(
-                engine.query(&op_id),
-                opengeni_agent_engine::registry::QueryAnswer::Running { .. }
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        task.abort();
-        let _ = task.await;
-
-        // The guard fires: the op settles as a typed cancelled terminal.
-        let mut settled = false;
-        for _ in 0..500 {
-            if let Some(handles) = engine.handles(&op_id) {
-                if handles
-                    .exit
-                    .get()
-                    .is_some_and(|e| e.outcome == JobOutcome::Cancelled)
-                {
-                    settled = true;
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(settled, "an aborted adapter must cancel its child (typed)");
     }
 
     #[test]

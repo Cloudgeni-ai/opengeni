@@ -56,7 +56,11 @@ import {
 } from "./retry-policy";
 import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observer";
 import { selfhostedFaultClass } from "./fault-rendering";
-import { nextDurableOpId } from "../op-correlation";
+import {
+  nextDurableOpId,
+  notifyDurableOpOwnershipTransferStarted,
+  notifyDurableOpOwnershipTransferred,
+} from "../op-correlation";
 import { OpStreamExecClient, type OpStreamJournal } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 
@@ -222,6 +226,8 @@ const SELFHOSTED_EXEC_REPLY_GRACE_MS = 5_000;
 /** nats.js ultimately schedules a JS timer; stay inside the signed 32-bit timer
  *  range while also fitting the reply grace. */
 const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRACE_MS;
+const SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS = 10_000;
+const SELFHOSTED_BACKGROUND_MAX_YIELD_MS = 30_000;
 
 function normalizeOperationResourcePolicy(
   policy: SelfhostedOperationResourcePolicy | undefined,
@@ -298,6 +304,14 @@ export interface SelfhostedOperationResourcePolicy {
   cpuMaxMillicores?: number | null;
 }
 
+export interface SelfhostedBackgroundCommandAdoption {
+  controlWorkspaceId: string;
+  enrollmentId: string;
+  connectionInstanceId: string;
+  opId: string;
+  command: string;
+}
+
 /** Exact command-admission snapshot. A worker resolves this immediately before
  * every exec/Git admission; retries and already-started operations retain it. */
 export interface SelfhostedOperationAdmission {
@@ -325,9 +339,8 @@ export interface SelfhostedSessionDeps {
    * workspace-owned routes. */
   controlWorkspaceId?: string;
   agentId: string;
-  /** Exact live daemon process claimed for this enrollment. Production builders
-   *  require it; direct transport tests may omit it for the legacy subject shape. */
-  connectionInstanceId?: string;
+  /** Exact live daemon process claimed for this enrollment. */
+  connectionInstanceId: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
   /** Stable identity for the session's interactive terminal. Repeated stream
@@ -341,7 +354,7 @@ export interface SelfhostedSessionDeps {
    *  ControlRequest so the agent can reject a stale op with ERROR_CODE_FENCED).
    *  Defaults to 0 (no fence) for the negotiation-only / test path. */
   epoch?: number;
-  /** The CONTROL-op timeout (ping/fs/desktop/pty and the exec wire fallback). The
+  /** The CONTROL-op timeout (ping/fs/desktop/pty and op-stream control RPCs). The
    *  agent's own control liveness must stay responsive, so this is short (the 30s
    *  default). Override for tests or per-deployment tuning. */
   timeoutMs?: number;
@@ -349,7 +362,7 @@ export interface SelfhostedSessionDeps {
    * The EXEC process deadline — distinct from `timeoutMs`. A real command
    * (compile, test run, install) routinely outlives the short control timeout, so
    * a positive value asks the agent to kill the child at that wall; 0 means no
-   * duration deadline over op-stream. Omitted preserves the legacy `timeoutMs`
+   * duration deadline over op-stream. Omitted preserves the `timeoutMs` value
    * fallback for older embedding callers; production settings always thread this
    * field explicitly.
    */
@@ -365,6 +378,23 @@ export interface SelfhostedSessionDeps {
    * connection identity, policy revision, capabilities, op-stream state, and
    * any caller-owned live authority from one authoritative snapshot. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
+  /** Durable session ownership transfer for model-facing exec that outlives its
+   * bounded wait. Omitted for one-off/Channel-A callers, which remain terminal. */
+  adoptBackgroundCommand?: (
+    input: SelfhostedBackgroundCommandAdoption,
+  ) => Promise<{ commandId: string }>;
+  /** Best-effort fast settlement for the race where an adopted op exits while
+   * the adoption transaction is committing. The reconciler remains authority. */
+  settleBackgroundCommand?: (input: {
+    commandId: string;
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+    outcome: "exited" | "lost";
+    exitCode: number | null;
+    reason: string;
+  }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
   retryClock?: SelfhostedRetryClock;
@@ -413,6 +443,9 @@ export interface SelfhostedExecResult {
    *  Channel-A superset (consumers that don't read it are unaffected); `exec()`
    *  places the deadline hint on stderr so Channel-A stdout stays byte-exact. */
   timedOut?: boolean;
+  /** Present only for a model-facing command durably transferred to its session. */
+  backgroundCommandId?: string;
+  backgroundOpId?: string;
 }
 
 /** The `exec` args the structural surface accepts (mirrors ChannelAExecArgs). */
@@ -422,6 +455,8 @@ export interface SelfhostedExecArgs {
   shell?: string | undefined;
   login?: boolean | undefined;
   tty?: boolean | undefined;
+  yieldTimeMs?: number | undefined;
+  maxOutputTokens?: number | undefined;
   runAs?: string | undefined;
 }
 
@@ -467,9 +502,15 @@ export class SelfhostedSession {
   private readonly resourcePolicySupported: boolean;
   private readonly operationCpuQuotaSupported: boolean;
   private readonly defaultOpStream: SelfhostedOpStreamDeps | undefined;
-  private readonly connectionInstanceId: string | undefined;
+  private readonly connectionInstanceId: string;
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
+    | undefined;
+  private readonly adoptBackgroundCommand:
+    | SelfhostedSessionDeps["adoptBackgroundCommand"]
+    | undefined;
+  private readonly settleBackgroundCommand:
+    | SelfhostedSessionDeps["settleBackgroundCommand"]
     | undefined;
 
   /**
@@ -527,12 +568,15 @@ export class SelfhostedSession {
     this.defaultOpStream = deps.opStream;
     this.connectionInstanceId = deps.connectionInstanceId;
     this.resolveOperationAdmission = deps.resolveOperationAdmission;
+    this.adoptBackgroundCommand = deps.adoptBackgroundCommand;
+    this.settleBackgroundCommand = deps.settleBackgroundCommand;
     // A pre-admission tombstone is safe only for a static connection. Dynamic
     // sessions must never route an unknown op id through their constructor's
     // potentially stale connection after a reconnect.
     this.defaultOpStreamClient =
       deps.opStream && !deps.resolveOperationAdmission
         ? this.opStreamClientFor({
+            controlWorkspaceId: this.controlWorkspaceId,
             connectionInstanceId: deps.connectionInstanceId,
             subject: this.subject,
             resourcePolicy: this.resourcePolicy,
@@ -609,7 +653,8 @@ export class SelfhostedSession {
   }
 
   private async admitOperation(commandPolicy: boolean): Promise<{
-    connectionInstanceId: string | undefined;
+    controlWorkspaceId: string;
+    connectionInstanceId: string;
     subject: string;
     resourcePolicy: OperationResourcePolicy | undefined;
     opStream: SelfhostedOpStreamDeps | undefined;
@@ -623,6 +668,7 @@ export class SelfhostedSession {
         );
       }
       return {
+        controlWorkspaceId: this.controlWorkspaceId,
         connectionInstanceId: this.connectionInstanceId,
         subject: this.subject,
         resourcePolicy: commandPolicy ? this.resourcePolicy : undefined,
@@ -649,6 +695,7 @@ export class SelfhostedSession {
       );
     }
     return {
+      controlWorkspaceId: resolved.workspaceId ?? this.controlWorkspaceId,
       connectionInstanceId: resolved.connectionInstanceId,
       subject: subjectFor(
         resolved.workspaceId ?? this.controlWorkspaceId,
@@ -698,7 +745,8 @@ export class SelfhostedSession {
     const stream = admission.opStream;
     if (!stream) return undefined;
     const key = JSON.stringify([
-      admission.connectionInstanceId ?? null,
+      admission.controlWorkspaceId,
+      admission.connectionInstanceId,
       admission.resourcePolicy?.memoryMaxBytes ?? null,
       admission.resourcePolicy?.memoryHighBytes ?? null,
       admission.resourcePolicy?.cpuMaxMillicores ?? null,
@@ -706,11 +754,9 @@ export class SelfhostedSession {
     const existing = this.opStreamClients.get(key);
     if (existing) return existing;
     const client = new OpStreamExecClient({
-      workspaceId: this.workspaceId,
+      workspaceId: admission.controlWorkspaceId,
       agentId: this.agentId,
-      ...(admission.connectionInstanceId !== undefined
-        ? { connectionInstanceId: admission.connectionInstanceId }
-        : {}),
+      connectionInstanceId: admission.connectionInstanceId,
       epoch: this.epoch,
       controlRpc: this.controlRpc,
       rpcSubject: admission.subject,
@@ -762,17 +808,16 @@ export class SelfhostedSession {
     const opKind = op.$case;
     // This is the last shared boundary before every request/reply provider
     // operation. Even a cached routed or pinned session must re-resolve its live
-    // authority here; an already-admitted exec/Git threads its exact snapshot so
-    // the op-stream and legacy paths cannot disagree.
-    const commandOperation = opKind === "exec" || opKind === "git";
+    // authority here; an already-admitted Git operation threads its exact
+    // snapshot. Exec uses the op-stream client and never enters this helper.
+    const commandOperation = opKind === "git";
     let operationAdmission = admittedCommand ?? (await this.admitOperation(commandOperation));
     const startedAt = Date.now();
     let drainingRetries = 0;
     let timeoutRetries = 0;
     let neverSentRetries = 0;
     for (;;) {
-      const commandAdmission =
-        opKind === "exec" || opKind === "git" ? operationAdmission : undefined;
+      const commandAdmission = opKind === "git" ? operationAdmission : undefined;
       const resourcePolicy = commandAdmission?.resourcePolicy;
       const req: ControlRequest = {
         requestId: crypto.randomUUID(),
@@ -873,7 +918,7 @@ export class SelfhostedSession {
   get effectiveExecDeadlineMs(): number {
     // Production always threads the setting explicitly (default 0). Preserve the
     // short control timeout only for structural/test callers that omit the newer
-    // exec field entirely, so old embedding code keeps a safe bounded legacy path.
+    // exec field entirely, so those callers remain safely bounded.
     const configured = Math.trunc(this.execTimeoutMs ?? this.timeoutMs);
     if (configured <= 0) return 0;
     return Math.min(configured, SELFHOSTED_MAX_EXEC_TIMEOUT_MS);
@@ -881,6 +926,13 @@ export class SelfhostedSession {
 
   /** Channel-A `exec`: run a command on the machine and return its output. */
   async exec(args: SelfhostedExecArgs): Promise<SelfhostedExecResult> {
+    return await this.execInternal(args, false);
+  }
+
+  private async execInternal(
+    args: SelfhostedExecArgs,
+    allowBackground: boolean,
+  ): Promise<SelfhostedExecResult> {
     // Admission is the only mutable-policy read. Everything below retains this
     // exact connection/capability/policy-revision snapshot through completion.
     const admission = await this.admitCommand();
@@ -910,51 +962,29 @@ export class SelfhostedSession {
       timeoutMs: executionTimeoutMs,
     };
     const opStreamClient = this.opStreamClientFor(admission);
-    let legacyAdmission = admission;
-    if (opStreamClient) {
-      try {
-        return await this.execViaOpStream(opStreamClient, execReq, executionTimeoutMs);
-      } catch (error) {
-        // The transport had no live connection, or the runner refused the START
-        // itself (capability/downgrade race). The op provably never ran. A bounded
-        // command may use the legacy fallback; an unbounded command must not be
-        // launched onto a request/reply path that can stop waiting invisibly.
-        if (!(error instanceof OpStreamUnavailableError)) {
-          throw error;
-        }
-        if (executionTimeoutMs === 0) {
-          throw unboundedExecRequiresOpStream(error);
-        }
-        // A runner refusal or unavailable stream proves the START never
-        // executed, but time elapsed after the first admission. Re-read live
-        // authority at the final boundary before the distinct legacy provider
-        // dispatch. The ordinary no-op-stream path retains its single immediate
-        // admission below.
-        legacyAdmission = await this.admitCommand();
+    if (!opStreamClient) {
+      throw execRequiresOpStream();
+    }
+    try {
+      return await this.execViaOpStream(
+        opStreamClient,
+        admission,
+        execReq,
+        executionTimeoutMs,
+        allowBackground
+          ? Math.min(
+              SELFHOSTED_BACKGROUND_MAX_YIELD_MS,
+              Math.max(0, Math.trunc(args.yieldTimeMs ?? SELFHOSTED_BACKGROUND_DEFAULT_YIELD_MS)),
+            )
+          : 0,
+        args.cmd,
+      );
+    } catch (error) {
+      if (error instanceof OpStreamUnavailableError) {
+        throw execRequiresOpStream(error);
       }
+      throw error;
     }
-    if (executionTimeoutMs === 0) {
-      throw unboundedExecRequiresOpStream();
-    }
-    return this.execLegacy(execReq, executionTimeoutMs, legacyAdmission);
-  }
-
-  /** The legacy monolithic exec request/reply — the permanent fallback wire
-   *  form (and the only form for runners without `op_stream`). */
-  private async execLegacy(
-    execReq: ExecRequest,
-    executionTimeoutMs: number,
-    admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
-  ): Promise<SelfhostedExecResult> {
-    const result = await this.call(
-      { $case: "exec", exec: execReq },
-      executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS,
-      admission,
-    );
-    if (result.$case !== "exec") {
-      throw new Error(`selfhosted exec: unexpected result ${result.$case}`);
-    }
-    return execResultToChannelA(result.exec, executionTimeoutMs);
   }
 
   /**
@@ -962,25 +992,85 @@ export class SelfhostedSession {
    * op-stream.ts). The durable op id comes from the tool-call correlation
    * context (`{callId}:{ordinal}` — B1) when this exec runs inside an SDK tool
    * invocation; a non-tool caller falls back to a random unique id (never
-   * collides, merely not stable across a turn re-dispatch). Emits the SAME
-   * per-op observation the legacy path does, with `replyBytes` filled from the
-   * reassembled stream (the field the framed transport was designed to own).
+   * collides, merely not stable across a turn re-dispatch). Emits the standard
+   * per-op observation, with `replyBytes` filled from the reassembled stream
+   * (the field the framed transport was designed to own).
    */
   private async execViaOpStream(
     client: OpStreamExecClient,
+    admission: Awaited<ReturnType<SelfhostedSession["admitCommand"]>>,
     execReq: ExecRequest,
     executionTimeoutMs: number,
+    backgroundYieldMs: number,
+    command: string,
   ): Promise<SelfhostedExecResult> {
     const startedAt = Date.now();
     const opId = nextDurableOpId() ?? `anon_${crypto.randomUUID()}`;
+    let adoptedCommandId: string | null = null;
     this.inFlightOpStreamClients.set(opId, client);
     try {
-      const outcome = await client.exec(
-        opId,
-        execReq,
-        executionTimeoutMs,
-        executionTimeoutMs > 0 ? executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS : 0,
-      );
+      const wallMs =
+        executionTimeoutMs > 0 ? executionTimeoutMs + SELFHOSTED_EXEC_REPLY_GRACE_MS : 0;
+      const result =
+        backgroundYieldMs > 0 && this.adoptBackgroundCommand
+          ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
+              yieldMs: backgroundYieldMs,
+              onYield: async () => {
+                notifyDurableOpOwnershipTransferStarted(opId);
+                const adopted = await this.adoptBackgroundCommand!({
+                  controlWorkspaceId: admission.controlWorkspaceId,
+                  enrollmentId: this.agentId,
+                  connectionInstanceId: admission.connectionInstanceId,
+                  opId,
+                  command,
+                });
+                adoptedCommandId = adopted.commandId;
+                notifyDurableOpOwnershipTransferred(opId);
+              },
+            })
+          : {
+              status: "completed" as const,
+              outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
+            };
+      if (result.status === "running") {
+        const retries = result.heals + result.startRetries;
+        this.emitOp({
+          op: "exec",
+          outcome: "ok",
+          healed: retries > 0,
+          retries,
+          durationMs: Date.now() - startedAt,
+          machineId: this.agentId,
+          replyBytes: result.replyBytes,
+          ...(retries > 0 ? { faultClass: result.heals > 0 ? "reconnecting" : "draining" } : {}),
+        });
+        const stdout = decoder.decode(result.stdout);
+        const stderr = decoder.decode(result.stderr);
+        return {
+          output: stdout,
+          stdout,
+          stderr,
+          exitCode: null,
+          timedOut: false,
+          backgroundCommandId: adoptedCommandId!,
+          backgroundOpId: result.opId,
+        };
+      }
+      const outcome = result.outcome;
+      if (adoptedCommandId) {
+        await Promise.resolve(
+          this.settleBackgroundCommand?.({
+            commandId: adoptedCommandId,
+            controlWorkspaceId: admission.controlWorkspaceId,
+            enrollmentId: this.agentId,
+            connectionInstanceId: admission.connectionInstanceId,
+            opId,
+            outcome: "exited",
+            exitCode: outcome.response.exitCode,
+            reason: "op_exit",
+          }),
+        ).catch(() => undefined);
+      }
       const retries = outcome.heals + outcome.startRetries;
       this.emitOp({
         op: "exec",
@@ -996,11 +1086,7 @@ export class SelfhostedSession {
       });
       return execResultToChannelA(outcome.response, executionTimeoutMs);
     } catch (error) {
-      if (error instanceof OpStreamUnavailableError) {
-        // Not a fault: the caller falls back to the legacy exec, which emits
-        // its own observation.
-        throw error;
-      }
+      if (error instanceof OpStreamUnavailableError) throw error;
       const controlError =
         error instanceof SelfhostedControlError
           ? error
@@ -1057,7 +1143,15 @@ export class SelfhostedSession {
    *  deadline hint already lands on stderr there and is included in this body. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
-    const result = await this.exec(args);
+    const result = await this.execInternal(args, true);
+    if (result.backgroundCommandId && result.backgroundOpId) {
+      const output = joinExecCommandOutput(result.stdout, result.stderr);
+      return [
+        `Command running in background with command ID ${result.backgroundCommandId}.`,
+        `Connected Machine operation ${result.backgroundOpId} remains pinned to its launch daemon.`,
+        ...(output ? ["", "Output:", output] : []),
+      ].join("\n");
+    }
     const exitCode =
       typeof result.exitCode === "number" && Number.isSafeInteger(result.exitCode)
         ? result.exitCode
@@ -1608,6 +1702,12 @@ export class SelfhostedSandboxClient {
   private readonly resolveOperationAdmission:
     | (() => Promise<SelfhostedOperationAdmission | null>)
     | undefined;
+  private readonly adoptBackgroundCommand:
+    | SelfhostedSessionDeps["adoptBackgroundCommand"]
+    | undefined;
+  private readonly settleBackgroundCommand:
+    | SelfhostedSessionDeps["settleBackgroundCommand"]
+    | undefined;
   private readonly onOp: SelfhostedOpObserver | undefined;
   private readonly opStream: SelfhostedOpStreamDeps | undefined;
   private controlRpcMemo: ControlRpc | undefined;
@@ -1621,7 +1721,8 @@ export class SelfhostedSandboxClient {
     /** The agentId a bare create()/resume() (no state) binds to. Optional: the
      *  resume path supplies it via deserializeSessionState. */
     agentId?: string;
-    /** Exact live daemon process. Production builders always supply it. */
+    /** Exact live daemon process. Optional only for the inert registry client;
+     *  any live create()/resume() fails closed until one is bound. */
     connectionInstanceId?: string;
     /** Stable terminal identity (normally the durable OpenGeni session id). */
     terminalScopeId?: string;
@@ -1630,12 +1731,14 @@ export class SelfhostedSandboxClient {
     timeoutMs?: number;
     /** The exec process deadline threaded into every bound session (distinct from
      *  `timeoutMs`; 0 means no duration deadline, while omission preserves the
-     *  legacy control-timeout fallback for older embedding callers). */
+     *  historical control-timeout value fallback for embedding callers). */
     execTimeoutMs?: number;
     operationResourcePolicy?: SelfhostedOperationResourcePolicy;
     operationResourcePolicySupported?: boolean;
     operationCpuQuotaSupported?: boolean;
     resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
+    adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
+    settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
     /** The run's declared sandbox environment, threaded into every bound session's
      *  `state.manifest.environment` so the SDK's per-turn manifest-env delta is
      *  empty (validateNoEnvironmentDelta). See SelfhostedSessionDeps.environment.
@@ -1667,6 +1770,8 @@ export class SelfhostedSandboxClient {
     this.operationResourcePolicySupported = opts.operationResourcePolicySupported;
     this.operationCpuQuotaSupported = opts.operationCpuQuotaSupported;
     this.resolveOperationAdmission = opts.resolveOperationAdmission;
+    this.adoptBackgroundCommand = opts.adoptBackgroundCommand;
+    this.settleBackgroundCommand = opts.settleBackgroundCommand;
     this.environment = opts.environment;
     this.transientExecEnvironment = opts.transientExecEnvironment;
     this.workingDir = opts.workingDir;
@@ -1688,9 +1793,7 @@ export class SelfhostedSandboxClient {
         ? { controlWorkspaceId: this.controlWorkspaceId }
         : {}),
       agentId,
-      ...(this.connectionInstanceId !== undefined
-        ? { connectionInstanceId: this.connectionInstanceId }
-        : {}),
+      connectionInstanceId: this.requireConnectionInstanceId(),
       controlRpc: this.controlRpc(),
       relay: this.relay,
       ...(this.terminalScopeId !== undefined ? { terminalScopeId: this.terminalScopeId } : {}),
@@ -1710,6 +1813,12 @@ export class SelfhostedSandboxClient {
         : {}),
       ...(this.resolveOperationAdmission !== undefined
         ? { resolveOperationAdmission: this.resolveOperationAdmission }
+        : {}),
+      ...(this.adoptBackgroundCommand !== undefined
+        ? { adoptBackgroundCommand: this.adoptBackgroundCommand }
+        : {}),
+      ...(this.settleBackgroundCommand !== undefined
+        ? { settleBackgroundCommand: this.settleBackgroundCommand }
         : {}),
       ...(this.environment !== undefined ? { environment: this.environment } : {}),
       ...(this.transientExecEnvironment !== undefined
@@ -1764,6 +1873,15 @@ export class SelfhostedSandboxClient {
     }
     return this.defaultAgentId;
   }
+
+  private requireConnectionInstanceId(): string {
+    if (!this.connectionInstanceId) {
+      throw new Error(
+        "selfhosted sandbox client: no connectionInstanceId bound (live create()/resume() requires an exact claimed daemon instance)",
+      );
+    }
+    return this.connectionInstanceId;
+  }
 }
 
 /**
@@ -1801,7 +1919,7 @@ export interface SelfhostedSessionBuild {
   /** The control-op timeout (ping/fs/desktop/pty). Absent ⇒ the 30s default. */
   timeoutMs?: number;
   /** The exec process deadline, distinct from `timeoutMs`. 0 = none; absence
-   *  preserves the control-timeout fallback for older embedding callers. */
+   *  preserves the historical control-timeout value fallback for embedding callers. */
   execTimeoutMs?: number;
   /** Per-enrollment optional command policy resolved from the same database
    * snapshot as the exact connection identity. */
@@ -1812,11 +1930,12 @@ export interface SelfhostedSessionBuild {
   operationCpuQuotaSupported?: boolean;
   /** Live last-boundary operation admission resolver; see SelfhostedSessionDeps. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
+  adoptBackgroundCommand?: SelfhostedSessionDeps["adoptBackgroundCommand"];
+  settleBackgroundCommand?: SelfhostedSessionDeps["settleBackgroundCommand"];
   /** The per-op observer (out-of-band telemetry). Absent ⇒ no-op. */
   onOp?: SelfhostedOpObserver;
   /** The op-stream exec transport (present when the runner advertises it and the
-   *  server flag is on). Required for an unbounded command; bounded commands may
-   *  use the legacy request/reply fallback. */
+   *  server flag is on). Required for every Connected Machine exec command. */
   opStream?: SelfhostedOpStreamDeps;
 }
 
@@ -1864,6 +1983,12 @@ export async function buildSelfhostedBackendSession(
       : {}),
     ...(deps.resolveOperationAdmission !== undefined
       ? { resolveOperationAdmission: deps.resolveOperationAdmission }
+      : {}),
+    ...(deps.adoptBackgroundCommand !== undefined
+      ? { adoptBackgroundCommand: deps.adoptBackgroundCommand }
+      : {}),
+    ...(deps.settleBackgroundCommand !== undefined
+      ? { settleBackgroundCommand: deps.settleBackgroundCommand }
       : {}),
     ...(deps.onOp !== undefined ? { onOp: deps.onOp } : {}),
     ...(deps.environment !== undefined ? { environment: deps.environment } : {}),
@@ -1935,12 +2060,12 @@ function execResultToChannelA(res: ExecResponse, execDeadlineMs: number): Selfho
   };
 }
 
-function unboundedExecRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedControlError {
+function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedControlError {
   const runnerUpgrade = cause?.unavailableKind === "runner" || cause === undefined;
   return new SelfhostedControlError({
     message: runnerUpgrade
-      ? "This Connected Machine does not advertise the streaming command protocol required for unbounded execution. Update and reconnect the OpenGeni agent, or explicitly configure a positive Connected Machine exec timeout for legacy compatibility. The command was not started."
-      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not fall back to an ambiguous request/reply command because unbounded execution is configured; the command was not started. Retry after the machine reconnects.",
+      ? "This Connected Machine does not advertise the streaming command protocol required for exec. Update and reconnect the OpenGeni agent. The command was not started."
+      : "The Connected Machine streaming channel is temporarily unavailable. OpenGeni did not downgrade to an ambiguous request/reply command; the command was not started. Retry after the machine reconnects.",
     code: runnerUpgrade ? ErrorCode.ERROR_CODE_UNSUPPORTED : ErrorCode.ERROR_CODE_STREAM,
     reason: runnerUpgrade ? null : "agent_reconnecting",
     retryable: !runnerUpgrade,

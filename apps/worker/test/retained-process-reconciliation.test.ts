@@ -16,11 +16,13 @@ import {
   createSession,
   getRetainedProcess,
   initializeSessionStartAtomically,
+  mutateSessionControlInTransaction,
   readLease,
   recordRetainedProcessReconciliationProof,
   releaseLeaseHolder,
   retainedProcessSettlementIdentity,
   retainWorkspaceMutationProcess,
+  SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
   settleRetainedProcess,
   type Database,
@@ -28,7 +30,12 @@ import {
   type RetainedProcessProviderProof,
   type SandboxRetainedProcess,
   type SandboxRetainedProcessIdentity,
+  withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
+import {
+  listSessionBackgroundCommands,
+  requestSessionBackgroundCommandCancellation,
+} from "@opengeni/db/session-background-commands";
 import { createObservability, type Observability } from "@opengeni/observability";
 import {
   classifyRetainedProcessPollResult,
@@ -222,6 +229,7 @@ async function promoteTurnProcess(
   input: {
     outcome?: ClosedAttemptOutcome;
     providerSessionId?: number;
+    backgroundCommand?: string;
   } = {},
 ): Promise<ProcessFixture> {
   const ids = await freshWorkspace();
@@ -257,6 +265,11 @@ async function promoteTurnProcess(
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation,
     providerBinding: MODAL_PROVIDER_BINDING,
+    ...(input.backgroundCommand
+      ? {
+          backgroundCommand: { commandId: processId, command: input.backgroundCommand },
+        }
+      : {}),
     owner: {
       kind: "turn",
       turnId: attempt.turnId,
@@ -409,6 +422,7 @@ async function settlementProjection(fixture: ProcessFixture) {
     {
       processState: string;
       processReason: string | null;
+      processExitCode: number | null;
       admissionOutcome: string | null;
       admissionSettled: boolean;
       processHolders: number;
@@ -422,6 +436,7 @@ async function settlementProjection(fixture: ProcessFixture) {
     }[]
   >`
     select process.state as "processState", process.settlement_reason as "processReason",
+      process.exit_code as "processExitCode",
       admission.provider_outcome as "admissionOutcome",
       admission.settled_at is not null as "admissionSettled",
       (select count(*)::integer from sandbox_lease_holders holder
@@ -471,6 +486,127 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("Pause before managed adoption fences session ownership but preserves exact cleanup authority", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshTurn(ids);
+    const { instanceId } = await insertWarmLease(ids, {
+      sessionId: attempt.sessionId,
+      holderId: attempt.holderId,
+      holderKind: "turn",
+    });
+    const operation = `retainedProcessPaused-${crypto.randomUUID()}`;
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: attempt.attemptId,
+      holderId: attempt.holderId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 7,
+      expectedInstanceId: instanceId,
+      operation,
+    });
+    await withWorkspaceSessionActivityRls(
+      db,
+      ids.workspaceId,
+      async (scopedDb) =>
+        await mutateSessionControlInTransaction(scopedDb, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          actor: { type: "human", subjectId: "user:test-owner" },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+    );
+
+    const processId = crypto.randomUUID();
+    let fenced: SandboxRetainedProcessPromotionFencedError | null = null;
+    try {
+      await retainWorkspaceMutationProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId: 72,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation,
+        providerBinding: MODAL_PROVIDER_BINDING,
+        backgroundCommand: { commandId: processId, command: "sleep 60" },
+        owner: {
+          kind: "turn",
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 7,
+          expectedInstanceId: instanceId,
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
+      fenced = error;
+    }
+
+    expect(fenced?.process).toMatchObject({ id: processId, state: "active" });
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+      }),
+    ).toHaveLength(0);
+  });
+
+  test("session-owned cancellation is interrupted and settled with the process", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({
+      outcome: "completed",
+      backgroundCommand: "bun test --watch",
+    });
+    const cancellation = await requestSessionBackgroundCommandCancellation(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      commandId: fixture.process.id,
+      subjectId: "user:test-owner",
+    });
+    expect(cancellation).toMatchObject({ accepted: true, command: { state: "stopping" } });
+
+    let observedMode: "observe" | "cancel" | undefined;
+    await runReaper(async (_settings, _lease, process, mode) => {
+      expect(process.id).toBe(fixture.process.id);
+      observedMode = mode;
+      return {
+        status: "proved",
+        proof: { outcome: "exited", exitCode: 130, reason: "provider_exit_banner" },
+      };
+    });
+
+    expect(observedMode).toBe("cancel");
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "exited",
+      processExitCode: 130,
+      processHolders: 0,
+    });
+    const commands = await listSessionBackgroundCommands(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+    });
+    expect(commands[0]).toMatchObject({
+      id: fixture.process.id,
+      state: "exited",
+      exitCode: 130,
+      settlementReason: "provider_exit_banner",
+    });
+  });
+
   test("classifies only exact provider exit/loss banners and defers running or malformed output", () => {
     expect(
       classifyRetainedProcessPollResult(

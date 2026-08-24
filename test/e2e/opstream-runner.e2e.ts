@@ -2,7 +2,7 @@
 // local nats-server — the end-to-end proof for the streaming transport
 // (op-stream protocol v1.1, server half):
 //
-//   1. LONG STREAM — an exec whose output far exceeds the legacy 1 MiB reply
+//   1. LONG STREAM — an exec whose output far exceeds the monolithic 1 MiB reply
 //      wall streams live and reassembles byte-exact (blake3-verified by the
 //      client on every path).
 //   2. BLIP MID-EXEC — the NATS server is SIGKILLed and restarted mid-command;
@@ -36,6 +36,7 @@ import {
 const ENABLED = process.env.OPENGENI_OPSTREAM_E2E === "1";
 const WORKSPACE_ID = "hx-ws";
 const AGENT_ID = "e2e-opstream-agent";
+const CONNECTION_INSTANCE_ID = "e2e-opstream-connection";
 
 function resolveNatsServer(): string | null {
   if (process.env.OPENGENI_NATS_SERVER_BIN) {
@@ -102,6 +103,7 @@ describe.skipIf(!runnable)("op-stream exec against the REAL runner (e2e)", () =>
     return new SelfhostedSession({
       workspaceId: WORKSPACE_ID,
       agentId: AGENT_ID,
+      connectionInstanceId: CONNECTION_INSTANCE_ID,
       controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
       relay: { host: "relay.test" },
       timeoutMs: 5_000,
@@ -241,25 +243,4 @@ describe.skipIf(!runnable)("op-stream exec against the REAL runner (e2e)", () =>
     expect(persistLog.length).toBe(1);
     expect(persistLog[0]).toStartWith("persist:e2e_once:0@");
   }, 120_000);
-
-  test("legacy parity: the same runner serves the same command over the legacy wire", async () => {
-    const legacy = new SelfhostedSession({
-      workspaceId: WORKSPACE_ID,
-      agentId: AGENT_ID,
-      controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
-      relay: { host: "relay.test" },
-      timeoutMs: 5_000,
-      execTimeoutMs: 60_000,
-      // no opStream: the permanent fallback wire form
-    });
-    const streaming = buildSession(journalFor("4000", []));
-    const viaLegacy = await legacy.exec({ cmd: "printf 'out'; printf 'err' 1>&2; exit 3" });
-    const viaStream = await runWithToolCallCorrelation("e2e_parity", () =>
-      streaming.exec({ cmd: "printf 'out'; printf 'err' 1>&2; exit 3" }),
-    );
-    expect(viaStream.stdout).toBe(viaLegacy.stdout);
-    expect(viaStream.stderr).toBe(viaLegacy.stderr);
-    expect(viaStream.exitCode).toBe(viaLegacy.exitCode);
-    await streaming.finalizeOpStreamOps();
-  }, 60_000);
 });

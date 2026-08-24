@@ -136,7 +136,7 @@ describe("helloReportsOpStream", () => {
       true,
     );
   });
-  test("opStream=false or absent Capabilities → legacy exec fallback", () => {
+  test("opStream=false or absent Capabilities → exec unavailable", () => {
     expect(helloReportsOpStream(Hello.fromPartial({ capabilities: { opStream: false } }))).toBe(
       false,
     );

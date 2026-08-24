@@ -12,6 +12,9 @@ import { describe, expect, test } from "bun:test";
 import { type ControlRequest, type ControlResponse, ErrorCode } from "@opengeni/agent-proto";
 import {
   type ControlRpc,
+  FakeOpRunner,
+  type FakeOpScript,
+  InMemoryOpStreamTransport,
   type SelfhostedRetryClock,
   SelfhostedControlError,
   SelfhostedSession,
@@ -33,8 +36,7 @@ import {
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
-const encoder = new TextEncoder();
-
+const CONNECTION_INSTANCE = "connection-resilience";
 function controlError(code: ErrorCode): SelfhostedControlError {
   return agentErrorToControlError({ code, message: "", retryable: true, detail: {} });
 }
@@ -262,22 +264,6 @@ function timeoutStep(req: ControlRequest): ControlResponse {
     result: undefined,
   };
 }
-function execOkStep(req: ControlRequest): ControlResponse {
-  return {
-    requestId: req.requestId,
-    error: undefined,
-    result: {
-      $case: "exec",
-      exec: {
-        exitCode: 0,
-        stdout: encoder.encode("ok\n"),
-        stderr: new Uint8Array(0),
-        timedOut: false,
-        durationMs: "1",
-      },
-    },
-  };
-}
 function fsStatOkStep(req: ControlRequest): ControlResponse {
   return {
     requestId: req.requestId,
@@ -293,6 +279,7 @@ function sessionWith(
   return new SelfhostedSession({
     workspaceId: WS,
     agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: rpc,
     relay: RELAY,
     ...(extra.clock ? { retryClock: extra.clock } : {}),
@@ -301,36 +288,75 @@ function sessionWith(
   });
 }
 
-describe("SelfhostedSession.call — bounded retry through the transport", () => {
-  test("DRAINING then success: exec retries the backpressure and returns", async () => {
-    const rpc = new ScriptedRpc([drainingStep, drainingStep, execOkStep]);
+function opStreamSessionWith(
+  script: FakeOpScript,
+  extra: { clock?: SelfhostedRetryClock; timeoutMs?: number; execTimeoutMs?: number } = {},
+) {
+  const transport = new InMemoryOpStreamTransport();
+  const requests: ControlRequest[] = [];
+  const wireTimeouts: number[] = [];
+  const runner = new FakeOpRunner({
+    transport,
+    workspaceId: WS,
+    agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
+    defaultScript: () => script,
+  });
+  const session = new SelfhostedSession({
+    workspaceId: WS,
+    agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
+    controlRpc: {
+      request: async (subject, request, opts) => {
+        requests.push(request);
+        wireTimeouts.push(opts.timeoutMs);
+        return await runner.request(subject, request, opts);
+      },
+    },
+    relay: RELAY,
+    opStream: { transport },
+    ...(extra.clock ? { retryClock: extra.clock } : {}),
+    ...(extra.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}),
+    ...(extra.execTimeoutMs !== undefined ? { execTimeoutMs: extra.execTimeoutMs } : {}),
+  });
+  return { requests, runner, session, wireTimeouts };
+}
+
+describe("SelfhostedSession control and op-stream retry boundaries", () => {
+  test("DRAINING then success: OpStart retries the backpressure with one durable op id", async () => {
     const { clock, sleeps } = fakeClock(0.5);
-    const res = await sessionWith(rpc, { clock }).exec({ cmd: "true" });
+    const { requests, session } = opStreamSessionWith(
+      { frames: [{ channel: "stdout", bytes: "ok\n" }], drainingStarts: 2 },
+      { clock },
+    );
+    const res = await session.exec({ cmd: "true" });
     expect(res.exitCode).toBe(0);
-    expect(rpc.requests).toHaveLength(3);
+    const starts = requests.filter((request) => request.op?.$case === "opStart");
+    expect(starts).toHaveLength(3);
     // Two backoff sleeps: full-jitter base*2^n at jitter 0.5 → 250, 500.
     expect(sleeps).toEqual([250, 500]);
-    // Each attempt is a fresh request (a retry is a new request id).
-    const ids = new Set(rpc.requests.map((r) => r.requestId));
-    expect(ids.size).toBe(3);
+    // The stream protocol retries admission under one idempotent durable op id.
+    expect(new Set(starts.map((request) => request.requestId)).size).toBe(1);
   });
 
-  test("exec DRAINING exhausted: surfaces after the LONG budget, citing the retry count", async () => {
-    const rpc = new ScriptedRpc([drainingStep]); // always draining
+  test("OpStart DRAINING exhausted: surfaces after the LONG exec budget", async () => {
     const { clock, sleeps } = fakeClock();
+    const { requests, session } = opStreamSessionWith(
+      { frames: [], drainingStarts: SELFHOSTED_EXEC_DRAINING_MAX_RETRIES + 1 },
+      { clock },
+    );
     let err: unknown;
     try {
-      await sessionWith(rpc, { clock }).exec({ cmd: "true" });
+      await session.exec({ cmd: "true" });
     } catch (e) {
       err = e;
     }
     expect(err).toBeInstanceOf(SelfhostedControlError);
     expect((err as SelfhostedControlError).draining).toBe(true);
-    expect((err as SelfhostedControlError).message).toContain(
-      `retried ${SELFHOSTED_EXEC_DRAINING_MAX_RETRIES} times`,
+    expect((err as SelfhostedControlError).message).toContain("concurrent-work capacity");
+    expect(requests.filter((request) => request.op?.$case === "opStart")).toHaveLength(
+      SELFHOSTED_EXEC_DRAINING_MAX_RETRIES + 1,
     );
-    // 1 initial + exec-budget retries.
-    expect(rpc.requests).toHaveLength(SELFHOSTED_EXEC_DRAINING_MAX_RETRIES + 1);
     expect(sleeps).toHaveLength(SELFHOSTED_EXEC_DRAINING_MAX_RETRIES);
   });
 
@@ -349,19 +375,32 @@ describe("SelfhostedSession.call — bounded retry through the transport", () =>
     expect(sleeps).toHaveLength(SELFHOSTED_DRAINING_MAX_RETRIES);
   });
 
-  test("TIMEOUT on exec is NOT retried (a timed-out mutation may already have run)", async () => {
-    const rpc = new ScriptedRpc([timeoutStep, execOkStep]);
+  test("TIMEOUT around OpStart safely retries the same durable op id", async () => {
     const { clock, sleeps } = fakeClock();
+    const { requests, session } = opStreamSessionWith(
+      {
+        frames: [],
+        startError: {
+          code: ErrorCode.ERROR_CODE_TIMEOUT,
+          message: "slow",
+          retryable: true,
+          detail: {},
+        },
+      },
+      { clock },
+    );
     let err: unknown;
     try {
-      await sessionWith(rpc, { clock }).exec({ cmd: "true" });
+      await session.exec({ cmd: "true" });
     } catch (e) {
       err = e;
     }
     expect(err).toBeInstanceOf(SelfhostedControlError);
     expect((err as SelfhostedControlError).reason).toBe("agent_reconnecting");
-    expect(rpc.requests).toHaveLength(1);
-    expect(sleeps).toHaveLength(0);
+    const starts = requests.filter((request) => request.op?.$case === "opStart");
+    expect(starts).toHaveLength(4);
+    expect(new Set(starts.map((request) => request.requestId)).size).toBe(1);
+    expect(sleeps).toHaveLength(3);
   });
 
   test("TIMEOUT on a read-only op (fs_stat) is retried once then succeeds", async () => {
@@ -391,42 +430,42 @@ describe("SelfhostedSession.call — bounded retry through the transport", () =>
 
 describe("exec / control deadline split", () => {
   test("exec uses execTimeoutMs for the process deadline (control timeout stays short)", async () => {
-    const rpc = new ScriptedRpc([execOkStep]);
-    await sessionWith(rpc, { timeoutMs: 30_000, execTimeoutMs: 300_000 }).exec({ cmd: "true" });
-    const op = rpc.requests[0]?.op;
-    if (op?.$case !== "exec") throw new Error("expected exec request");
-    expect(op.exec.timeoutMs).toBe(300_000);
-    // The wire waits the process deadline plus the reply grace (5s).
-    expect(rpc.wireTimeouts[0]).toBe(305_000);
+    const { requests, session, wireTimeouts } = opStreamSessionWith(
+      { frames: [{ channel: "stdout", bytes: "ok\n" }] },
+      { timeoutMs: 30_000, execTimeoutMs: 300_000 },
+    );
+    await session.exec({ cmd: "true" });
+    const start = requests.find((request) => request.op?.$case === "opStart");
+    if (start?.op?.$case !== "opStart" || start.op.opStart.op?.$case !== "exec") {
+      throw new Error("expected op-stream exec start");
+    }
+    expect(start.op.opStart.op.exec.timeoutMs).toBe(300_000);
+    expect(wireTimeouts[0]).toBe(30_000);
   });
 
   test("exec falls back to the control timeout when no exec deadline is threaded", async () => {
-    const rpc = new ScriptedRpc([execOkStep]);
-    await sessionWith(rpc, { timeoutMs: 30_000 }).exec({ cmd: "true" });
-    const op = rpc.requests[0]?.op;
-    if (op?.$case !== "exec") throw new Error("expected exec request");
-    expect(op.exec.timeoutMs).toBe(30_000);
-    expect(rpc.wireTimeouts[0]).toBe(35_000);
+    const { requests, session, wireTimeouts } = opStreamSessionWith(
+      { frames: [{ channel: "stdout", bytes: "ok\n" }] },
+      { timeoutMs: 30_000 },
+    );
+    await session.exec({ cmd: "true" });
+    const start = requests.find((request) => request.op?.$case === "opStart");
+    if (start?.op?.$case !== "opStart" || start.op.opStart.op?.$case !== "exec") {
+      throw new Error("expected op-stream exec start");
+    }
+    expect(start.op.opStart.op.exec.timeoutMs).toBe(30_000);
+    expect(wireTimeouts[0]).toBe(30_000);
   });
 
   test("a timed-out exec result carries the actionable hint on stderr (stdout untouched)", async () => {
-    const rpc = new ScriptedRpc([
-      (req) => ({
-        requestId: req.requestId,
-        error: undefined,
-        result: {
-          $case: "exec",
-          exec: {
-            exitCode: null,
-            stdout: encoder.encode("partial output\n"),
-            stderr: new Uint8Array(0),
-            timedOut: true,
-            durationMs: "300000",
-          },
-        },
-      }),
-    ]);
-    const res = await sessionWith(rpc, { execTimeoutMs: 300_000 }).exec({ cmd: "sleep 999" });
+    const { session } = opStreamSessionWith(
+      {
+        frames: [{ channel: "stdout", bytes: "partial output\n" }],
+        exit: { exitCode: -1, timedOut: true, durationMs: "300000" },
+      },
+      { execTimeoutMs: 300_000 },
+    );
+    const res = await session.exec({ cmd: "sleep 999" });
     expect(res.stdout).toBe("partial output\n");
     expect(res.stderr).toContain("300-second execution limit");
     expect(res.stderr).toContain("nohup");
@@ -437,46 +476,39 @@ describe("exec / control deadline split", () => {
 });
 
 describe("execCommand — the deadline hint reaches the SDK banner via stderr", () => {
-  const timedOutExecStep =
-    (stdout: string) =>
-    (req: ControlRequest): ControlResponse => ({
-      requestId: req.requestId,
-      error: undefined,
-      result: {
-        $case: "exec",
-        exec: {
-          exitCode: null,
-          stdout: encoder.encode(stdout),
-          stderr: new Uint8Array(0),
-          timedOut: true,
-          durationMs: "120000",
-        },
-      },
-    });
+  const timedOutScript = (stdout: string): FakeOpScript => ({
+    frames: stdout ? [{ channel: "stdout", bytes: stdout }] : [],
+    exit: { exitCode: -1, timedOut: true, durationMs: "120000" },
+  });
 
   test("empty-stdout timeout: execCommand returns the hint (never a silent empty string)", async () => {
-    const rpc = new ScriptedRpc([timedOutExecStep("")]);
-    const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({
+    const { session } = opStreamSessionWith(timedOutScript(""), { execTimeoutMs: 120_000 });
+    const out = await session.execCommand({
       cmd: "sleep 999",
     });
     expect(out).not.toBe("");
-    expect(parseExecBannerExitCode(out)).toBe(1);
+    expect(parseExecBannerExitCode(out)).toBe(-1);
     expect(stripExecBanner(out)).toContain("120-second execution limit");
     expect(stripExecBanner(out)).toContain("nohup");
   });
 
   test("partial-stdout timeout: execCommand appends the hint after the output", async () => {
-    const rpc = new ScriptedRpc([timedOutExecStep("partial output\n")]);
-    const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({
+    const { session } = opStreamSessionWith(timedOutScript("partial output\n"), {
+      execTimeoutMs: 120_000,
+    });
+    const out = await session.execCommand({
       cmd: "sleep 999",
     });
     expect(stripExecBanner(out)).toBe(`partial output\n\n${execDeadlineHint(120)}`);
-    expect(parseExecBannerExitCode(out)).toBe(1);
+    expect(parseExecBannerExitCode(out)).toBe(-1);
   });
 
   test("non-timeout: execCommand returns the SDK banner around stdout", async () => {
-    const rpc = new ScriptedRpc([execOkStep]);
-    const out = await sessionWith(rpc, { execTimeoutMs: 120_000 }).execCommand({ cmd: "echo ok" });
+    const { session } = opStreamSessionWith(
+      { frames: [{ channel: "stdout", bytes: "ok\n" }] },
+      { execTimeoutMs: 120_000 },
+    );
+    const out = await session.execCommand({ cmd: "echo ok" });
     expect(parseExecBannerExitCode(out)).toBe(0);
     expect(stripExecBanner(out)).toBe("ok\n");
     expect(out).not.toContain("execution limit");

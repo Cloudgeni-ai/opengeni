@@ -815,6 +815,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         initialNative = await runWithToolCallCorrelation(
           correlationId,
           async () => await invokeExecNative(commandInput),
+          {
+            onDurableOpOwnershipTransferStarted: (opId) =>
+              remoteExec?.releaseCancellationAuthority(opId),
+          },
         );
       } catch (error) {
         const retainedProcess =
@@ -1028,6 +1032,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               output = await runWithToolCallCorrelation(
                 correlationId,
                 async () => await tool.invoke(runContext, cancellableInput, details),
+                {
+                  onDurableOpOwnershipTransferStarted: (opId) =>
+                    remoteExec?.releaseCancellationAuthority(opId),
+                },
               );
             } catch (error) {
               const retainedProcess =
@@ -1083,7 +1091,14 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identityValidated: false,
                 cancellation: null,
               };
-              this.shellSessions.set(sessionId, state);
+              // A routing session exposes a retained locator only after both
+              // provider retention and the session-owned background-command
+              // adoption are durable. That commit transfers cancellation
+              // ownership away from this turn, so ordinary completion and
+              // Steer must not drain it.
+              if (state.processSession?.hasRetainedProcess?.(sessionId) !== true) {
+                this.shellSessions.set(sessionId, state);
+              }
               pendingStart?.settle();
               return await this.awaitModelFacingShellResult({
                 state,
@@ -1153,7 +1168,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 // or an ambiguous error must leave the registration fenced.
                 this.shellSessions.delete(sessionId);
               } else if (parseExecBannerSessionId(output) === sessionId) {
-                if (!this.shellSessions.has(sessionId)) {
+                if (
+                  directProcessSession?.hasRetainedProcess?.(sessionId) !== true &&
+                  !this.shellSessions.has(sessionId)
+                ) {
                   this.shellSessions.set(sessionId, {
                     sessionId,
                     markerPath: null,
@@ -1497,13 +1515,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private registerRemoteExec(
     session: Required<Pick<CommandCancellationSession, "cancelExecCommand">>,
     opId: string,
-  ): ActiveRemoteExec {
+  ): ActiveRemoteExec & { releaseCancellationAuthority(transferredOpId: string): void } {
     let resolveSettled!: () => void;
     const settledPromise = new Promise<void>((resolve) => {
       resolveSettled = resolve;
     });
     let cancellation: Promise<void> | null = null;
-    const entry: ActiveRemoteExec = {
+    const entry: ActiveRemoteExec & {
+      releaseCancellationAuthority(transferredOpId: string): void;
+    } = {
       settled: false,
       settledPromise,
       settle: () => {
@@ -1511,6 +1531,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         entry.settled = true;
         resolveSettled();
         this.remoteExecs.delete(entry);
+      },
+      releaseCancellationAuthority: (transferredOpId: string) => {
+        if (transferredOpId !== opId) return;
+        entry.settle();
       },
       cancel: () => {
         cancellation ??= (async () => {

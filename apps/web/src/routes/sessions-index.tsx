@@ -987,6 +987,7 @@ function RecentSessionRow({
   const model = recentSessionModelPresentation(session.model, catalogRows);
   const repo = sessionRepoLabel(session);
   const metaBits = [model.label, repo].filter(Boolean);
+  const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
   return (
     <li className="min-w-0">
       <Link
@@ -995,8 +996,8 @@ function RecentSessionRow({
         className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-surface-2/50"
       >
         <StatusDot
-          tone={SESSION_STATUS_TONE[session.status]}
-          pulse={session.status === "running"}
+          tone={hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status]}
+          pulse={hasBackgroundCommand || session.status === "running"}
         />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>

@@ -51,8 +51,7 @@ pub fn expose_native_client(request: &mut ExecRequest) {
 /// Bind an attempt-scoped Codemode exec to the deployment origin of the exact
 /// Connected Machine link carrying it. The control plane cannot safely infer
 /// this route: one runner may serve several deployments, while `localhost` has
-/// a different meaning on each host. A legacy connection has no authoritative
-/// origin and therefore never calls this function.
+/// a different meaning on each host.
 pub fn bind_connection_origin(
     request: &mut ControlRequest,
     api_base_url: &str,
@@ -79,7 +78,6 @@ pub fn bind_connection_origin(
 
 fn request_exec_mut(request: &mut ControlRequest) -> Option<&mut ExecRequest> {
     match request.op.as_mut()? {
-        v1::control_request::Op::Exec(exec) => Some(exec),
         v1::control_request::Op::OpStart(start) => match start.op.as_mut()? {
             v1::op_start::Op::Exec(exec) => Some(exec),
             _ => None,
@@ -657,35 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn connected_machine_exec_uses_the_exact_link_origin() {
-        let mut exec = ExecRequest::default();
-        exec.env.insert(
-            URL_ENV.to_string(),
-            "http://127.0.0.1:8000/stale".to_string(),
-        );
-        exec.env
-            .insert(TOKEN_ENV.to_string(), "attempt-secret".to_string());
-        let mut request = ControlRequest {
-            op: Some(v1::control_request::Op::Exec(exec)),
-            ..ControlRequest::default()
-        };
-
-        bind_connection_origin(
-            &mut request,
-            "https://machine.example.test/opengeni/",
-            "workspace-1",
-        );
-
-        let Some(v1::control_request::Op::Exec(exec)) = request.op else {
-            panic!("exec request");
-        };
-        assert_eq!(
-            exec.env.get(URL_ENV).map(String::as_str),
-            Some("https://machine.example.test/opengeni/v1/workspaces/workspace-1/codemode")
-        );
-    }
-
-    #[test]
     fn connected_machine_origin_is_not_projected_without_attempt_authority() {
         let mut exec = ExecRequest::default();
         exec.env.insert(
@@ -693,14 +662,20 @@ mod tests {
             "https://worker.example.test/codemode".to_string(),
         );
         let mut request = ControlRequest {
-            op: Some(v1::control_request::Op::Exec(exec)),
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(exec)),
+                ..v1::OpStart::default()
+            })),
             ..ControlRequest::default()
         };
 
         bind_connection_origin(&mut request, "https://machine.example.test", "workspace-1");
 
-        let Some(v1::control_request::Op::Exec(exec)) = request.op else {
-            panic!("exec request");
+        let Some(v1::control_request::Op::OpStart(start)) = request.op else {
+            panic!("op start request");
+        };
+        let Some(v1::op_start::Op::Exec(exec)) = start.op else {
+            panic!("streamed exec request");
         };
         assert_eq!(
             exec.env.get(URL_ENV).map(String::as_str),

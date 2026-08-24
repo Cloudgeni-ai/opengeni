@@ -96,6 +96,11 @@ const budgets = {
   // measure 2,134,519 raw / 593,854 gzip bytes on a direct session load. Move
   // only the exceeded raw aggregate to its next whole-KiB envelope; compressed,
   // file-count, initial, per-file, lazy-chunk, and CSS limits remain unchanged.
+  // Session-owned background-command list/cancel methods add 1,322 raw / 329
+  // gzip bytes to that shared SDK client. The exact Linux/x64 production graph
+  // measures 2,135,841 raw / 594,183 gzip bytes. Advance only those two direct-
+  // session aggregate envelopes to their next whole KiB; every initial,
+  // per-file, file-count, lazy-chunk, and CSS cap remains unchanged.
   initialRaw: 1485 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
@@ -146,8 +151,8 @@ const budgets = {
   // gzip to the next whole KiB above 1.5 KiB of headroom for the Linux/x64
   // skew; every initial, per-file, file-count, lazy-chunk, and CSS cap stays
   // fixed.
-  directSessionRaw: 2085 * kib,
-  directSessionGzip: 580 * kib,
+  directSessionRaw: 2086 * kib,
+  directSessionGzip: 581 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

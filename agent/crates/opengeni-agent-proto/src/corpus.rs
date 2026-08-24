@@ -52,7 +52,7 @@ pub fn canonical_control_response() -> v1::ControlResponse {
 }
 
 /// A richer `ControlRequest` exercising strings, a u32, an enum, repeated
-/// strings, bytes, and a single-entry map (via the wrapped `ExecRequest`).
+/// strings, bytes, and a single-entry map through replayable `OpStart` exec.
 #[must_use]
 pub fn canonical_control_request() -> v1::ControlRequest {
     let mut env = std::collections::HashMap::new();
@@ -62,13 +62,18 @@ pub fn canonical_control_request() -> v1::ControlRequest {
         request_id: "req-0002".to_string(),
         epoch: 7,
         resource_policy: None,
-        op: Some(v1::control_request::Op::Exec(v1::ExecRequest {
-            command: vec!["echo".to_string(), "hello".to_string()],
-            shell: false,
-            cwd: "/home/user/repo".to_string(),
-            env,
-            stdin: prost::bytes::Bytes::from_static(b"piped-input"),
-            timeout_ms: 5_000,
+        op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+            op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                command: vec!["echo".to_string(), "hello".to_string()],
+                shell: false,
+                cwd: "/home/user/repo".to_string(),
+                env,
+                stdin: prost::bytes::Bytes::from_static(b"piped-input"),
+                timeout_ms: 5_000,
+            })),
+            window_bytes: 65_536,
+            deadline_ms: 1_800_000_000_000,
+            origin_id: "session-abc".to_string(),
         })),
     }
 }

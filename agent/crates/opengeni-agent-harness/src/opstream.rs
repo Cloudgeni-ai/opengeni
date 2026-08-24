@@ -62,6 +62,17 @@ impl OpDriver {
         }
     }
 
+    /// Builds the driver from an exact connection-scoped rpc subject.
+    #[must_use]
+    pub fn from_rpc_subject(client: async_nats::Client, rpc_subject: &str) -> Self {
+        let prefix = rpc_subject.strip_suffix(".rpc").unwrap_or(rpc_subject);
+        Self {
+            client,
+            rpc_subject: rpc_subject.to_string(),
+            ack_subject: format!("{prefix}.ack"),
+        }
+    }
+
     /// `OpStart{exec}` with `request_id == op_id` (ruling B1: the durable id).
     pub async fn start_exec(
         &self,
@@ -70,14 +81,31 @@ impl OpDriver {
         window_bytes: u64,
         deadline_ms: i64,
     ) -> Result<OpReply, String> {
+        self.start_exec_request(
+            op_id,
+            v1::ExecRequest {
+                command: vec![command.to_string()],
+                shell: true,
+                ..Default::default()
+            },
+            window_bytes,
+            deadline_ms,
+        )
+        .await
+    }
+
+    /// `OpStart{exec}` with a fully specified exec payload.
+    pub async fn start_exec_request(
+        &self,
+        op_id: &str,
+        exec: v1::ExecRequest,
+        window_bytes: u64,
+        deadline_ms: i64,
+    ) -> Result<OpReply, String> {
         self.request(
             op_id,
             ReqOp::OpStart(v1::OpStart {
-                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
-                    command: vec![command.to_string()],
-                    shell: true,
-                    ..Default::default()
-                })),
+                op: Some(v1::op_start::Op::Exec(exec)),
                 window_bytes,
                 deadline_ms,
                 origin_id: "hx-op-scenarios".to_string(),
@@ -211,6 +239,18 @@ struct CollectorState {
 }
 
 impl OpCollector {
+    /// Subscribes using an exact connection-scoped rpc subject.
+    pub async fn attach_rpc(
+        client: &async_nats::Client,
+        rpc_subject: &str,
+        op_id: &str,
+    ) -> Result<Self, String> {
+        let prefix = rpc_subject
+            .strip_suffix(".rpc")
+            .ok_or_else(|| format!("invalid rpc subject: {rpc_subject}"))?;
+        Self::attach_subject(client, format!("{prefix}.op.{op_id}")).await
+    }
+
     /// Subscribes the per-op frame subject. MUST be called before `OpStart`
     /// (the subscription-before-start invariant).
     pub async fn attach(
@@ -222,6 +262,10 @@ impl OpCollector {
         let subject = format!(
             "agent.{WORKSPACE_ID}.{agent_id}.connection.{connection_instance_id}.op.{op_id}"
         );
+        Self::attach_subject(client, subject).await
+    }
+
+    async fn attach_subject(client: &async_nats::Client, subject: String) -> Result<Self, String> {
         let mut subscriber = client
             .subscribe(subject)
             .await

@@ -21,6 +21,7 @@ import {
   MemoryEventBus,
 } from "@opengeni/testing";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
+import type { OpStreamConnection } from "@opengeni/events";
 import {
   createEnrollment,
   createSandbox,
@@ -35,14 +36,18 @@ import {
   readLease,
   readActiveSandbox,
   setActiveSandbox,
+  setEnrollmentOpStreamState,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import {
   buildManifest,
+  createMockSelfhostedOpStream,
+  MockAgentResponder,
   RoutingBackendRecoveryRequiredError,
   subjectFor,
   type EstablishedSandboxSession,
+  type InMemoryOpStreamTransport,
   type OpStreamJournal,
 } from "@opengeni/runtime";
 import { swapActiveSandbox, type FleetContext } from "@opengeni/core";
@@ -64,9 +69,7 @@ let db: Database;
 const settings = testSettings({
   productAccessMode: "managed",
   sandboxSelfhostedEnabled: true,
-  // These DB/routing tests use a request/reply-only MemoryEventBus responder;
-  // op-stream behavior has its dedicated runtime suite.
-  agentOpStreamEnabled: false,
+  agentOpStreamEnabled: true,
   sandboxSelfhostedExecTimeoutMs: 30_000,
   selfhostedRelayUrl: "wss://relay.example",
 });
@@ -75,8 +78,8 @@ const testOpJournal: OpStreamJournal = {
   persistSettled: async () => undefined,
 };
 
-/** A MemoryEventBus whose responder echoes a marker hostname for exec — the
- *  enrolled machine. */
+/** A MemoryEventBus whose request/reply responder handles bounded control ops
+ *  while exec runs through the resumable op-stream protocol. */
 function busWithAgent(
   workspaceId: string,
   agentId: string,
@@ -85,55 +88,91 @@ function busWithAgent(
   onRequest?: () => void,
 ): MemoryEventBus {
   const bus = new MemoryEventBus();
-  const enc = new TextEncoder();
-  bus.subscribeRequests(subjectFor(workspaceId, agentId, connectionInstanceId), (payload) => {
-    onRequest?.();
-    const req = ControlRequest.decode(payload);
-    const op = req.op;
-    let res: ControlResponse;
-    if (op?.$case === "ping") {
-      res = {
-        requestId: req.requestId,
-        result: {
-          $case: "ping",
-          ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
-        },
-      };
-    } else if (op?.$case === "exec") {
-      res = {
-        requestId: req.requestId,
-        result: {
-          $case: "exec",
-          exec: {
-            exitCode: 0,
-            stdout: enc.encode(`${hostname}\n`),
-            stderr: new Uint8Array(0),
-            timedOut: false,
-            durationMs: "1",
-          },
-        },
-      };
-    } else {
-      res = {
-        requestId: req.requestId,
-        result: {
-          $case: "exec",
-          exec: {
-            exitCode: 1,
-            stdout: new Uint8Array(0),
-            stderr: enc.encode("unsupported"),
-            timedOut: false,
-            durationMs: "0",
-          },
-        },
-      };
-    }
-    return ControlResponse.encode(res).finish();
+  const responder = new MockAgentResponder({ hostname });
+  const stream = createMockSelfhostedOpStream({
+    responder,
+    workspaceId,
+    agentId,
+    connectionInstanceId,
   });
+  bus.subscribeRequests(
+    subjectFor(workspaceId, agentId, connectionInstanceId),
+    async (payload, subject) => {
+      const req = ControlRequest.decode(payload);
+      if (req.op?.$case === "opStart") onRequest?.();
+      const res = await stream.controlRpc.request(subject, req, {
+        timeoutMs: 0,
+      });
+      return ControlResponse.encode(res).finish();
+    },
+  );
+  const opStreamConnection = opStreamConnectionFor(stream.transport);
+  (
+    bus as MemoryEventBus & { getOpStreamConnection: () => OpStreamConnection }
+  ).getOpStreamConnection = () => opStreamConnection;
   return bus;
 }
 
+function opStreamConnectionFor(transport: InMemoryOpStreamTransport): OpStreamConnection {
+  return {
+    subscribe(subject) {
+      const values: Array<{ data: Uint8Array }> = [];
+      const readers: Array<(result: IteratorResult<{ data: Uint8Array }>) => void> = [];
+      let done = false;
+      let release: (() => void) | undefined;
+      void transport
+        .subscribe(subject, (data) => {
+          const message = { data };
+          const reader = readers.shift();
+          if (reader) reader({ done: false, value: message });
+          else values.push(message);
+        })
+        .then((subscription) => {
+          if (done) subscription.unsubscribe();
+          else release = subscription.unsubscribe;
+        })
+        .catch(() => {
+          done = true;
+          for (const reader of readers.splice(0)) {
+            reader({ done: true, value: undefined });
+          }
+        });
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              const value = values.shift();
+              if (value) return Promise.resolve({ done: false as const, value });
+              if (done)
+                return Promise.resolve({
+                  done: true as const,
+                  value: undefined,
+                });
+              return new Promise<IteratorResult<{ data: Uint8Array }>>((resolve) =>
+                readers.push(resolve),
+              );
+            },
+          };
+        },
+        unsubscribe() {
+          if (done) return;
+          done = true;
+          release?.();
+          for (const reader of readers.splice(0)) {
+            reader({ done: true, value: undefined });
+          }
+        },
+      };
+    },
+    publish(subject, payload) {
+      void transport.publish(subject, payload);
+    },
+    async flush() {},
+  };
+}
+
 async function claimTestConnection(input: {
+  accountId: string;
   workspaceId: string;
   enrollmentId: string;
   credentialGeneration: number;
@@ -145,6 +184,17 @@ async function claimTestConnection(input: {
     leaseMs: 60_000,
   });
   expect(claimed.claimed).toBe(true);
+  expect(
+    (
+      await setEnrollmentOpStreamState(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        enrollmentId: input.enrollmentId,
+        opStream: true,
+        connectionInstanceId,
+      })
+    ).updated,
+  ).toBe(true);
   return connectionInstanceId;
 }
 
@@ -282,6 +332,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       enrollmentId: enrollment.id,
     });
     const connectionInstanceId = await claimTestConnection({
+      accountId,
       workspaceId,
       enrollmentId: enrollment.id,
       credentialGeneration: enrollment.credentialGeneration,
@@ -436,6 +487,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       where id = ${machine.enrollmentId} and authority_scope = 'organization'
     `;
     const connectionInstanceId = await claimTestConnection({
+      accountId: account!.id,
       workspaceId: originWorkspace!.id,
       enrollmentId: machine.enrollmentId,
       credentialGeneration: machineCredential!.credentialGeneration,
@@ -453,11 +505,13 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     const established = await establishSelfhostedTurnSession(
       { db, settings, bus, opJournal: testOpJournal },
       {
+        accountId: account!.id,
         workspaceId: targetWorkspace!.id,
+        sessionId: crypto.randomUUID(),
         controlWorkspaceId: originWorkspace!.id,
         agentId: machine.enrollmentId,
         connectionInstanceId,
-        opStream: false,
+        opStream: true,
         operationResourcePolicy: {
           memoryMaxBytes: null,
           memoryHighBytes: null,
@@ -534,6 +588,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       from enrollments where id = ${machine.enrollmentId}
     `;
     const connectionInstanceId = await claimTestConnection({
+      accountId: account!.id,
       workspaceId: originWorkspace!.id,
       enrollmentId: machine.enrollmentId,
       credentialGeneration: machineCredential!.credentialGeneration,
@@ -621,11 +676,22 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     const pinned = await establishSelfhostedTurnSession(
       { db, settings, bus, opJournal: testOpJournal },
       {
+        accountId: account!.id,
         workspaceId: targetWorkspace!.id,
+        sessionId: session.id,
         controlWorkspaceId: originWorkspace!.id,
         agentId: machine.enrollmentId,
         connectionInstanceId,
-        opStream: false,
+        opStream: true,
+        operationResourcePolicy: {
+          memoryMaxBytes: null,
+          memoryHighBytes: null,
+          cpuMaxMillicores: null,
+          revision: 0,
+          updatedAt: null,
+        },
+        operationResourcePolicySupported: false,
+        operationCpuQuotaSupported: false,
         epoch: 0,
         environment: {},
         workingDir: null,
@@ -1332,6 +1398,7 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
       name: "sibling",
     });
     const connectionInstanceId = await claimTestConnection({
+      accountId,
       workspaceId,
       enrollmentId: enrollment.id,
       credentialGeneration: enrollment.credentialGeneration,
