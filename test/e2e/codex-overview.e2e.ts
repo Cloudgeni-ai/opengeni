@@ -509,9 +509,12 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const page = await context.newPage();
-    await page.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
-      waitUntil: "domcontentloaded",
-    });
+    await page.goto(
+      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
+      {
+        waitUntil: "domcontentloaded",
+      },
+    );
     const subscriptionsHeading = page.locator("#codex-subscriptions-heading");
     await subscriptionsHeading.waitFor({ timeout: 20_000 });
     await subscriptionsHeading.scrollIntoViewIfNeeded();
@@ -604,9 +607,12 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const mobile = await mobileContext.newPage();
-    await mobile.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
-      waitUntil: "domcontentloaded",
-    });
+    await mobile.goto(
+      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
+      {
+        waitUntil: "domcontentloaded",
+      },
+    );
     const mobileSubscriptionsHeading = mobile.locator("#codex-subscriptions-heading");
     await mobileSubscriptionsHeading.waitFor({ timeout: 20_000 });
     await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
@@ -717,9 +723,12 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const recoveryPage = await recoveryContext.newPage();
-    await recoveryPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
-      waitUntil: "domcontentloaded",
-    });
+    await recoveryPage.goto(
+      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
+      {
+        waitUntil: "domcontentloaded",
+      },
+    );
     const recoverySubscriptionsHeading = recoveryPage.locator("#codex-subscriptions-heading");
     await recoverySubscriptionsHeading.waitFor({ timeout: 20_000 });
     await recoverySubscriptionsHeading.scrollIntoViewIfNeeded();
@@ -792,9 +801,12 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const completedPage = await completedContext.newPage();
-    await completedPage.goto(`http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings`, {
-      waitUntil: "domcontentloaded",
-    });
+    await completedPage.goto(
+      `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
+      {
+        waitUntil: "domcontentloaded",
+      },
+    );
     const completedSubscriptionsHeading = completedPage.locator("#codex-subscriptions-heading");
     await completedSubscriptionsHeading.waitFor({ timeout: 20_000 });
     await completedSubscriptionsHeading.scrollIntoViewIfNeeded();
