@@ -188,7 +188,7 @@ export function WorkspaceManagementShell({
   children: ReactNode;
 }) {
   return (
-    <main className="grid h-dvh min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
+    <div className="grid h-dvh min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
       <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-dvh lg:max-h-none lg:border-r lg:border-b-0">
         <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
           <Link
@@ -285,7 +285,7 @@ export function WorkspaceManagementShell({
       </aside>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
-    </main>
+    </div>
   );
 }
 

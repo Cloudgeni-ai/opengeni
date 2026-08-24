@@ -57,7 +57,7 @@ export function OrganizationSettingsShell({
 }) {
   const copy = COPY[section];
   return (
-    <main
+    <div
       data-workspace-scroll-owner="self-managed"
       className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden"
     >
@@ -127,6 +127,6 @@ export function OrganizationSettingsShell({
           <div className="py-6">{children}</div>
         </div>
       </div>
-    </main>
+    </div>
   );
 }
