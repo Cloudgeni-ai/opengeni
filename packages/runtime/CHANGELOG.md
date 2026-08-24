@@ -1,5 +1,32 @@
 # @opengeni/runtime
 
+## 1.3.0
+
+### Minor Changes
+
+- a9cd9e7: Add the default-off first-party GitHub REST MCP bridge with separate workspace-App and personal-OAuth actors, exact accepted-repository authority, reviewed read/write tools, connector-policy defaults for writes, Codemode parity, bounded credential-free results, and no replay after ambiguous mutations.
+
+### Patch Changes
+
+- c5c7e5a: Keep already-published eager and in-process model tool servers alive when deferred MCP preparation fails, so recovery surfaces the original preparation error and finalization still releases every resource exactly once.
+- 5e9795c: Derive Connected Machine list state from the durable heartbeat cursor instead of a live ControlRpc ping on every `GET /machines`, and share one `useMachines` poll per workspace+session.
+- 3398c2f: Retain the failed MCP request method, JSON-RPC phase, and bounded exact cause chain in durable recovery diagnostics without changing retry behavior or source error identity.
+- e91d89e: Open Markdown `sandbox:` file links in the current session's Files workbench, preserve exact decoded paths through the selected filesystem authority, reveal deep lazy-tree ancestors, and handle malformed references safely.
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [de3f376]
+- Updated dependencies [a9cd9e7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [e91d89e]
+- Updated dependencies [5d664d8]
+  - @opengeni/config@0.19.0
+  - @opengeni/contracts@2.2.0
+  - @opengeni/sdk@2.2.0
+  - @opengeni/codemode@0.4.12
+
 ## 1.2.1
 
 ### Patch Changes

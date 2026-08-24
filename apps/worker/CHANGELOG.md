@@ -1,5 +1,50 @@
 # @opengeni/worker-bundle
 
+## 0.22.0
+
+### Minor Changes
+
+- 4be2055: The first-party `opengeni` MCP server gains `session_human_input_respond` (`sessions:control`, `session.human_input.write`): a live attempt answers or skips another session's structured human-input request, recorded as `agent_attempt:<attemptId>`, and signals that session's workflow exactly like the REST route. `session_wait` reports `ownPendingImmediateUpdates` and `ownPendingDeferredUpdateKinds`; only immediate-class own input ends the wait. The API and both workers install `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` into `@opengeni/db` at boot. The worker delivers a child's `child_requires_action` outbox row to the parent right after the `requires_action` settlement (generalized `deliverChildLifecycleOutboxToParent`; the reaper covers crashes) and the goal-continuation prompt explains every child notice kind, offering `opengeni__session_human_input_respond` only when it is in the session's effective first-party selection.
+- e6ffdc7: The agent-facing `goal_set` MCP tool no longer accepts `maxAutoContinuations` (the ceiling stays on `CreateSessionRequest.goal` and scheduled tasks), and the operator PATCH resume emits `goal.resumed{reason:"api"}`. The worker passes the configured idle-backoff policy to the goal materializer and treats a `deferred` result like `held`: the workflow closes and the delayed wake-outbox row (or any new input) restarts it, with no Temporal timer.
+
+### Patch Changes
+
+- 72f8fc6: Give sandboxes a scoped GitHub App installation token for every bound repository, public or private. Before credential minting and the runtime clone plan, the turn worker resolves bare `github.com` repository resources (API callers, older sessions, agent-spawned children inheriting a parent's resources) against the workspace's auditable installation allowlists through a bounded metadata-read lookup memoized per process, and stamps the ids for that turn when exactly one allowlist matches; a bound-but-unusable repository stays an anonymous clone and posts one visible `credential.auth_needed` warning per session and URI. Connected Machines are unaffected and resolution never fails the turn.
+- 3398c2f: Retain the failed MCP request method, JSON-RPC phase, and bounded exact cause chain in durable recovery diagnostics without changing retry behavior or source error identity.
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [1fc235b]
+- Updated dependencies [de3f376]
+- Updated dependencies [c5c7e5a]
+- Updated dependencies [a9cd9e7]
+- Updated dependencies [72f8fc6]
+- Updated dependencies [72f8fc6]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [5e9795c]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [3398c2f]
+- Updated dependencies [acd38d1]
+- Updated dependencies [e91d89e]
+- Updated dependencies [8e2361b]
+- Updated dependencies [5d664d8]
+- Updated dependencies [45bffc3]
+  - @opengeni/config@0.19.0
+  - @opengeni/contracts@2.2.0
+  - @opengeni/core@2.1.0
+  - @opengeni/db@3.1.0
+  - @opengeni/runtime@1.3.0
+  - @opengeni/github@0.5.2
+  - @opengeni/documents@0.6.9
+  - @opengeni/storage@0.2.105
+  - @opengeni/codemode@0.4.12
+  - @opengeni/events@0.3.123
+  - @opengeni/observability@0.8.3
+
 ## 0.21.1
 
 ### Patch Changes
