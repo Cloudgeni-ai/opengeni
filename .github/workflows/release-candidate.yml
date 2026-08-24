@@ -256,6 +256,9 @@ jobs:
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Resolve API candidate digest
         id: api
@@ -284,6 +287,9 @@ jobs:
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Resolve worker candidate digest
         id: worker
@@ -310,6 +316,9 @@ jobs:
             OPENGENI_DEPLOYMENT_REVISION=${{ steps.meta.outputs.version }}
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Resolve web candidate digest
         id: web
@@ -333,6 +342,9 @@ jobs:
           push: true
           build-args: OPENGENI_SOURCE_SHA=${{ inputs.source_sha }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Resolve sandbox candidate digest
         id: sandbox
@@ -355,6 +367,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Resolve relay candidate digest
         id: relay
@@ -380,6 +395,9 @@ jobs:
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-artifact-materializer:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Resolve artifact materializer candidate digest
         id: artifact-materializer
@@ -405,6 +423,9 @@ jobs:
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
           tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-artifact-outbox-dispatcher:${{ steps.meta.outputs.candidate_tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
       - name: Resolve artifact outbox dispatcher candidate digest
         id: artifact-outbox-dispatcher

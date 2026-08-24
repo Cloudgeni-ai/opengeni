@@ -1035,7 +1035,11 @@ Protected main CI uses the separate `canary-sha-<source>` namespace for its
 SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
-produce different digests from the same source tree.
+produce different digests from the same source tree. Every protected-main
+canary and release-candidate workload image carries
+`org.opencontainers.image.revision=<exact source SHA>` and the repository's
+`org.opencontainers.image.source` label; inspect those labels together with the
+immutable digest when diagnosing a deployed image.
 Each attempt refuses pre-existing run-scoped tags and builds the complete image
 set from scratch. A retry receives a different tag, so an interrupted attempt's
 partial registry state can never be mistaken for the next attempt's output.

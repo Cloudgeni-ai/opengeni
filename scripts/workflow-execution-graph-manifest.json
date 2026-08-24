@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "7186c2bef5ea214d46b9b05172515ee4c260803e6699e4383fe00309f23cff8b"
+      "sha256": "1abf46ad7fb50e94574e910337c4b65d3fb04ee2412184a0371b8b81260b7a14"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -50,7 +50,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "5f809237b3ca80f88bb0628da5bceeb4498485d87e5352c1301aaad58bd30d36"
+      "sha256": "1e4c4cda968eb95bfcf53afc30832af3e10552ae56809b27ac2222ed19977676"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
