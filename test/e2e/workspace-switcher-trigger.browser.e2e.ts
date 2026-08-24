@@ -67,10 +67,10 @@ describe("Workspace switcher trigger in Chromium", () => {
       "Product Testing",
       "Research Sandbox",
       "New workspace…",
-      "Settings",
     ]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
+    expect(await page.getByRole("menuitem", { name: "Settings", exact: true }).count()).toBe(0);
     expect(
       await page.getByRole("menuitem", { name: /Personal workspace/, exact: false }).isVisible(),
     ).toBe(true);
@@ -111,9 +111,9 @@ describe("Workspace switcher trigger in Chromium", () => {
       triggerBox!.x + triggerBox!.width / 2,
       triggerBox!.y + triggerBox!.height / 2,
     );
-    expect(await page.getByRole("menuitem", { name: "Settings", exact: true }).isVisible()).toBe(
-      true,
-    );
+    expect(
+      await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
+    ).toBe(true);
   });
 
   test("Enter and Space open the collapsed tooltip-wrapped trigger and Escape restores focus", async () => {
@@ -125,9 +125,9 @@ describe("Workspace switcher trigger in Chromium", () => {
 
     await trigger.focus();
     await trigger.press("Enter");
-    expect(await page.getByRole("menuitem", { name: "Settings", exact: true }).isVisible()).toBe(
-      true,
-    );
+    expect(
+      await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
+    ).toBe(true);
     await page.keyboard.press("Escape");
     expect(await trigger.evaluate((element) => document.activeElement === element)).toBe(true);
 
