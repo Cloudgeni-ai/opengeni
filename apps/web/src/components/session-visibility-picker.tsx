@@ -17,18 +17,6 @@ export function SessionVisibilityPicker(props: {
   disabled: boolean;
   onChange: (visibility: "private" | "workspace") => void;
 }) {
-  const privateEnabled = props.personalWorkspace || props.capabilities?.canCreatePrivate === true;
-  const privateReason =
-    props.capabilities === null
-      ? "Checking availability…"
-      : props.capabilities.reason === "managed_session_required"
-        ? "Sign in with your managed account to create an Only-me session."
-        : props.capabilities.reason === "not_activated"
-          ? "Private sessions are not enabled for this organization yet."
-          : props.capabilities.reason === "unavailable"
-            ? "Private-session availability could not be checked. Try again shortly."
-            : "Only you can open this session.";
-
   if (props.personalWorkspace) {
     return (
       <section className="mt-5 rounded-lg border border-border bg-surface/60 p-3">
@@ -43,6 +31,13 @@ export function SessionVisibilityPicker(props: {
         </div>
       </section>
     );
+  }
+
+  // When Workspace is the only valid value there is no decision to make.
+  // Personal work belongs in the member's owner-only Personal workspace;
+  // activated organizations get the real Workspace / Only me choice below.
+  if (props.capabilities?.canCreatePrivate !== true) {
+    return null;
   }
 
   return (
@@ -65,10 +60,10 @@ export function SessionVisibilityPicker(props: {
           value="private"
           name={`${props.id}-visibility`}
           selected={props.value === "private"}
-          disabled={props.disabled || !privateEnabled}
+          disabled={props.disabled}
           icon={<LockIcon className="size-4" aria-hidden="true" />}
           title="Only me"
-          description={privateReason}
+          description="Only you can open this session."
           onSelect={props.onChange}
         />
       </div>

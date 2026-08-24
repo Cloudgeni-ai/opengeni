@@ -923,7 +923,11 @@ async function requireMcpAccessGrant(
 
 function clientAuthConfig(settings: AppDependencies["settings"]) {
   if (settings.productAccessMode === "managed") {
-    return { mode: "managedSession" as const, session: "cookie" as const };
+    return {
+      mode: "managedSession" as const,
+      session: "cookie" as const,
+      emailVerificationRequired: settings.environment !== "local",
+    };
   }
   if (settings.productAccessMode === "configured") {
     return {

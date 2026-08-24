@@ -3378,7 +3378,12 @@ export type ClientAuthConfig =
   | { mode: "none" }
   | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
   | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
-  | { mode: "managedSession"; session: "cookie" };
+  | {
+      mode: "managedSession";
+      session: "cookie";
+      /** Defaults to true when omitted by an older deployment. */
+      emailVerificationRequired?: boolean;
+    };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
@@ -3688,6 +3693,8 @@ export type OrganizationMember = {
   id: string;
   organizationId: string;
   subjectId: string;
+  name: string | null;
+  email: string | null;
   role: OrganizationMembershipRole;
   status: "provisioning" | "active" | "suspended" | "revoked";
   authorizationRevision: number;
@@ -3731,6 +3738,25 @@ export type OrganizationPrivateSessionSettings = {
   version: number;
   updatedAt: string;
   changed?: boolean;
+};
+export type AddOrganizationWorkspaceMemberRequest = {
+  organizationMembershipId: string;
+  role?: string | undefined;
+  permissions: Permission[];
+};
+export type CreateOrganizationWorkspaceRequest = {
+  name: string;
+  slug?: string | null;
+  agentInstructions?: string | null;
+  operationId: string;
+};
+export type CreateOrganizationRequest = {
+  name: string;
+  operationId: string;
+};
+export type CreateOrganizationResponse = {
+  organization: OrganizationSummary;
+  workspaceId: string;
 };
 export type UpdateOrganizationNameRequest = {
   name: string;

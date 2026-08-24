@@ -1325,6 +1325,9 @@ describe("contracts", () => {
     expect(payload.deploymentRevision).toBe("test-sha");
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
+    expect(payload.auth.mode === "managedSession" && payload.auth.emailVerificationRequired).toBe(
+      true,
+    );
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     // models defaults to [] for back-compat (callers reading only allowedModels

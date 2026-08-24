@@ -115,6 +115,18 @@ export type RlsStrategy = "force" | "scoped";
  */
 export type UserLookup = (db: Database, email: string) => Promise<string | null>;
 
+export type ManagedUserProfile = {
+  id: string;
+  name: string | null;
+  email: string;
+};
+
+/** Host identity projection used by organization administration rosters. */
+export type UserProfileLookup = (
+  db: Database,
+  userIds: readonly string[],
+) => Promise<ManagedUserProfile[]>;
+
 export type CreateDbOptions = {
   /**
    * The Postgres `search_path` for this connection (Step I, §7.8 runtime half).
@@ -132,6 +144,8 @@ export type CreateDbOptions = {
   rlsStrategy?: RlsStrategy;
   /** Host-provided user-by-email resolver; unset → today's raw `auth_users` query. */
   userLookup?: UserLookup;
+  /** Host-provided user profile projection; unset → standalone `auth_users`. */
+  userProfileLookup?: UserProfileLookup;
   /** postgres-js pool size; defaults to today's `10`. */
   max?: number;
   /**
@@ -150,7 +164,11 @@ export type CreateDbOptions = {
  * config (e.g. one built outside `createDb`, or in a test) falls back to the
  * standalone defaults: `rlsStrategy: "force"`, raw `auth_users` lookup.
  */
-type DbBinding = { rlsStrategy: RlsStrategy; userLookup?: UserLookup };
+type DbBinding = {
+  rlsStrategy: RlsStrategy;
+  userLookup?: UserLookup;
+  userProfileLookup?: UserProfileLookup;
+};
 
 const dbBindings = new WeakMap<object, DbBinding>();
 
@@ -314,6 +332,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
   dbBindings.set(db as unknown as object, {
     rlsStrategy: options.rlsStrategy ?? "force",
     ...(options.userLookup ? { userLookup: options.userLookup } : {}),
+    ...(options.userProfileLookup ? { userProfileLookup: options.userProfileLookup } : {}),
   });
   return {
     db,
@@ -331,11 +350,16 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
  */
 export function registerDbBinding(
   db: Database,
-  binding: { rlsStrategy?: RlsStrategy; userLookup?: UserLookup },
+  binding: {
+    rlsStrategy?: RlsStrategy;
+    userLookup?: UserLookup;
+    userProfileLookup?: UserProfileLookup;
+  },
 ): void {
   dbBindings.set(db as unknown as object, {
     rlsStrategy: binding.rlsStrategy ?? "force",
     ...(binding.userLookup ? { userLookup: binding.userLookup } : {}),
+    ...(binding.userProfileLookup ? { userProfileLookup: binding.userProfileLookup } : {}),
   });
 }
 

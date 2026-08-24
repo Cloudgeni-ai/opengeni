@@ -3,6 +3,7 @@
 // /v1/billing/entitlements), and members. The workspace-scoped API keys section
 // moved to Workspace settings; this surface is the tenant-level console.
 import { useBillingUsage } from "@opengeni/react";
+import { useNavigate } from "@tanstack/react-router";
 import { ActivityIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -53,6 +54,7 @@ export function OrgSettingsRoute({
   section?: OrganizationAdminSection;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const client = context.client;
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -196,7 +198,9 @@ export function OrgSettingsRoute({
   // "shortly" rather than implying the balance already reflects the top-up.
   useEffect(() => {
     if (checkout === "success") {
-      toast.success("Payment received", { description: "Your credits will appear shortly." });
+      toast.success("Payment received", {
+        description: "Your credits will appear shortly.",
+      });
     } else if (checkout === "cancelled") {
       toast("Checkout cancelled", { description: "No charge was made." });
     }
@@ -268,6 +272,24 @@ export function OrgSettingsRoute({
               managedSession={context.clientConfig.auth.mode === "managedSession"}
               accessibleWorkspaceIds={new Set(context.workspaces.map((workspace) => workspace.id))}
               onOrganizationChanged={context.revalidatePrincipalAccess}
+              onCreateWorkspace={async (name, operationId) => {
+                await client.createOrganizationWorkspace(accountId, {
+                  name,
+                  operationId,
+                });
+              }}
+              onCreateOrganization={async (name, operationId) => {
+                const created = await client.createOrganization({
+                  name,
+                  operationId,
+                });
+                context.revalidatePrincipalAccess();
+                toast.success(`${created.organization.name} created`);
+                await navigate({
+                  to: "/workspaces/$workspaceId/sessions",
+                  params: { workspaceId: created.workspaceId },
+                });
+              }}
             />
             <OrganizationPrivateSessionsSection
               key={`${identityKey}:private-sessions`}

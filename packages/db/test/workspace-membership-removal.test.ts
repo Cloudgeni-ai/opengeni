@@ -1,7 +1,8 @@
 // Workspace-membership removal is the fenced SECURITY DEFINER teardown from
 // migration 0278: the removed member's queued/live work in that workspace is
 // cancelled and fenced, their private sessions' authority epochs advance, and
-// the guards (self-removal, last admin, actor administration) fail closed.
+// self-removal and actor-administration guards fail closed. The last-admin
+// guard remains for workspace-only control; organization control stays authoritative.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
@@ -444,14 +445,14 @@ describe("workspace membership removal fencing", () => {
     });
   });
 
-  test("two concurrent removals of the two last administering members leave one standing", async () => {
+  test("two organization administrators may remove the final durable workspace administrators", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const adminA = await grantAdmin(workspace);
     const adminB = await grantAdmin(workspace);
-    // Two independent organization-admin actors race to remove A and B. The
-    // roster locks serialize them: exactly one removal commits and the loser
-    // fails closed on the last-admin guard (55000) - never zero admins left.
+    // The organization control plane remains authoritative even with no
+    // durable operational workspace administrator, so both exact removals may
+    // commit. The roster locks still serialize the teardown itself.
     const actorX = await grantOrgAdmin(workspace);
     const actorY = await grantOrgAdmin(workspace);
     const clientX = createDb(shared.appUrl, { max: 1 });
@@ -463,39 +464,34 @@ describe("workspace membership removal fencing", () => {
           workspaceId: workspace.workspaceId,
           actorSubjectId: actorX,
           targetSubjectId: adminA,
+          requireOrganizationSharedWorkspaceAdministration: true,
         }),
         removeWorkspaceMember(clientY.db, {
           accountId: workspace.accountId,
           workspaceId: workspace.workspaceId,
           actorSubjectId: actorY,
           targetSubjectId: adminB,
+          requireOrganizationSharedWorkspaceAdministration: true,
         }),
       ]);
       const outcomes = [first!, second!];
-      const fulfilled = outcomes.filter(
-        (candidate): candidate is PromiseFulfilledResult<boolean> =>
-          candidate.status === "fulfilled",
-      );
-      const rejected = outcomes.filter(
-        (candidate): candidate is PromiseRejectedResult => candidate.status === "rejected",
-      );
-      expect(fulfilled).toHaveLength(1);
-      expect(fulfilled[0]!.value).toBe(true);
-      expect(rejected).toHaveLength(1);
-      expect(postgresCode(rejected[0]!.reason)).toBe("55000");
+      expect(outcomes.every((candidate) => candidate.status === "fulfilled")).toBe(true);
+      expect(
+        outcomes.every((candidate) => candidate.status === "fulfilled" && candidate.value === true),
+      ).toBe(true);
       const [roster] = await admin<{ admins: number }[]>`
         select count(*)::int as admins
         from workspace_memberships
         where workspace_id = ${workspace.workspaceId}
           and permissions ?| array['workspace:admin', 'members:manage']`;
-      expect(roster!.admins).toBe(1);
+      expect(roster!.admins).toBe(0);
     } finally {
       await clientX.close();
       await clientY.close();
     }
   });
 
-  test("refuses self-removal, last-admin removal, and a non-administering actor", async () => {
+  test("refuses self-removal and a non-administering actor while allowing organization control", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const admin1 = await grantAdmin(workspace);
@@ -521,8 +517,9 @@ describe("workspace membership removal fencing", () => {
       "42501",
     );
 
-    // A second admin exists -> the first admin becomes removable; removing the
-    // final administering member fails closed.
+    // A second admin exists -> the first admin becomes removable. A direct
+    // organization administrator may then remove the final durable workspace
+    // administrator because the organization control plane remains available.
     const admin2 = await grantAdmin(workspace);
     expect(
       await removeWorkspaceMember(db, {
@@ -533,6 +530,9 @@ describe("workspace membership removal fencing", () => {
       }),
     ).toBe(true);
     const outsideActor = await grantAdminInOtherContext(workspace, admin2);
+    // Merely naming an active organization administrator does not open the
+    // direct-control-plane exception. Ordinary/delegated removal retains the
+    // durable last-admin guard (and this actor has no workspace authority).
     await expectRemovalRejection(
       removeWorkspaceMember(db, {
         accountId: workspace.accountId,
@@ -540,15 +540,25 @@ describe("workspace membership removal fencing", () => {
         actorSubjectId: outsideActor,
         targetSubjectId: admin2,
       }),
-      "55000",
+      "42501",
     );
+    expect(
+      await removeWorkspaceMember(db, {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        actorSubjectId: outsideActor,
+        targetSubjectId: admin2,
+        requireOrganizationSharedWorkspaceAdministration: true,
+      }),
+    ).toBe(true);
     // Removing a non-member is an idempotent no-op.
     expect(
       await removeWorkspaceMember(db, {
         accountId: workspace.accountId,
         workspaceId: workspace.workspaceId,
-        actorSubjectId: admin2,
+        actorSubjectId: outsideActor,
         targetSubjectId: `user:absent-${crypto.randomUUID()}`,
+        requireOrganizationSharedWorkspaceAdministration: true,
       }),
     ).toBe(false);
   });

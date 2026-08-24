@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Permission } from "./permissions";
 
 export const OrganizationMembershipRole = z.enum(["owner", "admin", "member"]);
 export type OrganizationMembershipRole = z.infer<typeof OrganizationMembershipRole>;
@@ -26,6 +27,8 @@ export const OrganizationMember = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
   subjectId: z.string().min(1).max(1024),
+  name: z.string().min(1).max(1024).nullable().default(null),
+  email: z.string().email().max(320).nullable().default(null),
   role: OrganizationMembershipRole,
   status: z.enum(["provisioning", "active", "suspended", "revoked"]),
   authorizationRevision: z.number().int().positive(),
@@ -92,6 +95,39 @@ export const OrganizationAdministrationOverview = z.object({
   workspaces: z.array(OrganizationWorkspaceAccess).max(500),
 });
 export type OrganizationAdministrationOverview = z.infer<typeof OrganizationAdministrationOverview>;
+
+// Organization-control-plane assignment of an existing active organization
+// member to a shared workspace. The target is a membership rather than an
+// email address: joining the organization and receiving workspace access stay
+// two explicit lifecycle steps, and this surface cannot become a user lookup.
+export const AddOrganizationWorkspaceMemberRequest = z.object({
+  organizationMembershipId: z.string().uuid(),
+  role: z.string().trim().min(1).max(64).optional(),
+  permissions: z.array(Permission).max(128),
+});
+export type AddOrganizationWorkspaceMemberRequest = z.infer<
+  typeof AddOrganizationWorkspaceMemberRequest
+>;
+
+export const CreateOrganizationWorkspaceRequest = z.object({
+  name: z.string().trim().min(1).max(120),
+  slug: z.string().trim().min(1).max(120).nullable().optional(),
+  agentInstructions: z.string().nullable().optional(),
+  operationId: z.string().uuid(),
+});
+export type CreateOrganizationWorkspaceRequest = z.infer<typeof CreateOrganizationWorkspaceRequest>;
+
+export const CreateOrganizationRequest = z.object({
+  name: z.string().trim().min(1).max(120),
+  operationId: z.string().uuid(),
+});
+export type CreateOrganizationRequest = z.infer<typeof CreateOrganizationRequest>;
+
+export const CreateOrganizationResponse = z.object({
+  organization: OrganizationSummary,
+  workspaceId: z.string().uuid(),
+});
+export type CreateOrganizationResponse = z.infer<typeof CreateOrganizationResponse>;
 
 export const UpdateOrganizationNameRequest = z.object({
   name: z.string().trim().min(1).max(120),

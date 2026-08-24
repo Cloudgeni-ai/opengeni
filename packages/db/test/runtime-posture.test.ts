@@ -174,6 +174,7 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_membership_operation_receipts",
     "organization_memberships",
     "organization_profile_events",
+    "organization_shared_workspace_administration_capabilities",
     "organization_user_resource_authorities",
     "organization_user_resource_grants",
     "organization_user_retention_deletion_events",
@@ -426,14 +427,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 281],
+            [FORCE_RLS_TABLES, 282],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 145],
             [RUNTIME_READ_ONLY_TABLES, 19],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 51],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 52],
             [RUNTIME_DML_TABLES, 242],
           ] as const)
         : ([
@@ -458,7 +459,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 293 : 207;
+      const tableCount = hasCurrentMainActivityLedger ? 294 : 207;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
