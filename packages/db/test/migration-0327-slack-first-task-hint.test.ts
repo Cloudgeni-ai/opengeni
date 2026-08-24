@@ -17,7 +17,7 @@ import {
 } from "../src/index";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const migrationUrl = new URL("../drizzle/0326_slack_first_task_hint.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0327_slack_first_task_hint.sql", import.meta.url);
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -25,11 +25,11 @@ let client: DbClient;
 let db: Database;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0326-slack-first-task-hint");
+  shared = await acquireSharedTestDatabase("migration-0327-slack-first-task-hint");
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0326-slack-first-task-hint] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0327-slack-first-task-hint] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     available = false;
@@ -109,7 +109,7 @@ async function installation(label: string) {
   return { ...target, link, interaction };
 }
 
-describe("migration 0326 Slack first-task hint", () => {
+describe("migration 0327 Slack first-task hint", () => {
   test("is a rolling additive pair of columns with no RLS-blind backfill", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
