@@ -377,7 +377,9 @@ export function MessageTimeline({
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
   // so load/remount does not ease into the tip — live tip-follow is unchanged
   // once revealed. A flash of the window's TOP is still structurally impossible.
-  const [revealed, setRevealed] = useState(false);
+  // The accepted-create handoff uses the reserved local id "c" so its known
+  // first message is visible immediately; loaded histories still park first.
+  const [revealed, setRevealed] = useState(resolvedItems[0]?.id === "c");
   // Mirror `pinned` into a ref, written ONLY by applyPinned, so the
   // ResizeObserver rAF (a stable closure) reads the live value and a snap can
   // never race a just-unpinned reader across a pending React commit.

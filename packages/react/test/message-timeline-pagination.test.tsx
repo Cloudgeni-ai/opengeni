@@ -122,6 +122,25 @@ afterEach(() => {
 });
 
 describe("MessageTimeline pagination affordances", () => {
+  test("can reveal a known-fresh first message without blanking the scroller", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const r = await renderComponent(
+      <MessageTimeline items={[userItem("c", "accepted first prompt")]} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+
+    expect(scroller).not.toBeNull();
+    expect(scroller?.getAttribute("style") ?? "").not.toContain("visibility");
+    expect(r.container.textContent).toContain("accepted first prompt");
+    await r.unmount();
+  });
+
   test("keeps an optimistic user message mounted through its durable event handoff", async () => {
     const clientEventId = "client-send-1";
     const optimistic: TimelineItem = {

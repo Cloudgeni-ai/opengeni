@@ -115,6 +115,22 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("bash scripts/run-development-relay.sh");
   });
 
+  test("persists NATS auth-callout defaults for independently restarted components", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    for (const setting of [
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_USER",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD",
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_USER",
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD",
+    ]) {
+      expect(source).toContain(`printf '${setting}=%s\\n'`);
+    }
+  });
+
   test("probes local ports without walking unhealthy mounted filesystems", async () => {
     const source = await Bun.file(scriptPath).text();
     const netcatCapabilityCheck = source.indexOf("nc_help=");

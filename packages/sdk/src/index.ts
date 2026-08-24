@@ -756,6 +756,7 @@ export type {
   SubmitComposerDraftResponse,
   SaveNewSessionDraftRequest,
   SessionCommandReceipt,
+  SessionPromptRouting,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
   SessionPendingInputPreview,

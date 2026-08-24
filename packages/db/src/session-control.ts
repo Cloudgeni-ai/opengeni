@@ -562,9 +562,8 @@ export type WorkspaceControlAdmissionLock = {
 const WORKSPACE_CONTROL_ADMISSION_SAVEPOINT = "opengeni_workspace_control_admission";
 
 /**
- * Lock the workspace control prefix for an admission that mutates the control
- * row only when it must auto-resume a paused branch: Send, Steer, queued
- * Steer, and realtime ledger delegation.
+ * Lock the workspace control prefix for an admission. Callers that may resume
+ * a paused branch request escalation; inert queue admission stays shared.
  *
  * The common case (the target branch is active) holds only `FOR SHARE`. That
  * still excludes every control mutation (Pause/Resume/Cancel, workspace
@@ -585,7 +584,11 @@ const WORKSPACE_CONTROL_ADMISSION_SAVEPOINT = "opengeni_workspace_control_admiss
  */
 export async function lockWorkspaceInferenceControlForAdmission(
   db: Database,
-  input: { workspaceId: string; sessionId: string } & WorkspaceControlLockOptions,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    resumePausedBranch: boolean;
+  } & WorkspaceControlLockOptions,
 ): Promise<WorkspaceControlAdmissionLock> {
   // One budget spans the shared attempt and any escalation to the exclusive
   // prefix, so the caller's bound is the total wait, not a per-step timeout.
@@ -595,6 +598,10 @@ export async function lockWorkspaceInferenceControlForAdmission(
       : { budget: workspaceControlLockBudget(input.lockTimeoutMs) };
   await db.execute(sql.raw(`savepoint ${WORKSPACE_CONTROL_ADMISSION_SAVEPOINT}`));
   const shared = await lockWorkspaceInferenceControl(db, input.workspaceId, "share", lockOptions);
+  if (!input.resumePausedBranch) {
+    await db.execute(sql.raw(`release savepoint ${WORKSPACE_CONTROL_ADMISSION_SAVEPOINT}`));
+    return { control: shared, mode: "share" };
+  }
   const effective = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl: shared,
   });
@@ -646,7 +653,7 @@ export type SessionEventWriteLocks = {
  * Control-aware writers that do not mutate the control row take it `share`;
  * only genuine control mutations (Pause/Resume/Cancel, workspace control,
  * auto-resume, settings narrowing, quiescent tree deletion) take `update`.
- * Send/Steer admission decides between the two through
+ * Prompt admission declares whether it may resume a paused branch through
  * `lockWorkspaceInferenceControlForAdmission`.
  *
  * `FOR KEY SHARE` is deliberate. Event inserts need the workspace key to remain
@@ -2225,8 +2232,51 @@ export type SessionControlMutationResult = {
   cancelledSessionCount: number;
   cancelledTurnCount: number;
   affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
+  workflowWake: SessionControlWorkflowWake | null;
   replay: boolean;
 };
+
+export type SessionControlWorkflowWake = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  temporalWorkflowId: string;
+  wakeRevision: number;
+};
+
+async function pendingSessionControlWorkflowWake(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  wakeCount: number,
+): Promise<SessionControlWorkflowWake | null> {
+  if (wakeCount === 0) return null;
+  const [wake] = await db
+    .select({
+      accountId: schema.sessionWorkflowWakeOutbox.accountId,
+      workspaceId: schema.sessionWorkflowWakeOutbox.workspaceId,
+      sessionId: schema.sessionWorkflowWakeOutbox.sessionId,
+      temporalWorkflowId: schema.sessionWorkflowWakeOutbox.temporalWorkflowId,
+      wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+      deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+    })
+    .from(schema.sessionWorkflowWakeOutbox)
+    .where(
+      and(
+        eq(schema.sessionWorkflowWakeOutbox.workspaceId, workspaceId),
+        eq(schema.sessionWorkflowWakeOutbox.sessionId, sessionId),
+      ),
+    )
+    .limit(1);
+  if (!wake || wake.wakeRevision <= wake.deliveredRevision) return null;
+  return {
+    accountId: wake.accountId,
+    workspaceId: wake.workspaceId,
+    sessionId: wake.sessionId,
+    temporalWorkflowId: wake.temporalWorkflowId,
+    wakeRevision: wake.wakeRevision,
+  };
+}
 
 async function loadSessionSubtreeIds(
   db: Database,
@@ -2978,6 +3028,7 @@ export async function mutateSessionControlInTransaction(
         "Replayed session control receipt has no session event",
       );
     }
+    const wakeCount = Number(reserved.receipt.result.wakeCount ?? 0);
     return {
       receipt: reserved.receipt,
       control: await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
@@ -2987,7 +3038,7 @@ export async function mutateSessionControlInTransaction(
       workspaceControlEventId,
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
       backgroundCommandCount: Number(reserved.receipt.result.backgroundCommandCount ?? 0),
-      wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
+      wakeCount,
       cancelledSessionCount: Number(reserved.receipt.result.cancelledSessionCount ?? 0),
       cancelledTurnCount: Number(reserved.receipt.result.cancelledTurnCount ?? 0),
       affectedSessionEvents: Array.isArray(reserved.receipt.result.affectedSessionEvents)
@@ -2996,6 +3047,12 @@ export async function mutateSessionControlInTransaction(
             eventIds: string[];
           }>)
         : [{ sessionId: input.sessionId, eventIds: [sessionControlEventId] }],
+      workflowWake: await pendingSessionControlWorkflowWake(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        wakeCount,
+      ),
       replay: true,
     };
   }
@@ -3248,6 +3305,12 @@ export async function mutateSessionControlInTransaction(
     cancelledSessionCount: cancellation.cancelledSessionCount,
     cancelledTurnCount: cancellation.cancelledTurnCount,
     affectedSessionEvents: cancellation.affectedSessionEvents,
+    workflowWake: await pendingSessionControlWorkflowWake(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      wakeCount,
+    ),
     replay: false,
   };
 }
@@ -3258,7 +3321,7 @@ export async function autoResumeSessionBranchInTransaction(
     workspaceId: string;
     sessionId: string;
     actor: string;
-    reason: "human_send" | "human_steer" | "service_send" | "service_steer" | "agent_steer";
+    reason: "human_steer" | "service_steer" | "agent_steer";
     observedControlEtag?: string | null;
     /**
      * The admission prefix the caller already holds. A `share` admission

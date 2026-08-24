@@ -657,6 +657,7 @@
         "@opengeni/contracts": "workspace:*",
         "@opengeni/db": "workspace:*",
         "@opengeni/events": "workspace:*",
+        "@opengeni/observability": "workspace:*",
         "@opengeni/runtime": "workspace:*",
         "@opengeni/worker-bundle": "workspace:*",
         "@temporalio/client": "^1.17.0",
@@ -684,6 +685,7 @@
   "patchedDependencies": {
     "modal@0.9.0": "patches/modal@0.9.0.patch",
     "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
+    "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
     "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
   },

@@ -273,7 +273,9 @@ export async function clearAttemptCredentialsWithSettledFence(input: {
       error instanceof Error &&
       error.name === "SandboxWorkspaceMutationFencedError" &&
       (error as Error & { code?: unknown }).code === "attempt_fenced" &&
-      (input.activityStatus === "idle" || input.activityStatus === "failed");
+      (input.activityStatus === "idle" ||
+        input.activityStatus === "failed" ||
+        input.activityStatus === "cancelled");
     if (!settledAttemptFence) throw error;
     input.onSettledAttemptFence();
     await input.clearExactAttempt();

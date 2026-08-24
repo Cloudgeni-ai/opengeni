@@ -1356,6 +1356,7 @@ type TurnAnchorPrescan = {
   queuedTurnByTrigger: Map<string, string>;
   startSeqByTrigger: Map<string, number>;
   cancelledBeforeStartTriggers: Set<string>;
+  directChatSequenceByTrigger: Map<string, number>;
   startedTurnIds: Set<string>;
 };
 
@@ -1364,12 +1365,32 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
   const queuedTurnByTrigger = new Map<string, string>();
   const startSeqByTrigger = new Map<string, number>();
   const cancelledTurnIds = new Set<string>();
+  const withdrawnTurnIds = new Set<string>();
   const fallbackSeqByTurn = new Map<string, number>();
+  const directChatSequenceByTrigger = new Map<string, number>();
+  const queueSteerSequenceByTurn = new Map<string, number>();
   const startedTurnIds = new Set<string>();
 
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    if (event.type === "user.message" && payload.delivery === "steer") {
+      directChatSequenceByTrigger.set(event.id, event.sequence);
+    }
+    if (event.type === "session.control.steer_requested") {
+      const targetTurnId = typeof payload.targetTurnId === "string" ? payload.targetTurnId : null;
+      if (targetTurnId && !queueSteerSequenceByTurn.has(targetTurnId)) {
+        queueSteerSequenceByTurn.set(targetTurnId, event.sequence);
+      }
+    }
+    if (
+      event.type === "session.queue.changed" &&
+      (payload.operation === "edit" || payload.operation === "delete")
+    ) {
+      const withdrawnTurnId =
+        typeof payload.turnId === "string" ? payload.turnId : (turnId ?? null);
+      if (withdrawnTurnId) withdrawnTurnIds.add(withdrawnTurnId);
+    }
     if (event.type === "turn.queued") {
       const triggerEventId =
         typeof payload.triggerEventId === "string" ? payload.triggerEventId : null;
@@ -1404,6 +1425,10 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
   }
 
   for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
+    const queueSteerSequence = queueSteerSequenceByTurn.get(turnId);
+    if (queueSteerSequence !== undefined) {
+      directChatSequenceByTrigger.set(triggerEventId, queueSteerSequence);
+    }
     if (!startSeqByTrigger.has(triggerEventId)) {
       const fallbackSeq = fallbackSeqByTurn.get(turnId);
       if (fallbackSeq !== undefined) {
@@ -1415,7 +1440,7 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
   const cancelledBeforeStartTriggers = new Set<string>();
   for (const [triggerEventId, turnId] of queuedTurnByTrigger) {
     if (
-      cancelledTurnIds.has(turnId) &&
+      (cancelledTurnIds.has(turnId) || withdrawnTurnIds.has(turnId)) &&
       !startSeqByTrigger.has(triggerEventId) &&
       !fallbackSeqByTurn.has(turnId)
     ) {
@@ -1427,6 +1452,7 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     queuedTurnByTrigger,
     startSeqByTrigger,
     cancelledBeforeStartTriggers,
+    directChatSequenceByTrigger,
     startedTurnIds,
   };
 }
@@ -1437,6 +1463,13 @@ function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan)
 
   for (const event of ordered) {
     if (event.type !== "user.message") {
+      continue;
+    }
+    // Steer is an accepted direction change, not waiting queue copy. Keep it
+    // directly in chat across refresh/reconnect even before its turn starts.
+    const directChatSequence = prescan.directChatSequenceByTrigger.get(event.id);
+    if (directChatSequence !== undefined) {
+      pushInsertion(insertions, directChatSequence, event);
       continue;
     }
     const queuedTurnId = prescan.queuedTurnByTrigger.get(event.id);

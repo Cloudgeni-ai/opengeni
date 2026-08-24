@@ -194,6 +194,30 @@ describe("streamSessionEvents", () => {
     expect(transport.openedAfter).toEqual([0, 2]);
   });
 
+  test("resumes after the full durable range covered by a compact SSE event", async () => {
+    const controller = new AbortController();
+    const compact = makeEvent(1, "agent.message.delta", {
+      text: "one through one hundred",
+      coalescedUntil: 100,
+    });
+    const transport = scriptedTransport([
+      { events: [compact] },
+      { events: [makeEvent(101)], hang: true },
+    ]);
+    const seen: SessionEvent[] = [];
+    for await (const event of streamSessionEvents(transport, {
+      ...FAST,
+      signal: controller.signal,
+    })) {
+      seen.push(event);
+      if (event.sequence === 101) controller.abort();
+    }
+
+    expect(sequences(seen)).toEqual([1, 101]);
+    expect(transport.openedAfter).toEqual([0, 100]);
+    expect(transport.listCalls).toEqual([]);
+  });
+
   test("suppresses duplicates when the server replays already-seen events", async () => {
     const controller = new AbortController();
     const transport = scriptedTransport([

@@ -160,6 +160,12 @@ export type AppContextValue = {
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
   session: Session | null;
   setSession: Dispatch<SetStateAction<Session | null>>;
+  /**
+   * Exact successful create result carried across the index -> session route.
+   * It keeps the accepted first prompt visible while the durable event tail
+   * catches up, without treating ordinary follow-ups as direct-chat sends.
+   */
+  sessionCreationHandoff: SessionCreationHandoff | null;
   connectionState: SessionEventsConnectionState;
   setConnectionState: Dispatch<SetStateAction<SessionEventsConnectionState>>;
   /** The routed session's one shared event feed. Header consumers must never self-stream. */
@@ -275,6 +281,11 @@ export type AppContextValue = {
   resetSessionView: () => void;
   resetWorkspaceIntegrations: () => void;
 };
+
+export type SessionCreationHandoff = Readonly<{
+  session: Session;
+  clientEventId: string;
+}>;
 
 export type PendingSlackLink = {
   workspaceId: string;
@@ -445,6 +456,8 @@ export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): s
 
 export function RootRouteComponent() {
   const [session, setSessionState] = useState<Session | null>(null);
+  const [sessionCreationHandoff, setSessionCreationHandoff] =
+    useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -578,6 +591,7 @@ export function RootRouteComponent() {
 
   const resetSessionView = useCallback(() => {
     setSession(null);
+    setSessionCreationHandoff(null);
     setConnectionState("idle");
     sessionEventFeedStore.set(null);
   }, [sessionEventFeedStore, setSession]);
@@ -1407,6 +1421,14 @@ export function RootRouteComponent() {
         return null;
       }
       setSession(created);
+      if (attempt.request.clientEventId && attempt.request.startMode !== "realtime") {
+        setSessionCreationHandoff({
+          session: created,
+          clientEventId: attempt.request.clientEventId,
+        });
+      } else {
+        setSessionCreationHandoff(null);
+      }
       setConnectionState("idle");
       captureProductAnalyticsEvent("session_started", {
         $insert_id: `session_started:${created.id}`,
@@ -1793,6 +1815,7 @@ export function RootRouteComponent() {
           setInspectorOpen,
           session,
           setSession,
+          sessionCreationHandoff,
           connectionState,
           setConnectionState,
           sessionEventFeedStore,
@@ -1910,6 +1933,7 @@ export function RootRouteComponent() {
     selectedRepoIds,
     selectedRepoRefs,
     session,
+    sessionCreationHandoff,
     sessionEventFeedStore,
     setSession,
     toolMcpServers,

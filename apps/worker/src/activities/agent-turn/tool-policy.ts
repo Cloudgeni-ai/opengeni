@@ -86,6 +86,7 @@ export function lazyToolTransportForTurn(
       id: string;
       kind: RegistryProviderKind;
       api: ModelProviderApi;
+      wireProfile: "openai" | "azure-openai";
       builtin: boolean;
       baseUrl?: string | undefined;
     };
@@ -94,11 +95,11 @@ export function lazyToolTransportForTurn(
   if (!resolvedModel) return "openai_native";
   const provider = resolvedModel.provider;
   if (provider.kind === "codex-subscription") return "codex_native";
-  const isDirectBuiltinResponses =
-    provider.builtin &&
+  const isNativeResponsesProvider =
     provider.api === "responses" &&
-    (provider.id === "azure" || (provider.id === "openai" && provider.baseUrl === undefined));
-  if (isDirectBuiltinResponses) {
+    (provider.wireProfile === "azure-openai" ||
+      (provider.builtin && provider.id === "openai" && provider.baseUrl === undefined));
+  if (isNativeResponsesProvider) {
     return "openai_native";
   }
   return "generic_dispatch";

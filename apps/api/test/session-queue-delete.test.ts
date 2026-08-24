@@ -36,6 +36,7 @@ let db: Database;
 let app: Hono;
 let published = 0;
 let wakes = 0;
+let postCommitTasks: Array<() => Promise<void>> = [];
 
 const settings = testSettings({
   productAccessMode: "managed",
@@ -84,7 +85,16 @@ function deps(): ApiRouteDeps {
     objectStorage: null,
     documentIndexer: { indexDocument: async () => {} },
     getDocumentServices: () => ({}) as never,
+    schedulePromptPostCommit: (task: () => Promise<void>) => {
+      postCommitTasks.push(task);
+    },
   } as unknown as ApiRouteDeps;
+}
+
+async function flushPostCommitTasks(): Promise<void> {
+  const tasks = postCommitTasks;
+  postCommitTasks = [];
+  await Promise.all(tasks.map(async (task) => await task()));
 }
 
 async function bearer(
@@ -148,6 +158,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await flushPostCommitTasks();
   try {
     await client?.close();
   } catch {
@@ -191,6 +202,7 @@ describe("session queue delete lookup", () => {
       cancelledTurnCount: 0,
     });
     expect((await getSession(db, owner.workspaceId, session.id))?.status).toBe("cancelled");
+    await flushPostCommitTasks();
 
     const resumed = await control("resume");
     expect(resumed.status).toBe(409);
@@ -301,6 +313,7 @@ describe("session queue delete lookup", () => {
       },
     );
     expect(submitted.status).toBe(202);
+    await flushPostCommitTasks();
     const queued = await app.request(
       `http://x/v1/workspaces/${owner.workspaceId}/sessions/${session.id}/queue`,
       { headers: { authorization } },
@@ -319,6 +332,9 @@ describe("session queue delete lookup", () => {
       snapshot.items[0]!.version,
     );
     expect(deleted.status).toBe(200);
+    expect(postCommitTasks).toHaveLength(1);
+    expect(published).toBe(0);
+    await flushPostCommitTasks();
     expect(published).toBe(1);
     expect(wakes).toBe(0);
   });

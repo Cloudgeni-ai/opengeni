@@ -14,7 +14,7 @@ let interactionRevisionReads = 0;
 
 function event(sequence: number): SessionEvent {
   return {
-    id: `event-${sequence}`,
+    id: `33333333-3333-4333-8333-${String(sequence).padStart(12, "0")}`,
     workspaceId: WORKSPACE_ID,
     sessionId: SESSION_ID,
     sequence,
@@ -202,10 +202,11 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   for (const subscriber of subscribers.values()) {
     await subscriber(durableEvents);
   }
-  const fastSequences = await readSequences(fastReader, 2);
+  const fastEvents = await readSessionEvents(fastReader, 1);
 
   // The non-reading connection cannot hold up a sibling subscription.
-  expect(fastSequences).toEqual([1, 2]);
+  expect(fastEvents.map((candidate) => candidate.sequence)).toEqual([1]);
+  expect(fastEvents[0]?.payload).toMatchObject({ text: "12", coalescedUntil: 2 });
   expect(released).toEqual([]);
 
   await waitFor(() => released.length === 1);
@@ -238,13 +239,13 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   );
 
   // Each initial connection reads one replay page. The two-event live cursor
-  // causes one single-row gap read per connection, and the stalled connection
+  // causes one compact durable-range read per connection, and the stalled connection
   // performs no further row fetch while waiting for a consumer pull.
   expect(durableReads).toEqual([
     { after: 0, limit: 100 },
     { after: 0, limit: 100 },
-    { after: 0, limit: 1 },
-    { after: 0, limit: 1 },
+    { after: 0, limit: 2 },
+    { after: 0, limit: 2 },
   ]);
   const stalledReader = stalled.body!.getReader();
   await expect(stalledReader.read()).rejects.toBeInstanceOf(TypeError);
@@ -261,7 +262,9 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
     { stallTimeoutMs: 50 },
   );
   const resumedReader = resumed.body!.getReader();
-  expect(await readSequences(resumedReader, 2)).toEqual([1, 2]);
+  const resumedEvents = await readSessionEvents(resumedReader, 1);
+  expect(resumedEvents.map((candidate) => candidate.sequence)).toEqual([1]);
+  expect(resumedEvents[0]?.payload).toMatchObject({ text: "12", coalescedUntil: 2 });
 
   await resumedReader.cancel();
   await fastReader.cancel();
@@ -271,6 +274,33 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
     labels: { stream: "session" },
     value: 0,
   });
+});
+
+test("session SSE coalesces long durable delta runs before they reach the browser", async () => {
+  durableEvents = Array.from({ length: 250 }, (_, index) => event(index + 1));
+  durableReads.length = 0;
+  const response = await sseSessionStream(
+    fakeDb as never,
+    { subscribe: async () => () => {} } as unknown as EventBus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    { stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  const replayed = await readSessionEvents(reader, 3);
+
+  expect(replayed.map((candidate) => candidate.sequence)).toEqual([1, 101, 201]);
+  expect(replayed.map((candidate) => (candidate.payload as any).coalescedUntil)).toEqual([
+    100, 200, 250,
+  ]);
+  expect(durableReads).toEqual([
+    { after: 0, limit: 100 },
+    { after: 100, limit: 100 },
+    { after: 200, limit: 100 },
+  ]);
+  await reader.cancel();
 });
 
 test("a session stream fails closed before its first frame when host authorization is revoked", async () => {
@@ -532,6 +562,25 @@ async function readSequences(
     if (data) sequences.push((JSON.parse(data) as SessionEvent).sequence);
   }
   return sequences;
+}
+
+async function readSessionEvents(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  count: number,
+): Promise<SessionEvent[]> {
+  const events: SessionEvent[] = [];
+  const decoder = new TextDecoder();
+  while (events.length < count) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const data = decoder
+      .decode(value)
+      .split("\n")
+      .find((line) => line.startsWith("data: "))
+      ?.slice("data: ".length);
+    if (data) events.push(JSON.parse(data) as SessionEvent);
+  }
+  return events;
 }
 
 async function readControlEvents(

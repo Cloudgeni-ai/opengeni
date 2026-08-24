@@ -182,18 +182,68 @@ async function runSessionCommandPersistenceTransaction<T>(
   );
 }
 
-async function publishAndWakeAgentCommand(
+type SessionCommandPostCommitDeps = {
+  /** Historical name; now schedules replayable follow-up for every interactive session command. */
+  schedulePromptPostCommit?: ((task: () => Promise<void>) => void) | undefined;
+};
+
+type SessionCommandPostCommitStep = {
+  kind: "session_event_fanout" | "workspace_control_fanout" | "workflow_wake";
+  run: () => Promise<void>;
+};
+
+/**
+ * A committed interactive command must never wait for ephemeral fanout or an
+ * immediate Temporal nudge. Durable events and wake outboxes are the recovery
+ * contract; these steps only reduce propagation latency.
+ */
+function scheduleSessionCommandPostCommit(
+  deps: SessionCommandPostCommitDeps,
+  operation: string,
+  steps: SessionCommandPostCommitStep[],
+): void {
+  const task = async () => {
+    await Promise.all(
+      steps.map(async (step) => {
+        try {
+          await step.run();
+        } catch {
+          console.warn("[session-commands] replayable post-commit step failed", {
+            errorClass: "SessionCommandPostCommitError",
+            errorCode: "session_command_post_commit_failed",
+            origin: "core",
+            operation,
+            step: step.kind,
+          });
+        }
+      }),
+    );
+  };
+  try {
+    const schedule =
+      deps.schedulePromptPostCommit ??
+      ((pending: () => Promise<void>) => {
+        void pending();
+      });
+    schedule(task);
+  } catch {
+    console.warn("[session-commands] post-commit scheduling failed", {
+      errorClass: "SessionCommandPostCommitScheduleError",
+      errorCode: "session_command_post_commit_schedule_failed",
+      origin: "core",
+      operation,
+    });
+  }
+}
+
+async function wakeSessionCommand(
   deps: {
-    db: Database;
-    bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
-    sessionAuthorization?: SessionAuthorizationPort | null;
   },
   input: {
     accountId: string;
     workspaceId: string;
     sessionId: string;
-    eventIds: string[];
     workflowId: string;
     wakeRevision: number | null;
     shouldSignal: boolean;
@@ -201,7 +251,6 @@ async function publishAndWakeAgentCommand(
     controlRequested?: boolean;
   },
 ): Promise<void> {
-  await publishSessionEventIds(deps, input.workspaceId, input.sessionId, input.eventIds);
   if (!input.shouldSignal || input.wakeRevision === null) return;
   try {
     await deps.workflowClient.wakeSessionWorkflow({
@@ -215,14 +264,11 @@ async function publishAndWakeAgentCommand(
         : {}),
     });
   } catch {
-    console.warn(
-      "[session-commands] immediate Agent command wake failed; durable outbox will retry",
-      {
-        errorClass: "WorkflowWakeOperationError",
-        errorCode: "agent_command_wake_failed",
-        origin: "core",
-      },
-    );
+    console.warn("[session-commands] immediate command wake failed; durable outbox will retry", {
+      errorClass: "WorkflowWakeOperationError",
+      errorCode: "session_command_wake_failed",
+      origin: "core",
+    });
   }
 }
 
@@ -290,7 +336,7 @@ export async function sendAgentSessionMessage(
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: AgentSessionCommandContext,
   input: { targetSessionId: string; text: string; idempotencyKey: string },
 ) {
@@ -313,17 +359,40 @@ export async function sendAgentSessionMessage(
         }),
     },
   );
-  await publishAndWakeAgentCommand(deps, {
-    accountId: context.accountId,
-    workspaceId: context.workspaceId,
-    sessionId: input.targetSessionId,
-    eventIds: result.eventIds,
-    workflowId: result.workflowId,
-    wakeRevision: result.wakeRevision,
-    shouldSignal: result.shouldSignal,
-    interruptionCount: 0,
-  });
-  await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
+  scheduleSessionCommandPostCommit(deps, "agent_message", [
+    {
+      kind: "session_event_fanout",
+      run: async () =>
+        await publishSessionEventIds(
+          deps,
+          context.workspaceId,
+          input.targetSessionId,
+          result.eventIds,
+        ),
+    },
+    {
+      kind: "workspace_control_fanout",
+      run: async () =>
+        await publishWorkspaceControlEvent(
+          deps,
+          context.workspaceId,
+          result.workspaceControlEventId,
+        ),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () =>
+        await wakeSessionCommand(deps, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          sessionId: input.targetSessionId,
+          workflowId: result.workflowId,
+          wakeRevision: result.wakeRevision,
+          shouldSignal: result.shouldSignal,
+          interruptionCount: 0,
+        }),
+    },
+  ]);
   return result;
 }
 
@@ -333,7 +402,7 @@ export async function steerAgentSession(
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: AgentSessionCommandContext,
   input: {
     targetSessionId: string;
@@ -360,18 +429,41 @@ export async function steerAgentSession(
         }),
     },
   );
-  await publishAndWakeAgentCommand(deps, {
-    accountId: context.accountId,
-    workspaceId: context.workspaceId,
-    sessionId: input.targetSessionId,
-    eventIds: result.eventIds,
-    workflowId: result.workflowId,
-    wakeRevision: result.wakeRevision,
-    shouldSignal: result.shouldSignal,
-    interruptionCount: result.interruptionCount,
-    controlRequested: true,
-  });
-  await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
+  scheduleSessionCommandPostCommit(deps, "agent_steer", [
+    {
+      kind: "session_event_fanout",
+      run: async () =>
+        await publishSessionEventIds(
+          deps,
+          context.workspaceId,
+          input.targetSessionId,
+          result.eventIds,
+        ),
+    },
+    {
+      kind: "workspace_control_fanout",
+      run: async () =>
+        await publishWorkspaceControlEvent(
+          deps,
+          context.workspaceId,
+          result.workspaceControlEventId,
+        ),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () =>
+        await wakeSessionCommand(deps, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          sessionId: input.targetSessionId,
+          workflowId: result.workflowId,
+          wakeRevision: result.wakeRevision,
+          shouldSignal: result.shouldSignal,
+          interruptionCount: result.interruptionCount,
+          controlRequested: true,
+        }),
+    },
+  ]);
   return result;
 }
 
@@ -379,9 +471,12 @@ export async function controlAgentSessionWorkstream(
   deps: {
     db: Database;
     bus: EventBus;
-    workflowClient: Pick<SessionWorkflowClient, "requestSessionWorkflowWakeDispatch">;
+    workflowClient: Pick<
+      SessionWorkflowClient,
+      "requestSessionWorkflowWakeDispatch" | "wakeSessionWorkflow"
+    >;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: AgentSessionCommandContext,
   input: {
     targetSessionId: string;
@@ -415,11 +510,44 @@ export async function controlAgentSessionWorkstream(
         }),
     },
   );
-  await publishSessionEventIds(deps, context.workspaceId, input.targetSessionId, [
-    result.sessionControlEventId,
+  scheduleSessionCommandPostCommit(deps, "agent_control", [
+    {
+      kind: "session_event_fanout",
+      run: async () =>
+        await publishSessionEventIds(deps, context.workspaceId, input.targetSessionId, [
+          result.sessionControlEventId,
+        ]),
+    },
+    {
+      kind: "workspace_control_fanout",
+      run: async () =>
+        await publishWorkspaceControlEvent(
+          deps,
+          context.workspaceId,
+          result.workspaceControlEventId,
+        ),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () => {
+        if (!result.workflowWake) return;
+        await wakeSessionCommand(deps, {
+          accountId: result.workflowWake.accountId,
+          workspaceId: result.workflowWake.workspaceId,
+          sessionId: result.workflowWake.sessionId,
+          workflowId: result.workflowWake.temporalWorkflowId,
+          wakeRevision: result.workflowWake.wakeRevision,
+          shouldSignal: true,
+          interruptionCount: result.interruptionCount,
+          controlRequested: true,
+        });
+      },
+    },
   ]);
-  await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
-  await requestControlWakeDispatch(deps, result.wakeCount);
   return { ...result, authorization };
 }
 
@@ -479,7 +607,7 @@ export async function moveHumanQueuePrompt(
     db: Database;
     bus: EventBus;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: HumanSessionCommandContext,
   turnId: string,
   input: MoveSessionQueueItemRequest,
@@ -512,7 +640,13 @@ export async function moveHumanQueuePrompt(
       authorization?.relatedSessionAccess ?? "root",
     ),
   };
-  await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
+  scheduleSessionCommandPostCommit(deps, "human_queue_move", [
+    {
+      kind: "session_event_fanout",
+      run: async () =>
+        await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds),
+    },
+  ]);
   return response;
 }
 
@@ -521,7 +655,7 @@ export async function deleteHumanQueuePrompt(
     db: Database;
     bus: EventBus;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: HumanSessionCommandContext,
   turnId: string,
   input: DeleteSessionQueueItemRequest,
@@ -554,7 +688,13 @@ export async function deleteHumanQueuePrompt(
       authorization?.relatedSessionAccess ?? "root",
     ),
   };
-  await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
+  scheduleSessionCommandPostCommit(deps, "human_queue_delete", [
+    {
+      kind: "session_event_fanout",
+      run: async () =>
+        await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds),
+    },
+  ]);
   return response;
 }
 
@@ -563,7 +703,7 @@ export async function editHumanQueuePrompt(
     db: Database;
     bus: EventBus;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: HumanSessionCommandContext,
   turnId: string,
   input: EditSessionQueueItemRequest,
@@ -598,7 +738,13 @@ export async function editHumanQueuePrompt(
     ),
     draft: composerDraft(result.draft)!,
   };
-  await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
+  scheduleSessionCommandPostCommit(deps, "human_queue_edit", [
+    {
+      kind: "session_event_fanout",
+      run: async () =>
+        await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds),
+    },
+  ]);
   return response;
 }
 
@@ -606,8 +752,9 @@ export async function steerHumanQueuePrompt(
   deps: {
     db: Database;
     bus: EventBus;
+    workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: HumanSessionCommandContext,
   turnId: string,
   input: SteerSessionQueueItemRequest,
@@ -640,8 +787,36 @@ export async function steerHumanQueuePrompt(
       authorization?.relatedSessionAccess ?? "root",
     ),
   };
-  await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
-  await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
+  scheduleSessionCommandPostCommit(deps, "human_queue_steer", [
+    {
+      kind: "session_event_fanout",
+      run: async () =>
+        await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds),
+    },
+    {
+      kind: "workspace_control_fanout",
+      run: async () =>
+        await publishWorkspaceControlEvent(
+          deps,
+          context.workspaceId,
+          result.workspaceControlEventId,
+        ),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () =>
+        await wakeSessionCommand(deps, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          sessionId: context.sessionId,
+          workflowId: result.workflowId,
+          wakeRevision: result.wakeRevision,
+          shouldSignal: true,
+          interruptionCount: result.interruptionCount,
+          controlRequested: true,
+        }),
+    },
+  ]);
   return response;
 }
 
@@ -649,9 +824,12 @@ export async function controlHumanSessionWorkstreamWithOutcome(
   deps: {
     db: Database;
     bus: EventBus;
-    workflowClient: Pick<SessionWorkflowClient, "requestSessionWorkflowWakeDispatch">;
+    workflowClient: Pick<
+      SessionWorkflowClient,
+      "requestSessionWorkflowWakeDispatch" | "wakeSessionWorkflow"
+    >;
     sessionAuthorization?: SessionAuthorizationPort | null;
-  },
+  } & SessionCommandPostCommitDeps,
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
 ): Promise<{ response: SessionControlResponse; replay: boolean }> {
@@ -690,11 +868,47 @@ export async function controlHumanSessionWorkstreamWithOutcome(
     cancelledSessionCount: result.cancelledSessionCount,
     cancelledTurnCount: result.cancelledTurnCount,
   };
-  for (const affected of result.affectedSessionEvents) {
-    await publishSessionEventIds(deps, context.workspaceId, affected.sessionId, affected.eventIds);
-  }
-  await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
-  await requestControlWakeDispatch(deps, result.wakeCount);
+  scheduleSessionCommandPostCommit(deps, "human_control", [
+    ...result.affectedSessionEvents.map((affected) => ({
+      kind: "session_event_fanout" as const,
+      run: async () =>
+        await publishSessionEventIds(
+          deps,
+          context.workspaceId,
+          affected.sessionId,
+          affected.eventIds,
+        ),
+    })),
+    {
+      kind: "workspace_control_fanout",
+      run: async () =>
+        await publishWorkspaceControlEvent(
+          deps,
+          context.workspaceId,
+          result.workspaceControlEventId,
+        ),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () => {
+        if (!result.workflowWake) return;
+        await wakeSessionCommand(deps, {
+          accountId: result.workflowWake.accountId,
+          workspaceId: result.workflowWake.workspaceId,
+          sessionId: result.workflowWake.sessionId,
+          workflowId: result.workflowWake.temporalWorkflowId,
+          wakeRevision: result.workflowWake.wakeRevision,
+          shouldSignal: true,
+          interruptionCount: result.interruptionCount,
+          controlRequested: true,
+        });
+      },
+    },
+  ]);
   return { response, replay: result.replay };
 }
 
@@ -712,7 +926,7 @@ export async function controlHumanWorkspace(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "requestSessionWorkflowWakeDispatch">;
-  },
+  } & SessionCommandPostCommitDeps,
   context: Omit<HumanSessionCommandContext, "sessionId">,
   input: WorkspaceInferenceControlRequest,
 ): Promise<WorkspaceInferenceControlResponse> {
@@ -737,8 +951,21 @@ export async function controlHumanWorkspace(
     interruptionCount: result.interruptionCount,
     wakeCount: result.wakeCount,
   };
-  await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
-  await requestControlWakeDispatch(deps, result.wakeCount);
+  scheduleSessionCommandPostCommit(deps, "human_workspace_control", [
+    {
+      kind: "workspace_control_fanout",
+      run: async () =>
+        await publishWorkspaceControlEvent(
+          deps,
+          context.workspaceId,
+          result.workspaceControlEventId,
+        ),
+    },
+    {
+      kind: "workflow_wake",
+      run: async () => await requestControlWakeDispatch(deps, result.wakeCount),
+    },
+  ]);
   return response;
 }
 

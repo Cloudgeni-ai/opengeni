@@ -157,11 +157,26 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     const runRenewalToStop = renewals.runCredentialRenewal as RunCredentialRenewalController | null;
     renewals.runCredentialRenewal = null;
 
-    // Attempt-qualified credential deletion is also a real workspace write.
-    // Perform it under the same admission fence before publishing physical
-    // quiescence; a failure deliberately keeps the receipt closed.
+    // Capture the attempt-qualified credential target before draining the
+    // controllers that can still write a newer generation.
     const credentialSessionToClear = renewals.runCredentialSession;
     renewals.runCredentialSession = null;
+    await drainAttemptOwnedSandboxWriters({
+      // Normal turn completion owns the same process boundary as
+      // Pause/Steer: yielded provider shells must be terminated, polled,
+      // and durably settled before workspace capture. Only receipt
+      // publication remains conditional on acknowledgeQuiescence.
+      toolCancellationFence,
+      cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
+      gitCredentialRenewals: gitRenewalsToStop,
+      codemodeTokenRenewal: codemodeRenewalToStop,
+      runCredentialRenewal: runRenewalToStop,
+    });
+    // Attempt-qualified credential deletion is also a real workspace write,
+    // but it must not be submitted behind the very command being cancelled.
+    // Drain tool processes and credential renewals first, then delete only this
+    // attempt's generation before publishing physical quiescence. A failure
+    // deliberately keeps the receipt closed.
     if (credentialSessionToClear) {
       const clearAttemptCredentials = async (): Promise<void> =>
         await clearRunCredentialsForAttempt(credentialSessionToClear, {
@@ -196,17 +211,6 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         },
       });
     }
-    await drainAttemptOwnedSandboxWriters({
-      // Normal turn completion owns the same process boundary as
-      // Pause/Steer: yielded provider shells must be terminated, polled,
-      // and durably settled before workspace capture. Only receipt
-      // publication remains conditional on acknowledgeQuiescence.
-      toolCancellationFence,
-      cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
-      gitCredentialRenewals: gitRenewalsToStop,
-      codemodeTokenRenewal: codemodeRenewalToStop,
-      runCredentialRenewal: runRenewalToStop,
-    });
     sandboxState.attemptWritersDrained = true;
     if (control.acknowledgeQuiescence) {
       // A cancellation before sandbox-backed capabilities exist still has

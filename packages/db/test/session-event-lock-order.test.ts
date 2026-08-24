@@ -410,6 +410,17 @@ async function sendAgentMessage(
   );
 }
 
+async function runAndFlushSessionPostCommit<T>(
+  run: (schedule: (task: () => Promise<void>) => void) => Promise<T>,
+): Promise<T> {
+  const tasks: Array<() => Promise<void>> = [];
+  try {
+    return await run((task) => tasks.push(task));
+  } finally {
+    await Promise.all(tasks.map(async (task) => await task()));
+  }
+}
+
 async function sendPublishedAgentMessage(
   actor: RunningFixture,
   target: Pick<RunningFixture, "sessionId">,
@@ -418,30 +429,34 @@ async function sendPublishedAgentMessage(
   onWake: () => void,
   callerExecutionGeneration = 1,
 ): Promise<unknown> {
-  return await sendAgentSessionMessage(
-    {
-      db,
-      bus,
-      workflowClient: {
-        wakeSessionWorkflow: async () => {
-          onWake();
+  return await runAndFlushSessionPostCommit(
+    async (schedulePromptPostCommit) =>
+      await sendAgentSessionMessage(
+        {
+          db,
+          bus,
+          workflowClient: {
+            wakeSessionWorkflow: async () => {
+              onWake();
+            },
+          },
+          schedulePromptPostCommit,
         },
-      },
-    },
-    {
-      accountId: actor.accountId,
-      workspaceId: actor.workspaceId,
-      subjectId: `agent-test:${actor.sessionId}`,
-      callerSessionId: actor.sessionId,
-      callerTurnId: actor.turnId,
-      callerAttemptId: actor.attemptId,
-      callerExecutionGeneration,
-    },
-    {
-      targetSessionId: target.sessionId,
-      text: `event-ordering invariant published pair-lock message ${operationKey}`,
-      idempotencyKey: operationKey,
-    },
+        {
+          accountId: actor.accountId,
+          workspaceId: actor.workspaceId,
+          subjectId: `agent-test:${actor.sessionId}`,
+          callerSessionId: actor.sessionId,
+          callerTurnId: actor.turnId,
+          callerAttemptId: actor.attemptId,
+          callerExecutionGeneration,
+        },
+        {
+          targetSessionId: target.sessionId,
+          text: `event-ordering invariant published pair-lock message ${operationKey}`,
+          idempotencyKey: operationKey,
+        },
+      ),
   );
 }
 
@@ -452,30 +467,34 @@ async function steerPublishedAgentSession(
   bus: MemoryEventBus,
   onWake: () => void,
 ): Promise<unknown> {
-  return await steerAgentSession(
-    {
-      db,
-      bus,
-      workflowClient: {
-        wakeSessionWorkflow: async () => {
-          onWake();
+  return await runAndFlushSessionPostCommit(
+    async (schedulePromptPostCommit) =>
+      await steerAgentSession(
+        {
+          db,
+          bus,
+          workflowClient: {
+            wakeSessionWorkflow: async () => {
+              onWake();
+            },
+          },
+          schedulePromptPostCommit,
         },
-      },
-    },
-    {
-      accountId: actor.accountId,
-      workspaceId: actor.workspaceId,
-      subjectId: `agent-test:${actor.sessionId}`,
-      callerSessionId: actor.sessionId,
-      callerTurnId: actor.turnId,
-      callerAttemptId: actor.attemptId,
-      callerExecutionGeneration: 1,
-    },
-    {
-      targetSessionId: target.sessionId,
-      instruction: `event-ordering invariant published steer ${operationKey}`,
-      idempotencyKey: operationKey,
-    },
+        {
+          accountId: actor.accountId,
+          workspaceId: actor.workspaceId,
+          subjectId: `agent-test:${actor.sessionId}`,
+          callerSessionId: actor.sessionId,
+          callerTurnId: actor.turnId,
+          callerAttemptId: actor.attemptId,
+          callerExecutionGeneration: 1,
+        },
+        {
+          targetSessionId: target.sessionId,
+          instruction: `event-ordering invariant published steer ${operationKey}`,
+          idempotencyKey: operationKey,
+        },
+      ),
   );
 }
 
