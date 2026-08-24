@@ -53,11 +53,16 @@ describe("managed self-context surfaces", () => {
     expect(settingsSource).toContain("<MembersSection workspaceId={workspaceId}");
   });
 
+  // `get_organization_administration_overview` excludes every membership's
+  // personal workspace from the projection; the workspace-access section has to
+  // keep saying so, otherwise an administrator reads the shared-only roster as
+  // the whole organization. Keep these substrings on one source line each so an
+  // ordinary reflow does not masquerade as a removed guarantee.
   test("separates organization administration from Personal content", () => {
+    expect(organizationAdminSource).toContain("Personal workspaces stay private.");
     expect(organizationAdminSource).toContain(
-      "Personal workspaces and their content are\n            never included.",
+      "Create shared workspaces, then choose which organization members can use each one.",
     );
-    expect(organizationAdminSource).toContain("Every shared workspace in this organization.");
     expect(organizationSource).toContain("<OrganizationPeopleSection");
     expect(organizationSource).toContain("<OrganizationRetentionSection");
   });

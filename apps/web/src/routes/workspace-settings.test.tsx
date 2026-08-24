@@ -1,5 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterContextProvider,
+} from "@tanstack/react-router";
 import { act, type ReactNode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -87,6 +94,27 @@ beforeEach(() => {
   listSlackUserLinkAccessRequests.mockImplementation(async () => [slackAccessRequest]);
 });
 
+// `MembersSection` points managers at the organization workspace-access surface
+// with a TanStack `<Link>`, and `useLinkProps` throws outside router context.
+// Register the real link target so the rendered href is the genuine route
+// rather than a stub. `RouterContextProvider` is the low-level provider that
+// renders its own children, so these tests keep driving `MembersSection`
+// directly by props instead of through route matches.
+const testRootRoute = createRootRoute({});
+const testOrganizationRoute = createRoute({
+  getParentRoute: () => testRootRoute,
+  path: "/workspaces/$workspaceId/organization",
+  component: () => null,
+});
+const testRouter = createRouter({
+  routeTree: testRootRoute.addChildren([testOrganizationRoute]),
+  history: createMemoryHistory({ initialEntries: ["/"] }),
+});
+
+function WithRouter({ children }: { children: ReactNode }) {
+  return <RouterContextProvider router={testRouter}>{children}</RouterContextProvider>;
+}
+
 function deferred<Value>() {
   let resolve!: (value: Value) => void;
   let reject!: (reason: unknown) => void;
@@ -104,7 +132,11 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
 
   async function render(nextWorkspaceId: string, nextCanManage: boolean) {
     await act(async () => {
-      root.render(<MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />);
+      root.render(
+        <WithRouter>
+          <MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />
+        </WithRouter>,
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
@@ -134,7 +166,11 @@ function MembersBoundaryProbe({
     onBoundaryLayout();
   }, [onBoundaryLayout, workspaceId]);
 
-  return <MembersSection workspaceId={workspaceId} canManage={canManage} />;
+  return (
+    <WithRouter>
+      <MembersSection workspaceId={workspaceId} canManage={canManage} />
+    </WithRouter>
+  );
 }
 
 describe("workspace members loading", () => {
