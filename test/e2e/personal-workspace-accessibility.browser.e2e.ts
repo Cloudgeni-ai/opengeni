@@ -184,9 +184,12 @@ describe("Personal workspace accessibility in Chromium", () => {
     expect(await sessions.getByRole("radio", { name: /Only me/ }).isEnabled()).toBe(true);
     expect(await sessions.textContent()).toContain("Only you can open this session.");
 
+    // An organization that has not activated private sessions gets no chooser at
+    // all rather than a disabled one: Workspace is the only valid value, so there
+    // is no decision to present.
     const inactive = page.locator("#inactive-session-visibility-picker");
     expect(await inactive.getByRole("radio").count()).toBe(0);
-    expect(await inactive.textContent()).toBe("");
+    expect((await inactive.textContent()) ?? "").toBe("");
 
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),

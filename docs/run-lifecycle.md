@@ -408,9 +408,14 @@ rather than failing the session, so a top-up lets the same session continue.
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
 optional—connect/list concurrently with the first provider request. A plain
-terminal model response does not join that background work. Search disclosure,
-deferred invocation, Codemode activation, catalog persistence, and cleanup join
-the one exact preparation promise, so no partial catalog grants authority.
+terminal model response does not join that background work. Every actual local
+function call does join the one exact preparation promise before Runner can
+dispatch it, including always-visible base tools such as `exec_command` and
+`load_skill`; their stable first-request schemas remain eager, but their
+execution does not bypass catalog persistence. Search disclosure, deferred
+invocation, Codemode activation, catalog persistence, and cleanup join that same
+promise, so no partial catalog grants authority. An exact preparation failure is
+therefore observed at the first tool-call boundary and the tool body never runs.
 Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
@@ -420,10 +425,15 @@ after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
 turn's durable provider-recovery count rather than unrelated execution attempts.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing. Every Steer commits a control wake revision, including
-when the recovering turn has no live attempt. A later coalesced Send cannot
-downgrade it to an ordinary queue signal, so the workflow interrupts the hold
-and processes the new direction immediately.
+their existing pacing. Automatic same-turn provider/MCP recovery is finite: five
+replacement attempts may be scheduled, and a sixth retryable failure settles the
+same logical turn as failed with the original typed cause plus explicit recovery-
+exhaustion evidence. This is an infrastructure retry budget, not a goal,
+continuation, model-call, or run-length cap; a later human/API prompt may retry as
+new accepted work. Every Steer commits a control wake revision, including when
+the recovering turn has no live attempt. A later coalesced Send cannot downgrade
+it to an ordinary queue signal, so the workflow interrupts the hold and processes
+the new direction immediately.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. With workspace-local leasing enabled, the worker atomically selects and

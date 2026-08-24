@@ -9481,7 +9481,6 @@ describe("API component integration", () => {
         },
       ],
     });
-    await persistAttemptToolCatalog(dbClient.db, environment.catalog);
     const authorization = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: `sandbox:${attemptId}`,
       permissions: ["codemode:call"],
@@ -9492,6 +9491,23 @@ describe("API component integration", () => {
     });
     const base = workspacePath(grant.workspaceId, "/codemode");
 
+    const catalogNotReady = await app.request(`${base}/catalog`, {
+      headers: { authorization },
+    });
+    expect(catalogNotReady.status).toBe(409);
+    const catalogNotReadyBody = await catalogNotReady.json();
+    expect(catalogNotReadyBody).toMatchObject({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: "Codemode tool catalog is not ready for the active execution attempt",
+        retryable: true,
+        details: { code: "codemode_catalog_not_ready" },
+      },
+    });
+    expect(JSON.stringify(catalogNotReadyBody)).not.toContain("bearer");
+
+    await persistAttemptToolCatalog(dbClient.db, environment.catalog);
     const catalogResponse = await app.request(`${base}/catalog`, {
       headers: { authorization },
     });

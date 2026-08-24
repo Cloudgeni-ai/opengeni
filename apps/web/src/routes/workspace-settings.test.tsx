@@ -1,11 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import {
-  createMemoryHistory,
-  createRootRoute,
-  createRouter,
-  RouterContextProvider,
-} from "@tanstack/react-router";
+import * as RouterPackage from "@tanstack/react-router";
 import { act, type ReactNode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -72,6 +67,14 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     open ? <div data-testid="confirm-dialog">{title}</div> : null,
 }));
 
+// The manager view links to organization workspace access, and a real
+// `<Link>` needs a router this roster-focused render deliberately does not
+// mount.
+mock.module("@tanstack/react-router", () => ({
+  ...RouterPackage,
+  Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
+}));
+
 const { MembersSection } = await import("./workspace-settings");
 
 beforeAll(() => {
@@ -103,26 +106,14 @@ function deferred<Value>() {
   return { promise, reject, resolve };
 }
 
-function createTestRouter() {
-  return createRouter({
-    routeTree: createRootRoute(),
-    history: createMemoryHistory({ initialEntries: ["/"] }),
-  });
-}
-
 async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
-  const router = createTestRouter();
 
   async function render(nextWorkspaceId: string, nextCanManage: boolean) {
     await act(async () => {
-      root.render(
-        <RouterContextProvider router={router}>
-          <MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />
-        </RouterContextProvider>,
-      );
+      root.render(<MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
@@ -376,7 +367,6 @@ describe("workspace members loading", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
-    const router = createTestRouter();
     const boundaryLayouts: string[] = [];
     const captureBoundaryLayout = () => {
       boundaryLayouts.push(container.textContent ?? "");
@@ -385,13 +375,11 @@ describe("workspace members loading", () => {
     try {
       await act(async () => {
         root.render(
-          <RouterContextProvider router={router}>
-            <MembersBoundaryProbe
-              workspaceId={workspaceA}
-              canManage={true}
-              onBoundaryLayout={captureBoundaryLayout}
-            />
-          </RouterContextProvider>,
+          <MembersBoundaryProbe
+            workspaceId={workspaceA}
+            canManage={true}
+            onBoundaryLayout={captureBoundaryLayout}
+          />,
         );
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
@@ -419,13 +407,11 @@ describe("workspace members loading", () => {
 
       act(() => {
         root.render(
-          <RouterContextProvider router={router}>
-            <MembersBoundaryProbe
-              workspaceId={workspaceB}
-              canManage={true}
-              onBoundaryLayout={captureBoundaryLayout}
-            />
-          </RouterContextProvider>,
+          <MembersBoundaryProbe
+            workspaceId={workspaceB}
+            canManage={true}
+            onBoundaryLayout={captureBoundaryLayout}
+          />,
         );
       });
 
