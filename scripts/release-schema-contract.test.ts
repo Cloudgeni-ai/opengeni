@@ -161,7 +161,7 @@ describe("release schema contract", () => {
       "0323_organization_private_session_enablement.sql",
       "0325_child_lifecycle_notices.sql",
       "0327_slack_first_task_hint.sql",
-      "0328_slack_orchestration_delivery_events.sql",
+      "0329_slack_orchestration_delivery_events.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

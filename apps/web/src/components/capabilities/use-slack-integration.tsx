@@ -225,6 +225,11 @@ export function useSlackIntegration({
   const [orchestrationNoticeBusy, setOrchestrationNoticeBusy] = useState<
     keyof ResolvedWorkspaceSlackOrchestrationNoticeSettings | null
   >(null);
+  // The rendered `busy`/`disabled` flags come from the state above; this ref is
+  // the actual mutual exclusion. State is only observable to a closure created
+  // by a later render, so a handler captured from an earlier one would sail
+  // straight past a state-based guard.
+  const orchestrationNoticeWriting = useRef(false);
   const [publicationBusy, setPublicationBusy] = useState(false);
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
   const [botDisconnectOpen, setBotDisconnectOpen] = useState(false);
@@ -486,8 +491,16 @@ export function useSlackIntegration({
     notice: keyof ResolvedWorkspaceSlackOrchestrationNoticeSettings,
     enabled: boolean,
   ) {
+    // One write carries the whole pair, so a second concurrent write would send
+    // the pre-write value of the notice it is not changing and revert it. Both
+    // toggles render unavailable while one is in flight, and this ref is the
+    // authority behind that, because a caller may still hold a handler from an
+    // earlier render. Sequential toggles are unaffected: a completed write
+    // upserts the workspace, so the next one reads the persisted pair.
+    if (orchestrationNoticeWriting.current) return;
     const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
     if (!acceptedTransition) return;
+    orchestrationNoticeWriting.current = true;
     setOrchestrationNoticeBusy(notice);
     try {
       const updated = await context.updateWorkspaceSettings(workspaceId, {
@@ -497,6 +510,7 @@ export function useSlackIntegration({
         toast.success(enabled ? "Slack notice turned on" : "Slack notice turned off");
       }
     } finally {
+      orchestrationNoticeWriting.current = false;
       setOrchestrationNoticeBusy(null);
     }
   }
@@ -641,7 +655,11 @@ export function useSlackIntegration({
         onChange: (value) => void saveDestination(value),
       });
       // Both default off: an unsolicited Slack post is worse than a missed one,
-      // and the in-app rail and priority feed already surface this work.
+      // and the in-app rail and priority feed already surface this work. Each
+      // write sends the whole pair, so an in-flight write makes BOTH toggles
+      // unavailable: toggling the second one meanwhile would read the pre-write
+      // pair and silently revert the first.
+      const orchestrationNoticeWriteInFlight = orchestrationNoticeBusy !== null;
       options.push({
         kind: "toggle",
         id: "slack-child-requires-action-notice",
@@ -649,7 +667,7 @@ export function useSlackIntegration({
         description:
           "Posts one pointer to the blocked worker in the task's thread. You still answer on its OpenGeni card.",
         checked: orchestrationNotices.childRequiresAction,
-        disabled: !canManageReaction || !botActive || readOnly,
+        disabled: !canManageReaction || !botActive || readOnly || orchestrationNoticeWriteInFlight,
         busy: orchestrationNoticeBusy === "childRequiresAction",
         onChange: (checked) => void saveOrchestrationNotice("childRequiresAction", checked),
       });
@@ -659,7 +677,7 @@ export function useSlackIntegration({
         label: "Tell me in Slack when a goal pauses for budget or the continuation cap",
         description: "Posts one line in the task's thread. Pauses you asked for stay quiet.",
         checked: orchestrationNotices.goalPaused,
-        disabled: !canManageReaction || !botActive || readOnly,
+        disabled: !canManageReaction || !botActive || readOnly || orchestrationNoticeWriteInFlight,
         busy: orchestrationNoticeBusy === "goalPaused",
         onChange: (checked) => void saveOrchestrationNotice("goalPaused", checked),
       });

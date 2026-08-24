@@ -433,9 +433,16 @@ describe("Slack reaction shortcut enablement", () => {
 });
 
 describe("Slack orchestration notices", () => {
-  async function renderOptions(settings: Record<string, unknown>) {
+  async function renderOptions(
+    settings: Record<string, unknown>,
+    // When supplied, every write blocks on it, so a test can hold one in flight.
+    gate?: Promise<void>,
+  ) {
     const { bot, binding } = installedBot();
-    const updateWorkspaceSettings = mock(async () => true);
+    const updateWorkspaceSettings = mock(async () => {
+      if (gate) await gate;
+      return true;
+    });
     mutableContext.current = {
       ...appContext(["workspace:admin"]),
       accessContext: accessContext(["workspace:admin"]),
@@ -462,10 +469,20 @@ describe("Slack orchestration notices", () => {
     await act(async () => root.render(<Probe />));
     const option = (id: string) =>
       adapter!.model.options.find((candidate) => candidate.id === id) as IntegrationToggleOption;
+    const flush = async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
     return {
       updateWorkspaceSettings,
+      flush,
+      // Captured once: these are the handlers a stale render already handed
+      // out, which is exactly what the in-flight guard has to survive.
       childNotice: option("slack-child-requires-action-notice"),
       goalNotice: option("slack-goal-paused-notice"),
+      // Re-read from the current render, for the rendered disabled/busy flags.
+      current: (id: string) => option(id),
       patches: () =>
         updateWorkspaceSettings.mock.calls.map(
           (call) =>
@@ -505,12 +522,48 @@ describe("Slack orchestration notices", () => {
     try {
       expect(rendered.goalNotice.checked).toBe(true);
       expect(rendered.childNotice.checked).toBe(false);
+      // Enabling the second notice carries the first one forward untouched.
       await act(async () => rendered.childNotice.onChange(true));
-      await act(async () => rendered.goalNotice.onChange(false));
-      expect(rendered.patches()).toEqual([
-        { childRequiresAction: true, goalPaused: true },
-        { childRequiresAction: false, goalPaused: false },
-      ]);
+      expect(rendered.patches()).toEqual([{ childRequiresAction: true, goalPaused: true }]);
+    } finally {
+      await rendered.cleanup();
+    }
+  });
+
+  test("one in-flight write makes both toggles unavailable", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const rendered = await renderOptions({}, gate);
+    try {
+      expect(rendered.current("slack-child-requires-action-notice").disabled).toBe(false);
+      expect(rendered.current("slack-goal-paused-notice").disabled).toBe(false);
+
+      // Start a write and leave it hanging on the gate.
+      await act(async () => {
+        rendered.childNotice.onChange(true);
+      });
+      const child = rendered.current("slack-child-requires-action-notice");
+      const goal = rendered.current("slack-goal-paused-notice");
+      expect(child.busy).toBe(true);
+      expect(child.disabled).toBe(true);
+      // The notice that is NOT being written is unavailable too: a second write
+      // would carry this one's pre-write value and revert it.
+      expect(goal.busy).toBe(false);
+      expect(goal.disabled).toBe(true);
+
+      // Even a handler captured before the write started cannot slip through.
+      await act(async () => {
+        rendered.goalNotice.onChange(true);
+      });
+      expect(rendered.updateWorkspaceSettings).toHaveBeenCalledTimes(1);
+
+      release();
+      await rendered.flush();
+      expect(rendered.patches()).toEqual([{ childRequiresAction: true, goalPaused: false }]);
+      expect(rendered.current("slack-child-requires-action-notice").disabled).toBe(false);
+      expect(rendered.current("slack-goal-paused-notice").disabled).toBe(false);
     } finally {
       await rendered.cleanup();
     }

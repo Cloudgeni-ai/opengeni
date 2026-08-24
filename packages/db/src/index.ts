@@ -63496,6 +63496,47 @@ export async function getSessionSystemUpdateById(
   });
 }
 
+/**
+ * Whether the parent already holds a `child_requires_action_resolved` notice
+ * for one exact blocked boundary. Read-only, under the ordinary workspace RLS
+ * scope, and answered entirely from the PARENT's own rows: the child session is
+ * never read.
+ *
+ * A resolution supersedes a still-pending `child_requires_action` in the same
+ * commit, but a notice already claimed into a parent turn is `delivered` and
+ * keeps that state forever. A late reader (Slack delivery running behind a
+ * widened retry window) therefore cannot decide staleness from `state` alone.
+ * One accepted response advances that exact (child, turn, generation) boundary
+ * - a re-freeze is a new generation and a new notice - so the presence of the
+ * resolution row in any state is the durable "no longer blocked" fact.
+ */
+export async function childRequiresActionResolutionExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  boundary: { childSessionId: string; childTurnId: string; childTurnGeneration: number },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.sessionSystemUpdates.id })
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.kind, "child_requires_action_resolved"),
+          eq(schema.sessionSystemUpdates.sourceId, boundary.childSessionId),
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnId' = ${boundary.childTurnId}`,
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnGeneration' = ${String(
+            boundary.childTurnGeneration,
+          )}`,
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  });
+}
+
 export async function listOutstandingSessionSystemUpdates(
   db: Database,
   workspaceId: string,

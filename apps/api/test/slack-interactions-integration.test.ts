@@ -6942,16 +6942,218 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ]);
 
     // Human/API/agent pauses are decisions the human already made, no_progress
-    // is not a stop they must act on, and a resume is never announced.
+    // is not a stop they must act on, and a resume is never announced. The
+    // prototype keys are there because the announced set is a two-reason
+    // invariant and its lookup must not answer for `constructor` or friends.
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
       { type: "goal.paused", payload: { goalId, actor: "api", reason: "api" } },
       { type: "goal.paused", payload: { goalId, actor: "api", reason: "user_pause" } },
       { type: "goal.paused", payload: { goalId, actor: "agent", reason: "agent" } },
       { type: "goal.paused", payload: { goalId, actor: "system", reason: "no_progress" } },
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "constructor" } },
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "toString" } },
       { type: "goal.resumed", payload: { goalId, actor: "api", reason: "api" } },
     ]);
     await drainAll(value.deps);
     expect(value.slack.posts.slice(postsBefore)).toHaveLength(2);
+  }, 60_000);
+
+  test("stays quiet for a blocked worker that was already unblocked", async () => {
+    if (!available) return;
+    const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_CHILD_RESOLVED_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_CHILD_RESOLVED",
+        ts: "1774000000.000001",
+        text: "Orchestrate a worker that answers itself",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const childSessionId = crypto.randomUUID();
+    const childTurnId = crypto.randomUUID();
+    const blocked = async (childTurnGeneration: number) => {
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action",
+        classification: "action_required",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:${childTurnGeneration}`,
+        summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+        payload: {
+          type: "child_requires_action",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration,
+          requests: [
+            {
+              kind: "human_input",
+              requestId: crypto.randomUUID(),
+              questionCount: 1,
+              firstQuestion: "Which environment should I deploy to?",
+              allowSkip: false,
+              expiresAt: null,
+            },
+          ],
+          truncated: false,
+        },
+      });
+      expect(added.added).toBe(true);
+      return added.update.id;
+    };
+
+    const resolve = async (childTurnGeneration: number) => {
+      const resolved = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action_resolved",
+        classification: "info",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action-resolved:${childSessionId}:${childTurnId}:${childTurnGeneration}`,
+        summary: `Worker ${childSessionId} was answered.`,
+        payload: {
+          type: "child_requires_action_resolved",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration,
+          requestId: crypto.randomUUID(),
+          approvalId: null,
+          outcome: "answered",
+          respondedByKind: "human",
+        },
+      });
+      expect(resolved.added).toBe(true);
+    };
+
+    // A resolution supersedes a still-pending notice in the same commit, so the
+    // superseded state alone already says "no longer blocked".
+    const superseded = await blocked(1);
+    await resolve(1);
+    const [supersededRow] = await shared!.admin<{ state: string }[]>`
+      select state from session_system_updates where id = ${superseded}`;
+    expect(supersededRow?.state).toBe("superseded");
+
+    // The state is not sufficient on its own, though: a notice that is not
+    // pending when the resolution lands keeps whatever state it had, and a
+    // notice a parent turn has claimed stays `delivered` forever. Only the
+    // resolution row for that exact boundary proves those stale.
+    const stale = await blocked(2);
+    await shared!.admin`update session_system_updates set state = 'failed' where id = ${stale}`;
+    await resolve(2);
+    const [staleRow] = await shared!.admin<{ state: string }[]>`
+      select state from session_system_updates where id = ${stale}`;
+    expect(staleRow?.state).toBe("failed");
+
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(0);
+    const [budget] = await shared!.admin<{ progress_count: number }[]>`
+      select progress_count from slack_interactions where id = ${route!.id}`;
+    // A notice nobody posts never consumes one of the shared post slots.
+    expect(budget?.progress_count).toBe(0);
+
+    // A re-freeze is a new generation and a new block, and it does post.
+    await blocked(3);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      [
+        "A worker you started needs input.",
+        "> Which environment should I deploy to?",
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+      ].join("\n"),
+    ]);
+  }, 60_000);
+
+  test("caps orchestration notices at the shared per-interaction post budget", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackOrchestrationNotices: { childRequiresAction: true, goalPaused: true },
+    });
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_NOTICE_CAP_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_NOTICE_CAP",
+        ts: "1775000000.000001",
+        text: "Fan out to a lot of workers",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+
+    // Four blocked children, one more than the shared budget allows.
+    for (let index = 0; index < 4; index += 1) {
+      const childSessionId = crypto.randomUUID();
+      const childTurnId = crypto.randomUUID();
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action",
+        classification: "action_required",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:1`,
+        summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+        payload: {
+          type: "child_requires_action",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration: 1,
+          requests: [
+            {
+              kind: "human_input",
+              requestId: crypto.randomUUID(),
+              questionCount: 1,
+              firstQuestion: `Worker ${index} needs a decision`,
+              allowSkip: false,
+              expiresAt: null,
+            },
+          ],
+          truncated: false,
+        },
+      });
+      expect(added.added).toBe(true);
+    }
+    await drainAll(value.deps);
+    const delivered = value.slack.posts.slice(postsBefore);
+    expect(delivered).toHaveLength(3);
+    expect(
+      delivered.every((post) => post.text.startsWith("A worker you started needs input.")),
+    ).toBe(true);
+    const [budget] = await shared!.admin<{ progress_count: number }[]>`
+      select progress_count from slack_interactions where id = ${route!.id}`;
+    expect(budget?.progress_count).toBe(3);
+
+    // The budget is shared across every unsolicited post, so a later goal pause
+    // and a later assistant progress message are both silent as well.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "goal.paused",
+        payload: { goalId: crypto.randomUUID(), actor: "system", reason: "limits" },
+      },
+      { type: "agent.message.completed", payload: { text: "Still working on it" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(3);
+
+    // The terminal result is independent of the budget and still reaches Slack.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Final bounded result" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).at(-1)?.text).toContain("Final bounded result");
   }, 60_000);
 
   test("keeps both orchestration notices silent until the workspace turns them on", async () => {
@@ -7048,7 +7250,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     });
 
     // The switch owns only the two orchestration notices; every pre-existing
-    // card type keeps posting exactly as before.
+    // card type keeps posting exactly as before. This also takes the first of
+    // the three shared per-interaction slots, leaving exactly two for the two
+    // notices posted once the switch is on below.
     await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
       { type: "agent.message.completed", payload: { text: "Still working on it" } },
     ]);

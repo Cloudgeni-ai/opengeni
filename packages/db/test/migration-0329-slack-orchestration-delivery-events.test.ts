@@ -3,21 +3,21 @@ import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 const migrationUrl = new URL(
-  "../drizzle/0328_slack_orchestration_delivery_events.sql",
+  "../drizzle/0329_slack_orchestration_delivery_events.sql",
   import.meta.url,
 );
 
 let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0328-slack-orchestration-delivery-events");
+  shared = await acquireSharedTestDatabase("migration-0329-slack-orchestration-delivery-events");
 });
 
 afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0328 Slack orchestration delivery events", () => {
+describe("migration 0329 Slack orchestration delivery events", () => {
   test("is a rolling definer replacement with a re-pinned search_path and no backfill", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
