@@ -152,6 +152,94 @@ describe("managed-human session tenancy application service", () => {
     });
   }, 180_000);
 
+  test("returns empty personal-resource discovery before activation while mutations stay closed", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-discovery-inactive-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Inactive personal-resource discovery",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no shared workspace grant");
+    const authorization = {
+      grant: {
+        ...grant,
+        permissions: [...new Set([...grant.permissions, "rigs:use", "sessions:create"])],
+      },
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+    const deps = {
+      db: client.db,
+      sessionAuthorization: {
+        authorizeSession: async () => {
+          throw new Error("host authorization must not run before activation");
+        },
+        resolveListScope: async () => ({ kind: "all" as const }),
+      },
+    };
+
+    await expect(
+      listManagedHumanUserResourceAuthorities(
+        deps,
+        { ...authorization, canonicalManagedHumanSession: false },
+        grant.workspaceId,
+        { resourceKind: "rig", limit: 100 },
+      ),
+    ).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
+    await expect(
+      listManagedHumanUserResourceAuthorities(
+        deps,
+        {
+          ...authorization,
+          grant: {
+            ...authorization.grant,
+            permissions: authorization.grant.permissions.filter(
+              (permission) => permission !== "rigs:use" && permission !== "workspace:admin",
+            ),
+          },
+        },
+        grant.workspaceId,
+        { resourceKind: "rig", limit: 100 },
+      ),
+    ).rejects.toMatchObject({ status: 403 } satisfies Partial<HTTPException>);
+    await expect(
+      listManagedHumanUserResourceAuthorities(deps, authorization, grant.workspaceId, {
+        resourceKind: "rig",
+        limit: 100,
+      }),
+    ).resolves.toEqual({ authorities: [], nextCursor: null });
+    await expect(
+      issueManagedHumanUserResourceGrant(
+        deps,
+        authorization,
+        grant.workspaceId,
+        crypto.randomUUID(),
+        {
+          scope: "user",
+          resourceKind: "rig",
+          mode: "always",
+          context: "user_private",
+          workspaceSharedAcknowledged: false,
+        },
+      ),
+    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+    await expect(
+      revokeManagedHumanUserResourceGrant(
+        deps,
+        authorization,
+        grant.workspaceId,
+        crypto.randomUUID(),
+      ),
+    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+  }, 180_000);
+
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {
     if (!shared || !client) return;
     const userId = `core-personal-grants-${crypto.randomUUID()}`;

@@ -1285,6 +1285,49 @@ describe("the in-scope resolver refuses to be an arbitrary-subject oracle", () =
 });
 
 describe("managed personal-resource grant HTTP lifecycle", () => {
+  test("returns empty discovery pages before activation while mutation stays denied", async () => {
+    if (!shared || !client) return;
+    const human = await provisionManagedHuman();
+    const app = buildApp(undefined, true);
+    const headers = { cookie: human.cookie, "content-type": "application/json" };
+
+    for (const resourceKind of ["variable_set", "rig"] as const) {
+      const listResponse = await app.request(
+        `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities?scope=user&resourceKind=${resourceKind}`,
+        { headers },
+      );
+      expect(listResponse.status).toBe(200);
+      expect(await listResponse.json()).toEqual({
+        scope: "user",
+        authorities: [],
+        nextCursor: null,
+      });
+    }
+
+    const rigCatalogResponse = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/rigs`,
+      { headers },
+    );
+    expect(rigCatalogResponse.status).toBe(200);
+    expect(await rigCatalogResponse.json()).toEqual([]);
+
+    const issueResponse = await app.request(
+      `http://x/v1/workspaces/${human.personalWorkspaceId}/user-resource-authorities/${crypto.randomUUID()}/grants`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          scope: "user",
+          resourceKind: "variable_set",
+          mode: "always",
+          context: "user_private",
+          workspaceSharedAcknowledged: false,
+        }),
+      },
+    );
+    expect(issueResponse.status).toBe(403);
+  }, 180_000);
+
   test("returns RFC3339 expiry/revoke times, reissues expiry, and revokes without connections:read", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();

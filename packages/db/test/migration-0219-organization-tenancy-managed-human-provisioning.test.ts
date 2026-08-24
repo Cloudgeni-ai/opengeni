@@ -58,6 +58,7 @@ const expectedManagedPersonalWorkspacePermissions: Permission[] = [
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
+  "rigs:use",
   "artifacts:read",
   "artifacts:publish",
 ];
@@ -137,6 +138,7 @@ describe("migration 0219 managed-human organization provisioning", () => {
     expect(managedPersonalWorkspacePermissions).not.toContain("workspace:admin");
     expect(managedPersonalWorkspacePermissions).not.toContain("members:manage");
     expect(managedPersonalWorkspacePermissions).not.toContain("api_keys:manage");
+    expect(managedPersonalWorkspacePermissions).not.toContain("rigs:manage");
   });
 
   test("pins the rolling lifecycle capability, posture contract, and exact role grant", async () => {
