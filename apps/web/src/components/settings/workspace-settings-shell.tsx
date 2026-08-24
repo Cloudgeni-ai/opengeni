@@ -1,7 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
-  ArrowUpRightIcon,
   BarChart3Icon,
   BookOpenIcon,
   BotIcon,
@@ -21,6 +20,7 @@ import {
 import type { ComponentType, ReactNode } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
+import { ContentPage } from "@/components/ui/content-layout";
 import { cn } from "@/lib/utils";
 
 export type WorkspaceSettingsSection =
@@ -83,7 +83,11 @@ const WORKSPACE_PAGE_GROUPS = [
   {
     label: "Workspace activity",
     items: [
-      { to: "/workspaces/$workspaceId/agents" as const, label: "Agents", icon: BotIcon },
+      {
+        to: "/workspaces/$workspaceId/agents" as const,
+        label: "Agents",
+        icon: BotIcon,
+      },
       {
         to: "/workspaces/$workspaceId/insights" as const,
         label: "Insights",
@@ -119,7 +123,11 @@ const WORKSPACE_PAGE_GROUPS = [
         label: "Credentials & variables",
         icon: BoxesIcon,
       },
-      { to: "/workspaces/$workspaceId/rigs" as const, label: "Rigs", icon: BoxIcon },
+      {
+        to: "/workspaces/$workspaceId/rigs" as const,
+        label: "Rigs",
+        icon: BoxIcon,
+      },
       {
         to: "/workspaces/$workspaceId/machines" as const,
         label: "Machines",
@@ -129,21 +137,71 @@ const WORKSPACE_PAGE_GROUPS = [
   },
 ] as const;
 
-export function WorkspaceSettingsShell({
+type WorkspacePageTarget = (typeof WORKSPACE_PAGE_GROUPS)[number]["items"][number]["to"];
+
+export type WorkspaceManagementLocation =
+  | { kind: "settings"; section: WorkspaceSettingsSection }
+  | { kind: "page"; target: WorkspacePageTarget };
+
+const DEFAULT_SETTINGS_SECTION: WorkspaceSettingsSection = "general";
+
+export function workspaceSettingsSectionFromSearch(value: unknown): WorkspaceSettingsSection {
+  return value === "members" ||
+    value === "tools" ||
+    value === "plugins" ||
+    value === "models" ||
+    value === "api-keys" ||
+    value === "danger"
+    ? value
+    : DEFAULT_SETTINGS_SECTION;
+}
+
+/**
+ * Resolve the workspace routes that share the persistent management shell.
+ * Keep matching segment-aware: `/rigs/:rigId` belongs to Rigs, while a future
+ * `/rigs-archive` route must not be captured accidentally.
+ */
+export function workspaceManagementLocation(
+  pathname: string,
+  workspaceId: string,
+  settingsSection?: unknown,
+): WorkspaceManagementLocation | null {
+  const base = `/workspaces/${encodeURIComponent(workspaceId)}`;
+  if (pathname === `${base}/settings`) {
+    return {
+      kind: "settings",
+      section: workspaceSettingsSectionFromSearch(settingsSection),
+    };
+  }
+
+  for (const group of WORKSPACE_PAGE_GROUPS) {
+    for (const item of group.items) {
+      const targetPath = item.to.replace("$workspaceId", encodeURIComponent(workspaceId));
+      if (
+        pathname === targetPath ||
+        (item.to.endsWith("/rigs") && pathname.startsWith(`${targetPath}/`))
+      ) {
+        return { kind: "page", target: item.to };
+      }
+    }
+  }
+  return null;
+}
+
+export function WorkspaceManagementShell({
   workspaceId,
   workspaceName,
-  section,
+  location,
   children,
 }: {
   workspaceId: string;
   workspaceName: string;
-  section: WorkspaceSettingsSection;
+  location: WorkspaceManagementLocation;
   children: ReactNode;
 }) {
-  const copy = SECTION_COPY[section];
   return (
-    <main className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
-      <aside className="border-b border-border bg-surface/35 lg:sticky lg:top-0 lg:h-dvh lg:min-h-0 lg:overflow-y-auto lg:overscroll-y-contain lg:border-r lg:border-b-0">
+    <main className="grid h-dvh min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
+      <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-dvh lg:max-h-none lg:border-r lg:border-b-0">
         <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
           <Link
             to="/workspaces/$workspaceId/sessions"
@@ -179,7 +237,7 @@ export function WorkspaceSettingsShell({
           >
             {SETTINGS_ITEMS.map((item) => {
               const Icon = item.icon;
-              const selected = item.id === section;
+              const selected = location.kind === "settings" && item.id === location.section;
               return (
                 <Link
                   key={item.id}
@@ -213,16 +271,22 @@ export function WorkspaceSettingsShell({
               >
                 {group.items.map((item) => {
                   const Icon = item.icon;
+                  const selected = location.kind === "page" && item.to === location.target;
                   return (
                     <Link
                       key={item.to}
                       to={item.to}
                       params={{ workspaceId }}
-                      className="flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg lg:w-full"
+                      aria-current={selected ? "page" : undefined}
+                      className={cn(
+                        "flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm transition-colors lg:w-full",
+                        selected
+                          ? "bg-surface-3 font-medium text-fg"
+                          : "text-fg-muted hover:bg-surface-2 hover:text-fg",
+                      )}
                     >
                       <Icon className="size-4 shrink-0" />
                       <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                      <ArrowUpRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
                     </Link>
                   );
                 })}
@@ -232,15 +296,26 @@ export function WorkspaceSettingsShell({
         </div>
       </aside>
 
-      <div className="min-w-0 px-4 py-7 sm:px-8 lg:min-h-0 lg:overflow-y-auto lg:px-12 lg:py-10">
-        <div className="mx-auto max-w-4xl">
-          <header className="border-b border-border pb-5">
-            <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
-            <p className="mt-1.5 text-sm text-fg-muted">{copy.description}</p>
-          </header>
-          <div className="py-6">{children}</div>
-        </div>
-      </div>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
     </main>
+  );
+}
+
+export function WorkspaceSettingsContent({
+  section,
+  children,
+}: {
+  section: WorkspaceSettingsSection;
+  children: ReactNode;
+}) {
+  const copy = SECTION_COPY[section];
+  return (
+    <ContentPage width="standard">
+      <header className="border-b border-border pb-5">
+        <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
+        <p className="mt-1.5 text-sm text-fg-muted">{copy.description}</p>
+      </header>
+      <div className="py-6">{children}</div>
+    </ContentPage>
   );
 }

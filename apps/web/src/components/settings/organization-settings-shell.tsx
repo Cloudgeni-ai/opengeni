@@ -57,7 +57,10 @@ export function OrganizationSettingsShell({
 }) {
   const copy = COPY[section];
   return (
-    <main className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
+    <main
+      data-workspace-scroll-owner="self-managed"
+      className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden"
+    >
       <aside className="border-b border-border bg-surface/35 lg:sticky lg:top-0 lg:h-dvh lg:min-h-0 lg:overflow-y-auto lg:overscroll-y-contain lg:border-r lg:border-b-0">
         <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
           <Link

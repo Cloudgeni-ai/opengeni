@@ -9,6 +9,10 @@ import { toast } from "sonner";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
+import {
+  WorkspaceManagementShell,
+  workspaceManagementLocation,
+} from "@/components/settings/workspace-settings-shell";
 import { Button } from "@/components/ui/button";
 import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
@@ -166,7 +170,10 @@ export function WorkspaceShellRouteContent({
         return null;
       }
       if (!ownsSlackOperation(operation)) return null;
-      updateSlackAccess(workspaceId, (current) => ({ ...current, request: next }));
+      updateSlackAccess(workspaceId, (current) => ({
+        ...current,
+        request: next,
+      }));
       if (next.status === "completed") {
         completeSlackAccess(operation);
       }
@@ -256,7 +263,10 @@ export function WorkspaceShellRouteContent({
       if (ownsSlackOperation(operation)) {
         activeSlackOperation.current = null;
         slackMutationBusy.current = false;
-        updateSlackAccess(workspaceId, (current) => ({ ...current, busy: false }));
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          busy: false,
+        }));
       }
     }
   }
@@ -292,7 +302,10 @@ export function WorkspaceShellRouteContent({
       if (ownsSlackOperation(operation)) {
         activeSlackOperation.current = null;
         slackMutationBusy.current = false;
-        updateSlackAccess(workspaceId, (current) => ({ ...current, busy: false }));
+        updateSlackAccess(workspaceId, (current) => ({
+          ...current,
+          busy: false,
+        }));
       }
     }
   }
@@ -308,7 +321,9 @@ export function WorkspaceShellRouteContent({
     void refreshGitHub(workspaceId, abortController.signal);
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
       if (!abortController.signal.aborted && !isAbortError(error)) {
-        toast.error("Failed to load workspace MCP tools", { description: String(error) });
+        toast.error("Failed to load workspace MCP tools", {
+          description: String(error),
+        });
       }
     });
     return () => abortController.abort();
@@ -436,10 +451,16 @@ function AuthorizedWorkspaceShell({
   children: ReactNode;
   onMount?: () => void;
 }) {
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const usesDedicatedSettingsShell =
-    pathname === `/workspaces/${encodeURIComponent(workspaceId)}/settings` ||
-    pathname === `/workspaces/${encodeURIComponent(workspaceId)}/organization`;
+  const location = useRouterState({ select: (state) => state.location });
+  const organizationPath = `/workspaces/${encodeURIComponent(workspaceId)}/organization`;
+  const usesOrganizationShell = location.pathname === organizationPath;
+  const managementLocation = workspaceManagementLocation(
+    location.pathname,
+    workspaceId,
+    location.search.section,
+  );
+  const workspaceName =
+    context.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? "Workspace";
   useEffect(() => {
     onMount?.();
   }, [onMount]);
@@ -449,8 +470,16 @@ function AuthorizedWorkspaceShell({
       workspaceId={workspaceId}
       onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
     >
-      {usesDedicatedSettingsShell ? (
+      {usesOrganizationShell ? (
         children
+      ) : managementLocation ? (
+        <WorkspaceManagementShell
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          location={managementLocation}
+        >
+          {children}
+        </WorkspaceManagementShell>
       ) : (
         <RailProvider workspaceId={workspaceId}>
           <RailShell>{children}</RailShell>

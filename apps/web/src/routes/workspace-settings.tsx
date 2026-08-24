@@ -35,7 +35,7 @@ import { VideoGenerationPreferenceRow } from "@/components/video-generation-sett
 import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
 import { LoadErrorState } from "@/components/common";
 import {
-  WorkspaceSettingsShell,
+  WorkspaceSettingsContent,
   type WorkspaceSettingsSection,
 } from "@/components/settings/workspace-settings-shell";
 import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
@@ -116,6 +116,7 @@ export function WorkspaceSettingsRoute({
     () => new Set(defaultApiKeyPermissions),
   );
   const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
@@ -224,6 +225,7 @@ export function WorkspaceSettingsRoute({
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       setCreatedToken(result.token);
       setApiKeys((current) => [result.apiKey, ...current]);
+      setCreateKeyOpen(false);
       toast.success("API key created");
     } catch (error) {
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
@@ -240,7 +242,9 @@ export function WorkspaceSettingsRoute({
       await navigator.clipboard.writeText(token);
       toast.success("Token copied");
     } catch {
-      toast.error("Couldn't copy the token", { description: "Copy it manually instead." });
+      toast.error("Couldn't copy the token", {
+        description: "Copy it manually instead.",
+      });
     }
   }
 
@@ -316,11 +320,7 @@ export function WorkspaceSettingsRoute({
   }
 
   return (
-    <WorkspaceSettingsShell
-      workspaceId={workspaceId}
-      workspaceName={activeWorkspace?.name ?? "Workspace"}
-      section={section}
-    >
+    <WorkspaceSettingsContent section={section}>
       <section className="grid min-w-0 gap-6 text-left">
         {section === "general" ? (
           <>
@@ -526,7 +526,7 @@ export function WorkspaceSettingsRoute({
         ) : null}
 
         {section === "api-keys" ? (
-          <section className="grid gap-4 rounded-lg border border-border p-4">
+          <section className="grid gap-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h2 className="flex items-center gap-2 text-sm font-medium">
@@ -537,17 +537,13 @@ export function WorkspaceSettingsRoute({
                   Workspace-scoped keys for calling OpenGeni from another product.
                 </p>
               </div>
-              <span className="shrink-0 text-2xs text-fg-subtle">
-                {!apiKeysLoaded
-                  ? "Loading…"
-                  : activeApiKeyCount === 0
-                    ? "None"
-                    : `${activeApiKeyCount} active`}
-              </span>
+              {canManageApiKeys ? (
+                <Button type="button" size="sm" onClick={() => setCreateKeyOpen(true)}>
+                  <PlusIcon className="size-3.5" />
+                  Create API key
+                </Button>
+              ) : null}
             </div>
-            <p className="text-2xs text-fg-subtle">
-              A key can only carry permissions your own grant can delegate.
-            </p>
             {createdToken ? (
               <Notice tone="success" title="Copy this token now — it won't be shown again.">
                 <div className="mt-2 flex min-w-0 items-center gap-2">
@@ -566,47 +562,17 @@ export function WorkspaceSettingsRoute({
                 </div>
               </Notice>
             ) : null}
-            {canManageApiKeys ? (
-              <>
-                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <Input
-                    value={apiKeyName}
-                    onChange={(event) => setApiKeyName(event.target.value)}
-                    className="h-9"
-                  />
-                  <Button type="button" disabled={busy} onClick={() => void createKey()}>
-                    {busy ? (
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                    ) : (
-                      <PlusIcon className="size-3.5" />
-                    )}
-                    Create
-                  </Button>
-                </div>
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={delegablePermissions.size === 0}
-                    onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
-                  >
-                    Select all delegable
-                  </Button>
-                </div>
-                <PermissionGroupPicker
-                  groups={apiKeyPermissionGroups()}
-                  selected={selectedPermissions}
-                  delegable={delegablePermissions}
-                  onToggle={togglePermission}
-                />
-              </>
-            ) : (
-              <p className="text-xs text-fg-subtle">
-                You don't have permission to manage API keys here.
-              </p>
-            )}
-            <div className="divide-y divide-border/70 rounded-md border border-border/70">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xs font-medium text-fg-muted">Keys</h3>
+              <span className="text-2xs text-fg-subtle">
+                {!apiKeysLoaded
+                  ? "Loading…"
+                  : activeApiKeyCount === 0
+                    ? "No active keys"
+                    : `${activeApiKeyCount} active`}
+              </span>
+            </div>
+            <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
               {apiKeysError ? (
                 <div className="p-2">
                   <LoadErrorState
@@ -633,7 +599,7 @@ export function WorkspaceSettingsRoute({
                     title="No API keys yet"
                     description={
                       canManageApiKeys
-                        ? "Create one above to call OpenGeni from another product."
+                        ? "Create a key to call OpenGeni from another product."
                         : "Keys created here call OpenGeni from another product."
                     }
                   />
@@ -664,6 +630,80 @@ export function WorkspaceSettingsRoute({
                 ))
               )}
             </div>
+            {!canManageApiKeys ? (
+              <p className="text-xs text-fg-subtle">
+                You don't have permission to manage API keys here.
+              </p>
+            ) : null}
+
+            <Dialog open={createKeyOpen} onOpenChange={setCreateKeyOpen}>
+              <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-h-[85vh] sm:max-w-2xl">
+                <DialogHeader>
+                  <DialogTitle>Create API key</DialogTitle>
+                  <DialogDescription>
+                    Create a workspace-scoped key and choose what it can access.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid min-h-0 gap-5 overflow-y-auto pr-1">
+                  <div className="grid gap-2">
+                    <Label htmlFor="api-key-name">Name</Label>
+                    <Input
+                      id="api-key-name"
+                      autoFocus
+                      value={apiKeyName}
+                      onChange={(event) => setApiKeyName(event.target.value)}
+                      placeholder="Default API key"
+                    />
+                  </div>
+                  <section className="grid gap-3" aria-labelledby="api-key-permissions-heading">
+                    <div className="flex flex-wrap items-end justify-between gap-2">
+                      <div>
+                        <h3 id="api-key-permissions-heading" className="text-sm font-medium">
+                          Permissions
+                        </h3>
+                        <p className="mt-1 text-xs text-fg-muted">
+                          A key can only carry permissions your own grant can delegate.
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={delegablePermissions.size === 0}
+                        onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
+                      >
+                        Select all delegable
+                      </Button>
+                    </div>
+                    <PermissionGroupPicker
+                      groups={apiKeyPermissionGroups()}
+                      selected={selectedPermissions}
+                      delegable={delegablePermissions}
+                      disabled={busy}
+                      onToggle={togglePermission}
+                    />
+                  </section>
+                </div>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => setCreateKeyOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={busy || !apiKeyName.trim() || requestedPermissions.length === 0}
+                    onClick={() => void createKey()}
+                  >
+                    {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                    Create API key
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </section>
         ) : null}
 
@@ -685,7 +725,7 @@ export function WorkspaceSettingsRoute({
           />
         ) : null}
       </section>
-    </WorkspaceSettingsShell>
+    </WorkspaceSettingsContent>
   );
 }
 
@@ -1195,7 +1235,9 @@ function MemoryPreferenceRow({
     if (!acceptedTransition) return;
     setSaving(true);
     try {
-      const updated = await context.updateWorkspaceSettings(workspaceId, { memoryEnabled: next });
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        memoryEnabled: next,
+      });
       if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
         toast.success(next ? "Workspace memory enabled" : "Workspace memory disabled");
       }
