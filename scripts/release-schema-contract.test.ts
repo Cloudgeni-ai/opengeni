@@ -164,6 +164,8 @@ describe("release schema contract", () => {
       "0328_session_background_commands.sql",
       "0329_slack_orchestration_delivery_events.sql",
       "0330_api_key_descriptions.sql",
+      "0331_managed_organization_creation.sql",
+      "0332_organization_shared_workspace_control_plane.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -183,6 +185,22 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0314_unregistered_organization_invitations.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0331_managed_organization_creation.sql",
+      ),
+    ).toMatchObject({
+      sha256: "62912af210c1db18c7b58de8ad2c233f2fc6759a6ef4509c8e6352d75dd0641f",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0332_organization_shared_workspace_control_plane.sql",
+      ),
+    ).toMatchObject({
+      sha256: "6de1a4fc6f0dc0e67852cef996b6d0e01326d180c67d188cb7fcb9c704bc5cdd",
+      deploymentMode: "rolling",
+    });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0238_supergrok_realtime_model.sql",
