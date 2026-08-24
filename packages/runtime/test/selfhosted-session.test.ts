@@ -881,6 +881,7 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     const client = new SelfhostedSandboxClient({
       workspaceId: WS,
       relay: RELAY,
+      workspaceRoot: "/home/user/project",
       controlRpcFactory: () => rpc,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
