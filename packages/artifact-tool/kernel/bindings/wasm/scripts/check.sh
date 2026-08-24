@@ -4,20 +4,13 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 crate_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+repository_root=$(CDPATH= cd -- "$script_dir/../../../../../.." && pwd)
+rust_runner="$repository_root/scripts/artifact-kernel-rust.ts"
 
 "$script_dir/toolchain.sh"
 
-if ! cargo fmt --version >/dev/null 2>&1; then
-  echo "error: rustfmt is required; install it with rustup component add rustfmt" >&2
-  exit 1
-fi
-
-if ! cargo clippy --version >/dev/null 2>&1; then
-  echo "error: Clippy is required; install it with rustup component add clippy" >&2
-  exit 1
-fi
-
-cargo fmt --manifest-path "$crate_dir/Cargo.toml" --check
-cargo test --locked --manifest-path "$crate_dir/Cargo.toml"
-cargo clippy --locked --manifest-path "$crate_dir/Cargo.toml" --all-targets -- -D warnings
-cargo check --locked --manifest-path "$crate_dir/Cargo.toml" --target wasm32-unknown-unknown
+bun "$rust_runner" ensure --target wasm32-unknown-unknown --component rustfmt --component clippy
+bun "$rust_runner" cargo fmt --manifest-path "$crate_dir/Cargo.toml" --check
+bun "$rust_runner" cargo test --locked --manifest-path "$crate_dir/Cargo.toml"
+bun "$rust_runner" cargo clippy --locked --manifest-path "$crate_dir/Cargo.toml" --all-targets -- -D warnings
+bun "$rust_runner" cargo check --locked --manifest-path "$crate_dir/Cargo.toml" --target wasm32-unknown-unknown

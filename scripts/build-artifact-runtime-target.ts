@@ -10,6 +10,11 @@ import {
 import type { ArtifactRuntimeTarget } from "../packages/artifact-tool/src/runtime";
 import { resolveCurrentArtifactRuntimeTarget } from "../packages/artifact-tool/src/runtime-cli";
 import targetMatrix from "../packages/artifact-tool/kernel/bindings/packages/targets.json" with { type: "json" };
+import {
+  ensureArtifactKernelRustToolchain,
+  resolveArtifactKernelRustToolchain,
+  runArtifactKernelRustTool,
+} from "./artifact-kernel-rust";
 
 type TargetDefinition = Readonly<{
   target: ArtifactRuntimeTarget;
@@ -40,16 +45,15 @@ export async function buildArtifactRuntimeTarget(
       );
     }
   }
-  for (const tool of ["bun", "cargo", "rustup"] as const) {
-    if (!Bun.which(tool)) throw new Error(`${tool} is required to build ${options.target}`);
-  }
+  const rustToolchain = await resolveArtifactKernelRustToolchain(resolve(import.meta.dir, ".."));
+  await ensureArtifactKernelRustToolchain(rustToolchain, { targets: [definition.rustTarget] });
 
   const stagingParent = dirname(options.outputRoot);
   await mkdir(stagingParent, { recursive: true });
   const stagingRoot = await mkdtemp(join(stagingParent, ".artifact-runtime-target-"));
   try {
     if (definition.kind === "native") {
-      await buildNativeTarget(stagingRoot, definition);
+      await buildNativeTarget(stagingRoot, definition, rustToolchain);
     } else {
       await buildWasmTarget(stagingRoot);
     }
@@ -63,7 +67,11 @@ export async function buildArtifactRuntimeTarget(
   }
 }
 
-async function buildNativeTarget(outputRoot: string, definition: TargetDefinition): Promise<void> {
+async function buildNativeTarget(
+  outputRoot: string,
+  definition: TargetDefinition,
+  rustToolchain: Awaited<ReturnType<typeof resolveArtifactKernelRustToolchain>>,
+): Promise<void> {
   if (process.env.RUSTFLAGS || process.env.CARGO_ENCODED_RUSTFLAGS) {
     throw new Error("ambient Rust flags make the native artifact build identity ambiguous");
   }
@@ -76,10 +84,10 @@ async function buildNativeTarget(outputRoot: string, definition: TargetDefinitio
     "bindings",
     "napi",
   );
-  await run(["rustup", "target", "add", definition.rustTarget]);
-  await run(
+  await runArtifactKernelRustTool(
+    rustToolchain,
+    "cargo",
     [
-      "cargo",
       "build",
       "--locked",
       "--manifest-path",
@@ -88,7 +96,11 @@ async function buildNativeTarget(outputRoot: string, definition: TargetDefinitio
       "--target",
       definition.rustTarget,
     ],
-    artifactRuntimeNativeCargoEnvironment(definition.target),
+    {
+      cwd: resolve(import.meta.dir, ".."),
+      environment: artifactRuntimeNativeCargoEnvironment(definition.target),
+      ensure: false,
+    },
   );
   const targetRoot = join(outputRoot, "native", definition.target);
   await mkdir(targetRoot, { recursive: true });

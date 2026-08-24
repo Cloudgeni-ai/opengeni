@@ -2,6 +2,11 @@ import { copyFile, mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { resolveCurrentArtifactRuntimeTarget } from "../../src/runtime-cli";
 import { writeArtifactKernelBuildReceipt } from "./package-receipt";
+import {
+  ensureArtifactKernelRustToolchain,
+  resolveArtifactKernelRustToolchain,
+  runArtifactKernelRustTool,
+} from "../../../../scripts/artifact-kernel-rust";
 
 const root = import.meta.dir;
 const output = resolve(process.env.OPENGENI_ARTIFACT_BINDINGS_OUT ?? join(root, "dist"));
@@ -10,27 +15,15 @@ const napi = join(root, "napi");
 const wasm = join(root, "wasm");
 
 requireTool("bun", "Install Bun and rerun this build with `bun run .../bindings/build.ts`.");
-requireTool("cargo", "Install the pinned Rust toolchain.");
-requireTool("rustup", "Install rustup and the repository's pinned Rust toolchain.");
 requireTool(
   "wasm-bindgen",
   "Install the Cargo.lock-matched CLI. The WASM build script prints the exact command.",
 );
-await requireSuccessful(
-  ["cargo", "fmt", "--version"],
-  "rustfmt is required. Run: rustup component add rustfmt",
-);
-await requireSuccessful(
-  ["cargo", "clippy", "--version"],
-  "Clippy is required. Run: rustup component add clippy",
-);
-
-const installedTargets = await capture(["rustup", "target", "list", "--installed"]);
-if (!installedTargets.split(/\s+/).includes("wasm32-unknown-unknown")) {
-  throw new Error(
-    "Missing Rust target wasm32-unknown-unknown. Run: rustup target add wasm32-unknown-unknown",
-  );
-}
+const rustToolchain = await resolveArtifactKernelRustToolchain(resolve(root, "../../../.."));
+await ensureArtifactKernelRustToolchain(rustToolchain, {
+  targets: ["wasm32-unknown-unknown"],
+  components: ["rustfmt", "clippy"],
+});
 
 await run([
   "bun",
@@ -55,10 +48,9 @@ await run([
   join(wasm, "scripts", "benchmark.ts"),
 ]);
 
-await run(["cargo", "fmt", "--manifest-path", join(protocol, "Cargo.toml"), "--check"]);
-await run(["cargo", "test", "--locked", "--manifest-path", join(protocol, "Cargo.toml")]);
-await run([
-  "cargo",
+await runRust(["fmt", "--manifest-path", join(protocol, "Cargo.toml"), "--check"]);
+await runRust(["test", "--locked", "--manifest-path", join(protocol, "Cargo.toml")]);
+await runRust([
   "clippy",
   "--locked",
   "--manifest-path",
@@ -68,9 +60,8 @@ await run([
   "-D",
   "warnings",
 ]);
-await run(["cargo", "fmt", "--manifest-path", join(napi, "Cargo.toml"), "--check"]);
-await run([
-  "cargo",
+await runRust(["fmt", "--manifest-path", join(napi, "Cargo.toml"), "--check"]);
+await runRust([
   "test",
   "--locked",
   "--manifest-path",
@@ -78,8 +69,7 @@ await run([
   "--features",
   "noop",
 ]);
-await run([
-  "cargo",
+await runRust([
   "clippy",
   "--locked",
   "--manifest-path",
@@ -91,7 +81,7 @@ await run([
   "-D",
   "warnings",
 ]);
-await run(["cargo", "build", "--locked", "--manifest-path", join(napi, "Cargo.toml"), "--release"]);
+await runRust(["build", "--locked", "--manifest-path", join(napi, "Cargo.toml"), "--release"]);
 
 const nativeTarget = resolveCurrentArtifactRuntimeTarget();
 const nativeDirectory = join(output, "native", nativeTarget);
@@ -145,15 +135,6 @@ async function run(command: string[], environment: Record<string, string> = {}):
   if (exitCode !== 0) throw new Error(`Command failed (${exitCode}): ${command.join(" ")}`);
 }
 
-async function capture(command: string[]): Promise<string> {
-  const child = Bun.spawn(command, { cwd: root, stdout: "pipe", stderr: "inherit" });
-  const capturedOutput = await new Response(child.stdout).text();
-  const exitCode = await child.exited;
-  if (exitCode !== 0) throw new Error(`Command failed (${exitCode}): ${command.join(" ")}`);
-  return capturedOutput;
-}
-
-async function requireSuccessful(command: string[], help: string): Promise<void> {
-  const child = Bun.spawn(command, { cwd: root, stdout: "ignore", stderr: "ignore" });
-  if ((await child.exited) !== 0) throw new Error(help);
+async function runRust(args: string[]): Promise<void> {
+  await runArtifactKernelRustTool(rustToolchain, "cargo", args, { cwd: root, ensure: false });
 }
