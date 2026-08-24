@@ -27,9 +27,16 @@ CREATE TABLE document_authority_reclassifications (
   resulting_owner_organization_membership_id uuid,
   result jsonb NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  -- The receipt is workspace-owned evidence, so it dies with its workspace.
+  -- RESTRICT here would make any workspace in which a single Document was ever
+  -- reclassified permanently undeletable: `deleteWorkspaceIfQuiescent` relies on
+  -- cascades and has no quiescence branch for these tables, so the FK would
+  -- surface as an untyped 500 on `DELETE /v1/workspaces/:workspaceId` rather
+  -- than a typed status. The row-level immutability trigger below still refuses
+  -- every direct rewrite; only the referential cascade may remove it.
   CONSTRAINT document_authority_reclassifications_workspace_fk
     FOREIGN KEY (request_workspace_id, account_id)
-    REFERENCES workspaces(id, account_id) ON DELETE RESTRICT,
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT document_authority_reclassifications_hash_chk CHECK (
     input_hash ~ '^[0-9a-f]{64}$'
   ),
@@ -97,13 +104,20 @@ CREATE TABLE document_default_collection_backfill_receipts (
     ON DELETE RESTRICT,
   account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE RESTRICT,
   workspace_id uuid NOT NULL,
-  base_id uuid NOT NULL REFERENCES document_bases(id) ON DELETE RESTRICT,
+  -- CASCADE on both parents. One admin-triggered backfill writes a receipt for
+  -- EVERY workspace in the account, so RESTRICT would pin the whole account as
+  -- undeletable after a single run - and `document_bases.workspace_id` already
+  -- cascades, so a RESTRICT on `base_id` would block that cascade too. The
+  -- receipt describes a collection inside the workspace; once the workspace,
+  -- its bases, and its documents are gone the receipt is evidence about
+  -- nothing. Direct rewrites stay refused by the immutability trigger below.
+  base_id uuid NOT NULL REFERENCES document_bases(id) ON DELETE CASCADE,
   outcome text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (run_id, workspace_id),
   CONSTRAINT document_default_collection_backfill_receipts_workspace_fk
     FOREIGN KEY (workspace_id, account_id)
-    REFERENCES workspaces(id, account_id) ON DELETE RESTRICT,
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT document_default_collection_backfill_receipts_outcome_chk CHECK (
     outcome IN ('created', 'adopted')
   )
@@ -224,6 +238,19 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $body$
 BEGIN
+  -- A receipt is never rewritten and is never removed on its own. The single
+  -- exception is the referential cascade of an owning parent (its workspace, or
+  -- the Default base that workspace cascade already removes), which is what
+  -- keeps `DELETE /v1/workspaces/:workspaceId` working after this migration's
+  -- lifecycle has run. `pg_trigger_depth()` is the exact, RLS-immune
+  -- discriminator: a direct statement enters this trigger at depth 1, while a
+  -- referential action is itself executed from the parent's constraint trigger
+  -- and therefore enters at depth 2 or deeper. Checking whether the parent row
+  -- still exists would NOT work here - this trigger runs as the invoking role,
+  -- and `workspaces` looks empty to a FORCE-RLS-bound owner with no tenant GUC.
+  IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'document migration receipts are immutable' USING ERRCODE = '55000';
 END
 $body$;
@@ -429,6 +456,7 @@ DECLARE
   target_authority_id uuid;
   target_owner_membership_id uuid;
   old_authority_id uuid;
+  receipt_created_at timestamptz;
   result_value jsonb;
 BEGIN
   IF p_command IS NULL THEN
@@ -462,7 +490,13 @@ BEGIN
     RAISE EXCEPTION 'document reclassification workspace authority is invalid'
       USING ERRCODE = '42501';
   END IF;
-  IF expected_kind NOT IN ('organization', 'workspace', 'personal')
+  -- `NULL NOT IN (...)` is NULL, not TRUE, so an ABSENT kind would slip past
+  -- this guard and only surface much later as the compare-and-set 40001 the API
+  -- renders as a 409 conflict. A missing kind is malformed input: reject it here
+  -- with 22023 so the caller gets a 400.
+  IF expected_kind IS NULL
+    OR target_kind IS NULL
+    OR expected_kind NOT IN ('organization', 'workspace', 'personal')
     OR target_kind NOT IN ('organization', 'workspace', 'personal')
     OR octet_length(convert_to(actor_subject, 'UTF8')) NOT BETWEEN 1 AND 1024
   THEN
@@ -564,11 +598,6 @@ BEGIN
   END IF;
 
   old_authority_id := document_row.authority_id;
-  target_workspace_id := CASE
-    WHEN target_kind = 'workspace' THEN document_row.workspace_id
-    WHEN target_kind = 'personal' THEN document_row.workspace_id
-    ELSE NULL
-  END;
   target_subject_id := CASE WHEN target_kind = 'personal' THEN actor_subject ELSE NULL END;
   target_authority_id := CASE WHEN target_kind = 'personal' THEN document_row.authority_id ELSE NULL END;
   target_owner_membership_id := CASE
@@ -577,18 +606,42 @@ BEGIN
   END;
 
   IF target_kind = 'personal' AND target_authority_id IS NULL THEN
+    -- The capability window MUST be open before the membership read, not after
+    -- it. `organization_memberships` is FORCE ROW LEVEL SECURITY and carries no
+    -- GUC-only read policy: every branch is capability- or lifecycle-gated. This
+    -- routine is SECURITY DEFINER, so it runs as the schema OWNER, and `FORCE`
+    -- binds the owner too on the documented deployment posture (a NOSUPERUSER,
+    -- NOBYPASSRLS migration login). Reading first would match zero rows, leave
+    -- `IF FOUND` false, and silently skip this entire portable-authority
+    -- activation - see `docs/force-rls-migration-backfills.md`.
+    INSERT INTO opengeni_private.personal_document_authority_capabilities (
+      backend_pid, transaction_id, capability_kind
+    ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'write')
+    ON CONFLICT DO NOTHING;
+    -- Fail loudly rather than fall through to the legacy lane if the window is
+    -- ever not established: a blinded read here is indistinguishable from
+    -- "this subject holds no organization membership", and the difference is
+    -- whether a personal Document is portable or permanently workspace-pinned.
+    IF NOT opengeni_private.personal_document_authority_capability_active('write') THEN
+      RAISE EXCEPTION 'document reclassification personal authority window is unavailable'
+        USING ERRCODE = '55000';
+    END IF;
+    -- Deliberately NOT `FOR SHARE`. PostgreSQL applies a relation's UPDATE
+    -- policies to any SELECT that carries a locking clause, and every read
+    -- policy on `organization_memberships` is `FOR SELECT` only, so `FOR SHARE`
+    -- / `FOR KEY SHARE` / `FOR UPDATE` all return ZERO ROWS here without
+    -- raising - the same silent-blinding class as the FORCE-RLS backfill no-op.
+    -- The referential pin that matters is taken anyway: the INSERT below is
+    -- checked against `organization_user_resource_authorities_membership_fk`,
+    -- and RI checks bypass row security and take `FOR KEY SHARE` on the exact
+    -- membership row, so it cannot be deleted or re-keyed under us.
     SELECT membership.* INTO owner_member
     FROM organization_memberships membership
     WHERE membership.account_id = account_id_value
       AND membership.subject_id = actor_subject
       AND membership.status = 'active'
-      AND membership.revoked_at IS NULL
-    FOR SHARE;
+      AND membership.revoked_at IS NULL;
     IF FOUND THEN
-      INSERT INTO opengeni_private.personal_document_authority_capabilities (
-        backend_pid, transaction_id, capability_kind
-      ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'write')
-      ON CONFLICT DO NOTHING;
       INSERT INTO organization_user_resource_authorities (
         id, account_id, organization_membership_id, resource_kind,
         resource_id, origin_workspace_id, generation, status
@@ -598,10 +651,43 @@ BEGIN
       )
       RETURNING id, organization_membership_id
       INTO target_authority_id, target_owner_membership_id;
-      target_workspace_id := NULL;
+    ELSE
+      -- Configured/local and rolling-legacy subjects have no organization
+      -- membership and keep the pre-organization workspace-anchored personal
+      -- lane. Close the window immediately so nothing after this point runs
+      -- with a capability it did not earn.
+      DELETE FROM opengeni_private.personal_document_authority_capabilities
+      WHERE backend_pid = pg_backend_pid()
+        AND transaction_id = pg_current_xact_id_if_assigned()
+        AND capability_kind = 'write';
     END IF;
   END IF;
 
+  -- Derived AFTER the authority decision, and never before it. The receipt and
+  -- the API response must state the tuple `apply_document_authority` actually
+  -- stores, and that trigger normalizes `authority_workspace_id` to NULL for
+  -- every personal row with a non-null `authority_id` (a portable personal
+  -- Document is anchored by its authority row, never by a workspace). Computing
+  -- this up front made a `personal(portable) -> personal` receipt claim an
+  -- anchoring that does not exist, and the trigger's receipt match compares the
+  -- PRE-normalization NEW row, so nothing caught it.
+  target_workspace_id := CASE
+    WHEN target_kind = 'workspace' THEN document_row.workspace_id
+    WHEN target_kind = 'personal' AND target_authority_id IS NULL
+      THEN document_row.workspace_id
+    ELSE NULL
+  END;
+  IF target_authority_id IS NULL THEN
+    target_owner_membership_id := NULL;
+  END IF;
+
+  -- The receipt column and the receipt's own `createdAt` must be the SAME
+  -- instant. Two `clock_timestamp()` calls drift by microseconds, which makes
+  -- the `created_at = cursor` tie-break in
+  -- `list_document_authority_reclassifications` unreachable and can silently
+  -- skip a receipt whose stored `created_at` sorts before the cursor the client
+  -- echoed back from `result.createdAt`.
+  receipt_created_at := clock_timestamp();
   result_value := jsonb_build_object(
     'operationId', operation_id_value,
     'documentId', document_row.id,
@@ -617,7 +703,7 @@ BEGIN
       'subjectId', target_subject_id,
       'authorityId', target_authority_id
     ),
-    'createdAt', clock_timestamp()
+    'createdAt', receipt_created_at
   );
 
   INSERT INTO opengeni_private.document_migration_capabilities (
@@ -632,7 +718,7 @@ BEGIN
     previous_owner_organization_membership_id,
     resulting_authority_kind, resulting_authority_workspace_id,
     resulting_authority_subject_id, resulting_authority_id,
-    resulting_owner_organization_membership_id, result
+    resulting_owner_organization_membership_id, result, created_at
   ) VALUES (
     operation_id_value, input_hash_value, account_id_value,
     request_workspace_id_value, document_row.id, actor_subject,
@@ -640,7 +726,7 @@ BEGIN
     document_row.authority_subject_id, document_row.authority_id,
     document_row.owner_organization_membership_id,
     target_kind, target_workspace_id, target_subject_id, target_authority_id,
-    target_owner_membership_id, result_value
+    target_owner_membership_id, result_value, receipt_created_at
   );
 
   UPDATE documents SET

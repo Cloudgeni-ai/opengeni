@@ -81,6 +81,44 @@ A migration-time backfill over a FORCE-RLS table must do one of:
 A convergence assertion is not a substitute for any of the above: put the
 assertion *inside* the window so a silent no-op fails loudly.
 
+## The same trap at runtime: `SECURITY DEFINER` routines
+
+The mechanism is not confined to migration time. Inside a `SECURITY DEFINER`
+function, `current_user` is the function's **owner** - the same schema owner that
+runs migrations - so `FORCE ROW LEVEL SECURITY` binds it there too, on every
+ordinary request. A definer routine reading a capability-gated table therefore
+has the identical failure mode: **zero rows, no error.**
+
+Two rules, both of which fail silently when broken:
+
+1. **Open the capability window before the read.** A table like
+   `organization_memberships` carries no GUC-only read policy; every branch is
+   `current_user = <owner> AND <x>_capability_active()`. Installing the
+   capability *after* the `SELECT` (or after an `IF FOUND` on it) makes the read
+   match nothing and takes the not-found path.
+2. **A capability-gated read must carry no locking clause.** PostgreSQL applies a
+   relation's `UPDATE` policies to any `SELECT` with a row-locking clause, so
+   `FOR SHARE`, `FOR KEY SHARE`, `FOR NO KEY UPDATE`, and `FOR UPDATE` **all**
+   return zero rows when the only matching policy is `FOR SELECT`. Nothing
+   raises. Where a referential pin is genuinely needed, take it through a foreign
+   key: RI checks bypass row security and lock the referenced row `FOR KEY SHARE`.
+
+`packages/db/drizzle/0334_document_authority_reclassification.sql`'s
+`reclassify_document_authority` follows both rules and asserts the window is live
+before the read, so a regression aborts instead of quietly pinning a personal
+Document to its origin workspace forever.
+
+**Known unrepaired instance.** `0258_three_scope_document_knowledge_authority.sql`
+gets rule 1 right but not rule 2:
+`create_personal_document_authority` and
+`prepare_session_attempt_personal_document_reads` both read
+`organization_memberships ... FOR SHARE` inside the capability window. On a
+superuser-migrated database they see the row; on the documented production
+posture they see none, so a new personal Document silently takes the legacy
+workspace-anchored lane instead of minting a portable organization-user
+authority. Migration bytes are frozen, so this needs its own reviewed repair
+migration - it is listed here rather than fixed in passing.
+
 ### Enforcement
 
 - `bun run check:migration-rls-backfills` (`scripts/check-migration-rls-backfills.ts`,

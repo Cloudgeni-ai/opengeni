@@ -282,6 +282,12 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
     ).resolves.toBeNull();
   });
 
+  // NOTE: `acquireSharedTestDatabase` hands out the container SUPERUSER, for whom
+  // `FORCE ROW LEVEL SECURITY` never engages. This file therefore covers the
+  // domain contract, not the production FORCE-RLS boundary: the personal
+  // authority activation asserted below is exercised against a
+  // NOSUPERUSER/NOBYPASSRLS owner in
+  // `packages/db/test/migration-0334-document-authority-reclassification.test.ts`.
   test("reclassification preserves portable personal get, search, and browse isolation", async () => {
     if (!available) return;
     const subjectId = `human:${crypto.randomUUID()}`;
@@ -407,6 +413,56 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
     expect(nestedErrorMessages(siblingWorkspaceTargetError)).toContain(
       "workspace document target requires the immutable origin workspace route",
     );
+
+    // `personal(portable) -> personal` from the sibling route. `workspaceId` is
+    // asserted EXACTLY: `apply_document_authority` normalizes
+    // `authority_workspace_id` to NULL for every personal row that carries an
+    // `authority_id`, and the trigger's receipt match compares the
+    // PRE-normalization NEW row - so a response or an immutable receipt naming
+    // the origin workspace here would assert an anchoring the database does not
+    // hold, which is exactly what acceptance criterion 6 ("preserves ...
+    // provenance") forbids.
+    const portableOperationId = crypto.randomUUID();
+    const repeated = await reclassifyDocumentAuthority(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      documentId: stored.documentId,
+      operationId: portableOperationId,
+      actorSubjectId: subjectId,
+      expectedAuthority: {
+        kind: "personal",
+        workspaceId: null,
+        subjectId,
+        authorityId: promotedAuthorityId,
+      },
+      targetAuthorityKind: "personal",
+      accountAdminAuthorization: null,
+    });
+    expect(repeated.authority).toEqual({
+      kind: "personal",
+      workspaceId: null,
+      subjectId,
+      authorityId: promotedAuthorityId,
+    });
+    const [portableTruth] = await shared!.admin<
+      Array<{
+        documentWorkspace: string | null;
+        receiptWorkspace: string | null;
+        receiptResultWorkspace: string | null;
+      }>
+    >`
+      select document.authority_workspace_id as "documentWorkspace",
+        receipt.resulting_authority_workspace_id as "receiptWorkspace",
+        receipt.result #>> '{authority,workspaceId}' as "receiptResultWorkspace"
+      from documents document
+      join document_authority_reclassifications receipt
+        on receipt.operation_id = ${portableOperationId}::uuid
+      where document.id = ${stored.documentId}`;
+    expect(portableTruth).toEqual({
+      documentWorkspace: null,
+      receiptWorkspace: null,
+      receiptResultWorkspace: null,
+    });
 
     await shared!.admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id, role)

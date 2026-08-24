@@ -219,6 +219,29 @@ record whether an existing Default was adopted or a missing one was created.
 This changes grouping only. It does not reclassify a Document or widen
 retrieval, ranking, citation, or file access.
 
+One run writes a receipt for **every** workspace in the account, so those
+receipts - and the reclassification receipts - are workspace-owned evidence that
+cascades with its workspace rather than pinning it. `deleteWorkspaceIfQuiescent`
+relies on cascades and has no quiescence branch for these tables, so an
+`ON DELETE RESTRICT` here would turn one administrator action into an untyped
+Postgres error on `DELETE /v1/workspaces/:workspaceId` for every workspace in
+the account. The row-level immutability trigger still refuses every direct
+`UPDATE`/`DELETE`; only the referential cascade of an owning parent may remove a
+receipt, and the run's aggregate counters are retained as the run-level history.
+
+Both lifecycle routines run `SECURITY DEFINER`, so inside them `current_user` is
+the schema owner - and `FORCE ROW LEVEL SECURITY` binds the owner too. Two rules
+follow, and both fail **silently** when broken. First, the
+`personal_document_authority_capabilities` window must be opened *before* the
+`organization_memberships` read, or that read matches zero rows and the portable
+personal-authority activation is skipped without an error. Second, that read must
+carry **no** locking clause: PostgreSQL applies a relation's `UPDATE` policies to
+any `SELECT ... FOR SHARE`/`FOR KEY SHARE`/`FOR UPDATE`, and every read policy on
+`organization_memberships` is `FOR SELECT` only, so a locking read also returns
+zero rows. The referential pin is taken by the
+`organization_user_resource_authorities` foreign-key check instead, which bypasses
+row security. See [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
+
 Personal Document ownership never becomes ambient agent authority. The exact
 attempt-admission transaction freezes only Documents covered by a live
 `document.read` once/session/always grant for the target workspace and exact
