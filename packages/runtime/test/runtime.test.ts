@@ -3485,6 +3485,7 @@ describe("runtime event normalization", () => {
   test("a Connected Machine advertises Codemode without installing a token file", () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), [], {
       activeSandboxBackend: "selfhosted",
+      sandboxWorkspaceRoot: "/srv/project",
       codemodeAvailable: true,
     });
     expect(agent.instructions).toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);

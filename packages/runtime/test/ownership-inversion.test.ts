@@ -705,15 +705,22 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
       ARM_TENANT_ID: "tid",
     };
     const model = new ScriptedModel([{ output: [assistantMessage("done, no tools")] }]);
+    const workspaceRoot = "/srv/project";
     const agent = buildOpenGeniAgent(settings, [], {
       model,
       sandboxEnvironment: environment,
       activeSandboxBackend: "selfhosted",
+      sandboxWorkspaceRoot: workspaceRoot,
     });
 
     const execCalls: Array<{ cmd: string }> = [];
     const providedSession = {
-      state: { manifest: buildManifest(settings, [], environment) },
+      state: {
+        manifest: buildManifest(settings, [], environment, [], {
+          root: workspaceRoot,
+          includeResourceEntries: false,
+        }),
+      },
       exec: async (args: { cmd: string }) => {
         execCalls.push(args);
         return { exitCode: 0, stdout: "", stderr: "" };
