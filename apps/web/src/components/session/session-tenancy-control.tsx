@@ -80,6 +80,46 @@ export default function SessionRouteAuxiliary(
 }
 
 /** Route adapter kept inside the activation-gated lazy chunk. */
+/**
+ * A private fork lands in the SOURCE workspace, so it is the same product
+ * decision migration 0323 makes for a private create: an organization whose
+ * owner has not enabled private sessions gets no private destination in a
+ * shared workspace. Migration 0333's fork lifecycle routine fails that closed
+ * with SQLSTATE 55000, and this hook keeps the dialog from offering a choice
+ * the database will refuse. A personal workspace is exempt, exactly as on the create path,
+ * and an unknown answer fails closed rather than offering Private optimistically.
+ */
+function usePrivateForkCapability(options: {
+  client: OpenGeniCoreClient;
+  workspaceId: string;
+  personalWorkspace: boolean;
+  managedSession: boolean;
+}): boolean {
+  const { client, workspaceId, personalWorkspace, managedSession } = options;
+  const [canForkPrivately, setCanForkPrivately] = useState(personalWorkspace);
+  useEffect(() => {
+    if (personalWorkspace) {
+      setCanForkPrivately(true);
+      return;
+    }
+    setCanForkPrivately(false);
+    if (!managedSession) return;
+    let current = true;
+    void client
+      .getSessionTenancyCreateCapabilities(workspaceId)
+      .then((capabilities) => {
+        if (current) setCanForkPrivately(capabilities.canCreatePrivate === true);
+      })
+      .catch(() => {
+        if (current) setCanForkPrivately(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [client, managedSession, personalWorkspace, workspaceId]);
+  return canForkPrivately;
+}
+
 export function SessionTenancyRouteControl({
   session,
   events,
@@ -89,10 +129,18 @@ export function SessionTenancyRouteControl({
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const transition = context.captureWorkspaceInvocation(session.workspaceId);
-  if (!transition) return null;
   const workspace = context.workspaces.find((candidate) => candidate.id === session.workspaceId);
   const personalWorkspace = isPersonalWorkspace(workspace ?? null, context.managedSelfContext);
+  const managedSession =
+    context.clientConfig.auth.mode === "managedSession" && context.authSession !== null;
+  const canForkPrivately = usePrivateForkCapability({
+    client: context.client,
+    workspaceId: session.workspaceId,
+    personalWorkspace,
+    managedSession,
+  });
+  const transition = context.captureWorkspaceInvocation(session.workspaceId);
+  if (!transition) return null;
   const scopeLabel = personalWorkspace
     ? `${workspace?.name ?? "this workspace"} Personal workspace`
     : (workspace?.name ?? "this workspace");
@@ -103,9 +151,8 @@ export function SessionTenancyRouteControl({
       session={session}
       events={events}
       client={context.client}
-      managedSession={
-        context.clientConfig.auth.mode === "managedSession" && context.authSession !== null
-      }
+      managedSession={managedSession}
+      canForkPrivately={canForkPrivately}
       scopeLabel={scopeLabel}
       captureWorkspaceInvocation={context.captureWorkspaceInvocation}
       ownsWorkspaceInvocation={context.ownsWorkspaceInvocation}
@@ -131,6 +178,7 @@ export function SessionTenancyControl({
   events,
   client,
   managedSession,
+  canForkPrivately,
   scopeLabel,
   captureWorkspaceInvocation,
   ownsWorkspaceInvocation,
@@ -142,6 +190,9 @@ export function SessionTenancyControl({
   events?: SessionEvent[] | undefined;
   client: OpenGeniCoreClient;
   managedSession: boolean;
+  /** False also covers "not yet known": a private fork is never offered on a
+   *  guess, because the database refuses it under the 0323 product decision. */
+  canForkPrivately: boolean;
   scopeLabel: string;
   captureWorkspaceInvocation: (workspaceId: string) => WorkspaceTransitionIdentity | null;
   ownsWorkspaceInvocation: (workspaceId: string, accepted: WorkspaceTransitionIdentity) => boolean;
@@ -600,7 +651,9 @@ export function SessionTenancyControl({
                 onSelect={() =>
                   setConfirmation({
                     kind: "fork",
-                    visibility: pendingFork?.visibility ?? displayedTenancy.visibility,
+                    visibility:
+                      pendingFork?.visibility ??
+                      (canForkPrivately ? displayedTenancy.visibility : "workspace"),
                   })
                 }
               >
@@ -668,7 +721,14 @@ export function SessionTenancyControl({
                 : "Fork privately"
             : visibilityConfirmLabel
         }
-        destructive={confirmation?.visibility === "workspace"}
+        // A fork only widens exposure when a private source is copied into the
+        // workspace. Changing an existing session to workspace visibility always
+        // does. A shared-to-shared fork exposes nothing new.
+        destructive={
+          confirmation?.kind === "fork"
+            ? displayedTenancy.visibility === "private" && confirmation.visibility === "workspace"
+            : confirmation?.visibility === "workspace"
+        }
         cancelAutoFocus
         restoreFocusRef={accessTriggerRef}
         onConfirm={() => {
@@ -679,16 +739,22 @@ export function SessionTenancyControl({
         }}
       >
         {confirmation?.kind === "fork" && !retryingFork ? (
-          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Fork visibility">
-            <Button
-              type="button"
-              variant={confirmation.visibility === "private" ? "default" : "secondary"}
-              role="radio"
-              aria-checked={confirmation.visibility === "private"}
-              onClick={() => setConfirmation({ kind: "fork", visibility: "private" })}
-            >
-              <LockKeyholeIcon /> Private
-            </Button>
+          <div
+            className={canForkPrivately ? "grid grid-cols-2 gap-2" : "grid gap-2"}
+            role="radiogroup"
+            aria-label="Fork visibility"
+          >
+            {canForkPrivately ? (
+              <Button
+                type="button"
+                variant={confirmation.visibility === "private" ? "default" : "secondary"}
+                role="radio"
+                aria-checked={confirmation.visibility === "private"}
+                onClick={() => setConfirmation({ kind: "fork", visibility: "private" })}
+              >
+                <LockKeyholeIcon /> Private
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant={confirmation.visibility === "workspace" ? "default" : "secondary"}

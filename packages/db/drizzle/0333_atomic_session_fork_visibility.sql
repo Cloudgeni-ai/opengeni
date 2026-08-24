@@ -247,7 +247,8 @@ BEGIN
   -- source private. A new key still reaches the current source authorization
   -- check below and is denied.
   SELECT receipt.* INTO receipt_row FROM session_command_receipts receipt
-  WHERE receipt.workspace_id = p_source_workspace_id
+  WHERE receipt.account_id = p_account_id
+    AND receipt.workspace_id = p_source_workspace_id
     AND receipt.actor_type = 'human' AND receipt.actor_subject_id = p_actor_subject_id
     AND receipt.actor_attempt_id IS NULL AND receipt.action = 'session.fork'
     AND receipt.target_session_id = p_source_session_id
@@ -266,6 +267,23 @@ BEGIN
     copied_history_item_count :=
       (receipt_row.result ->> 'copiedHistoryItemCount')::integer;
     replay := true; RETURN NEXT; RETURN;
+  END IF;
+
+  -- Product decision, distinct from authority, and the same one migration 0323
+  -- makes on the create path: a private destination inside a shared workspace
+  -- requires the organization's private-session setting. A personal workspace
+  -- is exempt exactly as it is there. This is deliberately placed after the
+  -- keyed replay above and before any source read, so a fork that already
+  -- committed still replays byte-identically after an owner disables the
+  -- setting, while a fresh key fails closed with the same SQLSTATE the create
+  -- path raises.
+  IF p_destination_visibility = 'user_private'
+    AND actor_membership.personal_workspace_id IS DISTINCT FROM p_source_workspace_id
+    AND NOT organization_private_sessions_enabled(p_account_id)
+  THEN
+    RAISE EXCEPTION
+      'private sessions are not enabled for this organization''s shared workspaces'
+      USING ERRCODE = '55000';
   END IF;
 
   SELECT session.* INTO source_session FROM sessions session
@@ -294,7 +312,8 @@ BEGIN
     'session.fork', p_source_session_id, p_operation_key, p_canonical_request_hash
   ) ON CONFLICT DO NOTHING;
   SELECT receipt.* INTO receipt_row FROM session_command_receipts receipt
-  WHERE receipt.workspace_id = p_source_workspace_id
+  WHERE receipt.account_id = p_account_id
+    AND receipt.workspace_id = p_source_workspace_id
     AND receipt.actor_type = 'human' AND receipt.actor_subject_id = p_actor_subject_id
     AND receipt.actor_attempt_id IS NULL AND receipt.action = 'session.fork'
     AND receipt.target_session_id = p_source_session_id
@@ -406,7 +425,7 @@ BEGIN
     resources, skills, tools, metadata,
     created_by_kind, created_by_subject_id, created_by_context,
     owner_organization_membership_id, owner_subject_id,
-    visibility, authority_epoch,
+    visibility, create_requested_visibility, authority_epoch,
     forked_from_session_id, forked_from_authority_epoch,
     forked_from_visibility, forked_at, forked_by_organization_membership_id,
     model, reasoning_effort, latency_mode, sandbox_backend, sandbox_os, sandbox_group_id,
@@ -435,7 +454,10 @@ BEGIN
       'workspaceSharedAcknowledged', p_workspace_shared_acknowledged
     ),
     actor_membership.id, actor_membership.subject_id,
-    p_destination_visibility, 1,
+    -- create_requested_visibility mirrors the destination the caller actually
+    -- asked for. Leaving it at the column default made a private fork row
+    -- internally inconsistent with its own visibility.
+    p_destination_visibility, p_destination_visibility, 1,
     p_source_session_id, source_session.authority_epoch,
     source_session.visibility, clock_timestamp(), actor_membership.id,
     source_session.model, source_session.reasoning_effort, source_session.latency_mode,

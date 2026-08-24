@@ -321,6 +321,22 @@ async function activateSessionTenancy(human: ManagedHuman): Promise<void> {
     )`;
 }
 
+/**
+ * Migration 0333 applies the same organization owner/admin product decision to a
+ * private fork destination in a SHARED workspace that migration 0323 applies to
+ * a private create, so a test that forks privately outside a personal workspace
+ * has to represent an organization that enabled it. Activation alone deliberately
+ * does not: an organization activated after 0323 starts disabled.
+ */
+async function enablePrivateSessions(human: ManagedHuman): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  await shared.admin`
+    insert into organization_private_session_settings (
+      account_id, enabled, version, updated_by_membership_id
+    ) values (${human.accountId}, true, 1, null)
+    on conflict (account_id) do update set enabled = true`;
+}
+
 async function addOrdinaryWorkspaceMember(
   owner: ManagedHuman,
   member: ManagedHuman,
@@ -592,6 +608,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     const sessionOwner = await inviteIntoOrganization(caller, "member");
     await addOrdinaryWorkspaceMember(caller, sessionOwner);
     await activateSessionTenancy(caller);
+    await enablePrivateSessions(caller);
 
     const sharedSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
     const privateSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
@@ -760,6 +777,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     const sourceOwner = await inviteIntoOrganization(caller, "member");
     await addOrdinaryWorkspaceMember(caller, sourceOwner);
     await activateSessionTenancy(caller);
+    await enablePrivateSessions(caller);
     const sourceSessionId = await seedSession(sourceOwner, caller.legacyWorkspaceId);
     const idempotencyKey = `api-private-source-replay-${crypto.randomUUID()}`;
     const hostOperations: SessionAuthorizationOperation[] = [];

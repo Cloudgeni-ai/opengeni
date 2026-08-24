@@ -21,8 +21,21 @@ import { join } from "node:path";
 
 const repo = join(import.meta.dir, "..");
 
-const SQL_ENTRY_POINTS = ["transition_session_visibility", "fork_session_content"] as const;
-const ADAPTER_ENTRY_POINTS = ["transitionSessionVisibility", "forkSessionContent"] as const;
+const SQL_ENTRY_POINTS = [
+  "transition_session_visibility",
+  "fork_session_content",
+  // `replay_applied_session_fork` answers a fork's committed destination
+  // WITHOUT consulting mutable source-session authorization. That is exactly
+  // why it must stay pinned to the same narrow boundary as the two lifecycle
+  // functions: it is granted to `opengeni_app`, so any new importer would
+  // otherwise pass every guard in the tree.
+  "replay_applied_session_fork",
+] as const;
+const ADAPTER_ENTRY_POINTS = [
+  "transitionSessionVisibility",
+  "forkSessionContent",
+  "replayAppliedSessionFork",
+] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
 const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
 const AUTHORIZATION_CALLER_ALLOWLIST = new Set([

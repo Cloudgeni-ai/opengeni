@@ -813,6 +813,15 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         account_id, activation_version, inventory_digest, parity_digest, activated_by
       ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
       on conflict (account_id) do nothing`;
+    // A private fork destination in a shared workspace carries the same
+    // organization owner/admin product decision as a private create; this
+    // organization has enabled it, so the test exercises schema pinning rather
+    // than the product gate.
+    await admin`
+      insert into ${admin(SCHEMA)}.organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
     const source = await withSessionRlsActorContext({ subjectId }, async () =>
       createSession(db, {
         accountId: grant.accountId,

@@ -26,6 +26,7 @@ import {
   SessionTenancyAccessError,
   SessionTenancyConflictError,
   SessionTenancyInvalidRequestError,
+  SessionTenancyNotActivatedError,
   transitionSessionVisibility,
   withSessionRlsActorContext,
   withWorkspaceRls,
@@ -102,6 +103,16 @@ async function sessionVisibilityFixture() {
       account_id, activation_version, inventory_digest, parity_digest, activated_by
     ) values (${ownerGrant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
     on conflict (account_id) do nothing`;
+  // Migration 0323 leaves an organization activated after it with NO settings
+  // row, i.e. private sessions disabled until an owner/admin enables them. This
+  // fixture represents an organization that HAS enabled them, so the tests
+  // below exercise fork visibility rather than the product gate. The gate
+  // itself is proven by its own test.
+  await shared.admin`
+    insert into organization_private_session_settings (
+      account_id, enabled, version, updated_by_membership_id, updated_at
+    ) values (${ownerGrant.accountId}, true, 1, null, now())
+    on conflict (account_id) do update set enabled = true`;
   const [ownerMembership] = await shared.admin<{ id: string }[]>`
     select id from organization_memberships
     where account_id = ${ownerGrant.accountId}
@@ -935,6 +946,79 @@ describe("migration 0303 session tenancy product activation", () => {
         operationKey: `member-cannot-fork-private-source:${crypto.randomUUID()}`,
       }),
     ).rejects.toBeInstanceOf(SessionTenancyAccessError);
+  }, 180_000);
+
+  test("refuses a private fork destination when the organization has not enabled private sessions", async () => {
+    if (!shared || !client) return;
+    const value = await sessionVisibilityFixture();
+
+    // Migration 0323 makes private sessions in a SHARED workspace an explicit
+    // owner/admin product decision. A fork lands in the source workspace, so it
+    // is the same decision, and it must fail closed exactly as a private create
+    // does rather than becoming a way around the setting.
+    await shared.admin`
+      update organization_private_session_settings
+      set enabled = false, version = version + 1, updated_at = now()
+      where account_id = ${value.ownerGrant.accountId}`;
+
+    await expect(
+      forkSessionContent(client.db, {
+        sourceWorkspaceId: value.ownerGrant.workspaceId,
+        sourceSessionId: value.session.id,
+        actorSubjectId: value.otherSubjectId,
+        destinationWorkspaceId: value.ownerGrant.workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        operationKey: `disabled-private-fork:${crypto.randomUUID()}`,
+      }),
+    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+
+    // The decision is about the private destination only: a shared fork of the
+    // same source still succeeds.
+    const sharedFork = await forkSessionContent(client.db, {
+      sourceWorkspaceId: value.ownerGrant.workspaceId,
+      sourceSessionId: value.session.id,
+      actorSubjectId: value.otherSubjectId,
+      destinationWorkspaceId: value.ownerGrant.workspaceId,
+      destinationVisibility: "workspace_shared",
+      workspaceSharedAcknowledged: false,
+      operationKey: `disabled-shared-fork:${crypto.randomUUID()}`,
+    });
+    expect(sharedFork).toMatchObject({ visibility: "workspace_shared", replay: false });
+
+    // A fork that already committed while the setting was on still replays
+    // byte-identically after it is turned off. The gate sits after keyed replay
+    // resolution precisely so a lost response stays recoverable.
+    await shared.admin`
+      update organization_private_session_settings
+      set enabled = true, version = version + 1, updated_at = now()
+      where account_id = ${value.ownerGrant.accountId}`;
+    const committedKey = `enabled-then-disabled-private-fork:${crypto.randomUUID()}`;
+    const committed = await forkSessionContent(client.db, {
+      sourceWorkspaceId: value.ownerGrant.workspaceId,
+      sourceSessionId: value.session.id,
+      actorSubjectId: value.otherSubjectId,
+      destinationWorkspaceId: value.ownerGrant.workspaceId,
+      destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
+      operationKey: committedKey,
+    });
+    expect(committed).toMatchObject({ visibility: "user_private", replay: false });
+    await shared.admin`
+      update organization_private_session_settings
+      set enabled = false, version = version + 1, updated_at = now()
+      where account_id = ${value.ownerGrant.accountId}`;
+    expect(
+      await forkSessionContent(client.db, {
+        sourceWorkspaceId: value.ownerGrant.workspaceId,
+        sourceSessionId: value.session.id,
+        actorSubjectId: value.otherSubjectId,
+        destinationWorkspaceId: value.ownerGrant.workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        operationKey: committedKey,
+      }),
+    ).toEqual({ ...committed, replay: true });
   }, 180_000);
 
   test("blocks transition to private while an interaction holder retains sandbox access", async () => {

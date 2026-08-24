@@ -4,7 +4,6 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   classifySessionTenancyFailure,
   isCurrentSessionTenancyTarget,
-  prepareSessionForkAttempt,
   prepareSessionVisibilityAttempt,
   retryableSessionTenancyReconciliationFailure,
   sessionTenancyBlockerMessage,
@@ -62,45 +61,6 @@ describe("session tenancy browser operation state", () => {
         createKey,
       ).idempotencyKey,
     ).toBe("key-3");
-  });
-
-  test("retains a fork key only inside the exact same-workspace source", () => {
-    let generated = 0;
-    const createKey = () => `operation-key-${++generated}`;
-    const first = prepareSessionForkAttempt(
-      null,
-      {
-        workspaceId: "workspace-a",
-        sessionId: "session-a",
-        visibility: "workspace",
-        workspaceSharedAcknowledged: true,
-      },
-      createKey,
-    );
-    expect(
-      prepareSessionForkAttempt(
-        first,
-        {
-          workspaceId: "workspace-a",
-          sessionId: "session-a",
-          visibility: "workspace",
-          workspaceSharedAcknowledged: true,
-        },
-        createKey,
-      ),
-    ).toBe(first);
-    expect(
-      prepareSessionForkAttempt(
-        first,
-        {
-          workspaceId: "workspace-a",
-          sessionId: "session-b",
-          visibility: "workspace",
-          workspaceSharedAcknowledged: true,
-        },
-        createKey,
-      ).idempotencyKey,
-    ).toBe("operation-key-2");
   });
 
   test("requires both workspace and session identity for delayed outcomes", () => {

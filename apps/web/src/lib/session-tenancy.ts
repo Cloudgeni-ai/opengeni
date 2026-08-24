@@ -85,25 +85,6 @@ export function prepareSessionVisibilityAttempt(
   return { ...target, idempotencyKey: createIdempotencyKey() };
 }
 
-export function prepareSessionForkAttempt(
-  current: PendingSessionForkAttempt | null,
-  target: SessionTenancyTarget & {
-    visibility: SessionVisibility;
-    workspaceSharedAcknowledged: boolean;
-  },
-  createIdempotencyKey: () => string,
-): PendingSessionForkAttempt {
-  if (
-    current?.workspaceId === target.workspaceId &&
-    current.sessionId === target.sessionId &&
-    current.visibility === target.visibility &&
-    current.workspaceSharedAcknowledged === target.workspaceSharedAcknowledged
-  ) {
-    return current;
-  }
-  return { ...target, idempotencyKey: createIdempotencyKey() };
-}
-
 export function isCurrentSessionTenancyTarget(
   current: SessionTenancyTarget,
   accepted: SessionTenancyTarget,

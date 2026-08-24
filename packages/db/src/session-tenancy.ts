@@ -472,6 +472,13 @@ export async function forkSessionContent(
       },
     );
   } catch (error) {
+    // A private destination inside a shared workspace carries the same
+    // organization owner/admin product decision the create path enforces
+    // (migration 0323), and the fork routine raises the same 55000. Surface it
+    // as the not-activated product state rather than an opaque database error.
+    if (nestedPostgresSqlState(error) === "55000") {
+      throw new SessionTenancyNotActivatedError({ cause: error });
+    }
     mapSessionTenancyPersistenceError(error, { authorityEpochConflict: false });
   }
 }

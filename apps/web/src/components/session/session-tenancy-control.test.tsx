@@ -211,6 +211,7 @@ describe("SessionTenancyControl", () => {
     const common = {
       client: {} as OpenGeniCoreClient,
       managedSession: true,
+      canForkPrivately: true,
       scopeLabel: "Engineering",
       captureWorkspaceInvocation: () => ({ workspaceId: "workspace-a", revision: 1 }),
       ownsWorkspaceInvocation: () => true,
@@ -297,6 +298,7 @@ describe("SessionTenancyControl", () => {
           session={baseSession}
           client={client}
           managedSession
+          canForkPrivately
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
@@ -365,6 +367,7 @@ describe("SessionTenancyControl", () => {
           session={privateSession}
           client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
           managedSession
+          canForkPrivately
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
@@ -391,6 +394,75 @@ describe("SessionTenancyControl", () => {
     ]);
     expect(getSession).toHaveBeenCalledWith("workspace-a", "session-fork", { fresh: true });
     expect(onOpenSession).toHaveBeenCalledWith("workspace-a", "session-fork");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("offers no private fork destination when the organization has not enabled private sessions", async () => {
+    // Migration 0333 fails a private fork into a shared workspace closed with
+    // SQLSTATE 55000 when the organization has not enabled private sessions, so
+    // the dialog must not present a choice the database refuses. The same
+    // `canForkPrivately={false}` state also covers "not answered yet".
+    const requests: unknown[] = [];
+    const forkSession = mock(async (_workspaceId, _sessionId, request) => {
+      requests.push(request);
+      return {
+        operationId: crypto.randomUUID(),
+        eventId: crypto.randomUUID(),
+        eventSequence: 1,
+        sessionId: "session-fork",
+        workspaceId: "workspace-a",
+        visibility: "workspace" as const,
+        authorityEpoch: 1 as const,
+        copiedHistoryItemCount: 1,
+        replay: false,
+      };
+    });
+    const getSession = mock(async () => ({
+      ...baseSession,
+      id: "session-fork",
+      tenancy: { ...baseSession.tenancy!, visibility: "workspace" as const, authorityEpoch: 1 },
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          session={{
+            ...baseSession,
+            tenancy: { ...baseSession.tenancy!, visibility: "private", ownedByCurrentUser: true },
+          }}
+          client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
+          managedSession
+          canForkPrivately={false}
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onOpenSession={() => undefined}
+        />,
+      );
+    });
+
+    await chooseAccessAction(container, "Fork session…");
+    const dialog = container.querySelector('[role="dialog"]');
+    if (!(dialog instanceof HTMLElement)) throw new Error("Missing confirmation dialog");
+    expect(
+      Array.from(dialog.querySelectorAll('[role="radio"]')).map((node) => node.textContent?.trim()),
+    ).toEqual(["Workspace"]);
+    // A private source would otherwise default the fork to private.
+    expect(dialog.textContent).toContain("Fork a workspace-visible copy?");
+    await act(async () => dialogButton(container, "Fork for workspace").click());
+    await flush();
+    expect(requests).toEqual([
+      {
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+        idempotencyKey: expect.any(String),
+      },
+    ]);
 
     await act(async () => root.unmount());
     container.remove();
@@ -436,6 +508,7 @@ describe("SessionTenancyControl", () => {
           session={baseSession}
           client={{ forkSession, getSession } as unknown as OpenGeniCoreClient}
           managedSession
+          canForkPrivately
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
@@ -477,6 +550,7 @@ describe("SessionTenancyControl", () => {
           session={baseSession}
           client={{ updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient}
           managedSession
+          canForkPrivately
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
@@ -526,6 +600,7 @@ describe("SessionTenancyControl", () => {
           session={baseSession}
           client={{ updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient}
           managedSession
+          canForkPrivately
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
@@ -573,6 +648,7 @@ describe("SessionTenancyControl", () => {
           session={baseSession}
           client={{ updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient}
           managedSession
+          canForkPrivately
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
@@ -633,6 +709,7 @@ describe("SessionTenancyControl", () => {
       session: baseSession,
       client: { updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient,
       managedSession: true,
+      canForkPrivately: true,
       scopeLabel: "Engineering",
       captureWorkspaceInvocation: () => ({ workspaceId: "workspace-a", revision: 1 }),
       ownsWorkspaceInvocation: () => true,
@@ -699,6 +776,7 @@ describe("SessionTenancyControl", () => {
           session={baseSession}
           client={{ updateSessionVisibility, getSession } as unknown as OpenGeniCoreClient}
           managedSession
+          canForkPrivately
           scopeLabel="Engineering"
           captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
           ownsWorkspaceInvocation={() => true}
@@ -749,6 +827,7 @@ describe("SessionTenancyControl", () => {
             session={baseSession}
             client={{ updateSessionVisibility } as unknown as OpenGeniCoreClient}
             managedSession
+            canForkPrivately
             scopeLabel="Engineering"
             captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
             ownsWorkspaceInvocation={() => current}
