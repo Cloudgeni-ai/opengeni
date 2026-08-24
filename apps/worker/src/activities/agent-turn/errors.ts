@@ -218,7 +218,12 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
     input.failureCode !== "mcp_transport_timeout" ||
     input.modelRequestStarted ||
     !Number.isSafeInteger(input.detail.executionGeneration) ||
-    input.detail.executionGeneration <= 1
+    input.detail.executionGeneration <= 1 ||
+    !Number.isSafeInteger(input.detail.providerRecoveryCount) ||
+    input.detail.providerRecoveryCount <= 0 ||
+    input.detail.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+    !Number.isSafeInteger(input.detail.continueDelayMs) ||
+    input.detail.continueDelayMs <= 0
   ) {
     return null;
   }

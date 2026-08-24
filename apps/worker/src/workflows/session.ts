@@ -44,7 +44,6 @@ import {
 const TURNS_PER_RUN_BACKSTOP = 2_000;
 const CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP = 512;
 const HUMAN_INPUT_EXPIRY_STALE_RETRY_MS = 1_000;
-const ESCAPED_MCP_TIMEOUT_RECOVERY_DELAY_MS = 60_000;
 
 /**
  * The minimum hold for a rotation all-capped idle (`idleUntilReset`). A MANDATORY
@@ -188,7 +187,11 @@ export function escapedMcpTimeoutRecoveryDetail(
     typeof detail.triggerEventId !== "string" ||
     detail.triggerEventId.length === 0 ||
     !Number.isSafeInteger(detail.executionGeneration) ||
-    (detail.executionGeneration ?? 0) <= 1
+    (detail.executionGeneration ?? 0) <= 1 ||
+    !Number.isSafeInteger(detail.providerRecoveryCount) ||
+    (detail.providerRecoveryCount ?? 0) <= 0 ||
+    !Number.isSafeInteger(detail.continueDelayMs) ||
+    (detail.continueDelayMs ?? 0) <= 0
   ) {
     return null;
   }
@@ -196,6 +199,8 @@ export function escapedMcpTimeoutRecoveryDetail(
     turnId: detail.turnId,
     triggerEventId: detail.triggerEventId,
     executionGeneration: detail.executionGeneration!,
+    providerRecoveryCount: detail.providerRecoveryCount!,
+    continueDelayMs: detail.continueDelayMs!,
   };
 }
 
@@ -818,7 +823,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           const seenInterruptionWakeups = interruptionWakeups;
           await condition(
             () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
-            ESCAPED_MCP_TIMEOUT_RECOVERY_DELAY_MS,
+            escapedMcpTimeout.continueDelayMs,
           );
           return true;
         }

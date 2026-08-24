@@ -4364,6 +4364,8 @@ describe("escaped MCP transport timeout classifier", () => {
       turnId: "turn-2",
       triggerEventId: "trigger-1",
       executionGeneration: 2,
+      providerRecoveryCount: 1,
+      continueDelayMs: 2_000,
     };
     const escaped = escapedMcpTimeoutRecoveryFailure({
       failureCode: "mcp_transport_timeout",
@@ -4382,6 +4384,13 @@ describe("escaped MCP transport timeout classifier", () => {
         failureCode: "mcp_transport_timeout",
         modelRequestStarted: false,
         detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1 },
       }),
     ).toBeNull();
     expect(
