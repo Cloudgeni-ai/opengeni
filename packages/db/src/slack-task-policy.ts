@@ -30,6 +30,14 @@ export type SlackSharedTaskOrigin = {
   sourceThreadTs: string;
   initiatingSlackUserId: string;
   policyRevisionId: string;
+  /**
+   * Home tenancy of the frozen policy revision. The row's own
+   * `accountId`/`workspaceId` are the routed task's, which is a different
+   * workspace once Slack workspace routing is on. Null on rows written before
+   * routing existed, where the two were always equal.
+   */
+  policyAccountId: string | null;
+  policyWorkspaceId: string | null;
   policyHash: string;
   policyActivationVersion: number;
   publicationMode: "never" | "approval_required" | "allow";

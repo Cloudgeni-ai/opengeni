@@ -24,8 +24,7 @@
 import { and, eq, sql } from "drizzle-orm";
 
 import { rawRows, withRlsContext, type Database } from "./database";
-import { rlsSubjectIdOrEmpty } from "./workspace-authority";
-import { listSelfOrganizationMemberships } from "./organization-membership-lifecycle";
+import { personalWorkspaceIdForSubject } from "./slack-routing-personal-workspace";
 import * as schema from "./schema";
 import { workspaceMembershipPermissionsAllowSlackLink } from "./slack-user-link-access";
 
@@ -162,6 +161,31 @@ export async function probeSlackInteractionTenancy(
         interactionId: row.interaction_id,
       }
     : null;
+}
+
+/**
+ * Which workspace owns one Slack action handle.
+ *
+ * A button click arrives on an inbox row that carries the installation's
+ * tenancy and names the handle only by id, while the handle lives in the
+ * workspace that owns its session. Content-free, ids only: the caller must
+ * re-read the full handle under the returned tenancy's own RLS, where every
+ * existing authorization check already lives.
+ */
+export async function probeSlackActionHandleTenancy(
+  db: Database,
+  input: { connectionId: string; handleId: string },
+): Promise<SlackRouteHome | null> {
+  const rows = await rawRows<{ account_id: string; workspace_id: string }>(
+    db,
+    sql`select account_id, workspace_id
+      from opengeni_private.resolve_slack_action_handle_tenancy(
+        ${input.connectionId}::uuid,
+        ${input.handleId}::uuid
+      )`,
+  );
+  const row = rows[0];
+  return row ? { accountId: row.account_id, workspaceId: row.workspace_id } : null;
 }
 
 export async function getSlackChannelRoute(
@@ -431,59 +455,8 @@ export async function listSlackRoutableWorkspacesForSubject(
   );
 }
 
-/**
- * The subject's own personal workspace in one organization, or null.
- *
- * Only an `active` membership counts, and only that membership's own
- * `personalWorkspaceId` pointer is read - never a default workspace, a
- * `created_by`, or current access.
- *
- * Non-`user:` subjects (API keys, delegated service principals, configured and
- * local principals) can never own an organization membership, so they
- * short-circuit rather than tripping `list_self_organization_memberships`'
- * `42501` guard.
- */
-export async function personalWorkspaceIdForSubject(
-  db: Database,
-  input: { accountId: string; subjectId: string },
-): Promise<string | null> {
-  if (!input.subjectId.startsWith("user:")) return null;
-  // `listSelfOrganizationMemberships` opens its own scope and sets
-  // `opengeni.subject_id` to the probed subject. Under drizzle a nested
-  // transaction is a SAVEPOINT, and releasing a savepoint does NOT undo a
-  // transaction-local `set_config`, so without this the probed subject would
-  // leak out and silently re-scope the rest of a caller-owned transaction.
-  // `namedSubjectHasLiveWorkspaceAuthority` guards the same hazard the same
-  // way; empty string is the canonical "unset" because `current_subject_id()`
-  // is `nullif(current_setting(...), '')`.
-  const priorSubjectId = await rlsSubjectIdOrEmpty(db);
-  let completed = false;
-  try {
-    const memberships = await listSelfOrganizationMemberships(db, input.subjectId);
-    const membership = memberships.find(
-      (candidate) =>
-        candidate.status === "active" &&
-        candidate.organizationId === input.accountId &&
-        candidate.personalWorkspaceId !== null,
-    );
-    completed = true;
-    return membership?.personalWorkspaceId ?? null;
-  } finally {
-    const restore = db.execute(
-      sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
-    );
-    if (completed) {
-      await restore;
-    } else {
-      // A failed statement can leave a caller-owned transaction aborted.
-      // Preserve the original diagnostic rather than replacing it with the
-      // restore's `25P02`.
-      await restore.catch(() => undefined);
-    }
-  }
-}
-
 function compareCodeUnits(left: string, right: string): number {
   if (left === right) return 0;
   return left < right ? -1 : 1;
 }
+

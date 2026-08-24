@@ -23,6 +23,7 @@ import {
   getSlackBotUserLink,
   getSessionForSubject,
   getWorkspaceGrant,
+  createWorkspace,
   grantWorkspaceAccess,
   saveSlackBotUserLink,
   synchronizeCanonicalHumanLoginBindings,
@@ -631,6 +632,10 @@ async function fixture(
     /** Omitted keeps the shipped default: both orchestration notices off. */
     slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings;
     slackCommand?: string;
+    /** `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`. */
+    slackWorkspaceRouting?: boolean;
+    /** Create a second workspace in the same organization the owner can use. */
+    routedWorkspaceName?: string;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -675,6 +680,7 @@ async function fixture(
     environmentsEncryptionKey: encryptionKey,
     slackSigningSecret: signingMaterial,
     slackCommand: options.slackCommand ?? "/opengeni",
+    ...(options.slackWorkspaceRouting ? { slackWorkspaceRoutingEnabled: true } : {}),
     publicBaseUrl: "https://app.example.test",
     webBaseUrl: "https://app.example.test",
     sandboxBackend: "none",
@@ -738,6 +744,25 @@ async function fixture(
     });
   }
 
+  let routed: { accountId: string; workspaceId: string; name: string } | null = null;
+  if (options.routedWorkspaceName) {
+    const created = await createWorkspace(client.db, {
+      accountId: owner.accountId,
+      name: options.routedWorkspaceName,
+    });
+    await grantWorkspaceAccess(client.db, {
+      accountId: owner.accountId,
+      workspaceId: created.id,
+      subjectId: owner.subjectId,
+      permissions,
+    });
+    routed = {
+      accountId: owner.accountId,
+      workspaceId: created.id,
+      name: options.routedWorkspaceName,
+    };
+  }
+
   const slack = fakeSlack(new Set(options.deniedChannels ?? []), {
     failAfterAcceptTexts: new Set(options.failAfterAcceptTexts ?? []),
     sharedChannels: new Set(options.sharedChannels ?? []),
@@ -784,6 +809,7 @@ async function fixture(
     ownerSlackUserId,
     otherSlackUserId,
     connectionId: connection.id,
+    routed,
   };
 }
 

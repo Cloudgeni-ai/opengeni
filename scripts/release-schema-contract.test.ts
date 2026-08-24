@@ -170,6 +170,7 @@ describe("release schema contract", () => {
       "0334_connected_machine_workspace_root.sql",
       "0335_slack_workspace_routing.sql",
       "0336_atomic_session_fork_visibility.sql",
+      "0336_slack_routed_action_handles.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
