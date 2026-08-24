@@ -9663,10 +9663,16 @@ export async function getSlackBotUserLink(
  * stored decision, and unlinking plus relinking the Slack identity cannot flip
  * an acknowledgement that was already rendered.
  *
- * The frozen decision and the per-identity claim commit in one transaction, so
- * at most one interaction per Slack identity per installation is granted the
- * hint. Failure raises instead of degrading to "no hint": a caller must never
- * bind a post operation to text that depends on an unresolved answer.
+ * The per-identity claim row is the single source of truth and is replay-stable:
+ * the frozen answer is exactly "this identity's one claim names THIS
+ * interaction". At most one interaction per Slack identity per installation is
+ * therefore granted the hint, whichever resolver wins the claim, and the freeze
+ * is a separate compare-and-set whose losers read back the stored byte rather
+ * than their own recomputed one. This is deliberately not one transaction: the
+ * claim is a home-tenancy row and the freeze is a target-tenancy row, and one
+ * transaction carries one RLS scope. Failure raises instead of degrading to "no
+ * hint": a caller must never bind a post operation to text that depends on an
+ * unresolved answer.
  */
 export async function resolveSlackInteractionFirstTaskHint(
   db: Database,
@@ -10215,6 +10221,14 @@ export async function getSlackInteractionByConnectionRoute(
   });
 }
 
+/**
+ * Workspace-fenced route lookup.
+ *
+ * This is NOT the thread-continuation read: `slack_interactions_route_uq` is
+ * `(connection_id, route_key)` and therefore connection-global, so a thread that
+ * belongs to another workspace this installation can address is invisible here.
+ * Use `getSlackInteractionByConnectionRoute` for continuation.
+ */
 export async function getSlackInteractionByRoute(
   db: Database,
   workspaceId: string,

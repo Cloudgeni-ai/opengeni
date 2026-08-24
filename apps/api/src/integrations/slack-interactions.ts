@@ -1238,6 +1238,26 @@ export function startSlackInteractionPump(
   };
 }
 
+/**
+ * A concurrent creator may have won this thread in another workspace between the
+ * tenancy probe and the insert, in which case `getOrCreateSlackInteraction`
+ * adopts that row. The grant, the imported attachments, and the resolved route
+ * all belong to the workspace this pass chose, so none of them may be used
+ * against the adopted row. Retry instead: the next pass sees the thread through
+ * the probe, routes to it, and authorizes it properly.
+ */
+function requireSlackInteractionMatchesTarget(
+  interaction: Pick<SlackInteraction, "accountId" | "workspaceId">,
+  target: { accountId: string; workspaceId: string },
+): void {
+  if (
+    interaction.accountId !== target.accountId ||
+    interaction.workspaceId !== target.workspaceId
+  ) {
+    throw new SlackInteractionRetryableError("slack_route_creation_pending");
+  }
+}
+
 async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
   if (entry.triggerKind === "block_action") {
     await processSlackBlockAction(deps, entry);
@@ -1420,6 +1440,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     owningSubjectId: grant.subjectId,
     visibility: routePolicy.visibility,
   });
+  requireSlackInteractionMatchesTarget(interaction, target);
   if (interaction.sessionId) {
     const remounted = await remountSlackReactionTaskForSession(
       deps,
@@ -1963,6 +1984,7 @@ async function processSlackReactionInboxEntry(
     owningSubjectId: grant.subjectId,
     visibility: "workspace",
   });
+  requireSlackInteractionMatchesTarget(interaction, target);
   if (interaction.sessionId) {
     const appendedTask = await remountSlackReactionTaskForSession(
       deps,
@@ -2379,9 +2401,11 @@ async function acceptSlackReactionTask(
   resources: FileResourceRef[],
 ) {
   const clientEventId = `slack:${entry.providerEventId}`;
+  // Session events and user messages belong to the workspace that owns the
+  // session, which is the workspace the grant authorized, not the installation.
   const existing = await getSessionEventByClientEventId(
     deps.db,
-    entry.workspaceId,
+    grant.workspaceId,
     sessionId,
     clientEventId,
   );
@@ -2391,7 +2415,7 @@ async function acceptSlackReactionTask(
     }
     return;
   }
-  await acceptSessionUserMessage(deps, grant, entry.workspaceId, sessionId, {
+  await acceptSessionUserMessage(deps, grant, grant.workspaceId, sessionId, {
     text: entry.text,
     resources,
     clientEventId,
@@ -2435,7 +2459,7 @@ async function continueSlackSession(
   }
   const pending = await listSessionHumanInputRequests(
     deps.db,
-    entry.workspaceId,
+    interaction.workspaceId,
     interaction.sessionId,
     { status: "pending", limit: 2 },
   );
@@ -2475,7 +2499,7 @@ async function continueSlackSession(
   if (!hasPermission(grant.permissions, "sessions:control")) {
     throw new SlackInteractionPermanentError("sessions_control_denied");
   }
-  await acceptSessionUserMessage(deps, grant, entry.workspaceId, interaction.sessionId, {
+  await acceptSessionUserMessage(deps, grant, interaction.workspaceId, interaction.sessionId, {
     text: entry.text,
     ...(options.modelContext ? { modelContext: options.modelContext } : {}),
     resources,
@@ -3392,19 +3416,24 @@ function slackGoalPausedText(
  * The installation tenancy that owns this interaction's Slack credential.
  *
  * `slack_interactions.connection_id` deliberately has no composite
- * `(workspace_id, connection_id)` foreign key, so a routed interaction may
- * point at the installation's connection from another workspace. Resolve the
- * binding by team and prove it is the same connection before any provider call.
+ * `(workspace_id, connection_id)` foreign key, so a routed interaction may point
+ * at the installation's connection from another workspace.
+ *
+ * A binding that does not resolve, or that now names a different connection, is
+ * NOT turned into a new delivery precondition: this code previously used the
+ * interaction's own tenancy unconditionally, so falling back to it keeps every
+ * delivery that used to succeed succeeding. The fallback cannot post from the
+ * wrong workspace either, because `claimSlackBotPostOperation` selects the
+ * connection under the tenancy it is given and fails when it does not own it.
  */
 async function resolveSlackDeliveryHome(
   deps: ApiRouteDeps,
   interaction: Pick<SlackInteraction, "accountId" | "workspaceId" | "connectionId" | "slackTeamId">,
 ): Promise<{ accountId: string; workspaceId: string }> {
   const installation = await resolveSlackInstallationRoute(deps.db, interaction.slackTeamId);
-  if (!installation || installation.connectionId !== interaction.connectionId) {
-    throw new SlackInteractionPermanentError("slack_delivery_installation_changed");
-  }
-  return { accountId: installation.accountId, workspaceId: installation.workspaceId };
+  return installation && installation.connectionId === interaction.connectionId
+    ? { accountId: installation.accountId, workspaceId: installation.workspaceId }
+    : { accountId: interaction.accountId, workspaceId: interaction.workspaceId };
 }
 
 async function deliverSlackSessionEvents(
@@ -3656,7 +3685,7 @@ async function deliverSlackSessionEvents(
         );
         const posted = await getSlackBotPostOperation(
           deps.db,
-          interaction.workspaceId,
+          home.workspaceId,
           interaction.connectionId,
           existingProgress.operationId,
         );
