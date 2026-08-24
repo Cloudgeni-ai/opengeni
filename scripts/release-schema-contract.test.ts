@@ -599,8 +599,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0326_interaction_operation_error_codes.sql")) {
         return includesActivation
-          ? "09148f839a69ecbec30c80654668906d85dd60e56fd160f23f133719b442cc1b"
-          : "5a527fa78a1baf3c88331080eb01eeec2d481e88ee044f55bfb1c24e03caafd7";
+          ? "3d058b3b8c05d2ebf84de1b1024c995ec131c3c4dcb973a0c42014bca1046e3f"
+          : "eab718bef0df92dd9c78feb9639c0098ec0bbce267de79146315091ce8289d98";
       }
       if (migrations.has("0321_slack_bot_environment_display_name.sql")) {
         return includesActivation
@@ -1257,11 +1257,11 @@ describe("release schema contract", () => {
         (migrations.has("0326_interaction_operation_error_codes.sql") ? 1 : 0) +
         (migrations.has("0331_managed_organization_creation.sql") ? 1 : 0) +
         (migrations.has("0332_organization_shared_workspace_control_plane.sql") ? 1 : 0) +
-        (migrations.has("0333_connected_machine_workspace_root.sql") ? 1 : 0),
+        (migrations.has("0334_connected_machine_workspace_root.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
-      "0333_connected_machine_workspace_root.sql",
+      "0334_connected_machine_workspace_root.sql",
       "0259_company_brain_context_selection_receipts.sql",
       "0258_three_scope_document_knowledge_authority.sql",
       "0257_goal_revision_decisions_and_root_constraints.sql",
@@ -1293,8 +1293,8 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0333_connected_machine_workspace_root.sql")
-        ? "0333_connected_machine_workspace_root.sql"
+      migrations.has("0334_connected_machine_workspace_root.sql")
+        ? "0334_connected_machine_workspace_root.sql"
         : migrations.has("0326_interaction_operation_error_codes.sql")
           ? "0326_interaction_operation_error_codes.sql"
           : migrations.has("0321_slack_bot_environment_display_name.sql")
