@@ -8,9 +8,7 @@ import {
   BuildingIcon,
   CheckIcon,
   ChevronsUpDownIcon,
-  Loader2Icon,
   PauseIcon,
-  PlayIcon,
   PlusIcon,
   SettingsIcon,
 } from "lucide-react";
@@ -79,31 +77,6 @@ export function SwitcherBlock() {
   const [dialog, setDialog] = useState<"create" | "rename" | null>(null);
   const [nameDraft, setNameDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const [controlBusy, setControlBusy] = useState(false);
-  const workspacePermissions = context.accessContext.workspaceGrants.find(
-    (grant) => grant.workspaceId === rail.workspaceId,
-  )?.permissions;
-  const canControlWorkspace = workspacePermissions?.includes("workspace:admin") === true;
-
-  async function toggleWorkspaceControl() {
-    if (!activeWorkspace || controlBusy) return;
-    const acceptedTransition = context.captureWorkspaceInvocation(activeWorkspace.id);
-    if (!acceptedTransition) return;
-    const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
-    setControlBusy(true);
-    try {
-      const updated = await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
-      if (updated && context.ownsWorkspaceInvocation(activeWorkspace.id, acceptedTransition)) {
-        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
-      }
-    } catch (error) {
-      toast.error(`Couldn't ${action} the workspace`, {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setControlBusy(false);
-    }
-  }
 
   function openDialog(mode: "create" | "rename") {
     setNameDraft(mode === "rename" ? (activeWorkspace?.name ?? "") : "");
@@ -155,11 +128,7 @@ export function SwitcherBlock() {
           canCreate={createAccountId !== null}
           onSelect={rail.openWorkspace}
           onCreate={() => openDialog("create")}
-          activeWorkspace={activeWorkspace}
           managedSelfContext={context.managedSelfContext}
-          canControl={canControlWorkspace}
-          controlBusy={controlBusy}
-          onToggleControl={() => void toggleWorkspaceControl()}
           align="start"
         >
           <WorkspaceSwitcherTrigger
@@ -199,11 +168,7 @@ export function SwitcherBlock() {
         canCreate={createAccountId !== null}
         onSelect={rail.openWorkspace}
         onCreate={() => openDialog("create")}
-        activeWorkspace={activeWorkspace}
         managedSelfContext={context.managedSelfContext}
-        canControl={canControlWorkspace}
-        controlBusy={controlBusy}
-        onToggleControl={() => void toggleWorkspaceControl()}
         align="start"
       >
         <WorkspaceSwitcherTrigger
@@ -233,25 +198,12 @@ export function OrganizationSwitcherLine(props: {
   onSelect: (accountId: string) => void;
   workspaceId: string | null;
 }) {
-  // The org *name* renders in normal case (it's a name, not a section caption).
-  // Exactly one org: a static muted label, no useless switcher.
-  if (props.orgs.length <= 1) {
-    return (
-      <span
-        className="flex min-w-0 items-center gap-1 px-0.5 text-2xs font-medium text-fg-subtle"
-        title={props.currentLabel}
-      >
-        <BuildingIcon className="size-3 shrink-0" />
-        <span className="min-w-0 truncate">{props.currentLabel}</span>
-      </span>
-    );
-  }
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label={`${props.currentLabel}. Switch organization`}
+          aria-label={`${props.currentLabel}. Organization menu`}
           className="flex min-w-0 items-center gap-1 rounded px-0.5 py-0.5 text-2xs font-medium text-fg-subtle transition-colors hover:text-fg-muted focus-visible:outline-none"
         >
           <BuildingIcon className="size-3 shrink-0" />
@@ -260,32 +212,38 @@ export function OrganizationSwitcherLine(props: {
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-56">
-        <DropdownMenuLabel className="text-fg-subtle">Organizations</DropdownMenuLabel>
-        {props.orgs.map((org) => (
-          <DropdownMenuItem
-            key={org.accountId}
-            aria-current={org.accountId === props.activeAccountId ? "true" : undefined}
-            onSelect={() => {
-              if (org.accountId !== props.activeAccountId) {
-                props.onSelect(org.accountId);
-              }
-            }}
-          >
-            <span
-              aria-hidden="true"
-              className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
-            >
-              {org.label
-                .replace(/^Org\s+/, "")
-                .slice(0, 2)
-                .toUpperCase()}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{org.label}</span>
-            {org.accountId === props.activeAccountId ? (
-              <CheckIcon aria-hidden="true" className="size-4 text-brand" />
-            ) : null}
-          </DropdownMenuItem>
-        ))}
+        {props.orgs.length > 1 ? (
+          <>
+            <DropdownMenuLabel className="text-fg-subtle">Organizations</DropdownMenuLabel>
+            {props.orgs.map((org) => (
+              <DropdownMenuItem
+                key={org.accountId}
+                aria-current={org.accountId === props.activeAccountId ? "true" : undefined}
+                onSelect={() => {
+                  if (org.accountId !== props.activeAccountId) {
+                    props.onSelect(org.accountId);
+                  }
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
+                >
+                  {org.label
+                    .replace(/^Org\s+/, "")
+                    .slice(0, 2)
+                    .toUpperCase()}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{org.label}</span>
+                {org.accountId === props.activeAccountId ? (
+                  <CheckIcon aria-hidden="true" className="size-4 text-brand" />
+                ) : null}
+              </DropdownMenuItem>
+            ))}
+          </>
+        ) : (
+          <DropdownMenuLabel className="text-fg-subtle">{props.currentLabel}</DropdownMenuLabel>
+        )}
         {props.workspaceId ? (
           <>
             <DropdownMenuSeparator />
@@ -381,11 +339,7 @@ export function WorkspaceMenu(props: {
   canCreate: boolean;
   onSelect: (workspaceId: string) => void;
   onCreate: () => void;
-  activeWorkspace: Workspace | null;
   managedSelfContext: ManagedSelfContext | null;
-  canControl: boolean;
-  controlBusy: boolean;
-  onToggleControl: () => void;
   align: "start" | "end";
   children: ReactNode;
 }) {
@@ -433,23 +387,6 @@ export function WorkspaceMenu(props: {
           </div>
         ))}
         <DropdownMenuSeparator />
-        {props.activeWorkspace && props.canControl ? (
-          <>
-            <DropdownMenuItem onSelect={props.onToggleControl} disabled={props.controlBusy}>
-              {props.controlBusy ? (
-                <Loader2Icon className="size-4 animate-spin" />
-              ) : props.activeWorkspace.inferenceControl.state === "paused" ? (
-                <PlayIcon className="size-4 fill-current" />
-              ) : (
-                <PauseIcon className="size-4 fill-current" />
-              )}
-              {props.activeWorkspace.inferenceControl.state === "paused"
-                ? "Resume workspace"
-                : "Pause workspace"}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-          </>
-        ) : null}
         {props.canCreate ? (
           <DropdownMenuItem
             onSelect={(event) => {
@@ -461,15 +398,6 @@ export function WorkspaceMenu(props: {
             New workspace…
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuItem asChild>
-          <Link
-            to="/workspaces/$workspaceId/settings"
-            params={{ workspaceId: props.activeWorkspaceId }}
-          >
-            <SettingsIcon className="size-4" />
-            Settings
-          </Link>
-        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

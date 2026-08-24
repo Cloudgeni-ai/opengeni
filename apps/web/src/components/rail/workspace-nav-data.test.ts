@@ -14,7 +14,7 @@ describe("workspace rail destinations", () => {
     );
 
     expect(primaryTargets).toEqual([
-      "/workspaces/$workspaceId/capabilities",
+      "/workspaces/$workspaceId/plugins",
       "/workspaces/$workspaceId/schedules",
       "/workspaces/$workspaceId/artifacts",
     ]);

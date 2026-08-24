@@ -7,7 +7,7 @@
 // Popper into an entriesAware share-chunk with the session graph and crashes
 // lazy /settings (`createPopperScope is not a function`).
 import { useRouterState } from "@tanstack/react-router";
-import { ChevronUpIcon, SettingsIcon } from "lucide-react";
+import { ChevronUpIcon, SlidersHorizontalIcon } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
@@ -113,7 +113,7 @@ function WorkspaceSettingsMenu(props: {
     <details ref={detailsRef} className="group/workspace-menu relative">
       <summary
         aria-label={props.collapsed ? "Workspace" : undefined}
-        title={props.collapsed ? "Workspace — configure runtime, knowledge, and admin" : undefined}
+        title={props.collapsed ? "Manage workspace" : undefined}
         data-active={props.active ? "true" : undefined}
         className={cn(
           "group relative flex h-8 w-full cursor-pointer list-none items-center rounded-md text-sm font-medium text-fg-muted transition-colors pointer-coarse:h-10 [&::-webkit-details-marker]:hidden",
@@ -123,10 +123,10 @@ function WorkspaceSettingsMenu(props: {
         )}
       >
         <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100" />
-        <SettingsIcon className="size-4 shrink-0" />
+        <SlidersHorizontalIcon className="size-4 shrink-0" />
         {!props.collapsed ? (
           <>
-            <span className="min-w-0 flex-1 truncate text-left">Workspace</span>
+            <span className="min-w-0 flex-1 truncate text-left">Manage workspace</span>
             <ChevronUpIcon className="size-3.5 shrink-0 rotate-180 text-fg-subtle transition-transform group-open/workspace-menu:rotate-0" />
           </>
         ) : null}

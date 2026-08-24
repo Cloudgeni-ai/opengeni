@@ -10,7 +10,9 @@ import {
   CopyIcon,
   KeyRoundIcon,
   Loader2Icon,
+  PauseIcon,
   PencilIcon,
+  PlayIcon,
   PlusIcon,
   ShrinkIcon,
   Trash2Icon,
@@ -115,6 +117,7 @@ export function WorkspaceSettingsRoute({
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
@@ -181,6 +184,26 @@ export function WorkspaceSettingsRoute({
       }
     } finally {
       setRenaming(false);
+    }
+  }
+
+  async function toggleWorkspaceControl() {
+    if (!activeWorkspace || !canRename || controlBusy) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
+    setControlBusy(true);
+    try {
+      const updated = await context.setWorkspaceInferenceControl(workspaceId, action);
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      }
+    } catch (error) {
+      toast.error(`Couldn't ${action} the workspace`, {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setControlBusy(false);
     }
   }
 
@@ -295,7 +318,6 @@ export function WorkspaceSettingsRoute({
     <WorkspaceSettingsShell
       workspaceId={workspaceId}
       workspaceName={activeWorkspace?.name ?? "Workspace"}
-      organizationLabel={organizationLabel}
       section={section}
     >
       <section className="grid min-w-0 gap-6 text-left">
@@ -369,6 +391,37 @@ export function WorkspaceSettingsRoute({
               </div>
             </section>
 
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
+              <div>
+                <h2 className="text-sm font-medium">Workspace runtime</h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  {activeWorkspace?.inferenceControl.state === "paused"
+                    ? "New agent work is paused for this workspace."
+                    : "Agents can start and continue work in this workspace."}
+                </p>
+              </div>
+              {canRename ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={controlBusy}
+                  onClick={() => void toggleWorkspaceControl()}
+                >
+                  {controlBusy ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : activeWorkspace?.inferenceControl.state === "paused" ? (
+                    <PlayIcon className="size-3.5" />
+                  ) : (
+                    <PauseIcon className="size-3.5" />
+                  )}
+                  {activeWorkspace?.inferenceControl.state === "paused"
+                    ? "Resume workspace"
+                    : "Pause workspace"}
+                </Button>
+              ) : null}
+            </section>
+
             {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
 
             <section aria-labelledby="workspace-preferences-heading" className="grid min-w-0 gap-2">
@@ -381,7 +434,6 @@ export function WorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-                <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
                 <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
                 <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
                 <VideoGenerationPreferenceRow
@@ -403,20 +455,40 @@ export function WorkspaceSettingsRoute({
           )
         ) : null}
 
-        {section === "capabilities" ? (
-          <WorkspaceCapabilityDefaults workspaceId={workspaceId} canManage={canRename} />
-        ) : null}
-
-        {section === "models" ? (
-          <ModelAccessPolicySection
-            key={`model-access:${workspaceId}`}
+        {section === "permissions" ? (
+          <WorkspaceCapabilityDefaults
             workspaceId={workspaceId}
-            canManage={canDeleteWorkspace}
+            canManage={canRename}
+            kind="permissions"
           />
         ) : null}
 
-        {section === "connections" ? (
+        {section === "plugins" ? (
+          <WorkspaceCapabilityDefaults
+            workspaceId={workspaceId}
+            canManage={canRename}
+            kind="plugins"
+          />
+        ) : null}
+
+        {section === "models" ? (
           <>
+            <section className="grid gap-2">
+              <div>
+                <h2 className="text-sm font-medium">Default model</h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Used when a new session does not choose a different model.
+                </p>
+              </div>
+              <div className="rounded-lg border border-border px-3">
+                <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+              </div>
+            </section>
+            <ModelAccessPolicySection
+              key={`model-access:${workspaceId}`}
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
+            />
             {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
             <CodexSubscriptionsCard
               key={`codex-subscriptions:${workspaceId}`}

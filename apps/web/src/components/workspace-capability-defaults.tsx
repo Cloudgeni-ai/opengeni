@@ -30,9 +30,11 @@ function sorted<T extends string>(values: Iterable<T>): T[] {
 export function WorkspaceCapabilityDefaults({
   workspaceId,
   canManage,
+  kind,
 }: {
   workspaceId: string;
   canManage: boolean;
+  kind: "permissions" | "plugins";
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
@@ -71,6 +73,7 @@ export function WorkspaceCapabilityDefaults({
       defaults={defaults}
       revisionKey={workspace?.updatedAt ?? workspaceId}
       canManage={canManage}
+      kind={kind}
       onSave={async (next) => {
         const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
         if (!acceptedTransition) return false;
@@ -80,7 +83,11 @@ export function WorkspaceCapabilityDefaults({
         if (!updated || !context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
           return false;
         }
-        toast.success("Default session capabilities updated");
+        toast.success(
+          kind === "permissions"
+            ? "Default agent permissions updated"
+            : "Default session plugins updated",
+        );
         return true;
       }}
     />
@@ -94,6 +101,7 @@ export function WorkspaceCapabilityDefaultsView({
   defaults,
   revisionKey,
   canManage,
+  kind,
   onSave,
 }: {
   servers: McpServerOption[];
@@ -101,6 +109,7 @@ export function WorkspaceCapabilityDefaultsView({
   defaults: WorkspaceSessionToolDefaults;
   revisionKey: string;
   canManage: boolean;
+  kind: "permissions" | "plugins";
   onSave: (defaults: WorkspaceSessionToolDefaults) => Promise<boolean>;
 }) {
   const groups = useMemo(() => sessionCapabilityGroupsFor(firstPartyTools), [firstPartyTools]);
@@ -164,15 +173,19 @@ export function WorkspaceCapabilityDefaultsView({
     }
   };
 
+  const permissions = kind === "permissions";
+
   return (
-    <section aria-labelledby="workspace-capabilities-heading" className="grid min-w-0 gap-3">
+    <section aria-labelledby="workspace-tool-defaults-heading" className="grid min-w-0 gap-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 id="workspace-capabilities-heading" className="text-sm font-medium">
-            Default session capabilities
+          <h2 id="workspace-tool-defaults-heading" className="text-sm font-medium">
+            {permissions ? "Built-in permissions" : "Plugins for new sessions"}
           </h2>
           <p className="mt-1 text-xs text-fg-muted">
-            Select what new sessions can use by default. Individual sessions can use fewer.
+            {permissions
+              ? "Control OpenGeni actions such as knowledge, delegation, browser use, and workspace operations."
+              : "Selected apps and MCP servers are included when they are installed and available in this workspace."}
           </p>
         </div>
         <Button
@@ -183,26 +196,41 @@ export function WorkspaceCapabilityDefaultsView({
           onClick={() => void save()}
         >
           {saving ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-          Save defaults
+          Save
         </Button>
       </div>
 
       <div className="overflow-hidden rounded-lg border border-border bg-surface">
-        <CapabilitySectionLabel>OpenGeni</CapabilitySectionLabel>
+        <CapabilitySectionLabel>
+          {permissions ? "OpenGeni" : "Plugin access"}
+        </CapabilitySectionLabel>
         <div className="divide-y divide-border/70 px-3">
-          {builtInServers.map(({ server, capability }) => (
-            <PreferenceToggleRow
-              key={server.id}
-              icon={<PlugIcon className="size-3.5 text-brand" />}
-              label={capability.name}
-              description={capability.description}
-              checked={mcpIds.has(server.id)}
-              disabled={!canManage || saving}
-              wrapDescription
-              onToggle={() => toggleMcp(server.id)}
-            />
-          ))}
-          {openGeniGroups.map((group) => (
+          {permissions
+            ? builtInServers.map(({ server, capability }) => (
+                <PreferenceToggleRow
+                  key={server.id}
+                  icon={<PlugIcon className="size-3.5 text-brand" />}
+                  label={capability.name}
+                  description={capability.description}
+                  checked={mcpIds.has(server.id)}
+                  disabled={!canManage || saving}
+                  wrapDescription
+                  onToggle={() => toggleMcp(server.id)}
+                />
+              ))
+            : connectedServers.map((server) => (
+                <PreferenceToggleRow
+                  key={server.id}
+                  icon={<PlugIcon className="size-3.5 text-brand" />}
+                  label={server.name}
+                  description="Available to agents through this workspace connection."
+                  checked={mcpIds.has(server.id)}
+                  disabled={!canManage || saving}
+                  wrapDescription
+                  onToggle={() => toggleMcp(server.id)}
+                />
+              ))}
+          {(permissions ? openGeniGroups : connectedAppGroups).map((group) => (
             <CapabilityDefaultRow
               key={group.id}
               name={group.name}
@@ -212,35 +240,9 @@ export function WorkspaceCapabilityDefaultsView({
               onToggle={() => toggleGroup(group)}
             />
           ))}
-        </div>
-
-        <CapabilitySectionLabel bordered>Connected apps</CapabilitySectionLabel>
-        <div className="divide-y divide-border/70 px-3">
-          {connectedServers.map((server) => (
-            <PreferenceToggleRow
-              key={server.id}
-              icon={<PlugIcon className="size-3.5 text-brand" />}
-              label={server.name}
-              description="Available to agents through this workspace connection."
-              checked={mcpIds.has(server.id)}
-              disabled={!canManage || saving}
-              wrapDescription
-              onToggle={() => toggleMcp(server.id)}
-            />
-          ))}
-          {connectedAppGroups.map((group) => (
-            <CapabilityDefaultRow
-              key={group.id}
-              name={group.name}
-              description={group.description}
-              state={capabilityGroupSelection(group, firstPartyIds)}
-              disabled={!canManage || saving}
-              onToggle={() => toggleGroup(group)}
-            />
-          ))}
-          {connectedServers.length === 0 && connectedAppGroups.length === 0 ? (
+          {!permissions && connectedServers.length === 0 && connectedAppGroups.length === 0 ? (
             <p className="px-1 py-3 text-xs text-fg-subtle">
-              Connected apps appear here after they are added in Capabilities.
+              Connected plugins appear here after they are added on the Plugins page.
             </p>
           ) : null}
         </div>
@@ -249,17 +251,9 @@ export function WorkspaceCapabilityDefaultsView({
   );
 }
 
-function CapabilitySectionLabel({
-  bordered = false,
-  children,
-}: {
-  bordered?: boolean;
-  children: string;
-}) {
+function CapabilitySectionLabel({ children }: { children: string }) {
   return (
-    <div
-      className={cn("px-3 py-2", bordered ? "border-y border-border" : "border-b border-border")}
-    >
+    <div className="border-b border-border px-3 py-2">
       <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">{children}</p>
     </div>
   );

@@ -438,7 +438,8 @@ function AuthorizedWorkspaceShell({
 }) {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const usesDedicatedSettingsShell =
-    pathname === `/workspaces/${encodeURIComponent(workspaceId)}/settings`;
+    pathname === `/workspaces/${encodeURIComponent(workspaceId)}/settings` ||
+    pathname === `/workspaces/${encodeURIComponent(workspaceId)}/organization`;
   useEffect(() => {
     onMount?.();
   }, [onMount]);

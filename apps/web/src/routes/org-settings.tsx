@@ -3,27 +3,19 @@
 // /v1/billing/entitlements), and members. The workspace-scoped API keys section
 // moved to Workspace settings; this surface is the tenant-level console.
 import { useBillingUsage } from "@opengeni/react";
-import { Link } from "@tanstack/react-router";
-import {
-  ActivityIcon,
-  BuildingIcon,
-  GaugeIcon,
-  Loader2Icon,
-  LockIcon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { ActivityIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { LoadErrorState, PageHeader } from "@/components/common";
+import { LoadErrorState } from "@/components/common";
 import {
   OrganizationPeopleSection,
   OrganizationOverviewSection,
   OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
+import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
 import {
   entitlementEntries,
@@ -260,64 +252,12 @@ export function OrgSettingsRoute({
   const visibleBusy = busyOwnerKey === identityKey && busy;
 
   return (
-    <ContentPage width="standard">
+    <OrganizationSettingsShell
+      workspaceId={workspaceId}
+      organizationLabel={organizationLabel}
+      section={section}
+    >
       <section className="grid gap-5 text-left">
-        <PageHeader
-          icon={<BuildingIcon className="size-4" />}
-          title="Organization"
-          description={organizationLabel}
-          actions={
-            context.clientConfig.auth.mode === "managedSession" ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() =>
-                  void context
-                    .handleManagedSignOut()
-                    .catch((error) =>
-                      toast.error("Sign out failed", { description: String(error) }),
-                    )
-                }
-              >
-                <LockIcon className="size-3.5" />
-                Sign out
-              </Button>
-            ) : undefined
-          }
-        />
-
-        <nav
-          aria-label="Organization settings sections"
-          className="flex flex-wrap gap-1 rounded-lg border border-border bg-surface p-1"
-        >
-          {(
-            [
-              ["overview", "Overview"],
-              ["people", "People & invitations"],
-              ["retention", "Retention"],
-              ["billing", "Billing"],
-            ] as const
-          ).map(([target, label]) => (
-            <Button
-              key={target}
-              asChild
-              type="button"
-              variant={section === target ? "secondary" : "ghost"}
-              size="sm"
-            >
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: target }}
-                aria-current={section === target ? "page" : undefined}
-              >
-                {label}
-              </Link>
-            </Button>
-          ))}
-        </nav>
-
         {section === "overview" ? (
           <>
             <OrganizationOverviewSection
@@ -474,7 +414,7 @@ export function OrgSettingsRoute({
           />
         ) : null}
       </section>
-    </ContentPage>
+    </OrganizationSettingsShell>
   );
 }
 

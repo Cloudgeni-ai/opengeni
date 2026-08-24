@@ -1,87 +1,61 @@
 import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
-  KeyRoundIcon,
-  PlugIcon,
-  Settings2Icon,
-  ShieldAlertIcon,
-  ShieldCheckIcon,
-  SparklesIcon,
+  CreditCardIcon,
+  DatabaseIcon,
+  LayoutDashboardIcon,
   UsersIcon,
 } from "lucide-react";
 import type { ComponentType, ReactNode } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
+import type { OrganizationAdminSection } from "@/lib/organization-admin";
 import { cn } from "@/lib/utils";
 
-export type WorkspaceSettingsSection =
-  | "general"
-  | "members"
-  | "permissions"
-  | "plugins"
-  | "models"
-  | "api-keys"
-  | "danger";
-
-type SettingsItem = {
-  id: WorkspaceSettingsSection;
+type OrganizationSettingsItem = {
+  id: OrganizationAdminSection;
   label: string;
   icon: ComponentType<{ className?: string }>;
 };
 
-const SETTINGS_ITEMS: readonly SettingsItem[] = [
-  { id: "general", label: "General", icon: Settings2Icon },
-  { id: "members", label: "Members", icon: UsersIcon },
-  { id: "permissions", label: "Agent permissions", icon: ShieldCheckIcon },
-  { id: "plugins", label: "Plugin defaults", icon: PlugIcon },
-  { id: "models", label: "Models", icon: SparklesIcon },
-  { id: "api-keys", label: "API keys", icon: KeyRoundIcon },
-  { id: "danger", label: "Danger zone", icon: ShieldAlertIcon },
+const ITEMS: readonly OrganizationSettingsItem[] = [
+  { id: "overview", label: "Overview", icon: LayoutDashboardIcon },
+  { id: "people", label: "People & invitations", icon: UsersIcon },
+  { id: "retention", label: "Retention", icon: DatabaseIcon },
+  { id: "billing", label: "Billing", icon: CreditCardIcon },
 ];
 
-const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; description: string }> = {
-  general: {
-    title: "General",
-    description: "Workspace identity and defaults for new sessions.",
+const COPY: Record<OrganizationAdminSection, { title: string; description: string }> = {
+  overview: {
+    title: "Organization overview",
+    description: "Organization identity, access, and private-session policy.",
   },
-  members: {
-    title: "Members",
-    description: "Manage who can access this workspace and what they can do.",
+  people: {
+    title: "People & invitations",
+    description: "Manage organization membership, roles, invitations, and workspace access.",
   },
-  permissions: {
-    title: "Agent permissions",
-    description: "Choose which built-in OpenGeni actions new sessions can use.",
+  retention: {
+    title: "Retention",
+    description: "Control how long organization data is retained.",
   },
-  plugins: {
-    title: "Plugin defaults",
-    description: "Choose which plugins new sessions may use when they are available.",
-  },
-  models: {
-    title: "Models",
-    description: "Control which models can run in this workspace.",
-  },
-  "api-keys": {
-    title: "API keys",
-    description: "Create workspace-scoped credentials for other products.",
-  },
-  danger: {
-    title: "Danger zone",
-    description: "Irreversible workspace actions.",
+  billing: {
+    title: "Billing",
+    description: "Credits, usage, plan entitlements, and payment settings.",
   },
 };
 
-export function WorkspaceSettingsShell({
+export function OrganizationSettingsShell({
   workspaceId,
-  workspaceName,
+  organizationLabel,
   section,
   children,
 }: {
   workspaceId: string;
-  workspaceName: string;
-  section: WorkspaceSettingsSection;
+  organizationLabel: string;
+  section: OrganizationAdminSection;
   children: ReactNode;
 }) {
-  const copy = SECTION_COPY[section];
+  const copy = COPY[section];
   return (
     <main className="min-h-dvh bg-bg text-fg lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
       <aside className="border-b border-border bg-surface/35 lg:sticky lg:top-0 lg:h-dvh lg:border-r lg:border-b-0">
@@ -107,21 +81,21 @@ export function WorkspaceSettingsShell({
           </Link>
 
           <div className="mt-4 min-w-0 px-2 lg:mt-6">
-            <p className="text-base font-semibold">Settings</p>
-            <p className="mt-1 truncate text-xs text-fg-muted">{workspaceName}</p>
+            <p className="text-base font-semibold">Organization settings</p>
+            <p className="mt-1 truncate text-xs text-fg-muted">{organizationLabel}</p>
           </div>
 
           <nav
-            aria-label="Workspace settings"
-            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
+            aria-label="Organization settings"
+            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4 lg:flex lg:flex-col"
           >
-            {SETTINGS_ITEMS.map((item) => {
+            {ITEMS.map((item) => {
               const Icon = item.icon;
               const selected = item.id === section;
               return (
                 <Link
                   key={item.id}
-                  to="/workspaces/$workspaceId/settings"
+                  to="/workspaces/$workspaceId/organization"
                   params={{ workspaceId }}
                   search={{ section: item.id }}
                   aria-current={selected ? "page" : undefined}
@@ -130,7 +104,6 @@ export function WorkspaceSettingsShell({
                     selected
                       ? "bg-surface-3 font-medium text-fg"
                       : "text-fg-muted hover:bg-surface-2 hover:text-fg",
-                    item.id === "danger" && selected ? "text-danger" : "",
                   )}
                 >
                   <Icon className="size-4 shrink-0" />
