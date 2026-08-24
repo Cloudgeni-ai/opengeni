@@ -599,8 +599,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0326_interaction_operation_error_codes.sql")) {
         return includesActivation
-          ? "03bd3e9e89c926fdbaaa4f7240c56f439d22f51046061bf969055d510e073231"
-          : "421d52d5dbf3cc4517b02640537c33b988c6336e4060d1b934d440fef6b2184e";
+          ? "09148f839a69ecbec30c80654668906d85dd60e56fd160f23f133719b442cc1b"
+          : "5a527fa78a1baf3c88331080eb01eeec2d481e88ee044f55bfb1c24e03caafd7";
       }
       if (migrations.has("0321_slack_bot_environment_display_name.sql")) {
         return includesActivation
