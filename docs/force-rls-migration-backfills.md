@@ -116,6 +116,15 @@ carry, and `0340`'s `opengeni_private.bind_connection_owner_authority`, which
 opens its own narrow marker window and restores the previous marker on every
 exit.
 
+Do not imitate 0263's shape without checking the policy it lands on. Its read
+carries `FOR KEY SHARE`, which rule 2 forbids against a `FOR SELECT`-only
+policy; it is safe only because `organization_tenancy_lifecycle` is declared
+`FOR ALL`, so the UPDATE branch a locking read consults exists. 0340 takes the
+other lawful route and creates a *pair* - `connection_authority_binding_read`
+(`SELECT`) and `connection_authority_binding_lock` (`UPDATE`) - which is why its
+own `FOR SHARE` read sees rows. Either shape works; a locking read against a
+lone `FOR SELECT` policy is the one that silently returns nothing.
+
 **Known unrepaired instance.** `0258_three_scope_document_knowledge_authority.sql`
 gets rule 1 right but not rule 2:
 `create_personal_document_authority` and
@@ -127,7 +136,8 @@ workspace-anchored lane instead of minting a portable organization-user
 authority. Migration bytes are frozen, so this needs its own reviewed repair
 migration - it is listed here rather than fixed in passing.
 
-The organization-tenancy lane alone has produced four instances, all invisible
+The organization-tenancy lane alone has produced four more instances - all in
+tenancy migrations rather than 0258's Document lane - all invisible
 until a test ran through `acquireOwnerMigratedTestDatabase`:
 
 | Writer | Table | Command it issues | Was covered by |
@@ -137,7 +147,7 @@ until a test ran through `acquireOwnerMigratedTestDatabase`:
 | `bind_connection_authority` (backfill verify) | `organization_memberships` | `SELECT ... FOR SHARE` | a `FOR SELECT` policy only |
 | `activate_session_tenancy_product` | `session_tenancy_activations` | `INSERT` | a `FOR SELECT` policy only |
 
-A fifth, same class but not a write: 0305 restated the shared
+A fifth in that lane, same class but not a write: 0305 restated the shared
 `organization_tenancy_lifecycle` marker list on `organization_memberships` and
 dropped 0290's `organization_membership_backfill` entry, silently blinding both
 membership-backfill read seams. That is the argument for giving a seam its own
