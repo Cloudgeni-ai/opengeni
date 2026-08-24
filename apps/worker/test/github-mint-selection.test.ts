@@ -7,7 +7,11 @@
 
 import { describe, expect, test } from "bun:test";
 import type { ResourceRef } from "@opengeni/contracts";
-import { gitHubTokenMintSelection, gitHubTokenMintSelections } from "../src/activities/environment";
+import {
+  gitHubTokenAuthorizationSelections,
+  gitHubTokenMintSelection,
+  gitHubTokenMintSelections,
+} from "../src/activities/environment";
 
 const repo = (overrides: Record<string, unknown>): ResourceRef =>
   ({
@@ -66,6 +70,37 @@ describe("gitHubTokenMintSelection", () => {
     ).toEqual([
       { installationId: 123, repositoryIds: [456] },
       { installationId: 124, repositoryIds: [789] },
+    ]);
+  });
+
+  test("preserves an explicit PR Review credential binding for authorization", () => {
+    expect(
+      gitHubTokenAuthorizationSelections([
+        repo({
+          provider: "github",
+          credentialBindingId: "pr-review:11111111-1111-4111-8111-111111111111",
+          installationId: "123",
+          repositoryId: "456",
+          expectedCommitSha: "a".repeat(40),
+        }),
+      ]),
+    ).toEqual([
+      {
+        credentialBindingId: "pr-review:11111111-1111-4111-8111-111111111111",
+        installationId: 123,
+        repositoryIds: [456],
+        repositoryRefs: [
+          {
+            uri: "https://github.com/acme/repo",
+            ref: "main",
+            provider: "github",
+            credentialBindingId: "pr-review:11111111-1111-4111-8111-111111111111",
+            expectedCommitSha: "a".repeat(40),
+            repositoryId: "456",
+            installationId: "123",
+          },
+        ],
+      },
     ]);
   });
 });
