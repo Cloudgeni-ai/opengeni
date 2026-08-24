@@ -8,7 +8,7 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0336-tenancy-backfill-evidence");
+  shared = await acquireSharedTestDatabase("migration-0339-tenancy-backfill-evidence");
   if (!shared && requireRealDatabase) throw new Error("migration 0339 requires PostgreSQL");
 }, 180_000);
 
@@ -203,12 +203,12 @@ describe("migration 0339 tenancy backfill activation evidence", () => {
           'retired.example', 'api_key', 'ciphertext'
         ) returning id`;
     });
-    // A pre-0336 activation can legitimately carry zero or five receipts.
+    // A pre-0339 activation can legitimately carry zero or five receipts.
     await shared.admin`
       insert into session_tenancy_activations (
         account_id, activation_version, inventory_digest, parity_digest, activated_by
       ) values (
-        ${account!.id}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'pre-0336-test'
+        ${account!.id}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'pre-0339-test'
       )`;
 
     const writerTriggers = await shared.admin<Array<{ relation: string; enabled: string }>>`

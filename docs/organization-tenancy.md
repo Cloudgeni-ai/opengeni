@@ -91,7 +91,7 @@ REST wrappers converge on this lifecycle, including permission-independent
 revocation after baseline route-workspace access is proved.
 Standalone `once` and custom expiry remain outside this management surface.
 Migration 0306 adds the only direct-session `once` path; maintenance migration
-0339 extends it to the selected personal Connected Machine. Create/Send/Steer
+0338 extends it to the selected personal Connected Machine. Create/Send/Steer
 acceptance derives the fixed personal Variable Set/Rig/Connected Machine closure and issues it in
 the same transaction as the logical turn. New-session create binds the new
 session epoch; established-session requests provide the expected epoch. The
