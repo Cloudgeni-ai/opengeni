@@ -151,7 +151,14 @@ const budgets = {
   // gzip to the next whole KiB above 1.5 KiB of headroom for the Linux/x64
   // skew; every initial, per-file, file-count, lazy-chunk, and CSS cap stays
   // fixed.
-  directSessionRaw: 2086 * kib,
+  // The Slack orchestration-notice workspace toggles add two checkbox rows
+  // plus their resolved-settings plumbing to the Capabilities surface. The
+  // same macOS/arm64 production build measures merged main at 2,135,841 raw
+  // / 594,183 gzip bytes and this change at 2,136,237 raw / 594,259 gzip
+  // bytes. Gzip stays comfortably under its existing envelope; advance only
+  // the raw aggregate to its next whole KiB above one KiB of headroom. Every
+  // other cap, including gzip, stays fixed.
+  directSessionRaw: 2088 * kib,
   directSessionGzip: 581 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
