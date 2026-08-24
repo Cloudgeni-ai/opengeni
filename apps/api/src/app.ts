@@ -68,6 +68,7 @@ import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import {
   CodemodeAuthorityError,
+  CodemodeCatalogNotReadyError,
   isCodemodeGrant,
   readCodemodeOperation,
   requireActiveCodemodeCatalog,
@@ -954,10 +955,25 @@ function codemodeHttpError(error: unknown): HTTPException {
       cause: error,
     });
   }
-  if (
-    error instanceof CodemodeAuthorityError ||
-    error instanceof CodemodeOperationNotExecutableError
-  ) {
+  if (error instanceof CodemodeCatalogNotReadyError) {
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  if (error instanceof CodemodeAuthorityError) {
+    return new ApiHttpError(error.reason === "invalid_grant" ? 403 : 409, {
+      code: error.reason === "invalid_grant" ? "forbidden" : "conflict",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  if (error instanceof CodemodeOperationNotExecutableError) {
     return new HTTPException(409, { message: error.message, cause: error });
   }
   if (error instanceof CodemodeOperationConflictError) {

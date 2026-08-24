@@ -97,6 +97,8 @@ import {
   providerRecoveryCountFromMetadata,
   providerRetryAfterMs,
   providerRecoveryResult,
+  providerRecoveryExhaustedFailure,
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   requiresSignedFileResourceDownloads,
   objectStorageForSandboxDownloads,
   resolveActiveSandboxBackend,
@@ -731,7 +733,7 @@ describe("turn exact-content boundaries", () => {
     const failureSource = await Bun.file(
       new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
     ).text();
-    const failureClassifier = failureSource.indexOf("const failure = agentRunFailurePayload(error");
+    const failureClassifier = failureSource.indexOf("let failure = agentRunFailurePayload(error");
     const terminalFailureStart = failureSource.indexOf(
       'control.activityStatus = "failed";',
       failureClassifier,
@@ -4922,32 +4924,63 @@ describe("transient provider error classifier", () => {
 
   test("provider recovery backs off connectivity failures and honors rate-limit hints", () => {
     expect(
-      [1, 2, 3, 4, 5, 6].map(
-        (attemptNumber) =>
-          providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber })
-            .continueDelayMs,
+      [1, 2, 3, 4, 5].map((attemptNumber) =>
+        providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber }),
       ),
-    ).toEqual([2_000, 5_000, 15_000, 30_000, 60_000, 60_000]);
+    ).toEqual([
+      { status: "recovering", continueDelayMs: 2_000 },
+      { status: "recovering", continueDelayMs: 5_000 },
+      { status: "recovering", continueDelayMs: 15_000 },
+      { status: "recovering", continueDelayMs: 30_000 },
+      { status: "recovering", continueDelayMs: 60_000 },
+    ]);
+    const exhausted = providerRecoveryResult({
+      failureCode: "provider_unavailable",
+      attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,
+    });
+    expect(exhausted).toEqual({
+      status: "exhausted",
+      providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+    });
+    if (exhausted.status !== "exhausted") throw new Error("expected recovery exhaustion");
+    expect(
+      providerRecoveryExhaustedFailure(
+        {
+          error: "A required MCP server was temporarily unreachable.",
+          code: "mcp_transport_unavailable",
+          retryable: true,
+        },
+        exhausted,
+      ),
+    ).toMatchObject({
+      code: "mcp_transport_unavailable",
+      retryable: false,
+      recoveryExhausted: true,
+      providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      lastRetryableError: "A required MCP server was temporarily unreachable.",
+    });
     expect(
       providerRecoveryResult({
         failureCode: "provider_rate_limited",
         attemptNumber: 1,
-      }).continueDelayMs,
-    ).toBe(PROVIDER_BACKPRESSURE_DELAY_MS);
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
     expect(
       providerRecoveryResult({
         failureCode: "provider_rate_limited",
         attemptNumber: 1,
         retryAfterMs: 12_000,
-      }).continueDelayMs,
-    ).toBe(12_000);
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 12_000 });
     expect(
       providerRecoveryResult({
         failureCode: "provider_unavailable",
         attemptNumber: 1,
         retryAfterMs: 7_000,
-      }).continueDelayMs,
-    ).toBe(7_000);
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 7_000 });
     expect(
       providerRetryAfterMs(
         Object.assign(new Error("rate limited"), {
