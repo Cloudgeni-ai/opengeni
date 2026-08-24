@@ -752,11 +752,11 @@ CREATE TRIGGER sandbox_retained_processes_tenancy_writer_fence
 -- stated session authority is an ordinary workspace-membership row OR the
 -- active membership's own personal_workspace_id pointer (0302).
 ALTER FUNCTION check_organization_tenancy_parity(uuid, integer, integer)
-  RENAME TO check_organization_tenancy_parity_pre_0339;
-ALTER FUNCTION check_organization_tenancy_parity_pre_0339(uuid, integer, integer)
+  RENAME TO check_organization_tenancy_parity_pre_0340;
+ALTER FUNCTION check_organization_tenancy_parity_pre_0340(uuid, integer, integer)
   SET SCHEMA opengeni_private;
 REVOKE ALL ON FUNCTION
-  opengeni_private.check_organization_tenancy_parity_pre_0339(uuid, integer, integer)
+  opengeni_private.check_organization_tenancy_parity_pre_0340(uuid, integer, integer)
   FROM PUBLIC;
 
 CREATE FUNCTION check_organization_tenancy_parity(
@@ -772,7 +772,7 @@ DECLARE
   result jsonb;
   attributable_count integer;
 BEGIN
-  result := opengeni_private.check_organization_tenancy_parity_pre_0339(
+  result := opengeni_private.check_organization_tenancy_parity_pre_0340(
     p_organization_id, p_evidence_limit, p_observation_window_days
   );
   INSERT INTO opengeni_private.organization_tenancy_parity_capabilities (
@@ -1335,7 +1335,7 @@ BEGIN
       data_schema
     );
     REVOKE ALL ON FUNCTION
-      opengeni_private.check_organization_tenancy_parity_pre_0339(uuid,integer,integer)
+      opengeni_private.check_organization_tenancy_parity_pre_0340(uuid,integer,integer)
       FROM opengeni_app;
   END IF;
 END

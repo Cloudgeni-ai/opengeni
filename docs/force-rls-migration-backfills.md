@@ -108,6 +108,14 @@ Two rules, both of which fail silently when broken:
 before the read, so a regression aborts instead of quietly pinning a personal
 Document to its origin workspace forever.
 
+Two other worked examples of a definer that satisfies a policy branch it can
+actually reach: `0263`'s
+`assert_active_managed_human_organization_membership`, which gates on one of the
+`opengeni.organization_tenancy_lifecycle` markers the authority tables already
+carry, and `0340`'s `opengeni_private.bind_connection_owner_authority`, which
+opens its own narrow marker window and restores the previous marker on every
+exit.
+
 **Known unrepaired instance.** `0258_three_scope_document_knowledge_authority.sql`
 gets rule 1 right but not rule 2:
 `create_personal_document_authority` and
