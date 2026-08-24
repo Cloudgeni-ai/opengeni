@@ -104,7 +104,11 @@ describe("migration 0333 Slack workspace routing", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain(table);
     }
     expect(source).toContain("resolve_slack_interaction_tenancy");
-    expect(source).toContain("SET search_path = pg_catalog");
+    // The probe is schema-qualified because it now opens a private capability
+    // before reading the FORCE-RLS interaction table.
+    expect(source).toContain("SET search_path = %1$I, pg_catalog");
+    expect(source).toContain("slack_routing_capability_active");
+    expect(source).toContain("CREATE POLICY slack_routing_capability_read");
     expect(source).toContain("REVOKE ALL ON FUNCTION");
 
     // The installation binding stays frozen: one team still installs into one
@@ -120,7 +124,10 @@ describe("migration 0333 Slack workspace routing", () => {
     expect(executableSource).not.toContain("CREATE TRIGGER");
     expect(executableSource).not.toMatch(/DROP\s+(INDEX|TRIGGER|POLICY|FUNCTION|TABLE|COLUMN)/u);
     // Exactly one new privileged routine, and it is the ids-only probe.
-    expect(executableSource.match(/CREATE (OR REPLACE )?FUNCTION/gu)).toEqual(["CREATE FUNCTION"]);
+    expect(executableSource.match(/CREATE (OR REPLACE )?FUNCTION/gu)).toEqual([
+      "CREATE FUNCTION",
+      "CREATE FUNCTION",
+    ]);
 
     // Rolling safety is the absence of a backfill: an absent route is exactly
     // today's behaviour, so there is nothing to rewrite.
@@ -164,7 +171,7 @@ describe("migration 0333 Slack workspace routing", () => {
       where n.nspname = 'opengeni_private'
         and p.proname = 'resolve_slack_interaction_tenancy'`;
     expect(probe?.security).toBe("definer");
-    expect(probe?.config).toContain("search_path=pg_catalog");
+    expect(probe?.config).toContain("search_path=public, pg_catalog");
   });
 
   test("carries a workspace_isolation policy with both USING and WITH CHECK on every table", async () => {
@@ -260,7 +267,44 @@ describe("migration 0333 Slack workspace routing", () => {
         )`,
     );
     expect(unknownSource).toBe("23514");
+
+    const crossOrganizationDm = await captureSqlState(
+      async () =>
+        await shared!.admin`insert into slack_user_dm_routes (
+          account_id, workspace_id, connection_id, slack_team_id, slack_user_id,
+          target_account_id, target_workspace_id, decided_by_subject_id,
+          decided_by_slack_user_id, source
+        ) values (
+          ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, 'T0333', 'U-CROSS-ORG',
+          ${OTHER_ACCOUNT}, ${FOREIGN_WORKSPACE}, 'user:cross', 'U0333', 'picker'
+        )`,
+    );
+    expect(crossOrganizationDm).toBe("23514");
+
+    const promptId = crypto.randomUUID();
+    await shared.admin`insert into slack_route_prompts (
+      id, account_id, workspace_id, connection_id, inbox_id, slack_team_id,
+      slack_user_id, slack_channel_id, slack_message_ts, provider_event_id,
+      trigger_kind, request_text, has_files, message_operation_id, status, expires_at
+    ) values (
+      ${promptId}, ${ACCOUNT}, ${HOME_WORKSPACE}, ${CONNECTION}, ${crypto.randomUUID()},
+      'T0333', 'U0333', 'C-PROMPT-ORG', '1.0', ${`ev-org-${promptId}`},
+      'app_mention', 'do it', false, ${crypto.randomUUID()}, 'pending', now() + interval '10 minutes'
+    )`;
+    const crossOrganizationOption = await captureSqlState(
+      async () =>
+        await shared!.admin`insert into slack_route_prompt_options (
+          account_id, workspace_id, prompt_id, candidate_account_id,
+          candidate_workspace_id, candidate_label, position
+        ) values (
+          ${ACCOUNT}, ${HOME_WORKSPACE}, ${promptId}, ${OTHER_ACCOUNT},
+          ${FOREIGN_WORKSPACE}, 'Foreign', 1
+        )`,
+    );
+    expect(crossOrganizationOption).toBe("23514");
   });
+
+
 
   test("cascades a route away with its target workspace through the composite FK", async () => {
     if (!shared) return;
@@ -321,6 +365,17 @@ describe("migration 0333 Slack workspace routing", () => {
     // An unknown route state is refused outright.
     expect(
       await captureSqlState(async () => insertInbox("bad-state", ", route_state", ", 'guessed'")),
+    ).toBe("23514");
+    // The inbox is fenced to one organization exactly like every route table:
+    // this is the row the pump actually claims and routes from.
+    expect(
+      await captureSqlState(async () =>
+        insertInbox(
+          "bad-org",
+          ", route_state, target_account_id, target_workspace_id",
+          `, 'resolved', '${OTHER_ACCOUNT}', '${FOREIGN_WORKSPACE}'`,
+        ),
+      ),
     ).toBe("23514");
 
     await insertInbox(

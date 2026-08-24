@@ -6,6 +6,7 @@
 // mint personal-workspace access, and it must refuse another subject's).
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import {
   createDb,
   createWorkspace,
@@ -17,6 +18,7 @@ import {
   grantWorkspaceAccess,
   listSlackRoutableWorkspacesForSubject,
   managedPersonalWorkspacePermissions,
+  personalWorkspaceIdForSubject,
   probeSlackInteractionTenancy,
   resolveSlackTargetAuthority,
   upsertSlackChannelRoute,
@@ -186,7 +188,33 @@ describe("listSlackRoutableWorkspacesForSubject", () => {
       subjectId: human.subjectId,
     });
     const labels = candidates.map((candidate) => candidate.label);
+    // Asserting only `labels === labels.sort()` is vacuous on a shrunken or
+    // empty result, so pin the expected set too.
+    expect(labels.length).toBeGreaterThanOrEqual(2);
     expect(labels).toEqual([...labels].sort());
+    expect(new Set(labels).size).toBe(labels.length);
+  });
+
+  test("leaves the caller's subject scope untouched after probing another subject", async () => {
+    if (!client) return;
+    const human = await provisionHuman("guc");
+    const other = await provisionHuman("guc-other");
+    const observed = await client.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select set_config('opengeni.account_id', ${human.accountId}, true),
+                   set_config('opengeni.workspace_id', ${human.sharedWorkspaceId}, true),
+                   set_config('opengeni.subject_id', ${human.subjectId}, true)`,
+      );
+      await personalWorkspaceIdForSubject(tx, {
+        accountId: other.accountId,
+        subjectId: other.subjectId,
+      });
+      const rows = await tx.execute<{ subject: string | null }>(
+        sql`select nullif(current_setting('opengeni.subject_id', true), '') as subject`,
+      );
+      return (rows as unknown as Array<{ subject: string | null }>)[0]?.subject ?? null;
+    });
+    expect(observed).toBe(human.subjectId);
   });
 
   test("short-circuits a non-human subject rather than tripping the membership guard", async () => {

@@ -269,6 +269,7 @@ ALTER TABLE "slack_interaction_inbox"
       "route_state" IN ('resolved', 'awaiting_choice', 'denied')
       AND ("route_state" = 'resolved') = ("target_workspace_id" IS NOT NULL)
       AND ("target_account_id" IS NULL) = ("target_workspace_id" IS NULL)
+      AND ("target_account_id" IS NULL OR "target_account_id" = "account_id")
       AND ("route_state" = 'awaiting_choice') = ("route_prompt_id" IS NOT NULL)
     )
   ) NOT VALID;
@@ -301,10 +302,72 @@ ALTER TABLE "slack_interactions"
 -- because the caller must then re-read the full row under the returned
 -- tenancy's own RLS.
 --
+-- SECURITY DEFINER alone is NOT enough here. `slack_interactions` carries
+-- `FORCE ROW LEVEL SECURITY`, which binds the TABLE OWNER, and OpenGeni's
+-- migration principal is a non-superuser without `BYPASSRLS`. The routine
+-- therefore executes as a role the strict `workspace_isolation` policy still
+-- applies to, and a bare definer probe returns ZERO rows for exactly the
+-- cross-workspace lookup it exists for. This uses the same private
+-- transaction-capability seam migration 0243 established for Google Drive
+-- object ACLs: one transaction-local row in a private table opens one
+-- owner-checked permissive SELECT policy for the duration of the probe.
+-- `opengeni_app` holds no privilege on the capability table and cannot forge
+-- the path through a custom GUC.
+--
 -- `resolve_slack_installation`, `slack_installation_bindings_active_team_uq`,
 -- and `sync_slack_installation_binding()` are deliberately NOT touched: one team
 -- still installs into exactly one home workspace and one credential. Routing is
 -- a separate, additive fact.
+CREATE TABLE opengeni_private.slack_routing_runtime_capabilities (
+  "backend_pid" integer NOT NULL,
+  "transaction_id" xid8 NOT NULL,
+  "capability_kind" text NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT "slack_routing_runtime_capabilities_kind_chk" CHECK (
+    "capability_kind" IN ('interaction_tenancy')
+  ),
+  CONSTRAINT "slack_routing_runtime_capabilities_pk" PRIMARY KEY (
+    "backend_pid", "transaction_id", "capability_kind"
+  )
+);
+REVOKE ALL ON TABLE opengeni_private.slack_routing_runtime_capabilities FROM PUBLIC;
+
+CREATE FUNCTION opengeni_private.slack_routing_capability_active()
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = opengeni_private, pg_catalog
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM slack_routing_runtime_capabilities capability
+    WHERE capability.backend_pid = pg_catalog.pg_backend_pid()
+      AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+      AND capability.capability_kind = 'interaction_tenancy'
+  );
+$$;
+REVOKE ALL ON FUNCTION opengeni_private.slack_routing_capability_active() FROM PUBLIC;
+
+-- Permissive SELECT, additive to the existing `workspace_isolation` policy and
+-- gated on BOTH the effective role being the table owner AND a live capability
+-- row. The pre-existing RESTRICTIVE `session_visibility_isolation` policy on
+-- this table still applies, so this never widens session visibility.
+DO $slack_routing_capability_policy$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($policy$
+    CREATE POLICY slack_routing_capability_read ON %1$I.slack_interactions
+    FOR SELECT USING (
+      current_user = pg_catalog.pg_get_userbyid(
+        (SELECT relation.relowner
+         FROM pg_catalog.pg_class relation
+         WHERE relation.oid = %2$L::pg_catalog.regclass)
+      )
+      AND opengeni_private.slack_routing_capability_active()
+    )
+  $policy$, data_schema, data_schema || '.slack_interactions');
+END
+$slack_routing_capability_policy$;
+
 DO $privileged_functions$
 DECLARE data_schema text := current_schema();
 BEGIN
@@ -314,17 +377,40 @@ BEGIN
       p_route_key text
     )
     RETURNS TABLE (account_id uuid, workspace_id uuid, interaction_id uuid)
-    LANGUAGE sql
-    STABLE
+    LANGUAGE plpgsql
     SECURITY DEFINER
-    SET search_path = pg_catalog
-    AS $function$
-      SELECT I.account_id, I.workspace_id, I.id
-      FROM %1$I.slack_interactions I
-      WHERE I.connection_id = p_connection_id
-        AND I.route_key = p_route_key
-      LIMIT 1
-    $function$
+    SET search_path = %1$I, pg_catalog
+    AS $body$
+    BEGIN
+      IF p_connection_id IS NULL OR p_route_key IS NULL THEN
+        RETURN;
+      END IF;
+      INSERT INTO opengeni_private.slack_routing_runtime_capabilities (
+        backend_pid, transaction_id, capability_kind
+      ) VALUES (
+        pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), 'interaction_tenancy'
+      ) ON CONFLICT DO NOTHING;
+      BEGIN
+        RETURN QUERY
+          SELECT I.account_id, I.workspace_id, I.id
+          FROM slack_interactions I
+          WHERE I.connection_id = p_connection_id
+            AND I.route_key = p_route_key
+          LIMIT 1;
+        DELETE FROM opengeni_private.slack_routing_runtime_capabilities
+        WHERE backend_pid = pg_catalog.pg_backend_pid()
+          AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability_kind = 'interaction_tenancy';
+        RETURN;
+      EXCEPTION WHEN OTHERS THEN
+        DELETE FROM opengeni_private.slack_routing_runtime_capabilities
+        WHERE backend_pid = pg_catalog.pg_backend_pid()
+          AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+          AND capability_kind = 'interaction_tenancy';
+        RAISE;
+      END;
+    END;
+    $body$
   $ddl$, data_schema);
 END
 $privileged_functions$;
@@ -353,6 +439,9 @@ BEGIN
       target_schema
     );
     GRANT EXECUTE ON FUNCTION opengeni_private.resolve_slack_interaction_tenancy(uuid, text)
+      TO opengeni_app;
+    REVOKE ALL ON TABLE opengeni_private.slack_routing_runtime_capabilities FROM opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.slack_routing_capability_active()
       TO opengeni_app;
   END IF;
 END
