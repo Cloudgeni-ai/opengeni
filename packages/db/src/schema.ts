@@ -5471,6 +5471,12 @@ export const sessionTurns = pgTable(
     temporalWorkflowId: text("temporal_workflow_id").notNull(),
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
+    // Immutable user-facing admission intent. Physical execution still uses
+    // status=queued until a worker claims the row; this field keeps that
+    // implementation queue distinct from prompts genuinely waiting behind
+    // other work. Null is reserved for rolling/legacy writers and non-human
+    // turns, and is projected conservatively as visible queue work.
+    promptRouting: text("prompt_routing"),
     position: bigint("position", { mode: "number" }).notNull(),
     prompt: losslessText("prompt").notNull(),
     promptCodecVersion: losslessCodecVersion("prompt_codec_version"),

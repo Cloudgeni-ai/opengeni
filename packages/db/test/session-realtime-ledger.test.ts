@@ -1333,6 +1333,7 @@ describe("session realtime ledger", () => {
       reasoningEffort: "high",
       latencyMode: "fast",
       delivery: "steer",
+      routing: "accepted_for_steering",
       initiator: expect.any(Object),
     });
     expect(persisted.calls[0]!.turnId).toBe(persisted.turns[0]!.id);

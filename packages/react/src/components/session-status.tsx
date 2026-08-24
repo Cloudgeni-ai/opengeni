@@ -12,7 +12,7 @@ export type SessionStatusMeta = {
 
 export const SESSION_STATUS_META: Record<SessionStatusValue, SessionStatusMeta> = {
   queued: {
-    label: "Queued",
+    label: "Starting",
     dotClassName: "bg-og-status-queued",
     badgeClassName: "text-og-fg-muted border-og-border bg-og-status-queued/10",
     pulse: true,
