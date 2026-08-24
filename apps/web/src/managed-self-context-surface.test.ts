@@ -54,8 +54,10 @@ describe("managed self-context surfaces", () => {
   });
 
   test("separates organization administration from Personal content", () => {
+    expect(organizationAdminSource).toContain(
+      "Create shared workspaces, then choose which organization members can use each one.",
+    );
     expect(organizationAdminSource).toContain("Personal workspaces stay private.");
-    expect(organizationAdminSource).toContain("Create shared workspaces");
     expect(organizationSource).toContain("<OrganizationPeopleSection");
     expect(organizationSource).toContain("<OrganizationRetentionSection");
   });
