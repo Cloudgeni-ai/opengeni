@@ -1,4 +1,4 @@
-// Migration 0336 makes two things possible that routing needs once the routed
+// Migration 0337 makes two things possible that routing needs once the routed
 // workspace and the installation's workspace can actually differ: resolving an
 // action handle's tenancy from its id, and freezing a home-tenancy Slack task
 // policy on a routed-tenancy shared-task origin.
@@ -16,16 +16,16 @@ import {
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationUrl = new URL("../drizzle/0336_slack_routed_action_handles.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0337_slack_routed_action_handles.sql", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-const ACCOUNT = "aaaaaaaa-0336-4336-8336-aaaaaaaaaaaa";
-const HOME_WORKSPACE = "11111111-0336-4336-8336-111111111111";
-const TARGET_WORKSPACE = "22222222-0336-4336-8336-222222222222";
-const CONNECTION = "33333333-0336-4336-8336-333333333333";
-const INTERACTION = "44444444-0336-4336-8336-444444444444";
-const SESSION = "55555555-0336-4336-8336-555555555555";
-const HANDLE = "66666666-0336-4336-8336-666666666666";
+const ACCOUNT = "aaaaaaaa-0337-4336-8336-aaaaaaaaaaaa";
+const HOME_WORKSPACE = "11111111-0337-4336-8336-111111111111";
+const TARGET_WORKSPACE = "22222222-0337-4336-8336-222222222222";
+const CONNECTION = "33333333-0337-4336-8336-333333333333";
+const INTERACTION = "44444444-0337-4336-8336-444444444444";
+const SESSION = "55555555-0337-4336-8336-555555555555";
+const HANDLE = "66666666-0337-4336-8336-666666666666";
 const PROBE_PASSWORD = "handle_probe_password";
 
 let owned: OwnerMigratedTestDatabase | null = null;
@@ -86,7 +86,7 @@ async function insertTargetSession(owned: OwnerMigratedTestDatabase): Promise<vo
   });
 }
 
-describe("migration 0336 routed Slack action handles", () => {
+describe("migration 0337 routed Slack action handles", () => {
   beforeAll(async () => {
     owned = await acquireOwnerMigratedTestDatabase("slack-routed-handles");
     if (!owned) {
@@ -124,8 +124,8 @@ describe("migration 0336 routed Slack action handles", () => {
         (id, account_id, workspace_id, connection_id, slack_team_id, slack_channel_id,
          slack_thread_ts, route_key, triggering_provider_event_id, owning_subject_id, visibility,
          session_reservation_id)
-        values ('${INTERACTION}', '${ACCOUNT}', '${TARGET_WORKSPACE}', '${CONNECTION}', 'T0336',
-                'C0336', '1.0', 'C0336:1.0', 'Ev0336', 'user:probe', 'workspace', '${SESSION}');
+        values ('${INTERACTION}', '${ACCOUNT}', '${TARGET_WORKSPACE}', '${CONNECTION}', 'T0337',
+                'C0337', '1.0', 'C0337:1.0', 'Ev0337', 'user:probe', 'workspace', '${SESSION}');
     `);
     await insertTargetSession(owned);
     await owned.admin.unsafe(`
@@ -138,7 +138,7 @@ describe("migration 0336 routed Slack action handles", () => {
          authorized_slack_user_id, message_operation_id, expires_at)
         values ('${HANDLE}', '${ACCOUNT}', '${TARGET_WORKSPACE}', '${CONNECTION}',
                 '${INTERACTION}', '${SESSION}', 1, 'session_status', 'status', 'user:probe',
-                'U0336', gen_random_uuid(), now() + interval '1 hour');
+                'U0337', gen_random_uuid(), now() + interval '1 hour');
     `);
     probeUrl = owned.adminUrl.replace(
       /postgres:\/\/[^@]+@/u,
@@ -248,7 +248,7 @@ describe("migration 0336 routed Slack action handles", () => {
          authorized_slack_user_id, message_operation_id, expires_at)
         values ('${doomed}', '${ACCOUNT}', '${TARGET_WORKSPACE}', '${CONNECTION}',
                 '${INTERACTION}', '${SESSION}', 2, 'session_pause', 'pause', 'user:probe',
-                'U0336', gen_random_uuid(), now() + interval '1 hour');
+                'U0337', gen_random_uuid(), now() + interval '1 hour');
     `);
     const [present] = await owned.admin<Array<{ n: number }>>`
       select count(*)::int as n from opengeni_private.slack_action_handle_tenancy
@@ -286,7 +286,7 @@ describe("migration 0336 routed Slack action handles", () => {
       select set_config('opengeni.workspace_id', '${TARGET_WORKSPACE}', false);
     `);
     // The origin follows the routed task, while the policy it froze stays home.
-    // Before 0336 no value of (account_id, workspace_id) could satisfy both
+    // Before 0337 no value of (account_id, workspace_id) could satisfy both
     // composite foreign keys at once.
     await owned.admin.unsafe(`
       insert into slack_shared_task_origins
@@ -295,7 +295,7 @@ describe("migration 0336 routed Slack action handles", () => {
          policy_revision_id, policy_account_id, policy_workspace_id,
          policy_hash, policy_activation_version, publication_mode)
         values ('${INTERACTION}', '${ACCOUNT}', '${TARGET_WORKSPACE}', '${CONNECTION}',
-                '${SESSION}', 'T0336', 'C0336', '1.0', 'U0336',
+                '${SESSION}', 'T0337', 'C0337', '1.0', 'U0337',
                 '${revision}', '${ACCOUNT}', '${HOME_WORKSPACE}',
                 (select policy_hash from slack_task_policy_revisions where id = '${revision}'),
                 1, 'allow');
