@@ -9,6 +9,7 @@ import {
 import { and, asc, eq, gt, inArray, ne } from "drizzle-orm";
 
 import { type Database, withWorkspaceRls } from "./database";
+import { personalWorkspaceIdForSubject } from "./slack-routing-personal-workspace";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
@@ -564,7 +565,17 @@ async function membershipAllowsSlackLink(database: Database, row: RequestRow) {
       ),
     )
     .limit(1);
-  return workspaceMembershipPermissionsAllowSlackLink(membership?.permissions);
+  if (workspaceMembershipPermissionsAllowSlackLink(membership?.permissions)) return true;
+  // A managed human's own personal workspace deliberately has no
+  // `workspace_memberships` row, so a bare membership join denies its owner.
+  // Once a Slack direct message can land there, that would tell people to
+  // request access to their own workspace. The pointer is DERIVED from an
+  // active organization membership; it is never accepted from the request row.
+  const personalWorkspaceId = await personalWorkspaceIdForSubject(database, {
+    accountId: row.accountId,
+    subjectId: row.subjectId,
+  });
+  return personalWorkspaceId === row.workspaceId;
 }
 
 export function workspaceMembershipPermissionsAllowSlackLink(value: unknown): boolean {

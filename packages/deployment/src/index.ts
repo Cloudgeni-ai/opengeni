@@ -194,6 +194,14 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
 ];
 
+/** Per-channel and per-DM Slack workspace routing. Default off in
+ * @opengeni/config; a valueEnv passthrough emitted only when set. Turning it on
+ * is a deployment decision: with it off the routing resolver short-circuits to
+ * the installation's own workspace before any routing read. */
+export const SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED",
+];
+
 /** Optional remote-browser authorities and launch policy. These remain API
  * runtime secrets/settings; browserd receives only a per-session private
  * transport envelope over its placement-local control channel. */
@@ -2495,6 +2503,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {

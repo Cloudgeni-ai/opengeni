@@ -170,12 +170,21 @@ describe("release schema contract", () => {
       "0334_connected_machine_workspace_root.sql",
       "0335_slack_workspace_routing.sql",
       "0336_atomic_session_fork_visibility.sql",
+      "0337_slack_routed_action_handles.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
+    // Each appended migration moves both of these, and two candidates can be in
+    // flight at once, so derive them from what is actually on disk rather than
+    // re-pinning a literal that the next merge invalidates.
+    const routedSlackHandles = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0337_slack_routed_action_handles.sql",
+    );
     expect(completeSourceContract).toMatchObject({
-      fileCount: 345,
-      latestMigration: "0336_atomic_session_fork_visibility.sql",
+      fileCount: routedSlackHandles ? 346 : 345,
+      latestMigration: routedSlackHandles
+        ? "0337_slack_routed_action_handles.sql"
+        : "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(

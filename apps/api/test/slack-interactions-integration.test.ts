@@ -23,7 +23,10 @@ import {
   getSlackBotUserLink,
   getSessionForSubject,
   getWorkspaceGrant,
+  createWorkspace,
+  getSlackChannelRoute,
   grantWorkspaceAccess,
+  upsertSlackChannelRoute,
   saveSlackBotUserLink,
   synchronizeCanonicalHumanLoginBindings,
   updateSlackTaskPolicy,
@@ -631,6 +634,10 @@ async function fixture(
     /** Omitted keeps the shipped default: both orchestration notices off. */
     slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings;
     slackCommand?: string;
+    /** `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`. */
+    slackWorkspaceRouting?: boolean;
+    /** Create a second workspace in the same organization the owner can use. */
+    routedWorkspaceName?: string;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -675,6 +682,7 @@ async function fixture(
     environmentsEncryptionKey: encryptionKey,
     slackSigningSecret: signingMaterial,
     slackCommand: options.slackCommand ?? "/opengeni",
+    ...(options.slackWorkspaceRouting ? { slackWorkspaceRoutingEnabled: true } : {}),
     publicBaseUrl: "https://app.example.test",
     webBaseUrl: "https://app.example.test",
     sandboxBackend: "none",
@@ -738,6 +746,25 @@ async function fixture(
     });
   }
 
+  let routed: { accountId: string; workspaceId: string; name: string } | null = null;
+  if (options.routedWorkspaceName) {
+    const created = await createWorkspace(client.db, {
+      accountId: owner.accountId,
+      name: options.routedWorkspaceName,
+    });
+    await grantWorkspaceAccess(client.db, {
+      accountId: owner.accountId,
+      workspaceId: created.id,
+      subjectId: owner.subjectId,
+      permissions,
+    });
+    routed = {
+      accountId: owner.accountId,
+      workspaceId: created.id,
+      name: options.routedWorkspaceName,
+    };
+  }
+
   const slack = fakeSlack(new Set(options.deniedChannels ?? []), {
     failAfterAcceptTexts: new Set(options.failAfterAcceptTexts ?? []),
     sharedChannels: new Set(options.sharedChannels ?? []),
@@ -784,6 +811,7 @@ async function fixture(
     ownerSlackUserId,
     otherSlackUserId,
     connectionId: connection.id,
+    routed,
   };
 }
 
@@ -1057,6 +1085,319 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const revoked = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
     expect(revoked).toContain("Connect your OpenGeni account");
     expect(revoked).not.toContain("Must disappear after unlink");
+  });
+
+  // Per-channel and per-DM Slack workspace routing. Everything here needs the
+  // flag ON; the whole rest of this file is the proof that the flag OFF is
+  // byte-identical to single-workspace behaviour.
+  test("routes a channel to its chosen workspace instead of the installation's", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const channelId = "C_ROUTED";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_ROUTED_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000100.0001",
+            text: "ship the release notes",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    // The interaction, the session and its events live in the routed workspace.
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [route] = await interactions(routed.workspaceId);
+    expect(route?.session_id).toBeTruthy();
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions
+      where workspace_id = ${routed.workspaceId} and id = ${route!.session_id}`;
+    expect(session!.initial_message).toContain("ship the release notes");
+
+    // The bot still posts on the installation's own credential.
+    const [posts] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from slack_bot_post_operations
+      where workspace_id = ${value.owner.workspaceId}
+        and connection_id = ${value.connectionId}`;
+    expect(posts!.n).toBeGreaterThan(0);
+    const [routedPosts] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from slack_bot_post_operations
+      where workspace_id = ${routed.workspaceId}`;
+    expect(routedPosts!.n).toBe(0);
+  });
+
+  test("a mapped thread keeps its workspace after the channel is re-pointed", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const channelId = "C_REPOINTED";
+    const upsert = (targetWorkspaceId: string) =>
+      upsertSlackChannelRoute(client.db, home, {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: value.owner.accountId,
+        targetWorkspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      });
+    await upsert(routed.workspaceId);
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_THREAD_ROOT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000200.0001",
+            text: "start here",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [before] = await interactions(routed.workspaceId);
+    expect(before?.session_id).toBeTruthy();
+
+    // Re-point the channel at the installation's workspace. The live thread must
+    // not change tenant underneath the conversation.
+    await upsert(value.owner.workspaceId);
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_THREAD_REPLY_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000200.0002",
+            thread_ts: "1700000200.0001",
+            text: "and continue",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [after] = await interactions(routed.workspaceId);
+    expect(after!.id).toBe(before!.id);
+    expect(after!.session_id).toBe(before!.session_id);
+  });
+
+  test("a strict prefix overrides one message without rewriting the channel", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const channelId = "C_PREFIX";
+    await upsertSlackChannelRoute(client.db, home, {
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackChannelId: channelId,
+      targetAccountId: value.owner.accountId,
+      targetWorkspaceId: value.owner.workspaceId,
+      decidedBySubjectId: value.owner.subjectId,
+      decidedBySlackUserId: value.ownerSlackUserId,
+      source: "admin",
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFIX_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000300.0001",
+            text: "in Platform: audit the terraform",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [overridden] = await interactions(routed.workspaceId);
+    expect(overridden?.session_id).toBeTruthy();
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions
+      where workspace_id = ${routed.workspaceId} and id = ${overridden!.session_id}`;
+    // The addressing is stripped; the request is not.
+    expect(session!.initial_message).toContain("audit the terraform");
+    expect(session!.initial_message).not.toContain("in Platform:");
+
+    // The channel's own answer is untouched, so the next plain message goes back.
+    const stored = await getSlackChannelRoute(client.db, home, {
+      connectionId: value.connectionId,
+      slackChannelId: channelId,
+    });
+    expect(stored?.targetWorkspaceId).toBe(value.owner.workspaceId);
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFIX_NEXT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000300.0002",
+            text: "and now the plain one",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
+  });
+
+  test("a prefix naming an unreachable workspace creates no session anywhere", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFIX_DENIED_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_DENIED_PREFIX",
+            ts: "1700000400.0001",
+            text: "in Finance: do the thing",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await interactions(routed.workspaceId)).toHaveLength(0);
+    const [sessions] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from sessions
+      where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
+    expect(sessions!.n).toBe(0);
+    // The refusal names the workspace that was asked for and lands in the
+    // person's own bot DM, not the channel.
+    const refusal = value.slack.posts.find((post) => post.text.includes("Finance"));
+    expect(refusal?.text).toContain("No session was created.");
+  });
+
+  test("a routed workspace the person cannot reach never falls back to another one", async () => {
+    if (!available) return;
+    // The headline rule: OpenGeni does not quietly serve this from a workspace
+    // the person does happen to belong to.
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+      linkOther: true,
+    });
+    const routed = value.routed!;
+    const channelId = "C_NO_ACCESS";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    // The other linked human is a member of the installation's workspace only.
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NO_ACCESS_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.otherSlackUserId,
+            channel: channelId,
+            ts: "1700000600.0001",
+            text: "please do this",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(await interactions(routed.workspaceId)).toHaveLength(0);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [sessions] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from sessions
+      where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
+    expect(sessions!.n).toBe(0);
+    const refusal = value.slack.posts.find((post) => post.text.includes("No session was created."));
+    expect(refusal?.text).toContain("do not have access");
+  });
+
+  test("one workspace is not a choice, so an ordinary install never notices the flag", async () => {
+    if (!available) return;
+    // Same event, flag on, but the subject can only use the installation's
+    // workspace. This is what keeps the flag quiet for existing installs.
+    const value = await fixture({ slackWorkspaceRouting: true });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_SOLE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_SOLE",
+            ts: "1700000500.0001",
+            text: "just do it",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    expect(route?.session_id).toBeTruthy();
   });
 
   test("App Home never publishes task data without Slack's current view hash", async () => {

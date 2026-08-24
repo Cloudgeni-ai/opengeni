@@ -14,6 +14,7 @@ import {
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
+  SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
 } from "../src/index";
@@ -1225,6 +1226,9 @@ describe("deployment contract", () => {
     expect(CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
     ]);
+    expect(SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED",
+    ]);
     expect(EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV).toEqual([
       "OPENGENI_BROWSERBASE_API_KEY",
       "OPENGENI_KERNEL_API_KEY",
@@ -1384,11 +1388,14 @@ describe("deployment contract", () => {
     };
     const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
       OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true",
+      OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "true",
     });
     expect(configured.runtimeEnv).toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=true");
+    expect(configured.runtimeEnv).toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=true");
     expect(configured.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
   });
 
