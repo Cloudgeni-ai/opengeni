@@ -1,12 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import {
-  createMemoryHistory,
-  createRootRoute,
-  createRoute,
-  createRouter,
-  RouterContextProvider,
-} from "@tanstack/react-router";
+import * as RouterPackage from "@tanstack/react-router";
 import { act, type ReactNode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -73,6 +67,14 @@ mock.module("@/components/ui/confirm-dialog", () => ({
     open ? <div data-testid="confirm-dialog">{title}</div> : null,
 }));
 
+// The manager view links to organization workspace access, and a real
+// `<Link>` needs a router this roster-focused render deliberately does not
+// mount.
+mock.module("@tanstack/react-router", () => ({
+  ...RouterPackage,
+  Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
+}));
+
 const { MembersSection } = await import("./workspace-settings");
 
 beforeAll(() => {
@@ -94,30 +96,6 @@ beforeEach(() => {
   listSlackUserLinkAccessRequests.mockImplementation(async () => [slackAccessRequest]);
 });
 
-// `MembersSection` points managers at the organization workspace-access surface
-// with a TanStack `<Link>`, and `useLinkProps` throws outside router context.
-// This stub route exists only so that call resolves; nothing here asserts the
-// rendered href, and the path is deliberately flat with no `validateSearch`, so
-// it is not a faithful copy of the real route tree. Link-target correctness is
-// enforced by the typechecker instead: a `to` that is not in the registered
-// route tree fails `bun run typecheck` with TS2820. `RouterContextProvider` is
-// the low-level provider that renders its own children, so these tests keep
-// driving `MembersSection` directly by props instead of through route matches.
-const testRootRoute = createRootRoute({});
-const testOrganizationRoute = createRoute({
-  getParentRoute: () => testRootRoute,
-  path: "/workspaces/$workspaceId/organization",
-  component: () => null,
-});
-const testRouter = createRouter({
-  routeTree: testRootRoute.addChildren([testOrganizationRoute]),
-  history: createMemoryHistory({ initialEntries: ["/"] }),
-});
-
-function WithRouter({ children }: { children: ReactNode }) {
-  return <RouterContextProvider router={testRouter}>{children}</RouterContextProvider>;
-}
-
 function deferred<Value>() {
   let resolve!: (value: Value) => void;
   let reject!: (reason: unknown) => void;
@@ -135,11 +113,7 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
 
   async function render(nextWorkspaceId: string, nextCanManage: boolean) {
     await act(async () => {
-      root.render(
-        <WithRouter>
-          <MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />
-        </WithRouter>,
-      );
+      root.render(<MembersSection workspaceId={nextWorkspaceId} canManage={nextCanManage} />);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
@@ -169,11 +143,7 @@ function MembersBoundaryProbe({
     onBoundaryLayout();
   }, [onBoundaryLayout, workspaceId]);
 
-  return (
-    <WithRouter>
-      <MembersSection workspaceId={workspaceId} canManage={canManage} />
-    </WithRouter>
-  );
+  return <MembersSection workspaceId={workspaceId} canManage={canManage} />;
 }
 
 describe("workspace members loading", () => {

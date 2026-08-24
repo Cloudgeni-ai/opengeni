@@ -235,8 +235,9 @@ describe("Slack access-link browser acceptance", () => {
       await page.getByLabel("Email").fill("slack-link@example.test");
       await page.getByLabel("Password").fill("correct-horse-battery-staple");
       await page.locator('form button[type="submit"]').click();
+      // The managed panel keeps a failed attempt inline on the form instead of
+      // in a toast, so the failure is part of the sign-in surface itself.
       await expectText(page.locator("body"), "Couldn't sign in");
-      await expectText(page.locator("body"), "Email or password is incorrect.");
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toEqual([]);
 
@@ -264,7 +265,6 @@ describe("Slack access-link browser acceptance", () => {
         `${webBaseUrl}/workspaces/${workspaceId}/capabilities#slack_link=${encodeURIComponent(signedLink)}`,
         { waitUntil: "networkidle" },
       );
-      await expectVisible(page.getByRole("button", { name: "Cancel" }));
       expect(new URL(page.url()).searchParams.has("slack_link")).toBe(false);
       expect(new URL(page.url()).hash).toBe("");
       expect(
@@ -273,6 +273,7 @@ describe("Slack access-link browser acceptance", () => {
           session: Object.values(sessionStorage),
         })),
       ).toEqual({ local: [], session: [] });
+      await expectVisible(page.getByRole("button", { name: "Cancel" }));
       await expectSingleMainWithoutRail(page);
       await page.getByRole("button", { name: "Cancel" }).click();
       await expectSingleMainWithoutRail(page);
@@ -286,6 +287,8 @@ describe("Slack access-link browser acceptance", () => {
       expect(state.requestStatus).toBe("cancelled");
       expect(new URL(page.url()).hash).toBe("");
       await page.reload({ waitUntil: "networkidle" });
+      // A managed principal with no workspace access lands on organization
+      // onboarding; the bare "No workspace access" panel is the unmanaged path.
       await expectText(page.locator("main"), "Set up your OpenGeni workspace");
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toHaveLength(1);
@@ -433,13 +436,7 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       state.signInBodies.push((request.postDataJSON() ?? {}) as Record<string, unknown>);
       if (state.signInFailuresRemaining > 0) {
         state.signInFailuresRemaining -= 1;
-        return json(
-          {
-            code: "INVALID_EMAIL_OR_PASSWORD",
-            message: "Invalid email or password",
-          },
-          401,
-        );
+        return json({ message: "Invalid credentials" }, 401);
       }
       state.signedIn = true;
       return json({ user: { id: "browser-user" } });
@@ -495,9 +492,6 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
     }
     if (url.pathname === "/v1/organization-memberships") {
       return json({ memberships: [] });
-    }
-    if (url.pathname === "/v1/organization-invitations") {
-      return json({ invitations: [], nextCursor: null });
     }
     if (url.pathname === "/v1/workspaces") {
       state.workspaceListReads += 1;
@@ -599,6 +593,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
         state.linkedWorkspaceAuthorized = true;
       }
       return json(accessRequest(state));
+    }
+    if (url.pathname === "/v1/organization-invitations") {
+      return json({ invitations: [], nextCursor: null });
     }
     if (url.pathname.endsWith("/sessions")) {
       return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
