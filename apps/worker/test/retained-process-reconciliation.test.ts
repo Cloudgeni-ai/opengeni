@@ -511,7 +511,7 @@ describe("retained-process terminal-owner reconciliation", () => {
     });
     await withWorkspaceSessionActivityRls(
       db,
-      { accountId: ids.accountId, workspaceId: ids.workspaceId },
+      ids.workspaceId,
       async (scopedDb) =>
         await mutateSessionControlInTransaction(scopedDb, {
           accountId: ids.accountId,
