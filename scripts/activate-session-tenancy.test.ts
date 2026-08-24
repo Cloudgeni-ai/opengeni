@@ -54,13 +54,17 @@ const cleanParity = {
 const cleanBackfillEvidence = {
   schemaVersion: 1,
   ready: true,
-  receiptIds: Array.from({ length: 5 }, () => crypto.randomUUID()),
+  receiptIds: Array.from({ length: 6 }, () => crypto.randomUUID()),
   blockers: [],
   families: Object.fromEntries(
-    ["organization_memberships", "sessions", "variable_sets", "rigs", "machines"].map((family) => [
-      family,
-      { status: "completed", blocker: null },
-    ]),
+    [
+      "organization_memberships",
+      "sessions",
+      "variable_sets",
+      "rigs",
+      "machines",
+      "connections",
+    ].map((family) => [family, { status: "completed", blocker: null }]),
   ),
 };
 
@@ -123,7 +127,7 @@ describe("session tenancy activation evidence", () => {
     ).toThrow(/missing-gate:membership_personal_workspace_pointer/);
   });
 
-  test("requires all five settled backfill receipt families", () => {
+  test("requires all six settled backfill receipt families", () => {
     expect(() => assertSessionTenancyBackfillEvidence(cleanBackfillEvidence)).not.toThrow();
     expect(() =>
       assertSessionTenancyBackfillEvidence({

@@ -333,6 +333,14 @@ function safePosture(): RuntimeDatabasePosture {
         update: false,
         delete: false,
       },
+      {
+        name: "connection_tenancy_backfill_capabilities",
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
     ],
     targetRoutines: [
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
@@ -376,6 +384,13 @@ function safePosture(): RuntimeDatabasePosture {
       },
       {
         name: "personal_document_authority_capability_active(text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "connection_tenancy_backfill_capability_active(uuid)",
         owner: "opengeni_migrator",
         execute: true,
         publicExecute: false,
@@ -613,6 +628,35 @@ describe("runtime database posture evaluator", () => {
         expect.stringContaining("is not SECURITY DEFINER"),
         expect.stringContaining("runtime role lacks personal-document capability predicate"),
         expect.stringContaining("PUBLIC has forbidden personal-document capability predicate"),
+        expect.stringContaining("forbidden direct privileges on private table"),
+      ]),
+    );
+  });
+
+  test("enforces the connection-tenancy backfill capability boundary", () => {
+    const posture = safePosture();
+    const capabilityTable = posture.privateTables.find(
+      (table) => table.name === "connection_tenancy_backfill_capabilities",
+    )!;
+    const capabilityRoutine = posture.privateRoutines.find(
+      (routine) => routine.name === "connection_tenancy_backfill_capability_active(uuid)",
+    )!;
+    capabilityTable.update = true;
+    capabilityRoutine.owner = "another_owner";
+    capabilityRoutine.execute = false;
+    capabilityRoutine.publicExecute = true;
+    capabilityRoutine.securityDefiner = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("does not match table owner"),
+        expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining(
+          "runtime role lacks connection-tenancy backfill capability predicate",
+        ),
+        expect.stringContaining(
+          "PUBLIC has forbidden connection-tenancy backfill capability predicate",
+        ),
         expect.stringContaining("forbidden direct privileges on private table"),
       ]),
     );

@@ -24,7 +24,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
       .join(",")}}`;
   }
@@ -79,6 +79,7 @@ const REQUIRED_BACKFILL_RECEIPT_FAMILIES = [
   "variable_sets",
   "rigs",
   "machines",
+  "connections",
 ] as const;
 
 export function assertSessionTenancyBackfillEvidence(evidence: unknown): void {

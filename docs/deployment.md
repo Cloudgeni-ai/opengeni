@@ -462,10 +462,12 @@ activation:
   first two, applying 0303 is inert; the drained operator command performs the
   forward-only per-organization activation.
 
-Both declare `-- deployment-mode: maintenance`, both reject a live application
-with SQLSTATE `55000` from the same `pg_stat_activity` drain guard before taking
-`ACCESS EXCLUSIVE` locks that include `organization_user_resource_grants`, and
-neither has a down-migration. For each subsequent activation:
+The first two migration files declare `-- deployment-mode: maintenance`; 0303
+and 0336 install their contracts as rolling migrations but the separate
+activation command is still a drained, forward-only cutover. Each activation
+rejects a live application with SQLSTATE `55000` before taking `ACCESS
+EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
+For each subsequent activation:
 
 1. bind and verify the exact production subscription, cluster context,
    namespace, release, database, and image digests;
@@ -483,7 +485,7 @@ neither has a down-migration. For each subsequent activation:
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require 0303, 0332, plus every prerequisite
+6. run the new digest's migration Job and require 0303, 0336, plus every prerequisite
    migration to appear in `schema_migrations`;
 7. with the application still drained, run:
 
@@ -502,15 +504,21 @@ neither has a down-migration. For each subsequent activation:
    gate on total ownerless sessions or all-time immutable legacy writer rows;
    migration 0298 supplies their truthful attributable and observation-window
    refinements. Migration 0336 also requires the newest
-   `organization_memberships`, `sessions`, `variable_sets`, `rigs`, and
-   `machines` receipts to be completed, verifies full-population counts for the
-   resource/session classifiers, requires zero unresolved resource rows, and
-   binds those five exact receipt ids into every new activation row. It durably
-   records the exact evidence, checks the supplied exact
-   application-role inventory twice around write-blocking locks, and is
-   idempotent only for the same evidence digests.
+   `organization_memberships`, `sessions`, `variable_sets`, `rigs`, `machines`,
+   and `connections` receipts to be completed, verifies full-population counts
+   for the resource/session/connection classifiers, requires zero unresolved
+   resource or connection rows, and binds those six exact receipt ids into every
+   new activation row. It then recomputes inventory, parity, and receipt evidence
+   under the complete source-table lock, checks the supplied exact application-
+   role inventory twice around that fence, and is idempotent only for the same
+   evidence digests. A stale or fabricated digest rejects with SQLSTATE `40001`.
    A live application session rejects activation with SQLSTATE `55000`; changed
-   evidence against an existing receipt is a conflict.
+   evidence against an existing receipt is a conflict. Immediately before the
+   final recompute and receipt write, the database also takes the owner-only
+   `session-tenancy-canonical-boundary:v1` transaction fence. This happens only
+   after all source-table locks; do not move the boundary earlier, because future
+   greenfield provisioning writes its complete graph before taking the same
+   fence and the reversed order would deadlock.
 8. start only that same digest's API and workers, and require the startup and
    readiness posture checks to pass before reopening admission.
 

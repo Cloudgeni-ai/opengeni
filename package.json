@@ -37,6 +37,7 @@
     "db:check-tenancy-parity": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/check-tenancy-parity.ts",
     "db:backfill-session-ownership": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-session-ownership.ts",
     "db:backfill-organization-memberships": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-organization-memberships.ts",
+    "db:backfill-connection-authority": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-connection-authority.ts",
     "db:verify-resource-classification": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/verify-resource-classification.ts",
     "db:sweep-organization-retention": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/sweep-organization-retention.ts",
     "db:generate": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run generate",

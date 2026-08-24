@@ -567,7 +567,7 @@ export const sessionTenancyActivations = pgTable(
     ),
     backfillReceiptsValid: check(
       "session_tenancy_activation_backfill_receipts_check",
-      sql`cardinality(${table.backfillReceiptIds}) in (0, 5)`,
+      sql`cardinality(${table.backfillReceiptIds}) in (0, 5, 6)`,
     ),
   }),
 );

@@ -426,6 +426,7 @@ export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./managed-human-provisioning";
 export * from "./organization-membership-backfill";
+export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./workspace-membership-permissions";
@@ -18693,11 +18694,9 @@ export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
  */
 export const TENANCY_PARITY_LANES: readonly TenancyParityLaneDefinition[] = [
   {
-    // NOT bounded today: 0256's guard_connection_authority_write still actively
-    // mints `legacy_user` for any NEW connection whose subject has no active
-    // organization membership, and no migration upgrades an existing
-    // `legacy_user` row to `user`. It becomes drainable only once the
-    // membership backfill lands and stops the mint.
+    // Migration 0336 bounds this lane with a deterministic subject + active
+    // same-organization membership repair. Activation then fences new minting
+    // and hides any unresolved legacy row from runtime reads.
     id: "connectionsLegacyUser",
     title:
       "Connections on the legacy_user authority lane (drainable after the membership backfill)",
@@ -18793,9 +18792,8 @@ export const TENANCY_PARITY_UNVERIFIABLE: readonly TenancyParityUnverifiable[] =
       "subject-created sessions whose creator holds an active organization membership " +
       "AND stated authority over that workspace: a workspace_memberships row, or the " +
       "membership's own personal_workspace_id pointer. Only that attributable subset " +
-      "is drainable; the 'sessionsAttributableButUnattributed' lane still measures " +
-      "the narrower workspace-membership half, so it under-reports pre-0302 " +
-      "personal-workspace rows that 0297's backfill owns.",
+      "is drainable; migration 0336 measures both stated-authority forms in the " +
+      "'sessionsAttributableButUnattributed' lane.",
   },
 ];
 

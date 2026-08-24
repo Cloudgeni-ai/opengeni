@@ -1219,6 +1219,34 @@ Migration 0256 remains the one sibling family with a genuine discriminator:
 `connections.subject_id` plus an active `organization_memberships` row. None of
 these three tables has a `subject_id`, so the same shape does not transfer.
 
+#### Connection authority convergence (migration 0336)
+
+Connections use that genuine discriminator through a separate bounded command:
+
+```bash
+bun run db:backfill-connection-authority --organization-id <uuid>
+bun run db:backfill-connection-authority --organization-id <uuid> --apply \
+  --limit 500 --max-batches 200 --run-key <fresh-key>
+```
+
+Dry-run is the default. Apply batches claim `legacy_user` rows with
+`FOR UPDATE SKIP LOCKED` and upgrade only a connection whose exact
+`subject_id` has one active membership in the same organization. The command
+never treats origin workspace, current workspace access, creator metadata, or
+provider identity as ownership. Rows without that proof stay byte-identical and
+the final full-population classifier records them unresolved. A fresh run key
+on a complete converged walk produces the sixth activation receipt,
+`connections`; a partial walk must resume without a run key and classify under
+a fresh key only after convergence.
+
+Migration 0336 also closes both ways this compatibility population could reopen.
+After an organization activates, `bind_connection_authority` refuses to mint a
+new personal connection without a live membership, surviving `legacy_user`
+rows are invisible to runtime reads, and the worker refuses a pre-snapshot
+workspace reference without an exact connection id before resolving any
+credential. Pre-activation behavior remains unchanged, so rollback is still
+permitted until the activation receipt is written.
+
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>
 [--run-key <key>]` proves per row that each Variable Set, Rig, and Connected
@@ -1300,9 +1328,10 @@ repairable, and `--apply` repairs only those:
   `organization_memberships_personal_workspace_idx` makes that a 1:1 anchor)
   and the session's `created_by_subject_id` is that same membership's subject.
   Slice B provisions a personal workspace *without* a `workspace_memberships`
-  row, so 0225's second branch cannot reach these rows even today - the
-  population still grows until that derivation is extended, which is a phase F
-  decision and not part of this backfill.
+  row. Migration 0302 extended live derivation to the membership's exact
+  `personal_workspace_id`, so this is now a finite historical population;
+  migration 0336 makes parity count that pointer form as well as ordinary
+  workspace membership.
 - **Parent-inheritance closure.** An ownerless session whose same-workspace
   parent now has an owner pair: branch 1 of the live trigger replayed against
   durable parent data, which is also what makes the driver resumable.
@@ -1773,10 +1802,11 @@ is run:
    and any non-user-scoped total is derivable from it.
    Migration 0336 additionally requires the newest receipt in each executable
    phase-D family to be settled: `organization_memberships`, `sessions`,
-   `variable_sets`, `rigs`, and `machines`. Produce them with one complete
-   membership walk, one resource-classification run, and a final full session
-   `--classify`, each with a fresh `--run-key`. The three resource receipts must
-   have zero unresolved rows and every resource/session receipt must cover its
+   `variable_sets`, `rigs`, `machines`, and `connections`. Produce them with one
+   complete membership walk, one resource-classification run, a converged
+   connection-authority run, and a final full session `--classify`, each with a
+   fresh `--run-key`. The four resource/connection receipts must have zero
+   unresolved rows and every resource/session/connection receipt must cover its
    current full-family total. Membership and session unresolved rows are not
    blindly treated as corruption: the inventory/parity gates above decide
    whether their current residual populations are legitimate. The newest
@@ -1828,9 +1858,26 @@ Once any receipt exists, API/worker startup and readiness also require true.
 That startup interlock is forward-only posture, not a rollback mechanism.
 Migration 0336 preserves the activation command and database function
 signatures while adding the settled-backfill proof above. New activation rows
-bind the five exact receipt ids. Older activation rows retain an explicit empty
-receipt-id array and remain replayable only for their identical pre-0332
-inventory/parity digests; the migration never invents historical evidence.
+bind the six exact receipt ids. Older activation rows retain their existing
+zero- or five-receipt evidence and remain replayable only for their identical
+stored inventory/parity digests; the migration never invents historical
+evidence. The database recomputes inventory, parity, and receipt evidence while
+holding the complete source-table fence and rejects a stale or fabricated
+supplied digest with SQLSTATE `40001`.
+
+Migration 0336 also freezes the deployment-wide advisory boundary
+`session-tenancy-canonical-boundary:v1` behind the owner-only
+`lock_session_tenancy_activation_boundary()` seam. Operator activation keeps
+the organization advisory prefix, acquires every source-table
+`ACCESS EXCLUSIVE` lock, and only then takes this boundary immediately before
+its final evidence recompute and receipt write. A future greenfield provisioning
+transaction must do the inverse work order: write its complete organization
+graph first, take this same boundary last, and then inspect the already-committed
+version-1 witness. This ordering means a setup transaction either commits
+unactivated before the first boundary or waits and observes it afterward; taking
+the global boundary before the operator's source locks would introduce a
+RowExclusive/global-lock deadlock and is forbidden. Migration 0336 does not
+itself auto-activate new organizations.
 
 ### What an operator must not do
 

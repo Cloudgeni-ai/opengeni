@@ -63,6 +63,7 @@ function resolverFor(input: {
     attemptId: "attempt-1",
     turn,
     observability: input.obs,
+    isSessionTenancyProductActivated: async () => false,
     ...(input.authorize
       ? { authorizeAcceptedUse: async (_db, authority) => input.authorize!(authority) }
       : {}),
@@ -176,6 +177,7 @@ describe("tenancy compatibility lane telemetry", () => {
       rootSessionId: "session-root",
       attemptId: "attempt-1",
       turn,
+      isSessionTenancyProductActivated: async () => false,
       connectionCredentials: {
         mcpCredentials: async (hostRequest) => ({
           status: "ok",

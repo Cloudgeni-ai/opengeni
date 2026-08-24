@@ -189,7 +189,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0336_tenancy_backfill_activation_evidence.sql",
       ),
     ).toMatchObject({
-      sha256: "9d67722439aab9044520aef1e4a49e601a65f2a39762fe0735168fe8720e5e61",
+      sha256: "4ddca9b2b18ff10c3d7f3500712a9853f034848a015d5fe18b028672b145cc24",
       deploymentMode: "rolling",
     });
     expect(
@@ -590,8 +590,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0326_interaction_operation_error_codes.sql")) {
         return includesActivation
-          ? "c4ec5d41697c791e8083ae6285c7dd46b33d843b1ddf4024925d05fdceb5115c"
-          : "92906a57900983a7be80dd460e3fcc16e9f40da1441ae6be190fc088c168c1e9";
+          ? "d4944e04ff727431df22ed788f2d6b8d82fdb5c830d22fde370b162c93856c7c"
+          : "7b11790d262f6dbdb481dada967ae9c05acce84eca80128c2eb47fecb9943b3d";
       }
       if (migrations.has("0321_slack_bot_environment_display_name.sql")) {
         return includesActivation
@@ -1245,7 +1245,9 @@ describe("release schema contract", () => {
         (migrations.has("0309_channel_project_pins.sql") ? 1 : 0) +
         (migrations.has("0310_channel_project_order.sql") ? 1 : 0) +
         (migrations.has("0321_slack_bot_environment_display_name.sql") ? 1 : 0) +
-        (migrations.has("0326_interaction_operation_error_codes.sql") ? 1 : 0),
+        (migrations.has("0326_interaction_operation_error_codes.sql") ? 1 : 0) +
+        (migrations.has("0331_managed_organization_creation.sql") ? 1 : 0) +
+        (migrations.has("0332_organization_shared_workspace_control_plane.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(releaseSchemaContractHash(false) ?? currentMainContractHash);
     const latestCompatibleMigration = [
@@ -1280,171 +1282,177 @@ describe("release schema contract", () => {
       "0217_capability_definition_delete_authority.sql",
     ].find((path) => migrations.has(path));
     expect(contract.latestMigration).toBe(
-      migrations.has("0326_interaction_operation_error_codes.sql")
-        ? "0326_interaction_operation_error_codes.sql"
-        : migrations.has("0321_slack_bot_environment_display_name.sql")
-          ? "0321_slack_bot_environment_display_name.sql"
-          : migrations.has("0310_channel_project_order.sql")
-            ? "0310_channel_project_order.sql"
-            : migrations.has("0309_channel_project_pins.sql")
-              ? "0309_channel_project_pins.sql"
-              : migrations.has("0308_session_archives.sql")
-                ? "0308_session_archives.sql"
-                : migrations.has("0307_session_attention_state.sql")
-                  ? "0307_session_attention_state.sql"
-                  : migrations.has("0303_session_tenancy_product_activation.sql")
-                    ? "0303_session_tenancy_product_activation.sql"
-                    : migrations.has("0302_personal_workspace_session_ownership.sql")
-                      ? "0302_personal_workspace_session_ownership.sql"
-                      : migrations.has("0301_session_snapshot_and_pin_visibility.sql")
-                        ? "0301_session_snapshot_and_pin_visibility.sql"
-                        : migrations.has("0300_tenancy_backfill_ledger.sql")
-                          ? "0300_tenancy_backfill_ledger.sql"
-                          : migrations.has("0299_organization_membership_lock_order.sql")
-                            ? "0299_organization_membership_lock_order.sql"
-                            : migrations.has("0298_organization_tenancy_parity.sql")
-                              ? "0298_organization_tenancy_parity.sql"
-                              : migrations.has("0295_retire_legacy_standing_memory_mode.sql")
-                                ? "0295_retire_legacy_standing_memory_mode.sql"
-                                : migrations.has("0294_preference_activation_authority.sql")
-                                  ? "0294_preference_activation_authority.sql"
-                                  : migrations.has("0293_confirm_time_rule_rebaseline.sql")
-                                    ? "0293_confirm_time_rule_rebaseline.sql"
-                                    : migrations.has("0292_truthful_tenancy_inventory_counters.sql")
-                                      ? "0292_truthful_tenancy_inventory_counters.sql"
-                                      : migrations.has(
-                                            "0291_resource_authority_classification_assertion.sql",
-                                          )
-                                        ? "0291_resource_authority_classification_assertion.sql"
+      migrations.has("0332_organization_shared_workspace_control_plane.sql")
+        ? "0332_organization_shared_workspace_control_plane.sql"
+        : migrations.has("0331_managed_organization_creation.sql")
+          ? "0331_managed_organization_creation.sql"
+          : migrations.has("0326_interaction_operation_error_codes.sql")
+            ? "0326_interaction_operation_error_codes.sql"
+            : migrations.has("0321_slack_bot_environment_display_name.sql")
+              ? "0321_slack_bot_environment_display_name.sql"
+              : migrations.has("0310_channel_project_order.sql")
+                ? "0310_channel_project_order.sql"
+                : migrations.has("0309_channel_project_pins.sql")
+                  ? "0309_channel_project_pins.sql"
+                  : migrations.has("0308_session_archives.sql")
+                    ? "0308_session_archives.sql"
+                    : migrations.has("0307_session_attention_state.sql")
+                      ? "0307_session_attention_state.sql"
+                      : migrations.has("0303_session_tenancy_product_activation.sql")
+                        ? "0303_session_tenancy_product_activation.sql"
+                        : migrations.has("0302_personal_workspace_session_ownership.sql")
+                          ? "0302_personal_workspace_session_ownership.sql"
+                          : migrations.has("0301_session_snapshot_and_pin_visibility.sql")
+                            ? "0301_session_snapshot_and_pin_visibility.sql"
+                            : migrations.has("0300_tenancy_backfill_ledger.sql")
+                              ? "0300_tenancy_backfill_ledger.sql"
+                              : migrations.has("0299_organization_membership_lock_order.sql")
+                                ? "0299_organization_membership_lock_order.sql"
+                                : migrations.has("0298_organization_tenancy_parity.sql")
+                                  ? "0298_organization_tenancy_parity.sql"
+                                  : migrations.has("0295_retire_legacy_standing_memory_mode.sql")
+                                    ? "0295_retire_legacy_standing_memory_mode.sql"
+                                    : migrations.has("0294_preference_activation_authority.sql")
+                                      ? "0294_preference_activation_authority.sql"
+                                      : migrations.has("0293_confirm_time_rule_rebaseline.sql")
+                                        ? "0293_confirm_time_rule_rebaseline.sql"
                                         : migrations.has(
-                                              "0290_organization_membership_backfill.sql",
+                                              "0292_truthful_tenancy_inventory_counters.sql",
                                             )
-                                          ? "0290_organization_membership_backfill.sql"
+                                          ? "0292_truthful_tenancy_inventory_counters.sql"
                                           : migrations.has(
-                                                "0289_session_composer_policy_authority.sql",
+                                                "0291_resource_authority_classification_assertion.sql",
                                               )
-                                            ? "0289_session_composer_policy_authority.sql"
+                                            ? "0291_resource_authority_classification_assertion.sql"
                                             : migrations.has(
-                                                  "0288_attached_browser_reenrollment.sql",
+                                                  "0290_organization_membership_backfill.sql",
                                                 )
-                                              ? "0288_attached_browser_reenrollment.sql"
+                                              ? "0290_organization_membership_backfill.sql"
                                               : migrations.has(
-                                                    "0287_open_suffix_pending_tool_calls.sql",
+                                                    "0289_session_composer_policy_authority.sql",
                                                   )
-                                                ? "0287_open_suffix_pending_tool_calls.sql"
+                                                ? "0289_session_composer_policy_authority.sql"
                                                 : migrations.has(
-                                                      "0286_widen_task_note_expiry_ceiling.sql",
+                                                      "0288_attached_browser_reenrollment.sql",
                                                     )
-                                                  ? "0286_widen_task_note_expiry_ceiling.sql"
+                                                  ? "0288_attached_browser_reenrollment.sql"
                                                   : migrations.has(
-                                                        "0285_organization_tenancy_inventory.sql",
+                                                        "0287_open_suffix_pending_tool_calls.sql",
                                                       )
-                                                    ? "0285_organization_tenancy_inventory.sql"
+                                                    ? "0287_open_suffix_pending_tool_calls.sql"
                                                     : migrations.has(
-                                                          "0284_truthful_human_confirmed_review_reason.sql",
+                                                          "0286_widen_task_note_expiry_ceiling.sql",
                                                         )
-                                                      ? "0284_truthful_human_confirmed_review_reason.sql"
+                                                      ? "0286_widen_task_note_expiry_ceiling.sql"
                                                       : migrations.has(
-                                                            "0283_editable_spreadsheet_authored_state.sql",
+                                                            "0285_organization_tenancy_inventory.sql",
                                                           )
-                                                        ? "0283_editable_spreadsheet_authored_state.sql"
+                                                        ? "0285_organization_tenancy_inventory.sql"
                                                         : migrations.has(
-                                                              "0282_variable_set_session_attach_attribution.sql",
+                                                              "0284_truthful_human_confirmed_review_reason.sql",
                                                             )
-                                                          ? "0282_variable_set_session_attach_attribution.sql"
+                                                          ? "0284_truthful_human_confirmed_review_reason.sql"
                                                           : migrations.has(
-                                                                "0281_viewer_holder_authority_claims.sql",
+                                                                "0283_editable_spreadsheet_authored_state.sql",
                                                               )
-                                                            ? "0281_viewer_holder_authority_claims.sql"
+                                                            ? "0283_editable_spreadsheet_authored_state.sql"
                                                             : migrations.has(
-                                                                  "0280_connection_and_variable_set_audit_attribution.sql",
+                                                                  "0282_variable_set_session_attach_attribution.sql",
                                                                 )
-                                                              ? "0280_connection_and_variable_set_audit_attribution.sql"
+                                                              ? "0282_variable_set_session_attach_attribution.sql"
                                                               : migrations.has(
-                                                                    "0279_workspace_connection_use_lane.sql",
+                                                                    "0281_viewer_holder_authority_claims.sql",
                                                                   )
-                                                                ? "0279_workspace_connection_use_lane.sql"
+                                                                ? "0281_viewer_holder_authority_claims.sql"
                                                                 : migrations.has(
-                                                                      "0278_workspace_membership_removal_fencing.sql",
+                                                                      "0280_connection_and_variable_set_audit_attribution.sql",
                                                                     )
-                                                                  ? "0278_workspace_membership_removal_fencing.sql"
+                                                                  ? "0280_connection_and_variable_set_audit_attribution.sql"
                                                                   : migrations.has(
-                                                                        "0277_workspace_writer_authority_attribution.sql",
+                                                                        "0279_workspace_connection_use_lane.sql",
                                                                       )
-                                                                    ? "0277_workspace_writer_authority_attribution.sql"
+                                                                    ? "0279_workspace_connection_use_lane.sql"
                                                                     : migrations.has(
-                                                                          "0276_onboarding_proposal_initiating_human_guc.sql",
+                                                                          "0278_workspace_membership_removal_fencing.sql",
                                                                         )
-                                                                      ? "0276_onboarding_proposal_initiating_human_guc.sql"
+                                                                      ? "0278_workspace_membership_removal_fencing.sql"
                                                                       : migrations.has(
-                                                                            "0275_scheduled_connection_authority.sql",
+                                                                            "0277_workspace_writer_authority_attribution.sql",
                                                                           )
-                                                                        ? "0275_scheduled_connection_authority.sql"
+                                                                        ? "0277_workspace_writer_authority_attribution.sql"
                                                                         : migrations.has(
-                                                                              "0274_human_confirmed_knowledge_review.sql",
+                                                                              "0276_onboarding_proposal_initiating_human_guc.sql",
                                                                             )
-                                                                          ? "0274_human_confirmed_knowledge_review.sql"
+                                                                          ? "0276_onboarding_proposal_initiating_human_guc.sql"
                                                                           : migrations.has(
-                                                                                "0272_human_confirmed_learning_activation.sql",
+                                                                                "0275_scheduled_connection_authority.sql",
                                                                               )
-                                                                            ? "0272_human_confirmed_learning_activation.sql"
+                                                                            ? "0275_scheduled_connection_authority.sql"
                                                                             : migrations.has(
-                                                                                  "0271_company_brain_retrieval_only_default.sql",
+                                                                                  "0274_human_confirmed_knowledge_review.sql",
                                                                                 )
-                                                                              ? "0271_company_brain_retrieval_only_default.sql"
+                                                                              ? "0274_human_confirmed_knowledge_review.sql"
                                                                               : migrations.has(
-                                                                                    "0270_governed_learning_history_inspection.sql",
+                                                                                    "0272_human_confirmed_learning_activation.sql",
                                                                                   )
-                                                                                ? "0270_governed_learning_history_inspection.sql"
+                                                                                ? "0272_human_confirmed_learning_activation.sql"
                                                                                 : migrations.has(
-                                                                                      "0269_governed_learning_activation_controller.sql",
+                                                                                      "0271_company_brain_retrieval_only_default.sql",
                                                                                     )
-                                                                                  ? "0269_governed_learning_activation_controller.sql"
+                                                                                  ? "0271_company_brain_retrieval_only_default.sql"
                                                                                   : migrations.has(
-                                                                                        "0268_governed_learning_decision_receipts.sql",
+                                                                                        "0270_governed_learning_history_inspection.sql",
                                                                                       )
-                                                                                    ? "0268_governed_learning_decision_receipts.sql"
+                                                                                    ? "0270_governed_learning_history_inspection.sql"
                                                                                     : migrations.has(
-                                                                                          "0266_company_brain_context_receipt_inspection.sql",
+                                                                                          "0269_governed_learning_activation_controller.sql",
                                                                                         )
-                                                                                      ? "0266_company_brain_context_receipt_inspection.sql"
+                                                                                      ? "0269_governed_learning_activation_controller.sql"
                                                                                       : migrations.has(
-                                                                                            "0261_preference_knowledge_proposal_actor_binding.sql",
+                                                                                            "0268_governed_learning_decision_receipts.sql",
                                                                                           )
-                                                                                        ? "0261_preference_knowledge_proposal_actor_binding.sql"
+                                                                                        ? "0268_governed_learning_decision_receipts.sql"
                                                                                         : migrations.has(
-                                                                                              "0260_task_note_knowledge_promotion.sql",
+                                                                                              "0266_company_brain_context_receipt_inspection.sql",
                                                                                             )
-                                                                                          ? "0260_task_note_knowledge_promotion.sql"
+                                                                                          ? "0266_company_brain_context_receipt_inspection.sql"
                                                                                           : migrations.has(
-                                                                                                "0259_company_brain_context_selection_receipts.sql",
+                                                                                                "0261_preference_knowledge_proposal_actor_binding.sql",
                                                                                               )
-                                                                                            ? "0259_company_brain_context_selection_receipts.sql"
+                                                                                            ? "0261_preference_knowledge_proposal_actor_binding.sql"
                                                                                             : migrations.has(
-                                                                                                  "0258_three_scope_document_knowledge_authority.sql",
+                                                                                                  "0260_task_note_knowledge_promotion.sql",
                                                                                                 )
-                                                                                              ? "0258_three_scope_document_knowledge_authority.sql"
+                                                                                              ? "0260_task_note_knowledge_promotion.sql"
                                                                                               : migrations.has(
-                                                                                                    "0257_goal_revision_decisions_and_root_constraints.sql",
+                                                                                                    "0259_company_brain_context_selection_receipts.sql",
                                                                                                   )
-                                                                                                ? "0257_goal_revision_decisions_and_root_constraints.sql"
+                                                                                                ? "0259_company_brain_context_selection_receipts.sql"
                                                                                                 : migrations.has(
-                                                                                                      "0255_company_brain_governed_write_proposals.sql",
+                                                                                                      "0258_three_scope_document_knowledge_authority.sql",
                                                                                                     )
-                                                                                                  ? "0255_company_brain_governed_write_proposals.sql"
+                                                                                                  ? "0258_three_scope_document_knowledge_authority.sql"
                                                                                                   : migrations.has(
-                                                                                                        "0248_terraform_stacks_component_resolution_fence.sql",
+                                                                                                        "0257_goal_revision_decisions_and_root_constraints.sql",
                                                                                                       )
-                                                                                                    ? "0248_terraform_stacks_component_resolution_fence.sql"
+                                                                                                    ? "0257_goal_revision_decisions_and_root_constraints.sql"
                                                                                                     : migrations.has(
-                                                                                                          "0247_terraform_stacks_provenance_repair.sql",
+                                                                                                          "0255_company_brain_governed_write_proposals.sql",
                                                                                                         )
-                                                                                                      ? "0247_terraform_stacks_provenance_repair.sql"
+                                                                                                      ? "0255_company_brain_governed_write_proposals.sql"
                                                                                                       : migrations.has(
-                                                                                                            "0263_organization_membership_lifecycle.sql",
+                                                                                                            "0248_terraform_stacks_component_resolution_fence.sql",
                                                                                                           )
-                                                                                                        ? "0263_organization_membership_lifecycle.sql"
-                                                                                                        : latestCompatibleMigration,
+                                                                                                        ? "0248_terraform_stacks_component_resolution_fence.sql"
+                                                                                                        : migrations.has(
+                                                                                                              "0247_terraform_stacks_provenance_repair.sql",
+                                                                                                            )
+                                                                                                          ? "0247_terraform_stacks_provenance_repair.sql"
+                                                                                                          : migrations.has(
+                                                                                                                "0263_organization_membership_lifecycle.sql",
+                                                                                                              )
+                                                                                                            ? "0263_organization_membership_lifecycle.sql"
+                                                                                                            : latestCompatibleMigration,
     );
     expect(migrations.get("0289_session_composer_policy_authority.sql")).toMatchObject({
       sha256: "478e7ba49b6940bdd849223a0965b7dcc20a0d4428f0fc85078961dbd3984285",
