@@ -90,15 +90,16 @@ search path; the app role retains zero direct table DML. The Connection-specific
 REST wrappers converge on this lifecycle, including permission-independent
 revocation after baseline route-workspace access is proved.
 Standalone `once` and custom expiry remain outside this management surface.
-Migration 0306 adds the only direct-session `once` path: create/Send/Steer
-acceptance derives the fixed personal Variable Set/Rig closure and issues it in
+Migration 0306 adds the only direct-session `once` path; maintenance migration
+0333 extends it to the selected personal Connected Machine. Create/Send/Steer
+acceptance derives the fixed personal Variable Set/Rig/Connected Machine closure and issues it in
 the same transaction as the logical turn. New-session create binds the new
 session epoch; established-session requests provide the expected epoch. The
 receipt and snapshots are immutable, credential-free, and turn-bound, so
 same-turn recovery reuses once while goal/machine successors do not inherit it.
 The managed web console exposes that exact command for a new session and its
 existing-session Send/Steer composer. It discovers only the current managed
-human's active Variable Set/Rig authorities through the bounded owner list,
+human's active Variable Set/Rig/Connected Machine authorities through the bounded owner list,
 joins names from the server-issued personal workspace's metadata-only catalogs,
 and never lets an established session switch its fixed resource ids. Shared
 sessions require the version-1 output warning acknowledgement; authority-epoch,
@@ -106,7 +107,7 @@ principal, organization, workspace, session, or source-access changes clear the
 local decision and require an authoritative reload plus reconfirmation. The UI
 does not project an attachment as accepted before the create/Send/Steer command
 commits. Cross-workspace grant/fork UX, standalone management of `once`,
-Documents/Connected Machines/Connections without an exact runtime adapter, and
+Documents/Connections without an exact runtime adapter, and
 MCP/agent administration remain outside this slice.
 
 For direct and scheduled personal Variable Set/Rig use, personal-workspace and

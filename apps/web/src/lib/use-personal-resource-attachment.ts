@@ -16,11 +16,11 @@ import {
   loadPersonalResourceCatalog,
   personalSelection,
   resolvePersonalResourceOwnerScope,
+  type FixedPersonalResources,
   type PersonalAttachmentMode,
   type PersonalResourceCatalog,
 } from "./personal-resource-attachments";
 
-type FixedPersonalResources = { variableSetId: string | null; rigId: string | null };
 type PersonalResourceAttachmentAttempt = {
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
 };
@@ -69,7 +69,10 @@ export function usePersonalResourceAttachment(input: {
   onReloadSession?: (() => Promise<void>) | undefined;
 }): PersonalResourceAttachmentController {
   const onReloadSession = input.onReloadSession;
-  const hasFixedResources = input.fixed.variableSetId !== null || input.fixed.rigId !== null;
+  const hasFixedResources =
+    input.fixed.variableSetId !== null ||
+    input.fixed.rigId !== null ||
+    input.fixed.connectedMachine !== null;
   const resolvedScope =
     input.enabled === false
       ? null
@@ -171,7 +174,7 @@ export function usePersonalResourceAttachment(input: {
   // Eligibility is a synchronous fence. Do not wait for the transition effect
   // to clear prior owner state before hiding it from a connected-machine send.
   const selected = personalSelection(scope ? catalog : null, input.fixed);
-  const fixedIdentity = `${input.fixed.variableSetId ?? ""}:${input.fixed.rigId ?? ""}`;
+  const fixedIdentity = `${input.fixed.variableSetId ?? ""}:${input.fixed.rigId ?? ""}:${input.fixed.connectedMachine?.enrollmentId ?? ""}`;
   const selectedIdentity = `${fixedIdentity}:${selected.resourceCount}`;
   const priorSelectionIdentity = useRef(selectedIdentity);
   const priorFixedIdentity = useRef(fixedIdentity);
@@ -209,7 +212,9 @@ export function usePersonalResourceAttachment(input: {
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
   const fixedResourceCount =
-    Number(input.fixed.variableSetId !== null) + Number(input.fixed.rigId !== null);
+    Number(input.fixed.variableSetId !== null) +
+    Number(input.fixed.rigId !== null) +
+    Number(input.fixed.connectedMachine !== null);
   const closureError = selected.closureUnverified
     ? new Error(
         "The selected personal-resource authority closure could not be verified. Retry or choose a non-personal resource.",

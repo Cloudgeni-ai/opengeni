@@ -1071,8 +1071,8 @@ export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
   "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
 
 /**
- * Owner-authored issuance intent for the fixed personal Variable Set/Rig
- * closure selected by one session. The server derives every resource,
+ * Owner-authored issuance intent for the fixed personal Variable Set/Rig/
+ * Connected Machine closure selected by one session. The server derives every resource,
  * authority and action from the locked session; callers never nominate grants.
  */
 export const PersonalResourceAttachmentIntent = z
@@ -1110,9 +1110,9 @@ export const PersonalResourceAttachmentSummary = z
     context: SessionTenancyVisibility,
     resourceCount: z.number().int().positive(),
     resourceKinds: z
-      .array(z.enum(["variable_set", "rig"]))
+      .array(z.enum(["variable_set", "rig", "connected_machine"]))
       .min(1)
-      .max(2),
+      .max(3),
     sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
   })
   .strict();

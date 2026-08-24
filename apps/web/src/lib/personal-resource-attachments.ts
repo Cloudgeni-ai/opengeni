@@ -30,9 +30,17 @@ export type PersonalResourceCatalog = Readonly<{
   rigs: Rig[];
   variableSetAuthorities: UserResourceAuthoritySummary[];
   rigAuthorities: UserResourceAuthoritySummary[];
+  connectedMachineAuthorities: UserResourceAuthoritySummary[];
   variableSetAuthoritiesTruncated: boolean;
   rigAuthoritiesTruncated: boolean;
+  connectedMachineAuthoritiesTruncated: boolean;
   truncated: boolean;
+}>;
+
+export type FixedPersonalResources = Readonly<{
+  variableSetId: string | null;
+  rigId: string | null;
+  connectedMachine: Readonly<{ enrollmentId: string; name: string }> | null;
 }>;
 
 const AUTHORITY_PAGE_LIMIT = 100;
@@ -90,7 +98,7 @@ export function resolvePersonalResourceOwnerScope(input: {
 async function listAuthorityPages(
   client: OpenGeniCoreClient,
   workspaceId: string,
-  resourceKind: "variable_set" | "rig",
+  resourceKind: "variable_set" | "rig" | "connected_machine",
 ): Promise<{ authorities: UserResourceAuthoritySummary[]; truncated: boolean }> {
   const authorities: UserResourceAuthoritySummary[] = [];
   let cursor: string | undefined;
@@ -112,11 +120,12 @@ export async function loadPersonalResourceCatalog(
   client: OpenGeniCoreClient,
   scope: PersonalResourceOwnerScope,
 ): Promise<PersonalResourceCatalog> {
-  const [variableSets, rigs, variableSetPage, rigPage] = await Promise.all([
+  const [variableSets, rigs, variableSetPage, rigPage, connectedMachinePage] = await Promise.all([
     client.listVariableSets(scope.personalWorkspaceId),
     client.listRigs(scope.personalWorkspaceId),
     listAuthorityPages(client, scope.targetWorkspaceId, "variable_set"),
     listAuthorityPages(client, scope.targetWorkspaceId, "rig"),
+    listAuthorityPages(client, scope.targetWorkspaceId, "connected_machine"),
   ]);
   const eligible = (
     authority: UserResourceAuthoritySummary,
@@ -148,18 +157,24 @@ export async function loadPersonalResourceCatalog(
       eligible(authority, "variable_set"),
     ),
     rigAuthorities: rigPage.authorities.filter((authority) => eligible(authority, "rig")),
+    connectedMachineAuthorities: connectedMachinePage.authorities.filter(
+      (authority) =>
+        authority.resourceKind === "connected_machine" && authority.status === "active",
+    ),
     variableSetAuthoritiesTruncated: variableSetPage.truncated,
     rigAuthoritiesTruncated: rigPage.truncated,
-    truncated: variableSetPage.truncated || rigPage.truncated,
+    connectedMachineAuthoritiesTruncated: connectedMachinePage.truncated,
+    truncated: variableSetPage.truncated || rigPage.truncated || connectedMachinePage.truncated,
   };
 }
 
 export function personalSelection(
   catalog: PersonalResourceCatalog | null,
-  fixed: { variableSetId: string | null; rigId: string | null },
+  fixed: FixedPersonalResources,
 ): {
   variableSets: VariableSet[];
   rigs: Rig[];
+  connectedMachines: Array<Readonly<{ enrollmentId: string; name: string }>>;
   resourceCount: number;
   personalResourceCount: number;
   closureUnverified: boolean;
@@ -177,18 +192,31 @@ export function personalSelection(
   const rigs = fixed.rigId
     ? (catalog?.rigs.filter((resource) => resource.id === fixed.rigId) ?? [])
     : [];
-  const personalResourceCount = personalVariableSets.length + personalRigs.length;
+  const personalConnectedMachines = fixed.connectedMachine ? [fixed.connectedMachine] : [];
+  const connectedMachines = fixed.connectedMachine
+    ? catalog?.connectedMachineAuthorities.some(
+        (authority) => authority.resourceId === fixed.connectedMachine?.enrollmentId,
+      )
+      ? [fixed.connectedMachine]
+      : []
+    : [];
+  const personalResourceCount =
+    personalVariableSets.length + personalRigs.length + personalConnectedMachines.length;
   const closureUnverified = Boolean(
     (personalVariableSets.length > 0 &&
       (catalog?.variableSetAuthoritiesTruncated ||
         variableSets.length !== personalVariableSets.length)) ||
     (personalRigs.length > 0 &&
-      (catalog?.rigAuthoritiesTruncated || rigs.length !== personalRigs.length)),
+      (catalog?.rigAuthoritiesTruncated || rigs.length !== personalRigs.length)) ||
+    (personalConnectedMachines.length > 0 &&
+      (catalog?.connectedMachineAuthoritiesTruncated ||
+        connectedMachines.length !== personalConnectedMachines.length)),
   );
   return {
     variableSets,
     rigs,
-    resourceCount: variableSets.length + rigs.length,
+    connectedMachines,
+    resourceCount: variableSets.length + rigs.length + connectedMachines.length,
     personalResourceCount,
     closureUnverified,
   };

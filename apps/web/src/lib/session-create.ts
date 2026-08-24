@@ -356,6 +356,7 @@ export function submissionFromSessionDraft(
       // No sandboxBackend (forced `selfhosted` server-side) and no variable set
       // injection — the machine's own env & git auth apply (D2).
       extras: {
+        ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
         ...(goal ? { goal } : {}),
         ...mcp,
         ...visibleTools,

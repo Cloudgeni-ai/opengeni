@@ -132,6 +132,16 @@ const session = await client.createSession(workspaceId, {
 });
 ```
 
+That API-key example applies to workspace- or organization-scoped machines. A
+user-scoped machine must be selected by its owning managed human. The managed
+web console discovers the machine's personal authority and includes an atomic
+`personalResourceAttachment` in the create command after the owner chooses
+`once`, `session`, or `always` and acknowledges workspace-shared output. The
+server derives the selected enrollment from the locked session, issues
+`connected_machine.use` in the same accepted-turn transaction, and preserves a
+`once` decision across recovery of that logical turn. Callers never nominate a
+machine authority or issue a standalone grant before creating the session.
+
 Rules to keep in mind:
 
 - **`workingDir` requires `targetSandboxId`.** Sending `workingDir` alone (with

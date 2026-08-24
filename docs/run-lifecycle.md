@@ -55,7 +55,7 @@ and the wake outbox recover their failures.
 
 An owner-authored `personalResourceAttachment` is part of that same accepted
 work transaction for create, Send, and Steer. The server derives the fixed
-personal Variable Set/Rig closure from the locked session; callers never issue
+personal Variable Set/Rig/selected Connected Machine closure from the locked session; callers never issue
 a grant and then send work in a second operation. `once` is consumed against
 the logical turn id, so every recovery attempt for that turn copies the same
 immutable snapshot. It is never copied to a queue edit, goal continuation, or
