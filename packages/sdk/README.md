@@ -37,11 +37,11 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
-## Session visibility and private forks
+## Session visibility and forks
 
 For organizations with session-tenancy activation, a canonical managed-cookie
 owner can change a fully quiescent session between private and workspace
-visibility or create an independent same-workspace private fork. API keys and
+visibility or create an independent same-workspace private or workspace-visible fork. API keys and
 delegated/service bearers are intentionally not authority for these methods.
 The browser client below intentionally omits `apiKey`; its same-origin request
 carries the authenticated managed-session cookie.
@@ -59,6 +59,9 @@ await browserClient.updateSessionVisibility(workspaceId, sessionId, {
 
 const fork = await browserClient.forkSession(workspaceId, sessionId, {
   idempotencyKey: crypto.randomUUID(),
+  visibility: "workspace",
+  // Required when private conversation content is copied into workspace scope.
+  workspaceSharedAcknowledged: current.tenancy.visibility === "private",
 });
 ```
 
@@ -67,9 +70,11 @@ transport failure reports `outcomeUnknown`, retry the same operation with the
 same key. An authority-epoch conflict requires a fresh `getSession` and a new
 user decision. A quiescence conflict identifies the stable blocker after live
 turns, goals, realtime, schedules, workspace writers, retained processes, and
-sandbox access have been settled. Forks copy same-workspace durable content and
-references but no live turn, goal, credential, personal grant, Variable Set,
-Rig, MCP server configuration, sandbox identity, or workflow.
+sandbox access have been settled. Forks copy exact same-workspace durable
+conversation content but no live turn, goal, credential, Connection/delegation,
+personal grant, Variable Set, Rig, MCP server configuration, process, sandbox
+identity, pin, or workflow. Destination visibility and acknowledgement are
+idempotency-bound.
 
 ## Personal-resource grants
 

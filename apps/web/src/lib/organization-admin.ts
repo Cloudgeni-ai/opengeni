@@ -170,8 +170,8 @@ export function retentionPolicySummary(
   policy: Pick<OrganizationRetentionPolicy, "mode" | "retentionDays">,
 ): string {
   return policy.mode === "retain"
-    ? "Retain offboarded members' personal data indefinitely."
-    : `Make offboarded members' personal data eligible for operator cleanup after ${policy.retentionDays} days.`;
+    ? "Retain removed members' personal data indefinitely."
+    : `Make removed members' personal data eligible for operator cleanup after ${policy.retentionDays} days.`;
 }
 
 export function isOrganizationConflict(error: unknown): boolean {

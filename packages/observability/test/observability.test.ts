@@ -425,7 +425,43 @@ describe("observability", () => {
       console.warn = originalWarn;
     }
 
-    expect(observed).toEqual(["Startup dependency connection failed; retrying"]);
+    expect(observed).toEqual([
+      "Startup dependency Temporal connection failed; retrying (1/3 in 100ms)",
+    ]);
+  });
+
+  test("keeps safe retry context in structured startup logs", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => {
+      observed.push(String(message));
+    };
+    try {
+      const obs = createObservability(
+        { ...settings, observabilityStructuredLogs: true },
+        { component: "worker" },
+      );
+      logStartupDependencyRetry(obs, {
+        label: "PostgreSQL runtime posture",
+        attempt: 2,
+        attempts: 5,
+        delayMs: 250,
+        error: new Error("must remain private"),
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      dependency: "PostgreSQL runtime posture",
+      attempt: 2,
+      attempts: 5,
+      delayMs: 250,
+      errorClass: "StartupDependencyError",
+      errorCode: "startup_dependency_retry",
+      origin: "observability",
+    });
+    expect(observed[0]).not.toContain("must remain private");
   });
 
   test("public structured logs omit identifiers and arbitrary source fields", () => {

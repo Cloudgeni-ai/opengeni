@@ -16,6 +16,7 @@ import type {
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+  resolveWorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
 import {
   createScheduledTask,
@@ -72,7 +73,7 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
-  withDefaultEnabledCapabilityMcpTools,
+  withWorkspaceDefaultMcpTools,
 } from "./resources";
 
 /**
@@ -1111,15 +1112,23 @@ async function validateScheduledTaskAgentConfig(input: {
     { subjectId: input.grant.subjectId },
   );
   const requestedTools = validateToolRefs(input.payload.agentConfig.tools ?? [], runtimeSettings);
-  // A task whose creator did not choose tools gets the workspace's enabled
-  // capability MCP servers, exactly like a session created without a tools
-  // key. Scheduled runs are sessions too; "no MCP servers at all" was a trap
-  // every pack/template instantiation path kept falling into (a maintenance
-  // task that cannot reach its workspace's notebook MCP cannot do its job).
+  const workspace = await requireWorkspace(input.db, input.workspaceId);
+  const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
+  // A task whose creator did not choose tools gets the workspace's exact
+  // session defaults (or the deployment compatibility default), exactly like
+  // a session created without a tools key. Scheduled runs are sessions too;
+  // "no MCP servers at all" was a trap every pack/template instantiation path
+  // kept falling into (a maintenance task that cannot reach its workspace's
+  // notebook MCP cannot do its job).
   const tools =
     (input.toolsProvided ?? true)
       ? requestedTools
-      : withDefaultEnabledCapabilityMcpTools(requestedTools, input.settings, runtimeSettings);
+      : withWorkspaceDefaultMcpTools(
+          requestedTools,
+          input.settings,
+          runtimeSettings,
+          workspaceSessionToolDefaults,
+        );
   const prompt = input.payload.agentConfig.prompt.trim();
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });
@@ -1150,7 +1159,6 @@ async function validateScheduledTaskAgentConfig(input: {
   }
   const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
   if (requestedMaxDepth !== undefined) {
-    const workspace = await requireWorkspace(input.db, input.workspaceId);
     const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
     const deploymentPolicy = await getNestedAgentDepthDeploymentPolicy(input.db);
     const inheritedMaxDepth =

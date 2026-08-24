@@ -97,6 +97,8 @@ import {
   providerRecoveryCountFromMetadata,
   providerRetryAfterMs,
   providerRecoveryResult,
+  providerRecoveryExhaustedFailure,
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
   requiresSignedFileResourceDownloads,
   objectStorageForSandboxDownloads,
   resolveActiveSandboxBackend,
@@ -731,7 +733,7 @@ describe("turn exact-content boundaries", () => {
     const failureSource = await Bun.file(
       new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
     ).text();
-    const failureClassifier = failureSource.indexOf("const failure = agentRunFailurePayload(error");
+    const failureClassifier = failureSource.indexOf("let failure = agentRunFailurePayload(error");
     const terminalFailureStart = failureSource.indexOf(
       'control.activityStatus = "failed";',
       failureClassifier,
@@ -3006,6 +3008,27 @@ describe("lazy sandbox provisioner single-flight", () => {
     );
   });
 
+  test("lazy tool readiness installs its rejection handler before publishing the promise", async () => {
+    const toolsSource = await Bun.file(
+      new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
+    ).text();
+    const readinessAt = toolsSource.indexOf(
+      "const toolPreparationReady = eventing.preparedTools.ready.then",
+    );
+    const handledAt = toolsSource.indexOf(
+      "void toolPreparationReady.catch(() => undefined)",
+      readinessAt,
+    );
+    const publishedAt = toolsSource.indexOf(
+      "eventing.toolPreparationReady = toolPreparationReady",
+      handledAt,
+    );
+
+    expect(readinessAt).toBeGreaterThan(-1);
+    expect(handledAt).toBeGreaterThan(readinessAt);
+    expect(publishedAt).toBeGreaterThan(handledAt);
+  });
+
   test("deadline rotation uses only short anti-churn pacing", () => {
     expect(
       sandboxDeadlineRotationRecoveryDelayMs({
@@ -4362,6 +4385,8 @@ describe("escaped MCP transport timeout classifier", () => {
       turnId: "turn-2",
       triggerEventId: "trigger-1",
       executionGeneration: 2,
+      providerRecoveryCount: 1,
+      continueDelayMs: 2_000,
     };
     const escaped = escapedMcpTimeoutRecoveryFailure({
       failureCode: "mcp_transport_timeout",
@@ -4380,6 +4405,13 @@ describe("escaped MCP transport timeout classifier", () => {
         failureCode: "mcp_transport_timeout",
         modelRequestStarted: false,
         detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1 },
       }),
     ).toBeNull();
     expect(
@@ -4938,33 +4970,72 @@ describe("transient provider error classifier", () => {
   });
 
   test("provider recovery backs off connectivity failures and honors rate-limit hints", () => {
+    const expectedConnectivityBackoff = [
+      { status: "recovering", continueDelayMs: 2_000 },
+      { status: "recovering", continueDelayMs: 5_000 },
+      { status: "recovering", continueDelayMs: 15_000 },
+      { status: "recovering", continueDelayMs: 30_000 },
+      { status: "recovering", continueDelayMs: 60_000 },
+    ];
+    for (const failureCode of [
+      "provider_unavailable",
+      "upstream_connectivity_unavailable",
+      "mcp_transport_timeout",
+      "mcp_transport_unavailable",
+    ]) {
+      expect(
+        [1, 2, 3, 4, 5].map((attemptNumber) =>
+          providerRecoveryResult({ failureCode, attemptNumber }),
+        ),
+      ).toEqual(expectedConnectivityBackoff);
+    }
+    const exhausted = providerRecoveryResult({
+      failureCode: "provider_unavailable",
+      attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,
+    });
+    expect(exhausted).toEqual({
+      status: "exhausted",
+      providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+    });
+    if (exhausted.status !== "exhausted") throw new Error("expected recovery exhaustion");
     expect(
-      [1, 2, 3, 4, 5, 6].map(
-        (attemptNumber) =>
-          providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber })
-            .continueDelayMs,
+      providerRecoveryExhaustedFailure(
+        {
+          error: "A required MCP server was temporarily unreachable.",
+          code: "mcp_transport_unavailable",
+          retryable: true,
+        },
+        exhausted,
       ),
-    ).toEqual([2_000, 5_000, 15_000, 30_000, 60_000, 60_000]);
+    ).toMatchObject({
+      code: "mcp_transport_unavailable",
+      retryable: false,
+      recoveryExhausted: true,
+      providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      lastRetryableError: "A required MCP server was temporarily unreachable.",
+    });
     expect(
       providerRecoveryResult({
         failureCode: "provider_rate_limited",
         attemptNumber: 1,
-      }).continueDelayMs,
-    ).toBe(PROVIDER_BACKPRESSURE_DELAY_MS);
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
     expect(
       providerRecoveryResult({
         failureCode: "provider_rate_limited",
         attemptNumber: 1,
         retryAfterMs: 12_000,
-      }).continueDelayMs,
-    ).toBe(12_000);
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 12_000 });
     expect(
       providerRecoveryResult({
         failureCode: "provider_unavailable",
         attemptNumber: 1,
         retryAfterMs: 7_000,
-      }).continueDelayMs,
-    ).toBe(7_000);
+      }),
+    ).toEqual({ status: "recovering", continueDelayMs: 7_000 });
     expect(
       providerRetryAfterMs(
         Object.assign(new Error("rate limited"), {

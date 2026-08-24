@@ -1899,6 +1899,72 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("keeps rapid first and second Sends on stable chat and queue surfaces", async () => {
+    const resolvers: Array<(event: SessionEvent) => void> = [];
+    const inputs: SendMessageInput[] = [];
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        inputs.push(typed);
+        return await new Promise<SessionEvent>((resolve) => resolvers.push(resolve));
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          events: [],
+          sendDestination: () => "chat",
+        }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.send("first now")).toBe(true);
+      expect(await hook.result.current.send("second later")).toBe(true);
+    });
+    expect(
+      hook.result.current.optimisticMessages?.map(({ text, destination }) => ({
+        text,
+        destination,
+      })),
+    ).toEqual([
+      { text: "first now", destination: "chat" },
+      { text: "second later", destination: "queue" },
+    ]);
+    expect(inputs).toHaveLength(1);
+
+    await flushing(() =>
+      resolvers[0]?.({
+        ...makeEvent(10, "user.message"),
+        clientEventId: inputs[0]?.clientEventId ?? null,
+      }),
+    );
+    await flush();
+    expect(inputs).toHaveLength(2);
+    expect(
+      hook.result.current.optimisticMessages?.map(({ text, destination }) => ({
+        text,
+        destination,
+      })),
+    ).toEqual([
+      { text: "first now", destination: "chat" },
+      { text: "second later", destination: "queue" },
+    ]);
+
+    await flushing(() =>
+      resolvers[1]?.({
+        ...makeEvent(11, "user.message"),
+        clientEventId: inputs[1]?.clientEventId ?? null,
+      }),
+    );
+    await flush();
+    await hook.unmount();
+  });
+
   test("keeps an admitted chat bubble until execution starts even when the HTTP response is lost", async () => {
     let rejectSend!: (cause: unknown) => void;
     const pendingSend = new Promise<SessionEvent>((_resolve, reject) => {

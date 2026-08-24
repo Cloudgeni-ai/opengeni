@@ -105,7 +105,82 @@ describe("organization membership routes", () => {
     ).toBe(401);
   });
 
-  test("supports registered-user invite, subject-bound acceptance, listing and suspension", async () => {
+  test("creates an organization with its initial workspace and replays idempotently", async () => {
+    if (!shared || !app) return;
+    const operationId = crypto.randomUUID();
+    let createdOrganizationId = "";
+    try {
+      const request = {
+        name: "Product team",
+        operationId,
+      };
+      const [response, concurrentRetry] = await Promise.all([
+        app.request("http://x/v1/organizations", {
+          method: "POST",
+          headers: {
+            cookie: "session=present",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(request),
+        }),
+        app.request("http://x/v1/organizations", {
+          method: "POST",
+          headers: {
+            cookie: "session=present",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(request),
+        }),
+      ]);
+      expect(response.status).toBe(201);
+      expect(concurrentRetry.status).toBe(201);
+      const created = (await response.json()) as {
+        organization: { id: string; name: string };
+        workspaceId: string;
+      };
+      expect(await concurrentRetry.json()).toEqual(created);
+      createdOrganizationId = created.organization.id;
+      expect(created).toMatchObject({
+        organization: { name: "Product team" },
+      });
+
+      const replay = await app.request("http://x/v1/organizations", {
+        method: "POST",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(request),
+      });
+      expect(replay.status).toBe(201);
+      expect(await replay.json()).toEqual(created);
+
+      const [authority] = await shared.admin<
+        Array<{ memberships: number; sharedWorkspaces: number; personalWorkspaces: number }>
+      >`
+        select
+          (select count(*)::int from organization_memberships
+            where account_id = ${createdOrganizationId}
+              and subject_id = ${subjectId}
+              and role = 'owner'
+              and status = 'active') as memberships,
+          (select count(*)::int from workspace_memberships
+            where account_id = ${createdOrganizationId}
+              and workspace_id = ${created.workspaceId}
+              and subject_id = ${subjectId}
+              and role = 'owner') as "sharedWorkspaces",
+          (select count(*)::int from workspaces
+            where account_id = ${createdOrganizationId}
+              and external_source = 'opengeni:organization-membership') as "personalWorkspaces"`;
+      expect(authority).toEqual({ memberships: 1, sharedWorkspaces: 1, personalWorkspaces: 1 });
+    } finally {
+      if (createdOrganizationId) {
+        await shared.admin`delete from managed_accounts where id = ${createdOrganizationId}`;
+      }
+    }
+  });
+
+  test("supports organization invite, subject-bound acceptance, listing and suspension", async () => {
     if (!shared || !client || !app) return;
     const ownerMembershipResponse = await app.request("http://x/v1/organization-memberships", {
       headers: { cookie: "session=present" },
@@ -457,11 +532,23 @@ describe("organization membership routes", () => {
         operationId: crypto.randomUUID(),
       }),
     });
+    const memberCreateWorkspace = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces`,
+      {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Member must not create",
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
     await shared.admin`
       update organization_memberships set role = 'owner'
       where id = ${ownerMembership.id}`;
     expect(memberGet.status).toBe(403);
     expect(memberPatch.status).toBe(403);
+    expect(memberCreateWorkspace.status).toBe(403);
   });
 
   test("renames the canonical organization and inventories every shared workspace without Personal workspaces", async () => {
@@ -573,6 +660,164 @@ describe("organization membership routes", () => {
     expect(await afterBootstrap.json()).toMatchObject({
       organization: { name: "Acme Product" },
     });
+  }, 180_000);
+
+  test("administers shared-workspace settings and access without granting the organization owner operational access", async () => {
+    if (!shared || !app) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string; personalWorkspaceId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    const personalWorkspaceId = membershipBody.memberships[0]!.personalWorkspaceId;
+    const sharedWorkspaceId = crypto.randomUUID();
+    const targetPersonalWorkspaceId = crypto.randomUUID();
+    const targetMembershipId = crypto.randomUUID();
+    const targetSubjectId = `user:organization-control-target-${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into workspaces (id, account_id, name)
+      values
+        (${sharedWorkspaceId}, ${accountId}, 'Control-plane workspace'),
+        (${targetPersonalWorkspaceId}, ${accountId}, 'Target personal workspace')`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values
+        (${sharedWorkspaceId}, ${accountId}),
+        (${targetPersonalWorkspaceId}, ${accountId})`;
+    await shared.admin`
+      insert into organization_memberships (
+        id, account_id, subject_id, role, status, personal_workspace_id
+      ) values (
+        ${targetMembershipId}, ${accountId}, ${targetSubjectId}, 'member', 'active',
+        ${targetPersonalWorkspaceId}
+      )`;
+
+    const before = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from workspace_memberships
+      where workspace_id = ${sharedWorkspaceId} and subject_id = ${subjectId}`;
+    expect(before[0]?.count).toBe(0);
+
+    const createOperationId = crypto.randomUUID();
+    const createBody = {
+      name: "Created through organization",
+      slug: `org-created-${crypto.randomUUID()}`,
+      agentInstructions: "Help this team.",
+      operationId: createOperationId,
+    };
+    const created = await app.request(`http://x/v1/organizations/${accountId}/workspaces`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify(createBody),
+    });
+    expect(created.status).toBe(201);
+    const createdWorkspace = (await created.json()) as { id: string; name: string };
+    expect(createdWorkspace).toMatchObject({ name: createBody.name });
+    const replayCreate = await app.request(`http://x/v1/organizations/${accountId}/workspaces`, {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify(createBody),
+    });
+    expect(replayCreate.status).toBe(201);
+    expect(await replayCreate.json()).toEqual(createdWorkspace);
+    const [createdMembership] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from workspace_memberships
+      where workspace_id = ${createdWorkspace.id} and subject_id = ${subjectId}`;
+    expect(createdMembership?.count).toBe(0);
+
+    const missingUpdate = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${encodeURIComponent(targetSubjectId)}`,
+      {
+        method: "PATCH",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ role: "admin", permissions: ["workspace:admin"] }),
+      },
+    );
+    expect(missingUpdate.status).toBe(404);
+
+    const add = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members`,
+      {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          organizationMembershipId: targetMembershipId,
+          role: "member",
+          permissions: ["workspace:read", "sessions:read"],
+        }),
+      },
+    );
+    expect(add.status).toBe(201);
+    expect(await add.json()).toMatchObject({
+      subjectId: targetSubjectId,
+      role: "member",
+      permissions: ["workspace:read", "sessions:read"],
+    });
+
+    const promote = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${encodeURIComponent(targetSubjectId)}`,
+      {
+        method: "PATCH",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ role: "admin", permissions: ["workspace:admin"] }),
+      },
+    );
+    expect(promote.status).toBe(200);
+    expect(await promote.json()).toMatchObject({
+      subjectId: targetSubjectId,
+      role: "admin",
+      permissions: ["workspace:admin"],
+    });
+
+    const rename = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}`,
+      {
+        method: "PATCH",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ name: "Renamed through organization" }),
+      },
+    );
+    expect(rename.status).toBe(200);
+    expect(await rename.json()).toMatchObject({ name: "Renamed through organization" });
+
+    const settings = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/settings`,
+      {
+        method: "PATCH",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ memoryEnabled: true }),
+      },
+    );
+    expect(settings.status).toBe(200);
+    expect(await settings.json()).toMatchObject({ settings: { memoryEnabled: true } });
+
+    const personalDenied = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${personalWorkspaceId}/members`,
+      {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          organizationMembershipId: targetMembershipId,
+          permissions: ["workspace:read"],
+        }),
+      },
+    );
+    expect(personalDenied.status).toBe(404);
+
+    const remove = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${encodeURIComponent(targetSubjectId)}`,
+      { method: "DELETE", headers: { cookie: "session=present" } },
+    );
+    expect(remove.status).toBe(204);
+    const after = await shared.admin<Array<{ actorCount: number; targetCount: number }>>`
+      select
+        count(*) filter (where subject_id = ${subjectId})::int as "actorCount",
+        count(*) filter (where subject_id = ${targetSubjectId})::int as "targetCount"
+      from workspace_memberships
+      where workspace_id = ${sharedWorkspaceId}`;
+    expect(after[0]).toEqual({ actorCount: 0, targetCount: 0 });
   }, 180_000);
 
   test("returns only the current active membership and denies terminal membership state", async () => {

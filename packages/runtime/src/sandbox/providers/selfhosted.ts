@@ -90,6 +90,9 @@ export const selfhostedProvider: ProviderRegistration = {
       // ControlRpc). The registry-built client is the boot/assertion shape; an
       // empty workspaceId is fine until a session is bound with a real one.
       workspaceId: "",
+      // Inert registry shape only; request-scoped production clients replace
+      // this with the persisted machine Hello root before any operation.
+      workspaceRoot: "/workspace",
       relay: resolveRelayConfig(settings),
       controlRpcFactory: defaultControlRpcFactory,
     });

@@ -198,9 +198,15 @@ describe("API component integration", () => {
       "session.status.changed",
       "turn.queued",
     ]);
-    // The initial prompt is still waiting, so it exists only in the compact
-    // prompt queue. Timeline projection begins it when the turn actually starts.
-    expect(buildTimeline(events).map((item) => item.kind)).toEqual([]);
+    // Admission accepted the initial prompt directly. It belongs in chat even
+    // while the physical turn row waits for a worker claim.
+    expect(buildTimeline(events).map((item) => item.kind)).toEqual(["user-message"]);
+    expect(events.find((event) => event.type === "user.message")?.payload).toMatchObject({
+      routing: "accepted_for_execution",
+    });
+    expect(events.find((event) => event.type === "turn.queued")?.payload).toMatchObject({
+      routing: "accepted_for_execution",
+    });
 
     const listed = await app.request(workspacePath(workspaceId, "/sessions?limit=10"));
     expect(listed.status).toBe(200);
@@ -1138,16 +1144,29 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json", cookie: cookie! },
       body: JSON.stringify({
         name: "Managed test key",
+        description: "Used by the managed authentication integration test",
         permissions: ["workspace:read", "sessions:create"],
       }),
     });
     expect(createdKey.status).toBe(201);
     const keyBody = (await createdKey.json()) as {
       token: string;
-      apiKey: { workspaceId: string };
+      apiKey: { workspaceId: string; description: string | null };
     };
     expect(keyBody.token).toStartWith("ogk_");
     expect(keyBody.apiKey.workspaceId).toBe(workspaceId);
+    expect(keyBody.apiKey.description).toBe("Used by the managed authentication integration test");
+    const listedKeys = await app.request(workspacePath(workspaceId, "/api-keys"), {
+      headers: { cookie: cookie! },
+    });
+    expect(listedKeys.status).toBe(200);
+    expect(
+      (
+        (await listedKeys.json()) as {
+          apiKeys: Array<{ description: string | null }>;
+        }
+      ).apiKeys[0]?.description,
+    ).toBe("Used by the managed authentication integration test");
     const keyWorkspaceList = await app.request("/v1/workspaces", {
       headers: { authorization: `Bearer ${keyBody.token}` },
     });
@@ -1166,7 +1185,11 @@ describe("API component integration", () => {
       }),
     });
     expect(billingKey.status).toBe(201);
-    const billingKeyBody = (await billingKey.json()) as { token: string };
+    const billingKeyBody = (await billingKey.json()) as {
+      token: string;
+      apiKey: { description: string | null };
+    };
+    expect(billingKeyBody.apiKey.description).toBeNull();
     const billing = await app.request(`/v1/billing?accountId=${context.defaultAccountId}`, {
       headers: { authorization: `Bearer ${billingKeyBody.token}` },
     });
@@ -2467,6 +2490,7 @@ describe("API component integration", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       delivery: "send",
+      routing: "queued_for_execution",
       initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
@@ -9464,7 +9488,6 @@ describe("API component integration", () => {
         },
       ],
     });
-    await persistAttemptToolCatalog(dbClient.db, environment.catalog);
     const authorization = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: `sandbox:${attemptId}`,
       permissions: ["codemode:call"],
@@ -9475,6 +9498,23 @@ describe("API component integration", () => {
     });
     const base = workspacePath(grant.workspaceId, "/codemode");
 
+    const catalogNotReady = await app.request(`${base}/catalog`, {
+      headers: { authorization },
+    });
+    expect(catalogNotReady.status).toBe(409);
+    const catalogNotReadyBody = await catalogNotReady.json();
+    expect(catalogNotReadyBody).toMatchObject({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: "Codemode tool catalog is not ready for the active execution attempt",
+        retryable: true,
+        details: { code: "codemode_catalog_not_ready" },
+      },
+    });
+    expect(JSON.stringify(catalogNotReadyBody)).not.toContain("bearer");
+
+    await persistAttemptToolCatalog(dbClient.db, environment.catalog);
     const catalogResponse = await app.request(`${base}/catalog`, {
       headers: { authorization },
     });

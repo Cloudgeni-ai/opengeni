@@ -803,6 +803,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
       actorSubjectId: human.subjectId,
       destinationWorkspaceId: human.personalWorkspaceId,
       destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
       operationKey: `fork-${crypto.randomUUID()}`,
     });
     expect(result.visibility).toBe("user_private");
@@ -858,6 +859,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
         actorSubjectId: intruder.subjectId,
         destinationWorkspaceId: intruder.personalWorkspaceId,
         destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
         operationKey: `fork-${crypto.randomUUID()}`,
       }),
     ).rejects.toThrow();
@@ -876,6 +878,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
         actorSubjectId: intruder.subjectId,
         destinationWorkspaceId: owner.personalWorkspaceId,
         destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
         operationKey: `fork-${crypto.randomUUID()}`,
       }),
     ).rejects.toThrow();

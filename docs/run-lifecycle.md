@@ -25,10 +25,13 @@ needs.
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
 `clientEventId`, clears the visible draft immediately, and renders that snapshot
-as `Sending`, `Queued`, or `Not sent`. Rapid distinct sends keep distinct keys
-and preserve order. An outcome-unknown retry first reconciles and reuses the
-same key; a definite rejection retry receives a fresh key. Newer edits are a
-separate draft shadow and survive the in-flight operation and remount. The
+directly in chat when admitted toward execution, in the prompt queue when it
+must wait behind work, or as `Not sent` after a definite rejection. Rapid
+distinct sends keep distinct keys and preserve order: while the first admission
+is unsettled, the next Send is provisionally placed in the queue and never
+bounces between surfaces. An outcome-unknown retry first reconciles and reuses
+the same key; a definite rejection retry receives a fresh key. Newer edits are
+a separate draft shadow and survive the in-flight operation and remount. The
 optimistic row disappears when the authoritative `user.message` arrives, so
 HTTP-first, SSE-first, reconnect, and remount paths cannot create duplicate
 visible messages.
@@ -46,9 +49,10 @@ session fork copies the source session's exact typed reasoning and latency; it
 does not invent defaults or consult either composer.
 
 On the server, prompt acceptance remains one canonical Postgres transaction:
-the user event, queued turn, session/queue state, optional realtime mirror,
-audit receipt, `agent_run.created` usage fact, and workflow-wake outbox revision
-commit together. The response is built from those returned committed rows.
+the user event, physically queued turn, immutable admission routing,
+session/queue state, optional realtime mirror, audit receipt,
+`agent_run.created` usage fact, and workflow-wake outbox revision commit
+together. The response is built from those returned committed rows.
 NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
@@ -244,12 +248,20 @@ them. A Codex-subscription manager therefore keeps its external billing path for
 workers by default instead of falling back to the deployment's OpenGeni-credit
 model.
 
-The prompt queue is not worker backlog. In particular, human prompts preserved
-behind paused session/workspace gates are intentionally ineligible and do not
-schedule an activity. Fleet pressure comes from Temporal's dedicated
-`runAgentTurn` activity queue (`approximateBacklogCount` and oldest backlog
-age), together with the turn workers' used/memory-safe slots. Each turn worker
-must obtain a cgroup-aware slot before polling. Admission is capped at the
+The prompt queue is not worker backlog. `session_turns.status = 'queued'` means
+the worker has not claimed the physical row; it does not decide whether the user
+sees a queued prompt. Immutable `session_turns.prompt_routing` records that
+admission decision: `accepted_for_execution` and `accepted_for_steering` stay in
+chat, while only `queued_for_execution` appears in the prompt queue. Null remains
+a conservative visible-queue fallback for rolling/legacy writers. New durable
+`user.message` and `turn.queued` events repeat the same routing fact so live
+streaming and reload reconstruction cannot briefly place a prompt on the wrong
+surface. In particular,
+human prompts preserved behind paused session/workspace gates are intentionally
+ineligible and do not schedule an activity. Fleet pressure comes from Temporal's
+dedicated `runAgentTurn` activity queue (`approximateBacklogCount` and oldest
+backlog age), together with the turn workers' used/memory-safe slots. Each turn
+worker must obtain a cgroup-aware slot before polling. Admission is capped at the
 measured density of 16 and reserves a hard 100 MiB per turn plus 512 MiB of
 runtime/native headroom; a finite container that cannot safely admit one turn
 does not start. The invariant is checked both before and after Temporal's native
@@ -408,9 +420,14 @@ rather than failing the session, so a top-up lets the same session continue.
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference. All non-eager MCPs—strict or
 optional—connect/list concurrently with the first provider request. A plain
-terminal model response does not join that background work. Search disclosure,
-deferred invocation, Codemode activation, catalog persistence, and cleanup join
-the one exact preparation promise, so no partial catalog grants authority.
+terminal model response does not join that background work. Every actual local
+function call does join the one exact preparation promise before Runner can
+dispatch it, including always-visible base tools such as `exec_command` and
+`load_skill`; their stable first-request schemas remain eager, but their
+execution does not bypass catalog persistence. Search disclosure, deferred
+invocation, Codemode activation, catalog persistence, and cleanup join that same
+promise, so no partial catalog grants authority. An exact preparation failure is
+therefore observed at the first tool-call boundary and the tool body never runs.
 Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
@@ -420,10 +437,15 @@ after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
 turn's durable provider-recovery count rather than unrelated execution attempts.
 An explicit provider retry hint is a lower bound. Rate limits use the provider's
 `Retry-After` when present and otherwise wait 60 s; other retryable classes keep
-their existing pacing. Every Steer commits a control wake revision, including
-when the recovering turn has no live attempt. A later coalesced Send cannot
-downgrade it to an ordinary queue signal, so the workflow interrupts the hold
-and processes the new direction immediately.
+their existing pacing. Automatic same-turn provider/MCP recovery is finite: five
+replacement attempts may be scheduled, and a sixth retryable failure settles the
+same logical turn as failed with the original typed cause plus explicit recovery-
+exhaustion evidence. This is an infrastructure retry budget, not a goal,
+continuation, model-call, or run-length cap; a later human/API prompt may retry as
+new accepted work. Every Steer commits a control wake revision, including when
+the recovering turn has no live attempt. A later coalesced Send cannot downgrade
+it to an ordinary queue signal, so the workflow interrupts the hold and processes
+the new direction immediately.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. With workspace-local leasing enabled, the worker atomically selects and
@@ -1163,16 +1185,17 @@ explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
-An explicit Connected-Machine → managed-home route change uses the same durable
-same-logical-turn boundary without pretending the original attempt owns a cloud
-box. A machine-primary attempt never pre-leases home. When its active pointer is
-cleared to home, the routing proxy emits the typed
-`home_unavailable_this_turn` transition; failure settlement durably reconciles
+An active-route filesystem-root change uses the same durable same-logical-turn
+boundary. A machine-primary attempt never pre-leases home. Clearing its pointer
+to managed home emits `home_unavailable_this_turn`; swapping to a route whose
+manifest root differs, or reconnecting the selected machine under a different
+effective Hello root, emits `workspace_root_changed_this_turn` before another
+provider operation is dispatched. Failure settlement durably reconciles
 completed model/tool truth, closes only the unresolved tool suffix, records
-`sandbox_home_route_transition`, and returns `recovering`. The next attempt
-starts from the committed home pointer and establishes home normally. There is
-no new user message, silent fallback to the old machine, or blind replay of an
-ambiguous operation.
+`sandbox_route_transition`, and returns `recovering`. The next attempt starts
+from the committed pointer and binds one exact root for its lifetime. There is
+no new user message, per-turn machine cwd query, silent fallback, path
+reinterpretation, or blind replay of an ambiguous operation.
 
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with

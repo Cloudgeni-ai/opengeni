@@ -127,6 +127,8 @@ describe("escaped MCP timeout activity-failure recovery", () => {
     turnId: "turn-2",
     triggerEventId: "trigger-1",
     executionGeneration: 2,
+    providerRecoveryCount: 1,
+    continueDelayMs: 2_000,
   };
   const escaped = () =>
     activityFailure(
@@ -159,6 +161,17 @@ describe("escaped MCP timeout activity-failure recovery", () => {
             message: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
             type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
             details: [{ ...detail, executionGeneration: 1 }],
+          }),
+        ),
+      ),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryDetail(
+        activityFailure(
+          ApplicationFailure.create({
+            message: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
+            type: ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+            details: [{ ...detail, providerRecoveryCount: 0 }],
           }),
         ),
       ),

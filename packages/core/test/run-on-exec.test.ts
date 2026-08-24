@@ -50,6 +50,7 @@ class InMemoryMachineRunner implements ControlRpc {
       workspaceId: WORKSPACE,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
+      workspaceRoot: "/home/user/project",
       defaultScript: (exec) => this.scriptExec(exec),
     });
   }
@@ -132,6 +133,7 @@ async function run(
       workspaceId: WORKSPACE,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
+      workspaceRoot: "/home/user/project",
       controlRpc: runner,
       opStream: runner.opStream,
       relay: { host: "relay.test", tls: true },
@@ -160,6 +162,7 @@ describe("run_on Connected Machine exec receipts", () => {
           workspaceId: WORKSPACE,
           agentId: AGENT,
           connectionInstanceId: "snapshotted-before-revoke",
+          workspaceRoot: "/home/user/project",
           controlRpc: runner,
           relay: { host: "relay.test", tls: true },
           controlTimeoutMs: 30_000,
@@ -186,6 +189,7 @@ describe("run_on Connected Machine exec receipts", () => {
       workspaceId: WORKSPACE,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
+      workspaceRoot: "/home/user/project",
       relay: { host: "relay.test", tls: true } as const,
       controlTimeoutMs: 30_000,
       execTimeoutMs: 120_000,

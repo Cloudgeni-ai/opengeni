@@ -323,11 +323,14 @@ export class LazyToolRuntime {
     return this.functionTools.get(name);
   }
 
-  requiresPreparationForFunctionCall(name: string): boolean {
-    if (name === TOOL_SEARCH_NAME || name === TOOL_INVOKE_NAME) return true;
-    if (this.preparedToolsLoaded) return false;
-    const known = this.resolveFunctionTool(name);
-    return known === undefined || this.searchableToolNames.has(name);
+  requiresPreparationForFunctionCall(_name: string): boolean {
+    // Deferred preparation is one attempt-wide authority boundary, not only a
+    // schema-discovery dependency. Keep the stable always-visible base tool
+    // schemas on the first request, but make every actual function call join
+    // the exact shared promise before Runner can dispatch it. This prevents an
+    // eager tool such as exec_command from launching an out-of-process Codemode
+    // client before the attempt catalog has been persisted and activated.
+    return this.toolPreparationReady !== undefined && !this.preparationSettled;
   }
 
   wrapModel(model: Model): Model {

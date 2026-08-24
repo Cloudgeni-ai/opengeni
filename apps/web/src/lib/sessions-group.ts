@@ -867,6 +867,22 @@ function forestRoots(forest: SessionForest): SessionTreeNode[] {
   return [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
 }
 
+/**
+ * Rows as the rail will actually render them.
+ *
+ * Hierarchy mode nests spawned sessions under their parent, so lineage stays.
+ * Search results and browse groupings are deliberately flat - a partial match
+ * set is not a tree, and a browse bucket is a list - so every row there IS
+ * top-level and must say so. Both flat consumers (`buildPinnedRailSections`
+ * and `groupSessionsForBrowse`) read this one projection; a row that renders at
+ * the top level while still naming an absent parent is the bug this prevents.
+ */
+export function projectRailSessions(sessions: Session[], hierarchyMode: boolean): Session[] {
+  return hierarchyMode
+    ? sessions
+    : sessions.map((session) => ({ ...session, parentSessionId: null }));
+}
+
 /** Build the complete, explicit-pin, and ordinary rail projections together. */
 export function buildPinnedRailSections(
   sessions: Session[],

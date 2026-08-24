@@ -22,7 +22,11 @@ describe("SessionTenancyOperationController", () => {
       { visibility: "private", expectedAuthorityEpoch: 4 },
       key,
     );
-    const fork = controller.prepareFork(scope, key);
+    const fork = controller.prepareFork(
+      scope,
+      { visibility: "workspace", workspaceSharedAcknowledged: true },
+      key,
+    );
 
     expect(
       controller.prepareVisibility(
@@ -38,7 +42,13 @@ describe("SessionTenancyOperationController", () => {
         key,
       ),
     ).toBe(visibility);
-    expect(controller.prepareFork({ ...scope }, key)).toBe(fork);
+    expect(
+      controller.prepareFork(
+        { ...scope },
+        { visibility: "private", workspaceSharedAcknowledged: false },
+        key,
+      ),
+    ).toBe(fork);
     expect(generated).toBe(2);
   });
 
@@ -75,7 +85,11 @@ describe("SessionTenancyOperationController", () => {
       { visibility: "private", expectedAuthorityEpoch: 4 },
       () => "visibility-key",
     );
-    const fork = controller.prepareFork(scope, () => "fork-key");
+    const fork = controller.prepareFork(
+      scope,
+      { visibility: "private", workspaceSharedAcknowledged: false },
+      () => "fork-key",
+    );
 
     controller.settleVisibility(scope, { ...visibility, idempotencyKey: "other-key" });
     expect(controller.snapshot(scope).visibility).toBe(visibility);

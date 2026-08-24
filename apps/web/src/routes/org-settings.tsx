@@ -3,27 +3,20 @@
 // /v1/billing/entitlements), and members. The workspace-scoped API keys section
 // moved to Workspace settings; this surface is the tenant-level console.
 import { useBillingUsage } from "@opengeni/react";
-import { Link } from "@tanstack/react-router";
-import {
-  ActivityIcon,
-  BuildingIcon,
-  GaugeIcon,
-  Loader2Icon,
-  LockIcon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
+import { ActivityIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { LoadErrorState, PageHeader } from "@/components/common";
+import { LoadErrorState } from "@/components/common";
 import {
   OrganizationPeopleSection,
   OrganizationOverviewSection,
   OrganizationPrivateSessionsSection,
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
+import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
 import { useAppContext } from "@/context";
 import {
   entitlementEntries,
@@ -61,6 +54,7 @@ export function OrgSettingsRoute({
   section?: OrganizationAdminSection;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const client = context.client;
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -204,7 +198,9 @@ export function OrgSettingsRoute({
   // "shortly" rather than implying the balance already reflects the top-up.
   useEffect(() => {
     if (checkout === "success") {
-      toast.success("Payment received", { description: "Your credits will appear shortly." });
+      toast.success("Payment received", {
+        description: "Your credits will appear shortly.",
+      });
     } else if (checkout === "cancelled") {
       toast("Checkout cancelled", { description: "No charge was made." });
     }
@@ -260,64 +256,12 @@ export function OrgSettingsRoute({
   const visibleBusy = busyOwnerKey === identityKey && busy;
 
   return (
-    <ContentPage width="standard">
+    <OrganizationSettingsShell
+      workspaceId={workspaceId}
+      organizationLabel={organizationLabel}
+      section={section}
+    >
       <section className="grid gap-5 text-left">
-        <PageHeader
-          icon={<BuildingIcon className="size-4" />}
-          title="Organization"
-          description={organizationLabel}
-          actions={
-            context.clientConfig.auth.mode === "managedSession" ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() =>
-                  void context
-                    .handleManagedSignOut()
-                    .catch((error) =>
-                      toast.error("Sign out failed", { description: String(error) }),
-                    )
-                }
-              >
-                <LockIcon className="size-3.5" />
-                Sign out
-              </Button>
-            ) : undefined
-          }
-        />
-
-        <nav
-          aria-label="Organization settings sections"
-          className="flex flex-wrap gap-1 rounded-lg border border-border bg-surface p-1"
-        >
-          {(
-            [
-              ["overview", "Overview"],
-              ["people", "People & invitations"],
-              ["retention", "Retention"],
-              ["billing", "Billing"],
-            ] as const
-          ).map(([target, label]) => (
-            <Button
-              key={target}
-              asChild
-              type="button"
-              variant={section === target ? "secondary" : "ghost"}
-              size="sm"
-            >
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: target }}
-                aria-current={section === target ? "page" : undefined}
-              >
-                {label}
-              </Link>
-            </Button>
-          ))}
-        </nav>
-
         {section === "overview" ? (
           <>
             <OrganizationOverviewSection
@@ -328,6 +272,24 @@ export function OrgSettingsRoute({
               managedSession={context.clientConfig.auth.mode === "managedSession"}
               accessibleWorkspaceIds={new Set(context.workspaces.map((workspace) => workspace.id))}
               onOrganizationChanged={context.revalidatePrincipalAccess}
+              onCreateWorkspace={async (name, operationId) => {
+                await client.createOrganizationWorkspace(accountId, {
+                  name,
+                  operationId,
+                });
+              }}
+              onCreateOrganization={async (name, operationId) => {
+                const created = await client.createOrganization({
+                  name,
+                  operationId,
+                });
+                context.revalidatePrincipalAccess();
+                toast.success(`${created.organization.name} created`);
+                await navigate({
+                  to: "/workspaces/$workspaceId/sessions",
+                  params: { workspaceId: created.workspaceId },
+                });
+              }}
             />
             <OrganizationPrivateSessionsSection
               key={`${identityKey}:private-sessions`}
@@ -474,7 +436,7 @@ export function OrgSettingsRoute({
           />
         ) : null}
       </section>
-    </ContentPage>
+    </OrganizationSettingsShell>
   );
 }
 

@@ -1394,11 +1394,26 @@ describe("DB integration", () => {
         accountId: grantA.accountId,
         workspaceId: grantA.workspaceId,
         name: "RLS key",
+        description: "Verifies workspace-scoped API-key access",
         prefix: "og_test",
         keyHash,
         permissions: ["sessions:create"],
       });
-      expect((await findActiveApiKeyByHash(appDbClient.db, keyHash))?.id).toBe(apiKey.id);
+      expect(await findActiveApiKeyByHash(appDbClient.db, keyHash)).toMatchObject({
+        id: apiKey.id,
+        description: "Verifies workspace-scoped API-key access",
+      });
+      await expect(
+        createApiKey(appDbClient.db, {
+          accountId: grantA.accountId,
+          workspaceId: grantA.workspaceId,
+          name: "Oversized description",
+          description: "x".repeat(501),
+          prefix: "og_oversized",
+          keyHash: crypto.randomUUID(),
+          permissions: ["sessions:create"],
+        }),
+      ).rejects.toThrow();
     } finally {
       await appDbClient.close();
     }

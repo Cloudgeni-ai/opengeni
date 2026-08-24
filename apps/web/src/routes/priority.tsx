@@ -7,7 +7,7 @@ import { Link } from "@tanstack/react-router";
 import { ChevronRightIcon } from "lucide-react";
 import { useMemo } from "react";
 
-import { creatorHue, creatorInitials } from "@/lib/creator-initials";
+import { CreatorMonogram } from "@/components/creator-monogram";
 import { buildPriorityFeed, formatAgentMinutes, type PriorityEntry } from "@/lib/priority-feed";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { relativeTimeLabel } from "@/lib/sessions-group";
@@ -232,8 +232,6 @@ function PriorityRow(props: {
   const session = entry.session;
   const title = sessionDisplayTitle(session);
   const channelName = session.channelId ? props.channelNames.get(session.channelId) : undefined;
-  const initials = creatorInitials(session.createdBy);
-  const creatorLabel = session.createdBy.label?.trim() || session.createdBy.subjectId;
   const { figure, quiet, basis } = ledgerFigure(entry);
   // The single loudest thing on the page is the #1 figure; the product's
   // accent-bar idiom marks that same row as "start here".
@@ -296,16 +294,7 @@ function PriorityRow(props: {
         {basis ? <span className="text-2xs text-fg-subtle">{basis}</span> : null}
       </div>
       <div className="flex w-20 shrink-0 items-center justify-end gap-1.5 pt-1">
-        {initials ? (
-          <span
-            aria-hidden="true"
-            title={creatorLabel}
-            className="flex size-4.5 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90"
-            style={{ background: `oklch(0.45 0.11 ${creatorHue(session.createdBy.subjectId)})` }}
-          >
-            {initials}
-          </span>
-        ) : null}
+        <CreatorMonogram createdBy={session.createdBy} className="size-4.5" />
         <span className="font-mono text-2xs tabular-nums text-fg-subtle">
           {relativeTimeLabel(session.updatedAt)}
         </span>

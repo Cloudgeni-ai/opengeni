@@ -174,6 +174,7 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_membership_operation_receipts",
     "organization_memberships",
     "organization_profile_events",
+    "organization_shared_workspace_administration_capabilities",
     "organization_user_resource_authorities",
     "organization_user_resource_grants",
     "organization_user_retention_deletion_events",
@@ -441,26 +442,26 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 285],
+            [FORCE_RLS_TABLES, 290],
             [NON_RLS_RUNTIME_TABLES, 12],
-            [RUNTIME_FULL_DML_TABLES, 145],
+            [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 54],
-            [RUNTIME_DML_TABLES, 243],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 55],
+            [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 200],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 113],
-            [RUNTIME_READ_ONLY_TABLES, 17],
+            [RUNTIME_FULL_DML_TABLES, 117],
+            [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 31],
-            [RUNTIME_DML_TABLES, 180],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 28],
+            [RUNTIME_DML_TABLES, 183],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
@@ -473,7 +474,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 297 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 302 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );

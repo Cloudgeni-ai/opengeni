@@ -102,6 +102,7 @@ describe.skipIf(!runnable)("op-stream exec against the REAL runner (e2e)", () =>
   function buildSession(journal: OpStreamJournal): SelfhostedSession {
     return new SelfhostedSession({
       workspaceId: WORKSPACE_ID,
+      workspaceRoot: workDir,
       agentId: AGENT_ID,
       connectionInstanceId: CONNECTION_INSTANCE_ID,
       controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),

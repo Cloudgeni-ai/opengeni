@@ -9,9 +9,6 @@ import {
 } from "./lib/workspace-transition";
 
 const contextSource = await Bun.file(`${import.meta.dir}/context.tsx`).text();
-const switcherSource = await Bun.file(
-  `${import.meta.dir}/components/rail/switcher-block.tsx`,
-).text();
 const sessionListSource = await Bun.file(
   `${import.meta.dir}/components/rail/session-list.tsx`,
 ).text();
@@ -135,8 +132,8 @@ describe("principal transition contract", () => {
   });
 
   test("mutation callers do not toast, refresh, or announce stale results", () => {
-    expect(switcherSource).toContain(
-      "const updated = await context.setWorkspaceInferenceControl(activeWorkspace.id, action)",
+    expect(workspaceSettingsSource).toContain(
+      "const updated = await context.setWorkspaceInferenceControl(workspaceId, action)",
     );
     expect(transcriptionSettingsSource).toContain(
       "const updated = await context.updateWorkspaceSettings(workspaceId",

@@ -54,12 +54,13 @@ import { createTurnHistorySink } from "./history-sink";
 
 import { BudgetExhaustedError } from "./admission";
 import {
+  providerRecoveryExhaustedFailure,
   providerRecoveryResult,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
-  isHomeSandboxTurnTransitionError,
+  sandboxRouteTransitionCode,
   safeErrorDiagnostic,
   classifyXaiCredentialFailure,
   agentRunFailurePayload,
@@ -228,12 +229,8 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // and every preceding model/tool receipt, close only the unresolved suffix,
   // and continue the SAME logical turn in a fresh attempt. That next attempt
   // starts from the now-null pointer and establishes home normally.
-  if (
-    isHomeSandboxTurnTransitionError(error) &&
-    recoveryTurnId &&
-    eventing.publish &&
-    eventing.turnStartedPublished
-  ) {
+  const routeTransitionCode = sandboxRouteTransitionCode(error);
+  if (routeTransitionCode && recoveryTurnId && eventing.publish && eventing.turnStartedPublished) {
     try {
       await flushRuntimeBatcher();
       await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -242,9 +239,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         turnId: recoveryTurnId,
         triggerEventId: attempt.triggerEventId!,
         attemptId: input.attemptId,
-        reason: "sandbox_home_route_transition",
+        reason: "sandbox_route_transition",
         detail: {
-          code: "home_unavailable_this_turn",
+          code: routeTransitionCode,
           effectiveBoundary: "next_attempt",
         },
       });
@@ -264,10 +261,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       control.activityError = error;
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
-      console.error(
-        "home sandbox route-transition recovery failed",
-        safeErrorDiagnostic(recoveryError),
-      );
+      console.error("sandbox route-transition recovery failed", safeErrorDiagnostic(recoveryError));
       throw recoveryError;
     }
   }
@@ -1305,7 +1299,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // truth, recover this SAME accepted turn, then let the workflow re-claim
   // it after a pacing delay. This is independent of goal state and never
   // relies on a synthetic continuation prompt.
-  const failure = agentRunFailurePayload(error, {
+  let failure = agentRunFailurePayload(error, {
     isCodexTurn: billingState.isCodexTurn,
   }) as ReturnType<typeof agentRunFailurePayload>;
   if (isSessionEventPersistenceError(error)) {
@@ -1335,50 +1329,58 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     });
   }
   if (failure.retryable && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+    const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
+    const recoveryResult = providerRecoveryResult({
+      failureCode: failure.code,
+      attemptNumber: nextProviderRecoveryCount,
+      retryAfterMs: providerRetryAfterMs(error),
+    });
     try {
-      const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
-      const recoveryResult = providerRecoveryResult({
-        failureCode: failure.code,
-        attemptNumber: nextProviderRecoveryCount,
-        retryAfterMs: providerRetryAfterMs(error),
-      });
-      await flushRuntimeBatcher();
-      await historySink.reconcileConversationTruth({ requireDurable: true });
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-        sessionId: input.sessionId,
-        turnId: attempt.turnId,
-        triggerEventId: attempt.triggerEventId!,
-        attemptId: input.attemptId,
-        reason: failure.code ?? "provider_unavailable",
-        providerRecoveryCount: nextProviderRecoveryCount,
-        detail: {
-          ...failure,
-          continueDelayMs: recoveryResult.continueDelayMs,
-          providerRecoveryCount: nextProviderRecoveryCount,
-        },
-      });
-      if (recovery.action === "stale") {
-        acknowledgeLostAttemptOwnership();
-        control.activityStatus = "cancelled";
-        control.turnMetricOutcome = "cancelled";
-        return claimedResult({ status: "cancelled" });
-      }
-      acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-      control.turnMetricOutcome = "recovering";
-      control.activityStatus = "recovering";
-      control.activityError = error;
-      return claimedResult(recoveryResult);
-    } catch (recoveryError) {
-      const escaped = escapedMcpTimeoutRecoveryFailure({
-        failureCode: failure.code,
-        modelRequestStarted: attempt.modelRequestStarted,
-        detail: {
+      if (recoveryResult.status === "recovering") {
+        await flushRuntimeBatcher();
+        await historySink.reconcileConversationTruth({ requireDurable: true });
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
           turnId: attempt.turnId,
           triggerEventId: attempt.triggerEventId!,
-          executionGeneration: attempt.executionGeneration,
-        },
-      });
+          attemptId: input.attemptId,
+          reason: failure.code ?? "provider_unavailable",
+          providerRecoveryCount: nextProviderRecoveryCount,
+          detail: {
+            ...failure,
+            continueDelayMs: recoveryResult.continueDelayMs,
+            providerRecoveryCount: nextProviderRecoveryCount,
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          control.activityStatus = "cancelled";
+          control.turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        control.turnMetricOutcome = "recovering";
+        control.activityStatus = "recovering";
+        control.activityError = error;
+        return claimedResult(recoveryResult);
+      }
+      failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
+    } catch (recoveryError) {
+      const escaped =
+        recoveryResult.status === "recovering"
+          ? escapedMcpTimeoutRecoveryFailure({
+              failureCode: failure.code,
+              modelRequestStarted: attempt.modelRequestStarted,
+              detail: {
+                turnId: attempt.turnId,
+                triggerEventId: attempt.triggerEventId!,
+                executionGeneration: attempt.executionGeneration,
+                providerRecoveryCount: nextProviderRecoveryCount,
+                continueDelayMs: recoveryResult.continueDelayMs,
+              },
+            })
+          : null;
       if (escaped) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";

@@ -114,7 +114,7 @@ export function useCapabilitiesCatalog(workspaceId: string): CapabilitiesCatalog
     } catch (error) {
       if (!isCurrentScope()) return;
       setLoadError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load capabilities", {
+      toast.error("Failed to load plugins", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {

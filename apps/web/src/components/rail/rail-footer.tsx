@@ -1,14 +1,12 @@
 // Pinned rail footer: the collapse-toggle chevron and the signed-in user menu
 // (account/sign-out, depending on auth mode). Collapsed → just the avatar +
 // a collapse chevron, both with tooltips.
-import { Link } from "@tanstack/react-router";
 import {
   ChartColumnIcon,
   ChevronsLeftIcon,
   ChevronsRightIcon,
   LockIcon,
   LogOutIcon,
-  SettingsIcon,
   UserIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -85,15 +83,6 @@ export function RailFooter() {
               ) : null}
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem asChild>
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId: rail.workspaceId }}
-              >
-                <SettingsIcon className="size-4" />
-                Organization settings
-              </Link>
-            </DropdownMenuItem>
             {showAnalyticsPreferences ? (
               <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
                 <ChartColumnIcon className="size-4" />

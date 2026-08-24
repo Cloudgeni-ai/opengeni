@@ -292,6 +292,8 @@ export type EscapedMcpTimeoutRecoveryDetail = {
   turnId: string;
   triggerEventId: string;
   executionGeneration: number;
+  providerRecoveryCount: number;
+  continueDelayMs: number;
 };
 
 export type RecoverEscapedMcpTimeoutInput = EscapedMcpTimeoutRecoveryDetail & {

@@ -5,6 +5,18 @@ import { join } from "node:path";
 
 import { parseGnuTime } from "./profile-command";
 
+async function expectProcessGone(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await Bun.sleep(25);
+  }
+  expect(() => process.kill(pid, 0)).toThrow();
+}
+
 describe("secret-safe command profile parsing", () => {
   test("parses GNU time CPU, RSS, and filesystem counters", () => {
     expect(
@@ -52,7 +64,9 @@ describe("secret-safe command profile parsing", () => {
       { stdout: "ignore", stderr: "ignore" },
     );
     expect(await child.exited).toBe(7);
-    const profile = JSON.parse(readFileSync(output, "utf8")) as { exitCode: number };
+    const profile = JSON.parse(readFileSync(output, "utf8")) as {
+      exitCode: number;
+    };
     expect(profile.exitCode).toBe(7);
   });
 
@@ -178,15 +192,7 @@ describe("secret-safe command profile parsing", () => {
     expect(Number.isSafeInteger(descendantPid)).toBe(true);
     child.kill("SIGTERM");
     expect(await child.exited).not.toBe(0);
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      try {
-        process.kill(descendantPid, 0);
-      } catch {
-        break;
-      }
-      await Bun.sleep(25);
-    }
-    expect(() => process.kill(descendantPid, 0)).toThrow();
+    await expectProcessGone(descendantPid);
     const profile = JSON.parse(readFileSync(output, "utf8")) as {
       forwardedSignal: string | null;
     };
@@ -238,7 +244,7 @@ wait
     const descendantPid = Number(readFileSync(pidFile, "utf8").trim());
     child.kill("SIGTERM");
     expect(await child.exited).not.toBe(0);
-    expect(() => process.kill(descendantPid, 0)).toThrow();
+    await expectProcessGone(descendantPid);
     const profile = JSON.parse(readFileSync(output, "utf8")) as {
       exitCode: number;
       forwardedSignal: string | null;

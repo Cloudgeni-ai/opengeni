@@ -1357,6 +1357,7 @@ type TurnAnchorPrescan = {
   startSeqByTrigger: Map<string, number>;
   cancelledBeforeStartTriggers: Set<string>;
   directChatSequenceByTrigger: Map<string, number>;
+  explicitQueuedTriggers: Set<string>;
   startedTurnIds: Set<string>;
 };
 
@@ -1368,12 +1369,25 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
   const withdrawnTurnIds = new Set<string>();
   const fallbackSeqByTurn = new Map<string, number>();
   const directChatSequenceByTrigger = new Map<string, number>();
+  const explicitQueuedTriggers = new Set<string>();
   const queueSteerSequenceByTurn = new Map<string, number>();
   const startedTurnIds = new Set<string>();
+  const userMessageSequenceById = new Map<string, number>();
 
   for (const event of ordered) {
     const payload = asRecord(event.payload);
     const turnId = event.turnId ?? null;
+    if (event.type === "user.message") {
+      userMessageSequenceById.set(event.id, event.sequence);
+      if (payload.routing === "queued_for_execution") {
+        explicitQueuedTriggers.add(event.id);
+      } else if (
+        payload.routing === "accepted_for_execution" ||
+        payload.routing === "accepted_for_steering"
+      ) {
+        directChatSequenceByTrigger.set(event.id, event.sequence);
+      }
+    }
     if (event.type === "user.message" && payload.delivery === "steer") {
       directChatSequenceByTrigger.set(event.id, event.sequence);
     }
@@ -1397,6 +1411,16 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
       const queuedTurnId = typeof payload.turnId === "string" ? payload.turnId : turnId;
       if (triggerEventId && queuedTurnId) {
         queuedTurnByTrigger.set(triggerEventId, queuedTurnId);
+        if (
+          (payload.routing === "accepted_for_execution" ||
+            payload.routing === "accepted_for_steering") &&
+          !directChatSequenceByTrigger.has(triggerEventId)
+        ) {
+          directChatSequenceByTrigger.set(
+            triggerEventId,
+            userMessageSequenceById.get(triggerEventId) ?? event.sequence,
+          );
+        }
       }
       continue;
     }
@@ -1453,6 +1477,7 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
     startSeqByTrigger,
     cancelledBeforeStartTriggers,
     directChatSequenceByTrigger,
+    explicitQueuedTriggers,
     startedTurnIds,
   };
 }
@@ -1474,6 +1499,13 @@ function orderTimelineEvents(events: SessionEvent[], prescan: TurnAnchorPrescan)
     }
     const queuedTurnId = prescan.queuedTurnByTrigger.get(event.id);
     if (!queuedTurnId) {
+      if (prescan.explicitQueuedTriggers.has(event.id)) {
+        const startSeq = prescan.startSeqByTrigger.get(event.id);
+        if (startSeq !== undefined) {
+          pushInsertion(insertions, startSeq, event);
+        }
+        continue;
+      }
       pushInsertion(insertions, event.sequence, event);
       continue;
     }

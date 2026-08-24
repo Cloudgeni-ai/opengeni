@@ -18,7 +18,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 
 const migrationUrl = new URL(
-  "../drizzle/0334_document_authority_reclassification.sql",
+  "../drizzle/0338_document_authority_reclassification.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -60,11 +60,11 @@ async function withScope<T>(
 }
 
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("migration-0334-document-authority");
+  owned = await acquireOwnerMigratedTestDatabase("migration-0338-document-authority");
   if (!owned) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0334-document-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0338-document-authority] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     return;
@@ -120,7 +120,7 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-describe("migration 0334 Document authority reclassification", () => {
+describe("migration 0338 Document authority reclassification", () => {
   test("is rolling, explicit, and keeps legacy authority unchanged until a lifecycle call", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");

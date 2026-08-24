@@ -490,6 +490,12 @@ async function grantAppRoleIfSchemaExists(
     "list_organization_members(uuid,text)",
     "list_organization_invitations(uuid,text,uuid,integer)",
     "get_organization_administration_overview(uuid,text)",
+    "create_managed_organization(text,text,text,uuid)",
+    "assert_organization_shared_workspace_administrator(uuid,uuid,text)",
+    "open_organization_shared_workspace_administration_capability(uuid,uuid,text)",
+    "close_organization_shared_workspace_administration_capability(uuid)",
+    "create_organization_shared_workspace(uuid,text,text,text,text,uuid)",
+    "upsert_organization_shared_workspace_member(uuid,uuid,text,uuid,text,text,jsonb,boolean)",
     "update_organization_name(uuid,text,text,timestamptz,uuid)",
     "create_organization_invitation_v2(jsonb)",
     "bind_pending_organization_invitations_for_verified_email(text,text)",
@@ -1224,6 +1230,38 @@ BEGIN
       );
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.replay_applied_session_fork(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );

@@ -2673,6 +2673,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
+      if (!enrollment.workspaceRoot) {
+        throw new BrowserSessionStateError(
+          "Attached browser machine has not reported an absolute workspace root",
+        );
+      }
       const placementInstanceId = attachedEndPlacementInstanceId(
         operation,
         expectedPlacementInstanceId,
@@ -2682,6 +2687,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
+        workspaceRoot: enrollment.workspaceRoot,
         relay: relayConfigFromSettings(deps.settings),
         controlRpcFactory: () => new NatsControlRpc(async () => deps.bus.getRequestConnection()),
         // Browser-profile generation is the physical controller fence. Epoch 0

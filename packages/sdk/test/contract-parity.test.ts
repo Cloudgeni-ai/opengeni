@@ -4,6 +4,7 @@ import {
   AgentTopologyPageResponse as ContractAgentTopologyPageResponse,
   ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
+  AddOrganizationWorkspaceMemberRequest as ContractAddOrganizationWorkspaceMemberRequest,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
   IntegrationDefinitionSummary as ContractIntegrationDefinitionSummary,
   IntegrationPresentation as ContractIntegrationPresentation,
@@ -141,6 +142,7 @@ import type {
   IntegrationPresentation,
   ActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse,
+  AddOrganizationWorkspaceMemberRequest,
   AddWorkspaceMemberRequest,
   AttachViewerRequest,
   AttachViewerResponse,
@@ -299,7 +301,7 @@ describe("SDK / contracts parity", () => {
     );
   });
 
-  test("session visibility and private-fork request/response shapes stay in parity", () => {
+  test("session visibility and explicit fork request/response shapes stay in parity", () => {
     const visibilityRequest = (
       value: UpdateSessionVisibilityRequest,
     ): z.input<typeof ContractUpdateSessionVisibilityRequest> => value;
@@ -664,7 +666,12 @@ describe("SDK / contracts parity", () => {
     const message: ClientSessionEventInput = {
       type: "user.message",
       clientEventId: "ce-1",
-      payload: { text: "hello" },
+      payload: {
+        text: "hello",
+        controlEtag: "control-1",
+        expectedDraftRevision: 3,
+        connectionAuthorities: [],
+      },
     };
     const approval: ClientSessionEventInput = {
       type: "user.approvalDecision",
@@ -706,6 +713,11 @@ describe("SDK / contracts parity", () => {
       [acceptMember, acceptList, acceptAdd, acceptUpdate].every((fn) => typeof fn === "function"),
     ).toBe(true);
 
+    const acceptOrganizationAdd = (
+      value: Omit<AddOrganizationWorkspaceMemberRequest, "permissions">,
+    ): Omit<z.input<typeof ContractAddOrganizationWorkspaceMemberRequest>, "permissions"> => value;
+    expect(typeof acceptOrganizationAdd).toBe("function");
+
     const add: AddWorkspaceMemberRequest = {
       email: "teammate@example.com",
       role: "member",
@@ -715,6 +727,13 @@ describe("SDK / contracts parity", () => {
       permissions: ["sessions:read", "members:manage"],
     };
     expect(ContractAddWorkspaceMemberRequest.safeParse(add).success).toBe(true);
+    expect(
+      ContractAddOrganizationWorkspaceMemberRequest.safeParse({
+        organizationMembershipId: "00000000-0000-4000-8000-000000000001",
+        role: "member",
+        permissions: ["workspace:read"],
+      }).success,
+    ).toBe(true);
     expect(ContractUpdateWorkspaceMemberRequest.safeParse(update).success).toBe(true);
     expect(
       ContractWorkspaceMember.safeParse({

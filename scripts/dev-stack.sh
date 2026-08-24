@@ -431,12 +431,123 @@ if [ "${OPENGENI_SANDBOX_SELFHOSTED_ENABLED:-false}" = "true" ]; then
 fi
 
 pids=()
+pid_labels=()
+failed_process_status=1
+
+register_process() {
+  pids+=("$1")
+  pid_labels+=("$2")
+}
+
+signal_process_tree() {
+  local signal="$1"
+  local pid="$2"
+  local child
+  while read -r child; do
+    if [ -n "$child" ]; then
+      signal_process_tree "$signal" "$child"
+    fi
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  kill "-$signal" "$pid" >/dev/null 2>&1 || true
+}
+
 cleanup() {
-  if [ "${#pids[@]}" -gt 0 ]; then
-    kill "${pids[@]}" >/dev/null 2>&1 || true
+  if [ "${#pids[@]}" -eq 0 ]; then
+    return
   fi
+  local deadline=$((SECONDS + 5))
+  local pid running
+  for pid in "${pids[@]}"; do
+    signal_process_tree TERM "$pid"
+  done
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    running=0
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        running=1
+        break
+      fi
+    done
+    if [ "$running" -eq 0 ]; then
+      break
+    fi
+    sleep 0.1
+  done
+  for pid in "${pids[@]}"; do
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      signal_process_tree KILL "$pid"
+    fi
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" >/dev/null 2>&1 || true
+  done
 }
 trap cleanup EXIT INT TERM
+
+dev_processes_running() {
+  local index pid label status
+  for ((index = 0; index < ${#pids[@]}; index++)); do
+    pid="${pids[$index]}"
+    label="${pid_labels[$index]}"
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      if wait "$pid"; then
+        status=0
+      else
+        status=$?
+      fi
+      failed_process_status="$status"
+      if [ "$failed_process_status" -eq 0 ]; then
+        failed_process_status=1
+      fi
+      echo "OpenGeni dev process exited: ${label} (status ${status}). Stopping the stack." >&2
+      return 1
+    fi
+  done
+  return 0
+}
+
+stack_http_ready() {
+  curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_API_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_WORKER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_TURN_WORKER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}/healthz" >/dev/null 2>&1 &&
+    curl -fsS -m 1 "http://127.0.0.1:${OPENGENI_WEB_PORT}/" >/dev/null 2>&1
+}
+
+wait_for_stack_readiness() {
+  local deadline=$((SECONDS + 60))
+  while ! stack_http_ready; do
+    if ! dev_processes_running; then
+      return 1
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "OpenGeni dev stack did not become ready within 60 seconds. Stopping all processes." >&2
+      failed_process_status=1
+      return 1
+    fi
+    sleep 0.1
+  done
+  echo "OpenGeni dev stack ready: API, workers, artifact services, and web are reachable."
+}
+
+monitor_dev_stack() {
+  local unhealthy_checks=0
+  while dev_processes_running; do
+    if stack_http_ready; then
+      unhealthy_checks=0
+    else
+      unhealthy_checks=$((unhealthy_checks + 1))
+      if [ "$unhealthy_checks" -ge 2 ]; then
+        echo "OpenGeni dev stack lost aggregate readiness. Stopping instead of leaving a partial stack running." >&2
+        failed_process_status=1
+        return 1
+      fi
+    fi
+    sleep 5
+  done
+  return 1
+}
 
 default_database_url="postgres://opengeni_app:opengeni_app@127.0.0.1:5432/opengeni"
 if [ -z "${OPENGENI_DATABASE_URL:-}" ] || [ "${OPENGENI_DATABASE_URL}" = "$default_database_url" ]; then
@@ -713,8 +824,19 @@ fi
 export OPENGENI_DOCKER_NETWORK="${COMPOSE_PROJECT_NAME}_default"
 
 default_vite_api_base_url="http://127.0.0.1:8000"
+# Browser cookies are domain-scoped, so `localhost` and `127.0.0.1` are not
+# interchangeable here. Match the generated API URL to the configured local
+# web/public hostname; otherwise managed signup can create the user while the
+# browser silently drops the cross-site session cookie.
+browser_loopback_host="127.0.0.1"
+browser_base_url="${OPENGENI_WEB_BASE_URL:-${OPENGENI_PUBLIC_BASE_URL:-}}"
+if [[ "$browser_base_url" =~ ^https?://localhost([:/]|$) ]]; then
+  browser_loopback_host="localhost"
+elif [[ "$browser_base_url" =~ ^https?://127\.0\.0\.1([:/]|$) ]]; then
+  browser_loopback_host="127.0.0.1"
+fi
 if [ -z "${VITE_API_BASE_URL:-}" ] || [ "${VITE_API_BASE_URL}" = "$default_vite_api_base_url" ]; then
-  export VITE_API_BASE_URL="http://127.0.0.1:${OPENGENI_API_PORT}"
+  export VITE_API_BASE_URL="http://${browser_loopback_host}:${OPENGENI_API_PORT}"
 else
   export VITE_API_BASE_URL="$(rewrite_loopback_port "$VITE_API_BASE_URL" "$OPENGENI_API_PORT")"
 fi
@@ -1026,24 +1148,24 @@ fi
 if [ "$start_local_relay" = "1" ]; then
   env "${relay_cargo_env[@]+"${relay_cargo_env[@]}"}" \
     bash scripts/run-development-relay.sh &
-  pids+=("$!")
+  register_process "$!" "connected-machine relay"
 fi
 
 (cd apps/api && bun run dev) &
-pids+=("$!")
+register_process "$!" "API"
 
 (cd apps/worker && OPENGENI_WORKER_ROLE=control bun run dev:watch) &
-pids+=("$!")
+register_process "$!" "control worker"
 
 (cd apps/worker && OPENGENI_WORKER_ROLE=turn \
   OPENGENI_WORKER_HTTP_PORT="${OPENGENI_TURN_WORKER_HTTP_PORT}" bun run dev:watch) &
-pids+=("$!")
+register_process "$!" "turn worker"
 
 (cd apps/worker && bun run start:artifact-materializer) &
-pids+=("$!")
+register_process "$!" "artifact materializer"
 
 (cd apps/worker && bun run start:artifact-outbox) &
-pids+=("$!")
+register_process "$!" "artifact outbox"
 
 # The web setup surface serves the unpacked Chrome bridge archive directly from
 # apps/browser-extension/dist. Starting Vite without the package build leaves a
@@ -1053,9 +1175,14 @@ pids+=("$!")
 # the deterministic extension artifact cannot be produced.
 bun run --cwd apps/browser-extension build
 (cd apps/web && bun x vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &
-pids+=("$!")
+register_process "$!" "web"
 
-wait
-exit_code=$?
-cleanup
-exit "$exit_code"
+bun scripts/watch-development-schema.ts "$(pwd)" &
+register_process "$!" "database schema guard"
+
+if ! wait_for_stack_readiness; then
+  exit "$failed_process_status"
+fi
+if ! monitor_dev_stack; then
+  exit "$failed_process_status"
+fi

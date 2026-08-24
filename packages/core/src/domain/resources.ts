@@ -17,6 +17,7 @@ import {
   type RepositoryResourceRef,
   type ResourceRef,
   type ToolRef,
+  type WorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
 import {
   areGitHubRepositoriesAllowedForWorkspace,
@@ -84,6 +85,31 @@ export function withDefaultEnabledCapabilityMcpTools(
   runtimeSettings: McpSettings,
 ): ToolRef[] {
   return mergeToolRefs(tools, enabledCapabilityMcpToolRefs(settings, runtimeSettings));
+}
+
+/**
+ * Apply the workspace's exact new-session MCP defaults when configured.
+ * Stale or currently unavailable ids are optional and disappear from the
+ * executable selection without making every new session fail during a rolling
+ * connector change. An absent workspace override preserves the legacy
+ * deployment + enabled-capability default.
+ */
+export function withWorkspaceDefaultMcpTools(
+  tools: ToolRef[],
+  settings: McpSettings,
+  runtimeSettings: McpSettings,
+  defaults: WorkspaceSessionToolDefaults | null,
+): ToolRef[] {
+  if (!defaults) {
+    return withDefaultEnabledCapabilityMcpTools(tools, settings, runtimeSettings);
+  }
+  return mergeToolRefs(
+    tools,
+    validateToolRefs(
+      defaults.mcpServerIds.map((id) => ({ kind: "mcp" as const, id, optional: true as const })),
+      runtimeSettings,
+    ),
+  );
 }
 
 /** Drop stored refs that are no longer present in the current runtime registry. */

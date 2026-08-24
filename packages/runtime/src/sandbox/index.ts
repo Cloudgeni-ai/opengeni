@@ -460,6 +460,7 @@ export {
 } from "./selfhosted/retry-policy";
 export {
   SelfhostedSession,
+  SelfhostedWorkspaceRootChangedError,
   SelfhostedSandboxClient,
   buildSelfhostedBackendSession,
   isSelfhostedProviderNotFoundError,
@@ -479,6 +480,14 @@ export {
   type SelfhostedImageOutput,
   type SelfhostedOpStreamDeps,
 } from "./selfhosted/session";
+export {
+  connectedMachineWorkspaceRootsEqual,
+  isWindowsConnectedMachinePath,
+  normalizeConnectedMachineWorkspaceRoot,
+  resolveConnectedMachinePath,
+  resolveConnectedMachineWorkspaceRoot,
+  type ConnectedMachineOs,
+} from "./selfhosted/workspace-path";
 export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
@@ -539,6 +548,7 @@ export {
   RoutingMutationOutcomeUnknownError,
   RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
+  RoutingWorkspaceRootChangedError,
   RoutingUnsupportedError,
   type ActivePointer,
   type DefaultBackendLossResult,

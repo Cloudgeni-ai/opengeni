@@ -155,7 +155,6 @@ import type {
   UpsertIntegrationFacetRequest,
   PreviewPluginRequest,
   PluginPreview,
-  PersonalResourceAttachmentIntent,
   InstallPluginRequest,
   InstalledPlugin,
   ListInstalledPluginsResponse,
@@ -176,6 +175,7 @@ import type {
   WorkspaceModelCatalogResponse,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
+  UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
   ConnectionMetadata,
@@ -255,7 +255,11 @@ import type {
   ListOrganizationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
+  AddOrganizationWorkspaceMemberRequest,
   CreateOrganizationInvitationRequest,
+  CreateOrganizationRequest,
+  CreateOrganizationResponse,
+  CreateOrganizationWorkspaceRequest,
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
@@ -288,9 +292,6 @@ import type {
   ApproveSlackUserLinkAccessRequest,
   PackInstallation,
   PackUninstallPreview,
-  LatencyMode,
-  McpConnectionAuthoritySelection,
-  ReasoningEffort,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
   RetainedArtifactDownload,
@@ -305,7 +306,6 @@ import type {
   VideoGenerationPolicy,
   WorkspaceVideoGenerationSettings,
   RegisterCapabilityPackRequest,
-  ResourceRef,
   PreviewPackInstallationRequest,
   PreviewSkillImportRequest,
   ScheduledTask,
@@ -344,8 +344,6 @@ import type {
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
-  SessionMcpCredentialUpdateInput,
-  SubmittedTimelineAnnotation,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
   SessionQueueSnapshot,
@@ -412,7 +410,6 @@ import type {
   PtyWriteRequest,
   PtyResizeRequest,
   PtyCloseRequest,
-  ToolRef,
   TranscribeAudioResponse,
   TranscriptionRecordingListResponse,
   TranscriptionRecordingResponse,
@@ -572,23 +569,18 @@ export type OpenGeniRequestOptions = {
   timeoutMs?: number | undefined;
 };
 
-export type SendMessageInput = {
-  text: string;
-  annotations?: SubmittedTimelineAnnotation[];
-  /** Model-visible application context attached to this exact user message; omitted by standard timeline rendering. */
-  modelContext?: string;
-  resources?: ResourceRef[];
-  tools?: ToolRef[];
-  model?: string;
-  reasoningEffort?: ReasoningEffort;
-  latencyMode?: LatencyMode;
+/** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
+export type SendMessageInput = UserMessageEventInput["payload"] & {
   clientEventId?: string;
-  controlEtag?: string;
-  expectedDraftRevision?: number;
-  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
-  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
+
+function assertNoMessageTools(input: object): void {
+  if (Object.prototype.hasOwnProperty.call(input, "tools")) {
+    throw new TypeError(
+      "Message-level tools are not supported; update the session tool policy before sending.",
+    );
+  }
+}
 
 export type SteerMessageResult = {
   /** The accepted `user.message` event. */
@@ -953,7 +945,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create an independent same-workspace private fork of an owned, quiescent session. */
+  /** Create an independent same-workspace fork with explicit destination visibility. */
   async forkSession(
     workspaceId: string,
     sessionId: string,
@@ -1734,6 +1726,7 @@ export class OpenGeniClient {
     message: string | SendMessageInput,
   ): Promise<SessionEvent> {
     const input = typeof message === "string" ? { text: message } : message;
+    assertNoMessageTools(input);
     const { clientEventId, ...payload } = input;
     return await this.sendEvent(workspaceId, sessionId, {
       type: "user.message",
@@ -2201,6 +2194,7 @@ export class OpenGeniClient {
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
     const input = typeof message === "string" ? { text: message } : message;
+    assertNoMessageTools(input);
     return await this.requestSessionCommand<SteerMessageResult>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/steer`,
@@ -3760,6 +3754,13 @@ export class OpenGeniClient {
     );
   }
 
+  /** Create a new organization owned by the current managed human. */
+  async createOrganization(
+    request: CreateOrganizationRequest,
+  ): Promise<CreateOrganizationResponse> {
+    return await this.requestJson<CreateOrganizationResponse>("POST", "/v1/organizations", request);
+  }
+
   /** Pending and historical invitations addressed to the current managed human. */
   async listOrganizationInvitations(
     options: { cursor?: string; limit?: number } = {},
@@ -3849,6 +3850,86 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/organizations/${organizationId}`,
       request,
+    );
+  }
+
+  /**
+   * Organization control-plane update for a shared workspace. This does not
+   * require or create operational workspace access for the organization admin.
+   */
+  async updateOrganizationWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateWorkspaceRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
+      request,
+    );
+  }
+
+  /** Create a shared workspace without implicitly granting the actor access. */
+  async createOrganizationWorkspace(
+    organizationId: string,
+    request: CreateOrganizationWorkspaceRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "POST",
+      `/v1/organizations/${organizationId}/workspaces`,
+      request,
+    );
+  }
+
+  async updateOrganizationWorkspaceSettings(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateWorkspaceSettingsRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/settings`,
+      request,
+    );
+  }
+
+  async addOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    request: AddOrganizationWorkspaceMemberRequest,
+  ): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>(
+      "POST",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members`,
+      request,
+    );
+  }
+
+  async updateOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    subjectId: string,
+    request: UpdateWorkspaceMemberRequest,
+  ): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
+        subjectId,
+      )}`,
+      request,
+    );
+  }
+
+  async removeOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    subjectId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
+        subjectId,
+      )}`,
     );
   }
 

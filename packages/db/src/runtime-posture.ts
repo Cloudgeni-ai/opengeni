@@ -74,6 +74,12 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "list_organization_invitations(uuid, text, uuid, integer)",
   "list_organization_members(uuid, text)",
   "get_organization_administration_overview(uuid, text)",
+  "create_managed_organization(text, text, text, uuid)",
+  "assert_organization_shared_workspace_administrator(uuid, uuid, text)",
+  "open_organization_shared_workspace_administration_capability(uuid, uuid, text)",
+  "close_organization_shared_workspace_administration_capability(uuid)",
+  "create_organization_shared_workspace(uuid, text, text, text, text, uuid)",
+  "upsert_organization_shared_workspace_member(uuid, uuid, text, uuid, text, text, jsonb, boolean)",
   "update_organization_name(uuid, text, text, timestamp with time zone, uuid)",
   "create_organization_invitation_v2(jsonb)",
   "bind_pending_organization_invitations_for_verified_email(text, text)",
@@ -101,6 +107,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_membership_operation_receipts",
   "organization_memberships",
   "organization_profile_events",
+  "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -360,8 +367,12 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
 ] as const;
 const TRANSITION_SESSION_VISIBILITY_ROUTINE =
   "transition_session_visibility(uuid, uuid, uuid, text, text, integer, text, text, integer)";
-const FORK_SESSION_CONTENT_ROUTINE =
+const LEGACY_FORK_SESSION_CONTENT_ROUTINE =
   "fork_session_content(uuid, uuid, uuid, text, uuid, text, text, text, integer)";
+const FORK_SESSION_CONTENT_ROUTINE =
+  "fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
+const REPLAY_APPLIED_SESSION_FORK_ROUTINE =
+  "replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer)";
 const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uuid, integer)";
 const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
 const SESSION_TENANCY_QUIESCENCE_ROUTINE =
@@ -374,7 +385,9 @@ const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
   "close_private_session_create_capability(uuid)",
 ] as const;
 const SESSION_AUTHORITY_ROUTINES = new Set<string>([
+  LEGACY_FORK_SESSION_CONTENT_ROUTINE,
   FORK_SESSION_CONTENT_ROUTINE,
+  REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
   SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
@@ -417,6 +430,8 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...GOVERNED_LEARNING_ACTIVATION_ROUTINES,
   ...GOVERNED_LEARNING_INSPECTION_ROUTINES,
   FORK_SESSION_CONTENT_ROUTINE,
+  LEGACY_FORK_SESSION_CONTENT_ROUTINE,
+  REPLAY_APPLIED_SESSION_FORK_ROUTINE,
   SESSION_TENANCY_ACTIVATED_ROUTINE,
   SESSION_TENANCY_ANY_ACTIVATION_ROUTINE,
   XAI_AUTHORITY_LIVE_ROUTINE,
@@ -628,6 +643,7 @@ export const FORCE_RLS_TABLES = [
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
+  "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -714,15 +730,19 @@ export const FORCE_RLS_TABLES = [
   "slack_bot_post_operations",
   "slack_bot_update_operations",
   "slack_bot_user_links",
+  "slack_channel_routes",
   "slack_installation_bindings",
   "slack_interaction_action_handles",
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
+  "slack_route_prompt_options",
+  "slack_route_prompts",
   "slack_shared_task_origins",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
   "slack_task_policy_revisions",
+  "slack_user_dm_routes",
   "slack_user_link_access_request_operations",
   "slack_user_link_access_requests",
   "social_connections",
@@ -918,10 +938,14 @@ export const RUNTIME_FULL_DML_TABLES = [
   "slack_bot_post_operations",
   "slack_bot_update_operations",
   "slack_bot_user_links",
+  "slack_channel_routes",
   "slack_interaction_action_handles",
   "slack_interaction_inbox",
   "slack_interaction_progress_deliveries",
   "slack_interactions",
+  "slack_route_prompt_options",
+  "slack_route_prompts",
+  "slack_user_dm_routes",
   "social_connections",
   "social_posts",
   "stripe_webhook_events",
@@ -1100,6 +1124,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
+  "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
