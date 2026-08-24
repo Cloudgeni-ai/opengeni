@@ -374,7 +374,7 @@ export function AgentsRoute({ workspaceId }: { workspaceId: string }) {
       >
         <TopologyMetric label="Active" value={summary.active} icon={ActivityIcon} tone="running" />
         <TopologyMetric label="Running" value={summary.running} icon={BotIcon} tone="running" />
-        <TopologyMetric label="Queued" value={summary.queued} icon={Clock3Icon} tone="queued" />
+        <TopologyMetric label="Starting" value={summary.queued} icon={Clock3Icon} tone="queued" />
         <TopologyMetric
           label="Needs you"
           value={summary.attention}
@@ -944,7 +944,7 @@ function agentStatus(session: AgentTopologySession): {
   }
   if (session.status === "queued") {
     return {
-      label: "Queued",
+      label: "Starting",
       tone: "queued",
       pulse: false,
       textClass: "text-status-queued",
@@ -1039,7 +1039,7 @@ export function AgentTopologyPreviewRoute() {
             tone="running"
           />
           <TopologyMetric label="Running" value={summary.running} icon={BotIcon} tone="running" />
-          <TopologyMetric label="Queued" value={summary.queued} icon={Clock3Icon} tone="queued" />
+          <TopologyMetric label="Starting" value={summary.queued} icon={Clock3Icon} tone="queued" />
           <TopologyMetric
             label="Needs you"
             value={summary.attention}

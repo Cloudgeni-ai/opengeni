@@ -1103,6 +1103,7 @@ describe("retained-process terminal-owner reconciliation", () => {
         ) attempt on true`;
       await tx`set local enable_bitmapscan = off`;
       await tx`set local enable_sort = off`;
+      await tx`set local enable_incremental_sort = off`;
       const retainedInventory = await tx`
         explain (format json, costs off)
         select process.owner_actor_kind, process.workspace_id,

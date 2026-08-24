@@ -3,7 +3,10 @@ import { sessionTimelineEmptyStateCopy } from "./session-empty-state";
 
 describe("sessionTimelineEmptyStateCopy", () => {
   test("reports the actual zero-step lifecycle", () => {
-    expect(sessionTimelineEmptyStateCopy("queued", false).title).toBe("Queued to start");
+    expect(sessionTimelineEmptyStateCopy("queued", false)).toEqual({
+      title: "Starting the agent",
+      description: "Your prompt is in the conversation while the agent starts.",
+    });
     expect(sessionTimelineEmptyStateCopy("running", false).title).toBe("Starting the agent");
     expect(sessionTimelineEmptyStateCopy("recovering", false).title).toBe("Restoring this session");
     expect(sessionTimelineEmptyStateCopy("waiting_capacity", false).title).toBe(

@@ -208,6 +208,15 @@ function rememberOptimisticSendOperations(
         hasMcpCredentialUpdates: input.mcpCredentialUpdates !== undefined,
       } satisfies StoredOptimisticSendOperation;
     });
+  if (stored.length === 0) {
+    optimisticSendOperations.delete(key);
+    try {
+      pendingComposerStorage()?.removeItem(optimisticSendStorageKey(key));
+    } catch {
+      // Best effort; the in-memory entry is already gone.
+    }
+    return;
+  }
   optimisticSendOperations.set(key, stored);
   try {
     pendingComposerStorage()?.setItem(optimisticSendStorageKey(key), JSON.stringify(stored));
@@ -1950,11 +1959,14 @@ export function useComposer(
         annotations: annotationsAtSend,
       });
       const currentPayload = currentDraftPayload();
+      const hasEarlierUnsettledSend = optimisticSendsRef.current.some(
+        (candidate) => candidate.state !== "failed" || candidate.outcomeUnknown === true,
+      );
       const operation: OptimisticSendOperation = {
         clientEventId,
         delivery: "send",
         destination:
-          effectiveControl?.state === "paused"
+          effectiveControl?.state === "paused" || hasEarlierUnsettledSend
             ? "queue"
             : (sendDestinationRef.current?.() ?? "chat"),
         text: sendText,

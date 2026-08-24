@@ -91,9 +91,15 @@ on every native target and WASM and aggregation rejects any digest mismatch.
   path likewise acknowledges locally with one `clientEventId`, renders a bounded
   optimistic message, and reconciles it against the authoritative event stream.
   The committed response includes the command receipt and admission routing. The
-  browser therefore shows an idle Send in chat, a busy or paused Send in the queue,
-  and Steer in chat without guessing from a later event. A queued `user.message`
-  stays out of the chat timeline until its turn leaves the authoritative queue.
+  same immutable decision is stored as `session_turns.prompt_routing`; physical
+  `status = 'queued'` means only that the worker has not claimed the row and is
+  never itself user-visible queue authority. Both durable `user.message` and
+  `turn.queued` projections repeat that routing fact, so a partial stream or
+  fresh reload places the prompt correctly without a transient chat/queue flash.
+  The browser therefore shows an idle
+  Send in chat, a busy or paused Send in the queue, and Steer in chat without
+  guessing from a later event. A `queued_for_execution` `user.message` stays out
+  of the chat timeline until its turn is claimed.
   Queue-row Steer bridges that existing prompt into chat immediately and dedupes
   it by trigger event when durable stream history catches up, so missed live
   fanout cannot make an accepted direction change disappear.
@@ -874,7 +880,7 @@ stateDiagram-v2
 
 Key transitions (canonical: `apps/worker/src/workflows/session.ts`):
 
-- **Only human/API prompts are reorderable queue rows.** The one compact queue surface also projects canonical pending machine inputs directly from `session_system_updates`: attached to the eligible human prompt they will join, or grouped as standalone incoming updates. Events only invalidate that projection. The current inference, same-turn recovery, and compaction are not queue work.
+- **Only human/API prompts admitted as `queued_for_execution` are reorderable queue rows.** Physical unclaimed rows also include idle Send and Steer admissions whose immutable `prompt_routing` keeps them in chat; nullable rolling/legacy rows project conservatively into the visible queue. The one compact queue surface also projects canonical pending machine inputs directly from `session_system_updates`: attached to the eligible human prompt they will join, or grouped as standalone incoming updates. Events only invalidate that projection. The current inference, same-turn recovery, and compaction are not queue work.
 - **Machine-input batching preserves executable authority.** Ordinary notices may coalesce only when their frozen personal-MCP delegation snapshots are identical; differing snapshots form separate turns. Agent Steer remains authoritative over ordinary notices that join it. The active-turn and queued-turn surfaces disclose only server/provider summaries, never credential or owner identifiers.
 - **Structured human input is not an approval or a queue prompt.** When workspace setting `agentHumanInputEnabled` is not false, `request_human_input` freezes the current SDK tool call; answer, allowed skip, expiry, or cancellation is injected as structured output into that same call. Disabled workspaces omit the tool and reject stale/forged structured-input boundaries before `requires_action`. The request row, open suffix, events, and `requires_action` status are installed atomically. See [`human-input.md`](human-input.md).
 - **Every requires-action boundary admits one resume event.** Ordinary approval decisions and structured-input responses share the same durable gate, so parallel or mixed interruptions advance and re-freeze serially instead of settling two tool calls against one trigger.
