@@ -38,12 +38,15 @@ async function asTenant<T>(
   run: (tx: postgres.TransactionSql) => Promise<T>,
 ): Promise<T> {
   if (!app) throw new Error("database unavailable");
-  return await app.begin(async (tx) => {
+  // `begin` is typed to unwrap a returned promise ARRAY, which it never does for
+  // the single values these helpers return, so the generic needs restating.
+  const result = await app.begin(async (tx) => {
     await tx`select
       set_config('opengeni.account_id', ${accountId}, true),
       set_config('opengeni.workspace_id', ${workspaceId}, true)`;
     return await run(tx);
   });
+  return result as T;
 }
 
 async function captureSqlState(run: () => Promise<unknown>): Promise<string | null> {
@@ -336,7 +339,7 @@ describe("migration 0333 Slack workspace routing", () => {
       from slack_interaction_inbox
       where connection_id = ${CONNECTION}
       order by provider_event_id`;
-    expect(rows).toEqual([
+    expect([...rows]).toEqual([
       { providerEventId: "Ev0333-awaiting", routeState: "awaiting_choice" },
       { providerEventId: "Ev0333-legacy", routeState: null },
       { providerEventId: "Ev0333-resolved", routeState: "resolved" },
