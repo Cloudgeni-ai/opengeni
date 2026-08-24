@@ -1247,6 +1247,7 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
+  "rigs:use",
   "artifacts:read",
   "artifacts:publish",
 ];
