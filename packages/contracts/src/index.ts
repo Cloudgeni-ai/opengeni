@@ -4882,6 +4882,51 @@ export const MoveDocumentRequest = z.object({
 });
 export type MoveDocumentRequest = z.infer<typeof MoveDocumentRequest>;
 
+export const DocumentAuthorityTuple = z.object({
+  kind: DocumentAuthorityKind,
+  workspaceId: z.string().uuid().nullable(),
+  subjectId: z.string().nullable(),
+  authorityId: z.string().uuid().nullable(),
+});
+export type DocumentAuthorityTuple = z.infer<typeof DocumentAuthorityTuple>;
+
+export const ReclassifyDocumentAuthorityRequest = z.object({
+  operationId: z.string().uuid(),
+  expectedAuthority: DocumentAuthorityTuple,
+  targetAuthorityKind: DocumentAuthorityKind,
+});
+export type ReclassifyDocumentAuthorityRequest = z.infer<typeof ReclassifyDocumentAuthorityRequest>;
+
+export const DocumentAuthorityReclassification = z.object({
+  operationId: z.string().uuid(),
+  documentId: z.string().uuid(),
+  previousAuthority: DocumentAuthorityTuple,
+  authority: DocumentAuthorityTuple,
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type DocumentAuthorityReclassification = z.infer<typeof DocumentAuthorityReclassification>;
+
+export const RunDocumentDefaultCollectionBackfillRequest = z.object({
+  runId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  batchSize: z.number().int().min(1).max(100).default(50),
+});
+export type RunDocumentDefaultCollectionBackfillRequest = z.infer<
+  typeof RunDocumentDefaultCollectionBackfillRequest
+>;
+
+export const DocumentDefaultCollectionBackfill = z.object({
+  runId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  status: z.enum(["running", "completed"]),
+  lastWorkspaceId: z.string().uuid().nullable(),
+  processedCount: z.number().int().nonnegative(),
+  createdCount: z.number().int().nonnegative(),
+  adoptedCount: z.number().int().nonnegative(),
+  completedAt: z.string().datetime({ offset: true }).nullable(),
+});
+export type DocumentDefaultCollectionBackfill = z.infer<typeof DocumentDefaultCollectionBackfill>;
+
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
   baseIds: z.array(z.string().uuid()).optional(),

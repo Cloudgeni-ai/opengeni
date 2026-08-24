@@ -4,7 +4,9 @@ import {
   CreateKnowledgeMemoryRequest,
   CreateDocumentBaseRequest,
   Document,
+  DocumentAuthorityReclassification,
   DocumentBase,
+  DocumentDefaultCollectionBackfill,
   DocumentSearchRequest,
   DocumentSearchResponse,
   FileAsset,
@@ -12,6 +14,8 @@ import {
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
   MoveDocumentRequest,
+  ReclassifyDocumentAuthorityRequest,
+  RunDocumentDefaultCollectionBackfillRequest,
   UpdateKnowledgeMemoryRequest,
   WorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse,
@@ -35,10 +39,13 @@ import {
   getDocumentOriginalFile,
   getDocumentBase,
   listAccessibleDocuments,
+  listDocumentAuthorityReclassifications,
   listDocumentBasesEnsuringDefault,
   listDocuments,
   moveDocumentToBase,
   queueDocumentForReindex,
+  reclassifyDocumentAuthority,
+  runDocumentDefaultCollectionBackfill,
   searchEffectiveDocuments,
 } from "@opengeni/documents";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -90,6 +97,34 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "document base not found" });
     }
     return c.json(DocumentBase.parse(base));
+  });
+
+  app.post("/v1/workspaces/:workspaceId/document-default-collection-backfills", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "documents:manage",
+    );
+    if (!hasAccountAdminAuthority(authorization)) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
+    const payload = RunDocumentDefaultCollectionBackfillRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        DocumentDefaultCollectionBackfill.parse(
+          await runDocumentDefaultCollectionBackfill(db, {
+            ...payload,
+            accountId: authorization.grant.accountId,
+            workspaceId,
+            actorSubjectId: authorization.grant.subjectId,
+          }),
+        ),
+      );
+    } catch (error) {
+      throw documentHttpException(error);
+    }
   });
 
   app.post("/v1/workspaces/:workspaceId/document-bases/:baseId/documents", async (c) => {
@@ -177,6 +212,67 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       ).map((document) => Document.parse(document)),
     );
   });
+
+  app.post(
+    "/v1/workspaces/:workspaceId/documents/:documentId/authority-reclassifications",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "documents:manage",
+      );
+      const payload = ReclassifyDocumentAuthorityRequest.parse(await c.req.json());
+      const accountAdminAuthorized = hasAccountAdminAuthority(authorization);
+      try {
+        const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
+          viewerSubjectId: authorization.grant.subjectId,
+        });
+        if (!document) throw new HTTPException(404, { message: "document not found" });
+        if (
+          (document.authorityKind === "organization" ||
+            payload.targetAuthorityKind === "organization") &&
+          !accountAdminAuthorized
+        ) {
+          throw new HTTPException(403, { message: "missing permission: account:admin" });
+        }
+        return c.json(
+          DocumentAuthorityReclassification.parse(
+            await reclassifyDocumentAuthority(db, {
+              ...payload,
+              accountId: authorization.grant.accountId,
+              workspaceId,
+              documentId: document.id,
+              actorSubjectId: authorization.grant.subjectId,
+              accountAdminAuthorized,
+            }),
+          ),
+        );
+      } catch (error) {
+        if (error instanceof HTTPException) throw error;
+        throw documentHttpException(error);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/documents/:documentId/authority-reclassifications",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
+      return c.json(
+        (
+          await listDocumentAuthorityReclassifications(db, {
+            accountId: grant.accountId,
+            workspaceId,
+            documentId: c.req.param("documentId"),
+            actorSubjectId: grant.subjectId,
+          })
+        ).map((receipt) => DocumentAuthorityReclassification.parse(receipt)),
+      );
+    },
+  );
 
   app.get("/v1/workspaces/:workspaceId/documents/:documentId/original-file", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -778,6 +874,25 @@ function documentHttpException(error: unknown): HTTPException {
   }
   if (message.includes("already exists")) {
     return new HTTPException(409, { message });
+  }
+  if (
+    message.includes("operation id was reused") ||
+    message.includes("authority changed before reclassification") ||
+    message.includes("run identity mismatch")
+  ) {
+    return new HTTPException(409, { message });
+  }
+  if (
+    message.includes("reclassification requires") ||
+    message.includes("backfill requires organization administration")
+  ) {
+    return new HTTPException(403, { message });
+  }
+  if (
+    message.includes("reclassification input is invalid") ||
+    message.includes("reclassification authority is invalid")
+  ) {
+    return new HTTPException(400, { message });
   }
   if (message.includes("no suggested base")) {
     return new HTTPException(422, { message });

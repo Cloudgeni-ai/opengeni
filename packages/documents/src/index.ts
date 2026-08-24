@@ -6,6 +6,7 @@ import {
   CreateDocumentBaseRequest,
   Document,
   DocumentAuthorityKind,
+  DocumentAuthorityReclassification,
   DocumentBase,
   DocumentCuration,
   DocumentCurationStatus,
@@ -21,6 +22,9 @@ import {
   KnowledgeSearchResponse,
   KnowledgeSourceKind,
   ListIndexedDocumentsResponse,
+  type ReclassifyDocumentAuthorityRequest,
+  type RunDocumentDefaultCollectionBackfillRequest,
+  DocumentDefaultCollectionBackfill,
 } from "@opengeni/contracts";
 import {
   createPersonalDocumentAuthority,
@@ -167,6 +171,21 @@ export type DocumentAuthority = {
   workspaceId: string | null;
   subjectId: string | null;
 };
+
+export type ReclassifyDocumentAuthorityInput = ReclassifyDocumentAuthorityRequest & {
+  accountId: string;
+  workspaceId: string;
+  documentId: string;
+  actorSubjectId: string;
+  accountAdminAuthorized: boolean;
+};
+
+export type RunDocumentDefaultCollectionBackfillInput =
+  RunDocumentDefaultCollectionBackfillRequest & {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+  };
 
 export type AgentDocumentAuthorityContext = {
   sessionId: string;
@@ -961,6 +980,94 @@ export async function listDocumentBasesEnsuringDefault(
 ): Promise<DocumentBase[]> {
   await ensureDefaultBase(db, input);
   return await listDocumentBases(db, input.workspaceId);
+}
+
+export async function runDocumentDefaultCollectionBackfill(
+  db: Database,
+  input: RunDocumentDefaultCollectionBackfillInput,
+) {
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    { viewerSubjectId: input.actorSubjectId },
+    async (scopedDb) => {
+      const command = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actorSubjectId: input.actorSubjectId,
+        runId: input.runId,
+        operationId: input.operationId,
+        batchSize: input.batchSize,
+      };
+      const rows = (await scopedDb.execute(sql`
+        SELECT run_document_default_collection_backfill(
+          ${JSON.stringify(command)}::jsonb
+        ) AS result
+      `)) as unknown as Array<{ result: unknown }>;
+      const row = rows[0];
+      if (!row) throw new Error("Document Default collection backfill returned no result");
+      return DocumentDefaultCollectionBackfill.parse(row.result);
+    },
+  );
+}
+
+export async function reclassifyDocumentAuthority(
+  db: Database,
+  input: ReclassifyDocumentAuthorityInput,
+) {
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    { viewerSubjectId: input.actorSubjectId },
+    async (scopedDb) => {
+      const command = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        documentId: input.documentId,
+        operationId: input.operationId,
+        actorSubjectId: input.actorSubjectId,
+        expectedAuthority: input.expectedAuthority,
+        targetAuthorityKind: input.targetAuthorityKind,
+        accountAdminAuthorized: input.accountAdminAuthorized,
+      };
+      const rows = (await scopedDb.execute(sql`
+        SELECT reclassify_document_authority(${JSON.stringify(command)}::jsonb) AS result
+      `)) as unknown as Array<{ result: unknown }>;
+      const row = rows[0];
+      if (!row) throw new Error("Document authority reclassification returned no result");
+      return DocumentAuthorityReclassification.parse(row.result);
+    },
+  );
+}
+
+export async function listDocumentAuthorityReclassifications(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    documentId: string;
+    actorSubjectId: string;
+  },
+) {
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    { viewerSubjectId: input.actorSubjectId },
+    async (scopedDb) => {
+      const rows = (await scopedDb.execute(sql`
+        SELECT list_document_authority_reclassifications(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.actorSubjectId},
+          ${input.documentId}::uuid
+        ) AS result
+      `)) as unknown as Array<{ result: unknown }>;
+      return rows.map((row) => DocumentAuthorityReclassification.parse(row.result));
+    },
+  );
 }
 
 export async function addDocumentToBase(

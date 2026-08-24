@@ -1318,6 +1318,22 @@ describe("OpenGeniClient documents", () => {
       agentAccess: false,
     });
     await client.moveDocument(WORKSPACE_ID, DOCUMENT_ID);
+    await client.reclassifyDocumentAuthority(WORKSPACE_ID, DOCUMENT_ID, {
+      operationId: FILE_ID,
+      expectedAuthority: {
+        kind: "workspace",
+        workspaceId: WORKSPACE_ID,
+        subjectId: null,
+        authorityId: null,
+      },
+      targetAuthorityKind: "personal",
+    });
+    await client.listDocumentAuthorityReclassifications(WORKSPACE_ID, DOCUMENT_ID);
+    await client.runDocumentDefaultCollectionBackfill(WORKSPACE_ID, {
+      runId: BASE_ID,
+      operationId: FILE_ID,
+      batchSize: 10,
+    });
     expect(search.results).toEqual([]);
     expect(knowledgeSearch.results).toEqual([]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -1339,6 +1355,9 @@ describe("OpenGeniClient documents", () => {
         `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/drops`,
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/move`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/authority-reclassifications`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/authority-reclassifications`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills`,
       ],
     );
     expect(JSON.parse(requests[9]!.body!)).toEqual({
@@ -1362,6 +1381,21 @@ describe("OpenGeniClient documents", () => {
       agentAccess: false,
     });
     expect(JSON.parse(requests[16]!.body!)).toEqual({});
+    expect(JSON.parse(requests[17]!.body!)).toEqual({
+      operationId: FILE_ID,
+      expectedAuthority: {
+        kind: "workspace",
+        workspaceId: WORKSPACE_ID,
+        subjectId: null,
+        authorityId: null,
+      },
+      targetAuthorityKind: "personal",
+    });
+    expect(JSON.parse(requests[19]!.body!)).toEqual({
+      runId: BASE_ID,
+      operationId: FILE_ID,
+      batchSize: 10,
+    });
   });
 
   test("deleteDocument DELETEs the document and resolves on 204", async () => {

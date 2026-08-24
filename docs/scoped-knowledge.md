@@ -190,6 +190,25 @@ Configured/local
 subjects without an eligible active organization membership and legacy private
 rows keep the workspace binding established by migration 0165.
 
+Migration 0334 adds the only supported authority-reclassification lifecycle for
+those retained rows. It never guesses from a collection, creator other than the
+original personal owner, origin workspace, or present-day access. A caller must
+supply a UUID operation id and the exact current four-field authority tuple;
+PostgreSQL locks that operation, rejects stale expected state, and writes one
+immutable before/after receipt in the same transaction that changes the
+Document and every chunk. Moving to or from organization authority requires an
+exact account-admin grant, while a personal target is allowed only for the
+Document's immutable creating subject. Retries with the same input return the
+same receipt, conflicting reuse fails, and a failed transaction leaves the old
+authority and provenance intact. The collection remains non-authoritative.
+
+The same migration supplies an account-admin-only, bounded Default-collection
+backfill. A stable run id advances a workspace UUID cursor in batches, one
+operation id makes each call replay-safe, and immutable per-workspace receipts
+record whether an existing Default was adopted or a missing one was created.
+This changes grouping only. It does not reclassify a Document or widen
+retrieval, ranking, citation, or file access.
+
 Personal Document ownership never becomes ambient agent authority. The exact
 attempt-admission transaction freezes only Documents covered by a live
 `document.read` once/session/always grant for the target workspace and exact
