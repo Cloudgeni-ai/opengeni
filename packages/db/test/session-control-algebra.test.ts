@@ -8,6 +8,7 @@ import {
   createDb,
   createSession,
   evaluateSessionControl,
+  initializeSessionStartAtomically,
   listWorkspaceControlEvents,
   markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
@@ -75,6 +76,13 @@ async function fixture() {
 }
 
 async function claimAttempt(fixtureValue: Awaited<ReturnType<typeof fixture>>, sessionId: string) {
+  await initializeSessionStartAtomically(client.db, {
+    accountId: fixtureValue.grant.accountId,
+    workspaceId: fixtureValue.grant.workspaceId!,
+    sessionId,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
   const attemptId = crypto.randomUUID();
   const claimed = await claimSessionWorkForAttempt(client.db, fixtureValue.grant.workspaceId!, {
     sessionId,
