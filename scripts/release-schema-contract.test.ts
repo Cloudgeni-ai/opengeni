@@ -166,6 +166,7 @@ describe("release schema contract", () => {
       "0330_api_key_descriptions.sql",
       "0331_managed_organization_creation.sql",
       "0332_organization_shared_workspace_control_plane.sql",
+      "0333_session_turn_prompt_routing.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
