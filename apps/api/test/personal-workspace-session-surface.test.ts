@@ -322,7 +322,7 @@ async function activateSessionTenancy(human: ManagedHuman): Promise<void> {
 }
 
 /**
- * Migration 0335 applies the same organization owner/admin product decision to a
+ * Migration 0336 applies the same organization owner/admin product decision to a
  * private fork destination in a SHARED workspace that migration 0323 applies to
  * a private create, so a test that forks privately outside a personal workspace
  * has to represent an organization that enabled it. Activation alone deliberately

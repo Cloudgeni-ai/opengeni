@@ -168,13 +168,13 @@ describe("release schema contract", () => {
       "0332_organization_shared_workspace_control_plane.sql",
       "0333_session_turn_prompt_routing.sql",
       "0335_slack_workspace_routing.sql",
-      "0335_atomic_session_fork_visibility.sql",
+      "0336_atomic_session_fork_visibility.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
     expect(completeSourceContract).toMatchObject({
-      fileCount: 344,
-      latestMigration: "0335_atomic_session_fork_visibility.sql",
+      fileCount: 345,
+      latestMigration: "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -186,7 +186,7 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0335_atomic_session_fork_visibility.sql",
+        (migration) => migration.path === "0336_atomic_session_fork_visibility.sql",
       ),
     ).toMatchObject({
       sha256: "75604a1d9cce1bf698184e87d4f0405493e200e06378938b2f10adbfaa565f2d",
