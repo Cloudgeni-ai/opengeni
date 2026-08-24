@@ -96,10 +96,13 @@ beforeEach(() => {
 
 // `MembersSection` points managers at the organization workspace-access surface
 // with a TanStack `<Link>`, and `useLinkProps` throws outside router context.
-// Register the real link target so the rendered href is the genuine route
-// rather than a stub. `RouterContextProvider` is the low-level provider that
-// renders its own children, so these tests keep driving `MembersSection`
-// directly by props instead of through route matches.
+// This stub route exists only so that call resolves; nothing here asserts the
+// rendered href, and the path is deliberately flat with no `validateSearch`, so
+// it is not a faithful copy of the real route tree. Link-target correctness is
+// enforced by the typechecker instead: a `to` that is not in the registered
+// route tree fails `bun run typecheck` with TS2820. `RouterContextProvider` is
+// the low-level provider that renders its own children, so these tests keep
+// driving `MembersSection` directly by props instead of through route matches.
 const testRootRoute = createRootRoute({});
 const testOrganizationRoute = createRoute({
   getParentRoute: () => testRootRoute,
