@@ -3,12 +3,13 @@ import {
   SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT,
   SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH,
   mergeToolRefs,
+  resolveWorkspaceSessionToolDefaults,
   type Session,
   type SessionEffectiveToolPolicy,
   type SessionToolPolicy,
   type ToolRef,
 } from "@opengeni/contracts";
-import type { Database } from "@opengeni/db";
+import { requireWorkspace, type Database } from "@opengeni/db";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 
 const MANDATORY_SESSION_MCP_SERVER_IDS = ["opengeni"] as const;
@@ -184,7 +185,12 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
     ...(subjectId ? { subjectId } : {}),
   });
-  return defaultSessionMcpServerIds(runtimeSettings.mcpServers);
+  const availableDefaults = defaultSessionMcpServerIds(runtimeSettings.mcpServers);
+  const workspace = await requireWorkspace(db, workspaceId);
+  const configured = resolveWorkspaceSessionToolDefaults(workspace.settings);
+  if (!configured) return availableDefaults;
+  const available = new Set(availableDefaults);
+  return sortedIds(configured.mcpServerIds.filter((id) => available.has(id)));
 }
 
 /** Add a bounded, secret-safe effective projection to a session response. */

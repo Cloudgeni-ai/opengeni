@@ -2,7 +2,10 @@
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
 // workspace shell consumes this through `useAppContext`.
-import { resolveWorkspaceSessionDefaults } from "@opengeni/contracts";
+import {
+  resolveWorkspaceSessionDefaults,
+  resolveWorkspaceSessionToolDefaults,
+} from "@opengeni/contracts";
 import type { CreateSessionRequest, SessionEvent } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
@@ -529,6 +532,7 @@ export function RootRouteComponent() {
   // clientEventId (a fresh UUID every send).
   const pendingCreateAttempt = useRef<PendingCreateAttempt | null>(null);
   const appliedWorkspaceSessionDefaultsKey = useRef<string | null>(null);
+  const appliedWorkspaceToolDefaultsKey = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
@@ -636,6 +640,7 @@ export function RootRouteComponent() {
       setSelectedRepoRefs({});
       setSelectedCapabilityToolIds(new Set());
       previousCapabilityToolIds.current = new Set();
+      appliedWorkspaceToolDefaultsKey.current = null;
       setGithubAppOpen(false);
       setGithubOrg("");
       setBusy(false);
@@ -885,6 +890,20 @@ export function RootRouteComponent() {
     () => mergeMcpServerOptions(selectableMcpServers(clientConfig), workspaceMcpServers),
     [clientConfig, workspaceMcpServers],
   );
+  const routedWorkspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
+  const routedWorkspace =
+    workspaces.find((workspace) => workspace.id === routedWorkspaceId) ?? null;
+  const configuredWorkspaceToolDefaults = useMemo(
+    () => resolveWorkspaceSessionToolDefaults(routedWorkspace?.settings),
+    [routedWorkspace?.settings],
+  );
+  const workspaceDefaultToolIds = useMemo(() => {
+    const available = new Set(toolMcpServers.map((server) => server.id));
+    const configured = configuredWorkspaceToolDefaults?.mcpServerIds;
+    return configured
+      ? configured.filter((id) => available.has(id))
+      : toolMcpServers.map((server) => server.id);
+  }, [configuredWorkspaceToolDefaults, toolMcpServers]);
   const currentResources = useMemo(
     () => buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs),
     [manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs],
@@ -895,11 +914,25 @@ export function RootRouteComponent() {
       return;
     }
     const availableIds = toolMcpServers.map((server) => server.id);
+    const defaultsKey = `${routedWorkspaceId ?? ""}\u0000${[...workspaceDefaultToolIds]
+      .sort()
+      .join("\u0000")}`;
+    if (appliedWorkspaceToolDefaultsKey.current !== defaultsKey) {
+      appliedWorkspaceToolDefaultsKey.current = defaultsKey;
+      setSelectedCapabilityToolIds(new Set(workspaceDefaultToolIds));
+      previousCapabilityToolIds.current = new Set(availableIds);
+      return;
+    }
     setSelectedCapabilityToolIds((current) =>
-      selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current),
+      selectedAvailableCapabilityToolIds(
+        current,
+        availableIds,
+        previousCapabilityToolIds.current,
+        workspaceDefaultToolIds,
+      ),
     );
     previousCapabilityToolIds.current = new Set(availableIds);
-  }, [clientConfig, toolMcpServers]);
+  }, [clientConfig, routedWorkspaceId, toolMcpServers, workspaceDefaultToolIds]);
 
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.
@@ -1390,7 +1423,8 @@ export function RootRouteComponent() {
           defaultLatencyMode: latencyMode,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
-          workspaceDefaultMcpServerIds: ["files", ...toolMcpServers.map((server) => server.id)],
+          workspaceDefaultMcpServerIds:
+            configuredWorkspaceToolDefaults?.mcpServerIds ?? workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
@@ -1843,7 +1877,7 @@ export function RootRouteComponent() {
           selectedInstallationId,
           repositoryGroups,
           toolMcpServers,
-          workspaceDefaultToolIds: toolMcpServers.map((server) => server.id),
+          workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
           workspaceCapabilityCatalog,
           currentResources,
@@ -1937,6 +1971,7 @@ export function RootRouteComponent() {
     sessionEventFeedStore,
     setSession,
     toolMcpServers,
+    workspaceDefaultToolIds,
     workspaceMcpCatalogReady,
     workspaceCapabilityCatalog,
     workspaceStateOwnerId,

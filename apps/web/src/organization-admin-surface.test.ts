@@ -2,16 +2,20 @@ import { describe, expect, test } from "bun:test";
 
 const routeSource = await Bun.file(`${import.meta.dir}/routes/org-settings.tsx`).text();
 const adminSource = await Bun.file(`${import.meta.dir}/components/organization-admin.tsx`).text();
+const shellSource = await Bun.file(
+  `${import.meta.dir}/components/settings/organization-settings-shell.tsx`,
+).text();
 const tenancyDocs = await Bun.file(
   `${import.meta.dir}/../../../docs/organization-tenancy.md`,
 ).text();
 
 describe("organization administration surface", () => {
   test("routes accessible overview, people, retention, and billing sections", () => {
-    expect(routeSource).toContain('aria-label="Organization settings sections"');
-    expect(routeSource).toContain('aria-current={section === target ? "page" : undefined}');
+    expect(routeSource).toContain("<OrganizationSettingsShell");
+    expect(shellSource).toContain('aria-label="Organization settings"');
+    expect(shellSource).toContain('aria-current={selected ? "page" : undefined}');
     for (const section of ["overview", "people", "retention", "billing"]) {
-      expect(routeSource).toContain(`["${section}",`);
+      expect(shellSource).toContain(`id: "${section}"`);
     }
   });
 

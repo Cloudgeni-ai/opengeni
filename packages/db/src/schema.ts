@@ -1088,6 +1088,7 @@ export const apiKeys = pgTable(
       onDelete: "cascade",
     }),
     name: text("name").notNull(),
+    description: text("description"),
     prefix: text("prefix").notNull(),
     keyHash: text("key_hash").notNull(),
     permissions: jsonb("permissions").$type<string[]>().notNull().default([]),
@@ -1102,6 +1103,10 @@ export const apiKeys = pgTable(
     hash: uniqueIndex("api_keys_key_hash_idx").on(table.keyHash),
     account: index("api_keys_account_idx").on(table.accountId),
     workspace: index("api_keys_workspace_idx").on(table.workspaceId),
+    descriptionValid: check(
+      "api_keys_description_check",
+      sql`${table.description} is null or length(${table.description}) between 1 and 500`,
+    ),
   }),
 );
 

@@ -2,17 +2,18 @@
 // name/rename, members, API keys, memory/transcription/Codex policy, Codex
 // subscriptions, and a danger zone with workspace deletion. The org/billing
 // console lives at Organization settings.
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  ArrowUpRightIcon,
   BrainCircuitIcon,
   CheckIcon,
   ChevronDownIcon,
   CopyIcon,
   KeyRoundIcon,
   Loader2Icon,
-  PencilIcon,
+  PauseIcon,
+  PlayIcon,
   PlusIcon,
-  SettingsIcon,
   ShrinkIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -30,12 +31,12 @@ import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
+import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
 import { LoadErrorState } from "@/components/common";
-import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import {
-  WORKSPACE_BROWSE_ITEMS,
-  type WorkspaceConfigItem,
-} from "@/components/rail/workspace-nav-data";
+  WorkspaceSettingsContent,
+  type WorkspaceSettingsSection,
+} from "@/components/settings/workspace-settings-shell";
 import { PreferenceToggleRow, VoiceInputPreferenceRow } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
@@ -52,12 +53,11 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
-import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { cn } from "@/lib/utils";
 import {
   apiKeyPermissionGroups,
   defaultApiKeyPermissions,
@@ -68,28 +68,13 @@ import {
 } from "@/lib/permissions";
 import type { ApiKey, SlackUserLinkAccessRequest, WorkspaceMember } from "@/types";
 
-function BrowseWorkspaceStrip(props: { workspaceId: string; canReadInsights: boolean }) {
-  const items = WORKSPACE_BROWSE_ITEMS.filter(
-    (item: WorkspaceConfigItem) => !item.requiresAdmin || props.canReadInsights,
-  );
-  return (
-    <nav aria-label="Browse workspace" className="flex flex-wrap items-center gap-x-1 gap-y-1.5">
-      <span className="mr-1 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-        Browse
-      </span>
-      {items.map((item) => (
-        <WorkspaceConfigLink
-          key={item.to}
-          item={item}
-          workspaceId={props.workspaceId}
-          variant="browse"
-        />
-      ))}
-    </nav>
-  );
-}
-
-export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string }) {
+export function WorkspaceSettingsRoute({
+  workspaceId,
+  section,
+}: {
+  workspaceId: string;
+  section: WorkspaceSettingsSection;
+}) {
   const context = useAppContext();
   const client = context.client;
   const { captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
@@ -127,14 +112,15 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
   const [apiKeysError, setApiKeysError] = useState<Error | null>(null);
   const [apiKeysLoaded, setApiKeysLoaded] = useState(false);
   const [apiKeyName, setApiKeyName] = useState("Default API key");
+  const [apiKeyDescription, setApiKeyDescription] = useState("");
   const [selectedPermissions, setSelectedPermissions] = useState<Set<string>>(
     () => new Set(defaultApiKeyPermissions),
   );
   const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
-  const [editingName, setEditingName] = useState(false);
-  const [apiKeysOpen, setApiKeysOpen] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
   const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
@@ -203,6 +189,26 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     }
   }
 
+  async function toggleWorkspaceControl() {
+    if (!activeWorkspace || !canRename || controlBusy) return;
+    const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+    if (!acceptedTransition) return;
+    const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
+    setControlBusy(true);
+    try {
+      const updated = await context.setWorkspaceInferenceControl(workspaceId, action);
+      if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+      }
+    } catch (error) {
+      toast.error(`Couldn't ${action} the workspace`, {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setControlBusy(false);
+    }
+  }
+
   async function createKey() {
     if (!apiKeyName.trim() || requestedPermissions.length === 0) {
       toast.error("API key name and permissions are required");
@@ -214,12 +220,14 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
     try {
       const result = await client.createApiKey(workspaceId, {
         name: apiKeyName.trim(),
+        ...(apiKeyDescription.trim() ? { description: apiKeyDescription.trim() } : {}),
         permissions: requestedPermissions,
       });
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
       setCreatedToken(result.token);
       setApiKeys((current) => [result.apiKey, ...current]);
-      setApiKeysOpen(true);
+      setApiKeyDescription("");
+      setCreateKeyOpen(false);
       toast.success("API key created");
     } catch (error) {
       if (!ownsWorkspaceInvocation(workspaceId, acceptedTransition)) return;
@@ -236,7 +244,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
       await navigator.clipboard.writeText(token);
       toast.success("Token copied");
     } catch {
-      toast.error("Couldn't copy the token", { description: "Copy it manually instead." });
+      toast.error("Couldn't copy the token", {
+        description: "Copy it manually instead.",
+      });
     }
   }
 
@@ -300,191 +310,207 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 
   const activeApiKeyCount = apiKeys.filter((key) => !key.revokedAt).length;
 
-  async function finishRename() {
-    const name = nameDraft.trim();
-    if (!name || name === activeWorkspace?.name) {
-      setNameDraft(activeWorkspace?.name ?? "");
-      setEditingName(false);
-      return;
-    }
-    await submitRename();
-    setEditingName(false);
-  }
-
   return (
-    <ContentPage width="standard">
-      <section className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-6 text-left">
-        <header className="grid min-w-0 gap-3 border-b border-border pb-4">
-          <div className="flex min-w-0 items-center gap-2 text-sm text-fg-muted">
-            <SettingsIcon className="size-4 shrink-0 text-brand" />
-            <span>Workspace</span>
-            <span className="text-fg-subtle">·</span>
-            <span className="truncate">{organizationLabel}</span>
-          </div>
-          <div className="flex min-w-0 items-center gap-2">
-            {editingName && canRename ? (
+    <WorkspaceSettingsContent section={section}>
+      <section className="grid min-w-0 gap-6 text-left">
+        {section === "general" ? (
+          <>
+            <section className="grid max-w-xl gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-medium">Workspace name</h2>
+                  {personal ? <PersonalWorkspaceBadge /> : null}
+                </div>
+                <p className="mt-1 text-xs text-fg-muted">Shown throughout {organizationLabel}.</p>
+              </div>
               <form
-                className="flex min-w-0 flex-1 items-center gap-2"
+                className="flex min-w-0 items-center gap-2"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  void finishRename();
+                  void submitRename();
                 }}
               >
                 <Input
-                  autoFocus
                   value={nameDraft}
                   onChange={(event) => setNameDraft(event.target.value)}
-                  onBlur={() => void finishRename()}
                   onKeyDown={(event) => {
                     if (event.key === "Escape") {
                       setNameDraft(activeWorkspace?.name ?? "");
-                      setEditingName(false);
                     }
                   }}
-                  className="h-9 max-w-md text-base font-semibold"
+                  disabled={!canRename || renaming}
+                  className="h-9 text-sm"
                   placeholder="Workspace name"
                   aria-label="Workspace name"
                 />
-                <Button
-                  type="submit"
-                  size="icon-sm"
-                  variant="ghost"
-                  disabled={renaming || !nameDraft.trim()}
-                  aria-label="Save workspace name"
-                >
-                  {renaming ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : (
-                    <CheckIcon className="size-3.5" />
-                  )}
-                </Button>
-              </form>
-            ) : (
-              <>
-                <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
-                  {activeWorkspace?.name ?? "Workspace"}
-                </h1>
-                {personal ? <PersonalWorkspaceBadge /> : null}
                 {canRename ? (
                   <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Rename workspace"
-                    onClick={() => {
-                      setNameDraft(activeWorkspace?.name ?? "");
-                      setEditingName(true);
-                    }}
+                    type="submit"
+                    size="sm"
+                    variant="secondary"
+                    disabled={
+                      renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name
+                    }
                   >
-                    <PencilIcon className="size-3.5" />
+                    {renaming ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                    Save
                   </Button>
                 ) : null}
-              </>
-            )}
-          </div>
-          <BrowseWorkspaceStrip workspaceId={workspaceId} canReadInsights={canDeleteWorkspace} />
-        </header>
+              </form>
+            </section>
 
-        {personal ? (
-          <section
-            aria-labelledby="personal-workspace-heading"
-            className="grid gap-2 rounded-lg border border-brand/25 bg-brand/5 p-4"
-          >
-            <h2
-              id="personal-workspace-heading"
-              className="flex items-center gap-2 text-sm font-medium"
-            >
-              <UserIcon className="size-3.5 text-brand" />
-              Personal workspace
-              <PersonalWorkspaceBadge decorative />
-            </h2>
-            <p className="text-xs text-fg-muted">
-              This workspace is your owner-only context inside {organizationLabel}. Organization
-              administrators and other members do not gain access to its sessions or content.
-            </p>
-          </section>
-        ) : (
-          <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
-        )}
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
+              <div>
+                <h2 className="text-sm font-medium">Workspace runtime</h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  {activeWorkspace?.inferenceControl.state === "paused"
+                    ? "New agent work is paused for this workspace."
+                    : "Agents can start and continue work in this workspace."}
+                </p>
+              </div>
+              {canRename ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={controlBusy}
+                  onClick={() => void toggleWorkspaceControl()}
+                >
+                  {controlBusy ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : activeWorkspace?.inferenceControl.state === "paused" ? (
+                    <PlayIcon className="size-3.5" />
+                  ) : (
+                    <PauseIcon className="size-3.5" />
+                  )}
+                  {activeWorkspace?.inferenceControl.state === "paused"
+                    ? "Resume workspace"
+                    : "Pause workspace"}
+                </Button>
+              ) : null}
+            </section>
 
-        <section
-          aria-labelledby="workspace-preferences-heading"
-          className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1"
-        >
-          <h2 id="workspace-preferences-heading" className="text-sm font-medium">
-            Preferences
-          </h2>
-          <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-            <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-            <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-            <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-            <VideoGenerationPreferenceRow
+            {personal ? <PersonalWorkspaceNotice organizationLabel={organizationLabel} /> : null}
+
+            <section aria-labelledby="workspace-preferences-heading" className="grid min-w-0 gap-2">
+              <div>
+                <h2 id="workspace-preferences-heading" className="text-sm font-medium">
+                  Session defaults
+                </h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Applied when someone starts a new session in this workspace.
+                </p>
+              </div>
+              <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
+                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <VideoGenerationPreferenceRow
+                  workspaceId={workspaceId}
+                  canManage={canDeleteWorkspace}
+                  refreshKey={gatewayRevision}
+                />
+                <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+              </div>
+            </section>
+          </>
+        ) : null}
+
+        {section === "members" ? (
+          personal ? (
+            <PersonalWorkspaceNotice organizationLabel={organizationLabel} />
+          ) : (
+            <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
+          )
+        ) : null}
+
+        {section === "tools" ? (
+          <WorkspaceCapabilityDefaults
+            workspaceId={workspaceId}
+            canManage={canRename}
+            kind="permissions"
+          />
+        ) : null}
+
+        {section === "plugins" ? (
+          <>
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
+              <div>
+                <h2 className="text-sm font-medium">Install and manage plugins</h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Connect apps, MCP servers, skills, and packs on the Plugins page.
+                </p>
+              </div>
+              <Button asChild type="button" variant="secondary" size="sm">
+                <Link to="/workspaces/$workspaceId/plugins" params={{ workspaceId }}>
+                  Open Plugins
+                  <ArrowUpRightIcon className="size-3.5" />
+                </Link>
+              </Button>
+            </section>
+            <WorkspaceCapabilityDefaults
+              workspaceId={workspaceId}
+              canManage={canRename}
+              kind="plugins"
+            />
+          </>
+        ) : null}
+
+        {section === "models" ? (
+          <>
+            <section className="grid gap-2">
+              <div>
+                <h2 className="text-sm font-medium">Default model</h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Used when a new session does not choose a different model.
+                </p>
+              </div>
+              <div className="rounded-lg border border-border px-3">
+                <DefaultSessionModelPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+              </div>
+            </section>
+            <ModelAccessPolicySection
+              key={`model-access:${workspaceId}`}
               workspaceId={workspaceId}
               canManage={canDeleteWorkspace}
-              refreshKey={gatewayRevision}
             />
-            <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-          </div>
-        </section>
-
-        <ModelAccessPolicySection
-          key={`model-access:${workspaceId}`}
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-        />
-
-        {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
-        <CodexSubscriptionsCard
-          key={`codex-subscriptions:${workspaceId}`}
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-        />
-
-        <SuperGrokSubscriptionsCard
-          key={`supergrok:${workspaceId}`}
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-        />
-
-        <AiGatewayConnectionCard
-          workspaceId={workspaceId}
-          canManage={canDeleteWorkspace}
-          onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-        />
-
-        <details
-          className="rounded-lg border border-border"
-          open={apiKeysOpen || createdToken != null}
-          onToggle={(event) => {
-            const next = event.currentTarget.open;
-            if (createdToken != null && !next) {
-              event.currentTarget.open = true;
-              return;
-            }
-            setApiKeysOpen(next);
-          }}
-        >
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-surface-2/60 [&::-webkit-details-marker]:hidden">
-            <KeyRoundIcon className="size-3.5 shrink-0 text-brand" />
-            <span className="min-w-0 flex-1 text-sm font-medium">OpenGeni API Keys</span>
-            <span className="text-2xs text-fg-subtle">
-              {!apiKeysLoaded
-                ? "…"
-                : activeApiKeyCount === 0
-                  ? "None"
-                  : `${activeApiKeyCount} active`}
-            </span>
-            <ChevronDownIcon
-              className={cn(
-                "size-4 shrink-0 text-fg-subtle transition-transform",
-                apiKeysOpen || createdToken != null ? "rotate-180" : "",
-              )}
+            {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
+            <CodexSubscriptionsCard
+              key={`codex-subscriptions:${workspaceId}`}
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
             />
-          </summary>
-          <div className="grid gap-3 border-t border-border px-3 py-3">
-            <p className="text-2xs text-fg-subtle">
-              Workspace-scoped keys for calling OpenGeni from another product.
-            </p>
+            <SuperGrokSubscriptionsCard
+              key={`supergrok:${workspaceId}`}
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
+            />
+            <AiGatewayConnectionCard
+              workspaceId={workspaceId}
+              canManage={canDeleteWorkspace}
+              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+            />
+          </>
+        ) : null}
+
+        {section === "api-keys" ? (
+          <section className="grid gap-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h2 className="flex items-center gap-2 text-sm font-medium">
+                  <KeyRoundIcon className="size-3.5 text-brand" />
+                  OpenGeni API keys
+                </h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Workspace-scoped keys for calling OpenGeni from another product.
+                </p>
+              </div>
+              {canManageApiKeys ? (
+                <Button type="button" size="sm" onClick={() => setCreateKeyOpen(true)}>
+                  <PlusIcon className="size-3.5" />
+                  Create API key
+                </Button>
+              ) : null}
+            </div>
             {createdToken ? (
               <Notice tone="success" title="Copy this token now — it won't be shown again.">
                 <div className="mt-2 flex min-w-0 items-center gap-2">
@@ -503,50 +529,17 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                 </div>
               </Notice>
             ) : null}
-            {canManageApiKeys ? (
-              <>
-                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-                  <Input
-                    value={apiKeyName}
-                    onChange={(event) => setApiKeyName(event.target.value)}
-                    className="h-9"
-                  />
-                  <Button type="button" disabled={busy} onClick={() => void createKey()}>
-                    {busy ? (
-                      <Loader2Icon className="size-3.5 animate-spin" />
-                    ) : (
-                      <PlusIcon className="size-3.5" />
-                    )}
-                    Create
-                  </Button>
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-xs text-fg-subtle">
-                    A key can only carry permissions your own grant can delegate.
-                  </p>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={delegablePermissions.size === 0}
-                    onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
-                  >
-                    Select all delegable
-                  </Button>
-                </div>
-                <PermissionGroupPicker
-                  groups={apiKeyPermissionGroups()}
-                  selected={selectedPermissions}
-                  delegable={delegablePermissions}
-                  onToggle={togglePermission}
-                />
-              </>
-            ) : (
-              <p className="text-xs text-fg-subtle">
-                You don't have permission to manage API keys here.
-              </p>
-            )}
-            <div className="divide-y divide-border/70 rounded-md border border-border/70">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xs font-medium text-fg-muted">Keys</h3>
+              <span className="text-2xs text-fg-subtle">
+                {!apiKeysLoaded
+                  ? "Loading…"
+                  : activeApiKeyCount === 0
+                    ? "No active keys"
+                    : `${activeApiKeyCount} active`}
+              </span>
+            </div>
+            <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
               {apiKeysError ? (
                 <div className="p-2">
                   <LoadErrorState
@@ -573,7 +566,7 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                     title="No API keys yet"
                     description={
                       canManageApiKeys
-                        ? "Create one above to call OpenGeni from another product."
+                        ? "Create a key to call OpenGeni from another product."
                         : "Keys created here call OpenGeni from another product."
                     }
                   />
@@ -586,6 +579,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                   >
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{apiKey.name}</div>
+                      {apiKey.description ? (
+                        <div className="truncate text-xs text-fg-muted">{apiKey.description}</div>
+                      ) : null}
                       <div className="truncate text-2xs text-fg-subtle">
                         {apiKey.prefix}… · {apiKey.revokedAt ? "revoked" : "active"}
                       </div>
@@ -604,8 +600,95 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
                 ))
               )}
             </div>
-          </div>
-        </details>
+            {!canManageApiKeys ? (
+              <p className="text-xs text-fg-subtle">
+                You don't have permission to manage API keys here.
+              </p>
+            ) : null}
+
+            <Dialog open={createKeyOpen} onOpenChange={setCreateKeyOpen}>
+              <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden sm:max-h-[85vh] sm:max-w-2xl">
+                <DialogHeader>
+                  <DialogTitle>Create API key</DialogTitle>
+                  <DialogDescription>
+                    Create a workspace-scoped key and choose what it can access.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="grid min-h-0 gap-5 overflow-y-auto px-1">
+                  <div className="grid gap-4">
+                    <div className="grid gap-2">
+                      <Label htmlFor="api-key-name">Name</Label>
+                      <Input
+                        id="api-key-name"
+                        autoFocus
+                        value={apiKeyName}
+                        onChange={(event) => setApiKeyName(event.target.value)}
+                        placeholder="Default API key"
+                      />
+                    </div>
+                    <div className="grid gap-2">
+                      <Label htmlFor="api-key-description">Description</Label>
+                      <Textarea
+                        id="api-key-description"
+                        value={apiKeyDescription}
+                        onChange={(event) => setApiKeyDescription(event.target.value)}
+                        placeholder="What will this key be used for?"
+                        maxLength={500}
+                        rows={3}
+                      />
+                    </div>
+                  </div>
+                  <section className="grid gap-3" aria-labelledby="api-key-permissions-heading">
+                    <div className="flex flex-wrap items-end justify-between gap-2">
+                      <div>
+                        <h3 id="api-key-permissions-heading" className="text-sm font-medium">
+                          Permissions
+                        </h3>
+                        <p className="mt-1 text-xs text-fg-muted">
+                          A key can only carry permissions your own grant can delegate.
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={delegablePermissions.size === 0}
+                        onClick={() => setSelectedPermissions(new Set(delegablePermissions))}
+                      >
+                        Select all delegable
+                      </Button>
+                    </div>
+                    <PermissionGroupPicker
+                      groups={apiKeyPermissionGroups()}
+                      selected={selectedPermissions}
+                      delegable={delegablePermissions}
+                      disabled={busy}
+                      onToggle={togglePermission}
+                    />
+                  </section>
+                </div>
+                <DialogFooter>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => setCreateKeyOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    disabled={busy || !apiKeyName.trim() || requestedPermissions.length === 0}
+                    onClick={() => void createKey()}
+                  >
+                    {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                    Create API key
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </section>
+        ) : null}
 
         <ConfirmDialog
           open={revokingKey !== null}
@@ -616,14 +699,35 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           onConfirm={() => (revokingKey ? revokeKey(revokingKey.id) : false)}
         />
 
-        <DangerZone
-          workspaceName={activeWorkspace?.name ?? ""}
-          canDelete={canDeleteWorkspace}
-          isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
-          onDelete={deleteWorkspace}
-        />
+        {section === "danger" ? (
+          <DangerZone
+            workspaceName={activeWorkspace?.name ?? ""}
+            canDelete={canDeleteWorkspace}
+            isOnlyWorkspaceInAccount={isOnlyWorkspaceInAccount}
+            onDelete={deleteWorkspace}
+          />
+        ) : null}
       </section>
-    </ContentPage>
+    </WorkspaceSettingsContent>
+  );
+}
+
+function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: string }) {
+  return (
+    <section
+      aria-labelledby="personal-workspace-heading"
+      className="grid gap-2 rounded-lg border border-brand/25 bg-brand/5 p-4"
+    >
+      <h2 id="personal-workspace-heading" className="flex items-center gap-2 text-sm font-medium">
+        <UserIcon className="size-3.5 text-brand" />
+        Personal workspace
+        <PersonalWorkspaceBadge decorative />
+      </h2>
+      <p className="text-xs text-fg-muted">
+        This workspace is your owner-only context inside {organizationLabel}. Organization
+        administrators and other members do not gain access to its sessions or content.
+      </p>
+    </section>
   );
 }
 
@@ -1114,7 +1218,9 @@ function MemoryPreferenceRow({
     if (!acceptedTransition) return;
     setSaving(true);
     try {
-      const updated = await context.updateWorkspaceSettings(workspaceId, { memoryEnabled: next });
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        memoryEnabled: next,
+      });
       if (updated && context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
         toast.success(next ? "Workspace memory enabled" : "Workspace memory disabled");
       }

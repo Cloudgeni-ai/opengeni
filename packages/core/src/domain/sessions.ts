@@ -20,6 +20,7 @@ import {
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
+  resolveWorkspaceSessionToolDefaults,
   stableJson,
   type AccessGrant,
   type ComposerDraft,
@@ -79,6 +80,7 @@ import {
   getSessionTurnPersonalConnectionDelegations,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getWorkspaceModelPolicy,
+  requireWorkspace,
   initializeSessionStartAtomically,
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
@@ -144,7 +146,7 @@ import {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
-  withDefaultEnabledCapabilityMcpTools,
+  withWorkspaceDefaultMcpTools,
 } from "./resources";
 
 const reservedSessionMcpServerIds = new Set(["opengeni", "files", "docs", "codex_apps"]);
@@ -1543,6 +1545,8 @@ export async function createSessionForRequestWithOutcome(
       message: `parent session not found in workspace: ${parentSessionId}`,
     });
   }
+  const workspace = await requireWorkspace(db, workspaceId);
+  const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const parentAuthority = parentSession
     ? await getSessionAuthorityProjection(db, workspaceId, parentSession.id)
     : null;
@@ -1664,10 +1668,11 @@ export async function createSessionForRequestWithOutcome(
     const parentTracksWorkspaceDefaults = parentSession.toolPolicy?.mode === "workspace_default";
     const parentEffective = withFirstPartyTools(
       parentTracksWorkspaceDefaults
-        ? withDefaultEnabledCapabilityMcpTools(
+        ? withWorkspaceDefaultMcpTools(
             availableToolRefs(parentSession.tools, runtimeSettings),
             settings,
             runtimeSettings,
+            workspaceSessionToolDefaults,
           )
         : parentSession.tools,
       runtimeSettings,
@@ -1694,10 +1699,11 @@ export async function createSessionForRequestWithOutcome(
     selectedTools = requestedTools;
     toolPolicy = { mode: "explicit", inheritedFromSessionId: null };
   } else {
-    selectedTools = withDefaultEnabledCapabilityMcpTools(
+    selectedTools = withWorkspaceDefaultMcpTools(
       requestedTools,
       settings,
       capabilityRuntimeSettings,
+      workspaceSessionToolDefaults,
     );
     toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
   }
@@ -1925,7 +1931,8 @@ export async function createSessionForRequestWithOutcome(
   }
   // Tool visibility is independent from permission authority. A child that
   // omits the field inherits the parent's exact effective selection; a
-  // top-level omission selects the safe non-connector default catalog.
+  // top-level omission selects the workspace's exact default catalog (or the
+  // deployment default when the workspace has not configured one).
   const deploymentFirstPartyMcpToolPolicy = resolveFirstPartyMcpToolPolicy(settings);
   const disallowedFirstPartyMcpTool = payload.firstPartyMcpTools?.find(
     (tool) => !deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
@@ -1935,10 +1942,15 @@ export async function createSessionForRequestWithOutcome(
       message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
     });
   }
+  const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools.filter(
+    (tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+  );
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
     parentSession ? parentSession.firstPartyMcpTools : undefined,
-    deploymentFirstPartyMcpToolPolicy,
+    workspaceFirstPartyDefaults && !parentSession
+      ? { ...deploymentFirstPartyMcpToolPolicy, default: workspaceFirstPartyDefaults }
+      : deploymentFirstPartyMcpToolPolicy,
   );
   const googleDrivePublicationEnabled =
     firstPartyMcpTools.includes("editable_artifact_export") &&
@@ -2807,6 +2819,8 @@ export async function updateSessionToolPolicy(
   requirePermission(grant, "sessions:control");
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
+  const workspace = await requireWorkspace(deps.db, grant.workspaceId);
+  const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     deps.db,
     grant.workspaceId,
@@ -2847,10 +2861,19 @@ export async function updateSessionToolPolicy(
     });
   }
   const workspaceDefaultTools = withFirstPartyTools(
-    withDefaultEnabledCapabilityMcpTools([], deps.settings, capabilityRuntimeSettings),
+    withWorkspaceDefaultMcpTools(
+      [],
+      deps.settings,
+      capabilityRuntimeSettings,
+      workspaceSessionToolDefaults,
+    ),
     runtimeSettings,
   );
-  const workspaceDefaultFirstPartyTools = [...deploymentFirstPartyMcpToolPolicy.default];
+  const workspaceDefaultFirstPartyTools = [
+    ...(workspaceSessionToolDefaults?.firstPartyMcpTools.filter((tool) =>
+      deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
+    ) ?? deploymentFirstPartyMcpToolPolicy.default),
+  ];
   const events = await appendSessionEventsWithLockedSessionUpdate(
     deps.db,
     grant.workspaceId,
@@ -2874,10 +2897,11 @@ export async function updateSessionToolPolicy(
         const parentTracksWorkspaceDefaults = parent.toolPolicy?.mode === "workspace_default";
         const parentEffective = withFirstPartyTools(
           parentTracksWorkspaceDefaults
-            ? withDefaultEnabledCapabilityMcpTools(
+            ? withWorkspaceDefaultMcpTools(
                 availableToolRefs(parent.tools, runtimeSettings),
                 deps.settings,
                 runtimeSettings,
+                workspaceSessionToolDefaults,
               )
             : parent.tools,
           runtimeSettings,

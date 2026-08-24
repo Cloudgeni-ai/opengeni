@@ -1962,6 +1962,28 @@ export const WorkspaceSessionDefaults = z
   .strict();
 export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
 
+/**
+ * Exact capability selection inherited by new top-level sessions.
+ *
+ * The product UI presents understandable capability groups, but persistence
+ * stays source-of-truth exact: MCP server ids and first-party tool names. This
+ * keeps the runtime independent from presentation labels and lets a session
+ * narrow the resulting policy without changing the workspace default.
+ */
+export const WorkspaceSessionToolDefaults = z
+  .object({
+    mcpServerIds: z
+      .array(z.string().trim().min(1).max(128))
+      .max(128)
+      .transform((ids) => [...new Set(ids)]),
+    firstPartyMcpTools: z
+      .array(FirstPartyMcpToolName)
+      .max(512)
+      .transform((tools) => [...new Set(tools)]),
+  })
+  .strict();
+export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
   .object({
@@ -2127,6 +2149,7 @@ export const WorkspaceSettingsSchema = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -2167,6 +2190,14 @@ export function resolveWorkspaceSessionDefaults(
 ): WorkspaceSessionDefaults | null {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? (parsed.data.sessionDefaults ?? null) : null;
+}
+
+/** Exact capability defaults for new sessions, or null for deployment defaults. */
+export function resolveWorkspaceSessionToolDefaults(
+  settings: unknown,
+): WorkspaceSessionToolDefaults | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.sessionToolDefaults ?? null) : null;
 }
 
 /**
@@ -2276,6 +2307,7 @@ export const UpdateWorkspaceSettingsRequest = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -2966,6 +2998,7 @@ export const ApiKey = z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid().nullable(),
   name: z.string(),
+  description: z.string().nullable(),
   prefix: z.string(),
   permissions: z.array(Permission),
   expiresAt: z.string().nullable(),
@@ -2978,6 +3011,7 @@ export type ApiKey = z.infer<typeof ApiKey>;
 
 export const CreateApiKeyRequest = z.object({
   name: z.string().min(1),
+  description: z.string().trim().min(1).max(500).optional(),
   workspaceId: z.string().uuid().optional(),
   permissions: z.array(Permission).min(1),
   expiresAt: z.string().datetime({ offset: true }).optional(),

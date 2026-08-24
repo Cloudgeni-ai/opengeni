@@ -51,7 +51,7 @@ export function CapabilityDiscoveryControls({
         />
       </div>
 
-      <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Capability type filters">
+      <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Plugin type filters">
         {CAPABILITY_FILTERS.map((kind) => (
           <button
             key={kind}
@@ -177,7 +177,7 @@ export function CapabilityBrowseSection({
       {catalogView === "loading" ? (
         <CatalogSkeleton />
       ) : catalogView === "error" ? (
-        <LoadErrorState title="Couldn't load capabilities" error={loadError} onRetry={onRetry} />
+        <LoadErrorState title="Couldn't load plugins" error={loadError} onRetry={onRetry} />
       ) : browseItems.length === 0 ? (
         <RegistryFallback
           query={query}

@@ -64,7 +64,7 @@ describe("Personal workspace accessibility in Chromium", () => {
     });
 
     const firstTrigger = expanded.getByRole("button", {
-      name: "Org 11111111. Switch organization",
+      name: "Org 11111111. Organization menu",
       exact: true,
     });
     expect(await firstTrigger.isVisible()).toBe(true);
@@ -87,7 +87,7 @@ describe("Personal workspace accessibility in Chromium", () => {
     await secondItem.click();
     await expanded
       .getByRole("button", {
-        name: "Org aaaaaaaa. Switch organization",
+        name: "Org aaaaaaaa. Organization menu",
         exact: true,
       })
       .waitFor();

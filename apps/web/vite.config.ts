@@ -76,6 +76,16 @@ export default defineConfig({
               priority: 16,
             },
             {
+              // App owns composer launch search parsing, while the active
+              // session route also consumes it. Keep this tiny entry helper
+              // independent so recursive session grouping cannot make the
+              // workbench an initial dependency.
+              name: "composer-launch",
+              test: /apps[\\/]web[\\/]src[\\/]lib[\\/]composer-launch\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 17,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
@@ -89,6 +99,17 @@ export default defineConfig({
               entriesAware: true,
               entriesAwareMergeThreshold: 192 * 1024,
               priority: 2,
+            },
+            {
+              // The settings hub owns several substantial management surfaces.
+              // Keep their static graph behind that route so settings-only
+              // controls cannot densify an initial or direct-session load.
+              name: "workspace-settings",
+              test: /src[\\/]routes[\\/]workspace-settings\.tsx$/,
+              includeDependenciesRecursively: true,
+              entriesAware: true,
+              entriesAwareMergeThreshold: 128 * 1024,
+              priority: 3,
             },
             {
               // Keep the three Office editors, sync stack, Worker bootstrap,
