@@ -781,6 +781,9 @@ describe("OpenGeniClient", () => {
       text: "do the thing",
       modelContext: "Host context for this turn.",
       clientEventId: "ce-1",
+      controlEtag: "control-1",
+      expectedDraftRevision: 3,
+      connectionAuthorities: [],
     });
     expect(result.sequence).toBe(4);
     const request = requests[0]!;
@@ -793,8 +796,25 @@ describe("OpenGeniClient", () => {
       payload: {
         text: "do the thing",
         modelContext: "Host context for this turn.",
+        controlEtag: "control-1",
+        expectedDraftRevision: 3,
+        connectionAuthorities: [],
       },
     });
+  });
+
+  test("sendMessage rejects the retired per-message tools field before transport", async () => {
+    const { client, requests } = makeClient(() => jsonResponse(makeEvent(4, "user.message"), 202));
+
+    await expect(
+      client.sendMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "do the thing",
+        tools: [],
+      } as never),
+    ).rejects.toThrow(
+      "Message-level tools are not supported; update the session tool policy before sending.",
+    );
+    expect(requests).toHaveLength(0);
   });
 
   test("pause and terminal cancel use atomic control while approval posts a typed event", async () => {
