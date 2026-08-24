@@ -29,6 +29,7 @@ import {
 } from "../selfhosted/session";
 import type { SelfhostedOpObserver } from "../selfhosted/op-observer";
 import type { ControlRpc } from "../selfhosted/control-rpc";
+import { resolveConnectedMachineWorkspaceRoot } from "../selfhosted/workspace-path";
 import type {
   ActivePointer,
   RoutableBackendSession,
@@ -58,6 +59,8 @@ export interface SelfhostedConnectionBinding {
   /** Physical machine-origin workspace used in the control-plane subject. */
   workspaceId?: string;
   connectionInstanceId: string;
+  /** Absolute launch root persisted from this runner's authoritative Hello. */
+  workspaceRoot: string | null;
   opStream?: SelfhostedOpStreamDeps;
   operationResourcePolicy: SelfhostedOperationAdmission["operationResourcePolicy"];
   operationResourcePolicySupported: boolean;
@@ -189,13 +192,16 @@ export interface ActiveBackendResolverDeps {
  *   - `home_unavailable_this_turn`  — the pointer was cleared to the session default (home)
  *                                     mid-turn, but this attempt started pinned to a machine and
  *                                     never established the home box. The worker checkpoints the
- *                                     attempt and continues the same logical turn on home. */
+ *                                     attempt and continues the same logical turn on home.
+ *   - `workspace_root_unavailable`  — the selected runner has not reported a
+ *                                     usable absolute launch root yet. */
 export type BackendUnresolvableCode =
   | "stale_pointer"
   | "offline_enrollment"
   | "unsupported_backend_context"
   | "transient_establishment"
-  | "home_unavailable_this_turn";
+  | "home_unavailable_this_turn"
+  | "workspace_root_unavailable";
 
 /** Thrown when a swap target cannot be resolved (unknown sandbox, or a modal
  *  target with no establisher in this context). The caller maps it to a 409.
@@ -353,6 +359,16 @@ export function makeActiveBackendResolver(
           `selfhosted sandbox ${sandbox.id} has no live runner connection`,
         );
       }
+      if (!connection.workspaceRoot) {
+        throw new ActiveBackendUnresolvableError(
+          "workspace_root_unavailable",
+          `selfhosted sandbox ${sandbox.id} has not reported an absolute workspace root; reconnect it with a current agent`,
+        );
+      }
+      const workspaceRoot = resolveConnectedMachineWorkspaceRoot(
+        connection.workspaceRoot,
+        pointer.workingDir,
+      );
       const { session } = await buildSelfhostedBackendSession({
         workspaceId: deps.workspaceId,
         ...(connection.workspaceId !== undefined
@@ -362,6 +378,7 @@ export function makeActiveBackendResolver(
         controlRpcFactory: deps.controlRpcFactory,
         agentId: sandbox.enrollmentId,
         connectionInstanceId: connection.connectionInstanceId,
+        workspaceRoot,
         epoch: pointer.activeEpoch,
         ...(deps.selfhostedTimeoutMs !== undefined ? { timeoutMs: deps.selfhostedTimeoutMs } : {}),
         ...(deps.selfhostedExecTimeoutMs !== undefined
@@ -381,7 +398,23 @@ export function makeActiveBackendResolver(
         // The routing proxy caches this session by sandbox+epoch, but command
         // policy and runner authority are mutable. Re-read one coherent DB
         // snapshot only when a new exec/Git is admitted.
-        resolveOperationAdmission: () => deps.resolveSelfhostedConnection(sandbox),
+        resolveOperationAdmission: async () => {
+          const current = await deps.resolveSelfhostedConnection(sandbox);
+          if (!current) return null;
+          if (!current.workspaceRoot) {
+            throw new ActiveBackendUnresolvableError(
+              "workspace_root_unavailable",
+              `selfhosted sandbox ${sandbox.id} no longer has a reported workspace root`,
+            );
+          }
+          return {
+            ...current,
+            workspaceRoot: resolveConnectedMachineWorkspaceRoot(
+              current.workspaceRoot,
+              pointer.workingDir,
+            ),
+          };
+        },
         // The turn's declared environment → the session's manifest.environment, so
         // the SDK's per-turn manifest-env delta is empty (no "cannot change manifest
         // environment variables" throw on a pin-to-vm turn).
@@ -389,9 +422,6 @@ export function makeActiveBackendResolver(
         ...(deps.transientExecEnvironment !== undefined
           ? { transientExecEnvironment: deps.transientExecEnvironment }
           : {}),
-        // The session's working directory (per-session pointer) → the path/cwd base
-        // for this selfhosted backend. Absent/empty ⇒ the default workspace_root.
-        ...(pointer.workingDir ? { workingDir: pointer.workingDir } : {}),
       });
       return {
         session: session as RoutableBackendSession,

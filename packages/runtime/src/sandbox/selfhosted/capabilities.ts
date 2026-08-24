@@ -43,6 +43,8 @@ export interface SelfhostedEnrollment {
   exposure: string;
   allowScreenControl: boolean;
   hasDisplay: boolean;
+  /** Exact normalized launch root persisted from the authoritative Hello. */
+  workspaceRoot?: string | null;
   lastSeenAt: string | null;
   /** An un-cleared clean going-offline marker (the machine announced a typed
    *  GoingOffline). When set, the derivation reads the machine OFFLINE immediately,
@@ -212,7 +214,14 @@ export async function negotiateSelfhostedCapabilities(
     ...(input.sharedSessionIds !== undefined ? { sharedSessionIds: input.sharedSessionIds } : {}),
     ...(input.now ? { now: input.now } : {}),
   };
-  const caps = negotiateCapabilities(base);
+  const negotiated = negotiateCapabilities(base);
+  const caps: SessionCapabilities = {
+    ...negotiated,
+    FileSystem: {
+      ...negotiated.FileSystem,
+      root: input.enrollment?.workspaceRoot ?? ".",
+    },
+  };
 
   // ── Overlay the selfhosted liveness/consent/display reasons ────────────────
 

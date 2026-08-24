@@ -50,6 +50,7 @@ function responderFor(mock: MockAgentResponder): RequestHandler {
 function buildClient(bus: EventBus, workspaceId: string): SelfhostedSandboxClient {
   return new SelfhostedSandboxClient({
     workspaceId,
+    workspaceRoot: "/srv/project",
     connectionInstanceId: CONNECTION_INSTANCE_ID,
     relay: RELAY,
     // The control transport over the SAME connection the bus owns — no second dial.
@@ -227,6 +228,7 @@ describe("selfhosted control transport over a REAL local NATS", () => {
     });
     const client = new SelfhostedSandboxClient({
       workspaceId: WS_A,
+      workspaceRoot: "/srv/project",
       connectionInstanceId: CONNECTION_INSTANCE_ID,
       relay: RELAY,
       controlRpcFactory: () => rpc,

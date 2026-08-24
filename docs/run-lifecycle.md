@@ -1185,16 +1185,17 @@ explicit checkpoint/resume, not an automatic Temporal retry. A newer control
 revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
-An explicit Connected-Machine → managed-home route change uses the same durable
-same-logical-turn boundary without pretending the original attempt owns a cloud
-box. A machine-primary attempt never pre-leases home. When its active pointer is
-cleared to home, the routing proxy emits the typed
-`home_unavailable_this_turn` transition; failure settlement durably reconciles
+An active-route filesystem-root change uses the same durable same-logical-turn
+boundary. A machine-primary attempt never pre-leases home. Clearing its pointer
+to managed home emits `home_unavailable_this_turn`; swapping to a route whose
+manifest root differs, or reconnecting the selected machine under a different
+effective Hello root, emits `workspace_root_changed_this_turn` before another
+provider operation is dispatched. Failure settlement durably reconciles
 completed model/tool truth, closes only the unresolved tool suffix, records
-`sandbox_home_route_transition`, and returns `recovering`. The next attempt
-starts from the committed home pointer and establishes home normally. There is
-no new user message, silent fallback to the old machine, or blind replay of an
-ambiguous operation.
+`sandbox_route_transition`, and returns `recovering`. The next attempt starts
+from the committed pointer and binds one exact root for its lifetime. There is
+no new user message, per-turn machine cwd query, silent fallback, path
+reinterpretation, or blind replay of an ambiguous operation.
 
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with

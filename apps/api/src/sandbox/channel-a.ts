@@ -64,6 +64,8 @@ import {
   NatsOpStreamTransport,
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
+  RoutingWorkspaceRootChangedError,
+  SelfhostedWorkspaceRootChangedError,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
@@ -75,6 +77,7 @@ import {
   agentErrorToControlError,
   codemodeTokenFileFromEnvironment,
   offlineAgentError,
+  resolveConnectedMachineWorkspaceRoot,
   withCodemodeTokenSession,
   withRunCredentialsSession,
   type ChannelASession,
@@ -656,15 +659,24 @@ async function withChannelAOperation<T>(
           offlineAgentError("Connected Machine has no live runner connection", true),
         );
       }
+      if (!enrollment.workspaceRoot) {
+        throw new HTTPException(409, {
+          message:
+            "Connected Machine has not reported an absolute workspace root; reconnect it with a current agent",
+        });
+      }
       const built = await buildSelfhostedBackendSession({
         workspaceId: originWorkspaceId,
         agentId: sandbox.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
+        workspaceRoot: resolveConnectedMachineWorkspaceRoot(
+          enrollment.workspaceRoot,
+          pointer.workingDir,
+        ),
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => new NatsControlRpc(async () => bus.getRequestConnection()),
         epoch: pointer.activeEpoch,
         environment,
-        workingDir: pointer.workingDir,
         timeoutMs: settings.sandboxSelfhostedControlTimeoutMs,
         execTimeoutMs: settings.sandboxSelfhostedExecTimeoutMs,
         operationResourcePolicy: enrollment.operationPolicy,
@@ -1154,6 +1166,15 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
     error instanceof SandboxResumeIdentityUnavailableError
   )
     return new HTTPException(409, { message: error.message });
+  if (
+    error instanceof RoutingWorkspaceRootChangedError ||
+    error instanceof SelfhostedWorkspaceRootChangedError
+  )
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      retryable: true,
+    });
   if (error instanceof SandboxProviderReadLockUnavailableError)
     return new HTTPException(503, { message: error.message });
   if (error instanceof SandboxImageConflictError || error instanceof SandboxRigConflictError)
@@ -1245,6 +1266,8 @@ export function channelAOperationFailureDiagnostic(
   if (
     error instanceof SandboxResumeIdentityMismatchError ||
     error instanceof SandboxResumeIdentityUnavailableError ||
+    error instanceof RoutingWorkspaceRootChangedError ||
+    error instanceof SelfhostedWorkspaceRootChangedError ||
     (error instanceof HTTPException && error.status === 409)
   ) {
     return {

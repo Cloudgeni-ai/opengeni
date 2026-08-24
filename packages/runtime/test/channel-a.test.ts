@@ -1435,7 +1435,7 @@ describe("Workspace file import (Connected Machine private staging)", () => {
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: { host: "relay.test", port: 443, tls: true },
-      workingDir: "/home/u/project",
+      workspaceRoot: "/home/u/project",
     });
     const service = new SandboxChannelAService({ session });
 
@@ -2605,7 +2605,7 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
   const AGENT = "agent-abc";
   const CONNECTION_INSTANCE = "connection-channel-a";
 
-  test("selfhosted terminalExec preserves virtual '/workspace' so the machine cwd is workingDir", async () => {
+  test("selfhosted terminalExec resolves the relative root to the native workspace root", async () => {
     const seen: Array<{ command: string; cwd: string }> = [];
     const mock = new MockAgentResponder({
       exec: (req) => {
@@ -2633,13 +2633,13 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: RELAY,
-      workingDir: "/home/u/proj",
+      workspaceRoot: "/home/u/proj",
     });
     const svc = new SandboxChannelAService({ session });
 
     const out = await svc.terminalExec({
       command: "ls",
-      cwd: "/workspace",
+      cwd: ".",
       timeoutMs: 10000,
       emitStream: false,
     });
@@ -2649,7 +2649,7 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
     expect(seen).toEqual([{ command: "ls", cwd: "/home/u/proj" }]);
   });
 
-  test("selfhosted terminalExec preserves virtual '/workspace/sub' so compound commands run in workingDir/sub", async () => {
+  test("selfhosted terminalExec resolves a relative child beneath the native root", async () => {
     const seen: Array<{ command: string; cwd: string }> = [];
     const mock = new MockAgentResponder({
       exec: (req) => {
@@ -2677,13 +2677,13 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: RELAY,
-      workingDir: "/home/u/proj",
+      workspaceRoot: "/home/u/proj",
     });
     const svc = new SandboxChannelAService({ session });
 
     const out = await svc.terminalExec({
       command: "pwd && ls -la",
-      cwd: "/workspace/sub",
+      cwd: "sub",
       timeoutMs: 10000,
       emitStream: false,
     });
@@ -2693,7 +2693,7 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
     expect(seen).toEqual([{ command: "pwd && ls -la", cwd: "/home/u/proj/sub" }]);
   });
 
-  test("selfhosted ptyOpen preserves virtual cwd and remains non-interactive", async () => {
+  test("selfhosted ptyOpen uses a relative native-root child and remains non-interactive", async () => {
     let seenCwd: string | undefined;
     const mock = new MockAgentResponder({
       exec: (req) => {
@@ -2721,14 +2721,11 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       controlRpc: stream.controlRpc,
       opStream: stream.opStream,
       relay: RELAY,
-      workingDir: "/home/u/proj",
+      workspaceRoot: "/home/u/proj",
     });
     const svc = new SandboxChannelAService({ session });
 
-    const opened = await svc.ptyOpen(
-      { cols: 80, rows: 24, cwd: "/workspace/sub" },
-      "pty-selfhosted",
-    );
+    const opened = await svc.ptyOpen({ cols: 80, rows: 24, cwd: "sub" }, "pty-selfhosted");
 
     expect(opened.response.ptyId).toBe("pty-selfhosted");
     expect(opened.response.supportsInput).toBe(false);

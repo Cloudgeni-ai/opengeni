@@ -45,6 +45,7 @@ function opStreamSessionWith(
   });
   return new SelfhostedSession({
     workspaceId: WS,
+    workspaceRoot: "/home/user/project",
     agentId: AGENT,
     connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc: runner,
@@ -152,6 +153,7 @@ describe("SelfhostedOpObserver — one observation per completed op", () => {
     ]);
     const session = new SelfhostedSession({
       workspaceId: WS,
+      workspaceRoot: "/home/user/project",
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: rpc,

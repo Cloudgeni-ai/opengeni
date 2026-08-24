@@ -146,7 +146,12 @@ async function seedMachine(
   expect(connection.claimed).toBe(true);
   // Recent lastSeenAt so a probe-miss would be "reconnecting"; the online responder
   // makes the probe succeed → "online" (the seed swap's attach gate).
-  await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;
+  const workspaceRoot = os === "windows" ? "C:/work/project" : "/srv/project";
+  await admin`
+    update enrollments
+    set last_seen_at = now(), workspace_root = ${workspaceRoot}
+    where id = ${enrollment.id}
+  `;
   const sandbox = await createSandbox(db, {
     accountId,
     workspaceId,
@@ -247,6 +252,7 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     // A linux machine ⇒ sandbox_os 'linux' (matches the schema default here, but
     // it is now DERIVED from the enrollment, not the column default).
     expect(session.sandboxOs).toBe("linux");
+    expect(session.workingDir).toBe("/srv/project");
     // The first turn inherits the same home backend (label is consistent end-to-end).
     const [turnRow] = await admin<{ sandbox_backend: string }[]>`
       select sandbox_backend from session_turns where session_id = ${session.id} limit 1`;

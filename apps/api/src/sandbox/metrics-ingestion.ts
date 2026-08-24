@@ -54,6 +54,7 @@ import {
 } from "@opengeni/contracts";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import { normalizeConnectedMachineWorkspaceRoot } from "@opengeni/runtime/sandbox";
 import {
   AgentEvent,
   AgentUpdateStage,
@@ -723,6 +724,18 @@ export async function handleHelloPayload(
     });
     return;
   }
+  let workspaceRoot: string | undefined;
+  if (hello.workspaceRoot.length > 0) {
+    try {
+      workspaceRoot = normalizeConnectedMachineWorkspaceRoot(hello.workspaceRoot, authority.os);
+    } catch (error) {
+      observability?.warn?.("Ignored an invalid Connected Machine workspace root", {
+        workspaceId: ids.workspaceId,
+        agentId: ids.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   try {
     await refreshEnrollmentDisplay(db, {
       workspaceId: ids.workspaceId,
@@ -749,6 +762,7 @@ export async function handleHelloPayload(
           ? hello.updateChannel
           : null,
       capabilities: helloRuntimeCapabilities(hello),
+      ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
       completedUpdate: helloCompletedUpdate(hello),
     });
   } catch (error) {
