@@ -300,6 +300,19 @@ describe("session queue delete lookup", () => {
       sandboxBackend: "none",
     });
     const authorization = await bearer(owner.accountId, owner.workspaceId);
+    const accepted = await app.request(
+      `http://x/v1/workspaces/${owner.workspaceId}/sessions/${session.id}/events`,
+      {
+        method: "POST",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.message",
+          clientEventId: crypto.randomUUID(),
+          payload: { text: "run first" },
+        }),
+      },
+    );
+    expect(accepted.status).toBe(202);
     const submitted = await app.request(
       `http://x/v1/workspaces/${owner.workspaceId}/sessions/${session.id}/events`,
       {

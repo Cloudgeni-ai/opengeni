@@ -39,7 +39,7 @@ const migrationPath = join(
 );
 const atomicForkMigrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0333_atomic_session_fork_visibility.sql",
+  "../drizzle/0334_atomic_session_fork_visibility.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;

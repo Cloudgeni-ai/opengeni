@@ -235,6 +235,17 @@ const INTERACTION_INTERVENTION_OUTCOMES = new Set([
   "expired",
   "cancelled",
 ]);
+const PUBLIC_STARTUP_DEPENDENCIES = new Set([
+  "Modal private-registry image",
+  "NATS",
+  "PostgreSQL runtime posture",
+  "Temporal",
+  "Temporal client",
+  "Temporal schedule (file upload reaper)",
+  "Temporal schedule (sandbox reaper)",
+  "Temporal schedule (session-workflow wake dispatcher)",
+  "Temporal schedule (site auth maintenance)",
+]);
 
 /**
  * External logs and OTLP are public/third-party projections, not canonical
@@ -1065,15 +1076,19 @@ export function logStartupDependencyRetry(
   observability: Observability,
   event: StartupDependencyRetryEvent,
 ): void {
-  observability.warn("Startup dependency connection failed; retrying", {
-    dependency: event.label,
-    attempt: event.attempt,
-    attempts: event.attempts,
-    delayMs: event.delayMs,
-    errorClass: "StartupDependencyError",
-    errorCode: "startup_dependency_retry",
-    origin: "observability",
-  });
+  const dependency = PUBLIC_STARTUP_DEPENDENCIES.has(event.label) ? event.label : "Dependency";
+  observability.warn(
+    `Startup dependency ${dependency} connection failed; retrying (${event.attempt}/${event.attempts} in ${event.delayMs}ms)`,
+    {
+      dependency,
+      attempt: event.attempt,
+      attempts: event.attempts,
+      delayMs: event.delayMs,
+      errorClass: "StartupDependencyError",
+      errorCode: "startup_dependency_retry",
+      origin: "observability",
+    },
+  );
 }
 
 function normalizeLabels(labels: MetricLabels = {}): Record<string, string> {
@@ -1098,6 +1113,7 @@ function cleanAttributes(attributes: Attributes): Record<string, string | number
 function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
   if ("errorClass" in attributes || "errorCode" in attributes) {
     return {
+      ...projectStartupDependencyAttributes(attributes),
       ...projectPublicChannelADiagnosticAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
@@ -1110,6 +1126,29 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       return typeof value === "string" && pattern?.test(value) === true;
     }),
   );
+}
+
+function projectStartupDependencyAttributes(attributes: Attributes): Attributes {
+  if (
+    attributes.errorClass !== "StartupDependencyError" ||
+    attributes.errorCode !== "startup_dependency_retry"
+  ) {
+    return {};
+  }
+  const dependency = attributes.dependency;
+  const attempt = attributes.attempt;
+  const attempts = attributes.attempts;
+  const delayMs = attributes.delayMs;
+  return {
+    ...(typeof dependency === "string" && PUBLIC_STARTUP_DEPENDENCIES.has(dependency)
+      ? { dependency }
+      : {}),
+    ...(typeof attempt === "number" && Number.isInteger(attempt) && attempt > 0 ? { attempt } : {}),
+    ...(typeof attempts === "number" && Number.isInteger(attempts) && attempts > 0
+      ? { attempts }
+      : {}),
+    ...(typeof delayMs === "number" && Number.isFinite(delayMs) && delayMs >= 0 ? { delayMs } : {}),
+  };
 }
 
 function projectPublicChannelADiagnosticAttributes(attributes: Attributes): Attributes {

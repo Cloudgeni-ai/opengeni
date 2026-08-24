@@ -171,7 +171,12 @@ describe("browser e2e", () => {
     const secondPage = await context.newPage();
     const diagnostics = observePageFailures(page);
     let coordinates: BrowserSessionCoordinates | null = null;
+    let turnWorkerSuspended = false;
     try {
+      if (process.platform !== "win32") {
+        turnWorkerSuspended = worker.turns.proc.kill("SIGSTOP");
+        expect(turnWorkerSuspended).toBe(true);
+      }
       const response = await page.goto(`http://127.0.0.1:${webPort}`);
       expect(response?.ok()).toBe(true);
       await page.evaluate(() => {
@@ -219,6 +224,15 @@ describe("browser e2e", () => {
       const queueChip = page.getByTestId("session-chrome-queue");
 
       await timeline.getByText("E2E HOLD INITIAL DIRECTION", { exact: true }).waitFor();
+      if (turnWorkerSuspended) {
+        expect((await browserQueueSnapshot(page, apiPort, coordinates)).items).toEqual([]);
+        expect(await queueChip.getByText(/queued prompt/).count()).toBe(0);
+        expect(
+          await timeline.getByText("E2E HOLD INITIAL DIRECTION", { exact: true }).count(),
+        ).toBe(1);
+        expect(worker.turns.proc.kill("SIGCONT")).toBe(true);
+        turnWorkerSuspended = false;
+      }
       const firstSendFailures = await page.evaluate(() => {
         const browserWindow = window as typeof window & {
           __opengeniFirstSendTrace?: {
@@ -489,6 +503,7 @@ describe("browser e2e", () => {
         { cause: error },
       );
     } finally {
+      if (turnWorkerSuspended) worker.turns.proc.kill("SIGCONT");
       diagnostics.stop();
       await context.close();
     }

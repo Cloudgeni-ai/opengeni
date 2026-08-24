@@ -988,7 +988,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const goalChip = desktopPage.getByTestId("session-chrome-goal");
       const agentsChip = desktopPage.getByTestId("session-chrome-agents");
       const composer = desktopPage.getByLabel("Message the agent");
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      const timeline = desktopPage.getByTestId("session-timeline");
+      await timeline
+        .getByText("Inspect the full session-control surface", { exact: true })
+        .waitFor();
+      expect(await queueChip.count()).toBe(0);
       await goalChip.waitFor();
       await agentsChip.waitFor();
       await composer.waitFor();
@@ -1005,9 +1009,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         Math.abs((chromeBounds?.width ?? 0) - (composerBounds?.width ?? 0)),
       ).toBeLessThanOrEqual(1);
 
-      // Enter appends an ordinary human prompt to the one visible queue. The
-      // inert workflow client keeps both rows waiting so the browser can inspect
-      // the exact server-authoritative order.
+      // The initial prompt is already in chat, never presented as queued. Later
+      // sends wait in the one visible queue because the inert workflow client
+      // deliberately leaves the accepted initial turn pending.
+      await composer.fill("A first prompt queued from the composer");
+      await submitQueuedComposerPrompt(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        manager.id,
+        "A first prompt queued from the composer",
+      );
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor({ timeout: 20_000 });
       await composer.fill("A second prompt queued from the composer");
       await submitQueuedComposerPrompt(
         desktopPage,
@@ -1033,7 +1046,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const queuedRows = chrome.getByRole("list", { name: "Queued prompts" }).getByRole("listitem");
       expect(await queuedRows.count()).toBe(2);
       expect(await queuedRows.nth(0).innerText()).toContain(
-        "Inspect the full session-control surface",
+        "A first prompt queued from the composer",
       );
       expect(await queuedRows.nth(1).innerText()).toContain(
         "A second prompt queued from the composer",
@@ -1057,7 +1070,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await chrome.getByRole("button", { name: "Move queued prompt 2 up" }).click();
       await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer");
       await chrome.getByRole("button", { name: "Move queued prompt 1 down" }).click();
-      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
+      await expectRowPrompt(queuedRows, 0, "A first prompt queued from the composer");
 
       // Edit is a checkout: it removes the exact queue row and restores the
       // complete durable prompt into the composer, where Enter submits it again.
@@ -1105,7 +1118,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
-      const timeline = desktopPage.getByTestId("session-timeline");
       try {
         await timeline
           .getByText("A second prompt queued from the composer (edited)", { exact: true })
@@ -1123,7 +1135,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       }
       expect(await chrome.getByText("Changing direction…", { exact: true }).count()).toBe(0);
       await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
-      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
+      await expectRowPrompt(queuedRows, 0, "A first prompt queued from the composer");
 
       // Remove deletes only the selected waiting prompt. Add one final prompt so
       // the queue surface can still be exercised in the mobile pass.
@@ -1138,7 +1150,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         "A replacement prompt after delete",
       );
       await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
-      expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
+      expect(
+        await timeline
+          .getByText("Inspect the full session-control surface", { exact: true })
+          .count(),
+      ).toBe(1);
       const withdrawnPromptCount = await timeline
         .getByText("A second prompt queued from the composer", { exact: true })
         .count();

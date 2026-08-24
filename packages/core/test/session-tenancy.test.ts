@@ -454,7 +454,7 @@ describe("managed-human session tenancy application service", () => {
       ) values (
         ${grant.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'core-test'
       )`;
-    // Migration 0333 applies the same organization owner/admin product decision
+    // Migration 0334 applies the same organization owner/admin product decision
     // to a private fork destination in a shared workspace that migration 0323
     // applies to a private create. This organization has enabled it.
     await shared.admin`
@@ -631,7 +631,7 @@ describe("managed-human session tenancy application service", () => {
         ${ownerWorkspaceGrant.accountId}, 1, ${"7".repeat(64)}, ${"8".repeat(64)},
         'core-fork-replay-test'
       )`;
-    // Migration 0333 applies the same organization owner/admin product decision
+    // Migration 0334 applies the same organization owner/admin product decision
     // to a private fork destination in a shared workspace that migration 0323
     // applies to a private create. This organization has enabled it.
     await shared.admin`

@@ -84,7 +84,7 @@ export default function SessionRouteAuxiliary(
  * A private fork lands in the SOURCE workspace, so it is the same product
  * decision migration 0323 makes for a private create: an organization whose
  * owner has not enabled private sessions gets no private destination in a
- * shared workspace. Migration 0333's fork lifecycle routine fails that closed
+ * shared workspace. Migration 0334's fork lifecycle routine fails that closed
  * with SQLSTATE 55000, and this hook keeps the dialog from offering a choice
  * the database will refuse. A personal workspace is exempt, exactly as on the create path,
  * and an unknown answer fails closed rather than offering Private optimistically.

@@ -970,7 +970,7 @@ undefined-function rather than infer or bypass activation. The 0225/0289
 migration bodies remain historical checkpoints;
 anything running against the fully migrated schema, including later migration
 tests, must supply version `1` and operate under the exact durable receipt.
-Migration 0333 is a rolling expansion on top of that cutover. It retains the
+Migration 0334 is a rolling expansion on top of that cutover. It retains the
 nine-argument private-only overload for an in-flight old caller's exact retry
 and adds the ten-argument product overload with an explicit acknowledgement
 boolean. New callers use only the ten-argument overload. No defaulted or
