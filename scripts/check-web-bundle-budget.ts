@@ -179,7 +179,20 @@ const budgets = {
   // envelopes. Advance those two aggregates: raw to the next whole KiB above
   // one KiB of headroom, gzip above the observed 1.5-KiB Linux/x64 skew. Every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2118 * kib,
+  //
+  // OPE-157 adds `reclassifyDocumentAuthority`,
+  // `listDocumentAuthorityReclassifications` and
+  // `runDocumentDefaultCollectionBackfill` to the SDK. The web app calls none of
+  // them, but they are instance methods on the single `OpenGeniCoreClient` class
+  // the app imports wholesale, so they are retained and the direct-session graph
+  // grows 1,317 bytes past the cap (2,170,149 measured). That is dead weight
+  // shipped to every browser session, and it is structural rather than specific
+  // to this change: every future SDK method taxes the browser bundle whether or
+  // not the browser uses it, and the previous cap left only 133 bytes of
+  // headroom. This advance follows the established rule (next whole KiB above
+  // one KiB of headroom) as a stopgap; the real fix is to make the client
+  // tree-shakeable, tracked separately.
+  directSessionRaw: 2121 * kib,
   directSessionGzip: 593 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
