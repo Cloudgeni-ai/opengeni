@@ -23,6 +23,7 @@ import {
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
+import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
@@ -150,8 +151,26 @@ function SessionsIndexRouteContent({
   launch: ComposerLaunchSearch;
 }) {
   const context = useAppContext();
-  const firstPartyMcpToolPolicy = clientFirstPartyMcpToolPolicy(context.clientConfig);
-  const firstPartyToolOptions = firstPartySessionToolOptionsFor(firstPartyMcpToolPolicy.allowed);
+  const firstPartyMcpToolPolicy = useMemo(
+    () => clientFirstPartyMcpToolPolicy(context.clientConfig),
+    [context.clientConfig],
+  );
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const configuredToolDefaults = useMemo(
+    () => resolveWorkspaceSessionToolDefaults(workspace?.settings),
+    [workspace?.settings],
+  );
+  const defaultFirstPartyMcpTools = useMemo(
+    () =>
+      configuredToolDefaults?.firstPartyMcpTools.filter((tool) =>
+        firstPartyMcpToolPolicy.allowed.includes(tool),
+      ) ?? firstPartyMcpToolPolicy.default,
+    [configuredToolDefaults, firstPartyMcpToolPolicy],
+  );
+  const firstPartyToolOptions = useMemo(
+    () => firstPartySessionToolOptionsFor(firstPartyMcpToolPolicy.allowed),
+    [firstPartyMcpToolPolicy],
+  );
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
@@ -167,9 +186,8 @@ function SessionsIndexRouteContent({
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [draft, setDraft] = useState<SessionDraft>(() =>
-    emptySessionDraft(firstPartyMcpToolPolicy.default),
+    emptySessionDraft(defaultFirstPartyMcpTools),
   );
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
@@ -306,7 +324,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
-      options: newSessionDraftOptionsFromSessionDraft(draft, firstPartyMcpToolPolicy.default),
+      options: newSessionDraftOptionsFromSessionDraft(draft, defaultFirstPartyMcpTools),
     }),
     [
       attachments.readyResources,
@@ -315,7 +333,7 @@ function SessionsIndexRouteContent({
       context.reasoningEffort,
       context.currentResources,
       draft,
-      firstPartyMcpToolPolicy.default,
+      defaultFirstPartyMcpTools,
       message,
       persistedToolPolicy,
     ],
@@ -339,7 +357,7 @@ function SessionsIndexRouteContent({
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
-        firstPartyMcpToolPolicy.default,
+        defaultFirstPartyMcpTools,
       );
       const channelId = launch.channelId ?? history.projects[0]?.channelId ?? null;
       const rememberedCompute = rememberedProjectCompute(history, channelId);
@@ -370,7 +388,7 @@ function SessionsIndexRouteContent({
       setSelectedRepoIds,
       setSelectedRepoRefs,
       githubRepos,
-      firstPartyMcpToolPolicy.default,
+      defaultFirstPartyMcpTools,
       launch.channelId,
       workspaceDefaultToolIdsForHydration,
     ],
@@ -482,7 +500,7 @@ function SessionsIndexRouteContent({
                 });
                 return null;
               }
-              const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
+              const submission = submissionFromSessionDraft(draft, defaultFirstPartyMcpTools);
               const created = await context.startSession(
                 workspaceId,
                 {
@@ -524,7 +542,7 @@ function SessionsIndexRouteContent({
             }
             const submission = submissionFromSessionDraft(
               draft,
-              firstPartyMcpToolPolicy.default,
+              defaultFirstPartyMcpTools,
               personalAttachment.intent,
             );
             const created = await context.startSession(
@@ -556,7 +574,7 @@ function SessionsIndexRouteContent({
                 const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
                 if (acknowledged?.kind === "consumed") {
                   setMessage("");
-                  setDraft(emptySessionDraft(firstPartyMcpToolPolicy.default));
+                  setDraft(emptySessionDraft(defaultFirstPartyMcpTools));
                   attachments.removeReadyFiles(
                     submittedResources.flatMap((resource) =>
                       resource.kind === "file" ? [resource.fileId] : [],

@@ -3780,6 +3780,8 @@ export type WorkspaceSettings = {
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   /** Model policy inherited by new chats and scheduled tasks. */
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
+  /** Exact capability selection inherited by new top-level sessions. */
+  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3794,6 +3796,11 @@ export type WorkspaceSettings = {
 export type WorkspaceSessionDefaults = {
   model: string;
   reasoningEffort: ReasoningEffort;
+};
+
+export type WorkspaceSessionToolDefaults = {
+  mcpServerIds: string[];
+  firstPartyMcpTools: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -3821,6 +3828,7 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
+  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;

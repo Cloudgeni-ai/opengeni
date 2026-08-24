@@ -26,14 +26,14 @@ export type RepoDraft = { id: number; url: string; ref: string };
 export type IntelligenceEffort = ReasoningEffort;
 export type McpServerOption = { id: string; name: string };
 
-const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni", "files"]);
+const NON_SELECTABLE_SESSION_MCP_SERVER_IDS = new Set(["opengeni"]);
 
 /**
  * Runtime infrastructure is not user policy:
  * - `opengeni` is the mandatory carrier for the individually selected
  *   first-party tools.
- * - `files` is OpenGeni's hidden-on-by-default file/download capability.
- *   The public API may still omit it from an explicit session policy.
+ * - `files` is a real user-facing capability. It is selected by default, but
+ *   workspace admins and individual sessions may narrow it like other tools.
  */
 export function isSelectableSessionMcpServerId(id: string): boolean {
   return !NON_SELECTABLE_SESSION_MCP_SERVER_IDS.has(id);
@@ -136,16 +136,14 @@ export function buildTools(
 }
 
 /**
- * OpenGeni's product UI keeps file access enabled without exposing an
- * implementation-level Files checkbox. This is deliberately a UI default, not
- * a server mandate: API and embedded clients can still submit an explicit
- * policy without `files`.
+ * Materialize the exact user-facing MCP selection. The mandatory internal
+ * `opengeni` carrier is attached server-side and never appears here.
  */
 export function buildOpenGeniUiTools(
   existing: ToolRef[] | undefined,
   selectedMcpServerIds: Iterable<string>,
 ): ToolRef[] {
-  return buildTools(existing, ["files", ...selectableSessionMcpServerIds(selectedMcpServerIds)]);
+  return buildTools(existing, [...selectableSessionMcpServerIds(selectedMcpServerIds)]);
 }
 
 function canonicalToolIds(tools: ToolRef[]): string[] {
@@ -154,9 +152,7 @@ function canonicalToolIds(tools: ToolRef[]): string[] {
 
 /**
  * Materialize the picker's selection only when it narrows/pins the inherited
- * baseline. `undefined` is the wire-level omitted-tools contract. The product
- * UI's hidden Files default is materialized when it writes an explicit policy;
- * API clients that need a truly empty allow-list submit `[]` directly.
+ * baseline. `undefined` is the wire-level omitted-tools contract.
  */
 export function toolsForPolicySelection(input: {
   existing?: ToolRef[];

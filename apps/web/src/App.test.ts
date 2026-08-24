@@ -1597,7 +1597,7 @@ describe("buildTools", () => {
     ]);
   });
 
-  test("keeps mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
+  test("keeps only mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
     const config = {
       mcpServers: [
         {
@@ -1615,6 +1615,7 @@ describe("buildTools", () => {
       ],
     } as unknown as Parameters<typeof selectableMcpServers>[0];
     expect(selectableMcpServers(config)).toEqual([
+      expect.objectContaining({ id: "files" }),
       expect.objectContaining({ id: "docs" }),
       expect.objectContaining({ id: "linear" }),
     ]);
@@ -2207,7 +2208,7 @@ describe("GitHub repository resources", () => {
 });
 
 describe("new-session draft tool policy", () => {
-  test("keeps omitted defaults distinct from the UI's Files-only and narrowed policies", () => {
+  test("keeps omitted defaults distinct from explicit and narrowed policies", () => {
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni", "docs"],
@@ -2223,7 +2224,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: true,
       }),
-    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
+    ).toEqual({ tools: [], toolsProvided: true });
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni"],
@@ -2231,7 +2232,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: false,
       }),
-    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
+    ).toEqual({ tools: [], toolsProvided: true });
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni"],
@@ -2255,10 +2256,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: false,
       }),
-    ).toEqual({
-      tools: [{ kind: "mcp", id: "files" }],
-      toolsProvided: true,
-    });
+    ).toEqual({ tools: [], toolsProvided: true });
   });
 });
 

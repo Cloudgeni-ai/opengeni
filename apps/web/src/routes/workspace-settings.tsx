@@ -30,6 +30,7 @@ import { SuperGrokSubscriptionsCard } from "@/components/supergrok-connection";
 import { AiGatewayConnectionCard } from "@/components/ai-gateway-connection";
 import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
+import { WorkspaceCapabilityDefaults } from "@/components/workspace-capability-defaults";
 import { LoadErrorState } from "@/components/common";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
 import {
@@ -426,6 +427,8 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
             <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
           </div>
         </section>
+
+        <WorkspaceCapabilityDefaults workspaceId={workspaceId} canManage={canRename} />
 
         <ModelAccessPolicySection
           key={`model-access:${workspaceId}`}

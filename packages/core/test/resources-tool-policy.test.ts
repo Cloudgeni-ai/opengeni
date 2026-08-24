@@ -4,6 +4,7 @@ import {
   assertToolRefsSubset,
   isAuthoritativeGitHubRepositorySelectionError,
   validateToolRefsForSessionPolicy,
+  withWorkspaceDefaultMcpTools,
 } from "../src/domain/resources";
 import type { ToolRef } from "@opengeni/contracts";
 
@@ -81,5 +82,25 @@ describe("session resource tool policy fences", () => {
         message: "narrowing required",
       }),
     ).toThrow(HTTPException);
+  });
+
+  test("workspace defaults select exact currently available MCP capabilities", () => {
+    expect(
+      withWorkspaceDefaultMcpTools([], settings, settings, {
+        mcpServerIds: ["cap-docs", "removed-connector"],
+        firstPartyMcpTools: [],
+      }),
+    ).toEqual([mcp("cap-docs", true)]);
+  });
+
+  test("an absent workspace override preserves legacy capability defaults", () => {
+    expect(
+      withWorkspaceDefaultMcpTools(
+        [],
+        { mcpServers: [settings.mcpServers[0]!, settings.mcpServers[2]!] },
+        settings,
+        null,
+      ),
+    ).toEqual([mcp("cap-docs", true)]);
   });
 });
