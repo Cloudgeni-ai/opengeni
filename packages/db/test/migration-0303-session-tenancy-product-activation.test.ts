@@ -16,9 +16,35 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-async function account(): Promise<string> {
+const BACKFILL_FAMILIES = [
+  "organization_memberships",
+  "sessions",
+  "variable_sets",
+  "rigs",
+  "machines",
+] as const;
+
+async function settleBackfillEvidence(accountId: string): Promise<string[]> {
+  return await shared!.admin.begin(async (transaction) => {
+    await transaction`select set_config('opengeni.account_id', ${accountId}, true)`;
+    const receiptIds: string[] = [];
+    for (const family of BACKFILL_FAMILIES) {
+      const [opened] = await transaction<{ id: string }[]>`
+        select open_tenancy_backfill_receipt(
+          ${accountId}::uuid, ${family}, ${`activation-${family}-${crypto.randomUUID()}`}
+        ) as id`;
+      await transaction`
+        select complete_tenancy_backfill_receipt(${opened!.id}::uuid, 0, 0, 'completed')`;
+      receiptIds.push(opened!.id);
+    }
+    return receiptIds;
+  });
+}
+
+async function account(options?: { withEvidence?: boolean }): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('0303 activation') returning id`;
+  if (options?.withEvidence !== false) await settleBackfillEvidence(row!.id);
   return row!.id;
 }
 
@@ -34,6 +60,28 @@ async function activate(accountId: string, inventory = "0".repeat(64)) {
 }
 
 describe("migration 0303 session tenancy product activation", () => {
+  test("refuses a new activation until all five current receipt families are settled", async () => {
+    if (!shared) return;
+    const accountId = await account({ withEvidence: false });
+    let missingFailure: unknown;
+    try {
+      await activate(accountId);
+    } catch (error) {
+      missingFailure = error;
+    }
+    expect(nestedPostgresSqlState(missingFailure)).toBe("55000");
+    expect(String(missingFailure)).toContain("requires settled backfill evidence");
+
+    const receiptIds = await settleBackfillEvidence(accountId);
+    expect(Array.from(await activate(accountId))).toEqual([
+      { accountId, activationVersion: 1, replay: false },
+    ]);
+    const [receipt] = await shared.admin<{ backfillReceiptIds: string[] }[]>`
+      select backfill_receipt_ids as "backfillReceiptIds"
+      from session_tenancy_activations where account_id = ${accountId}`;
+    expect(receipt?.backfillReceiptIds).toEqual(receiptIds);
+  });
+
   test("exposes only mandatory activation-versioned lifecycle signatures", async () => {
     if (!shared) return;
     const routines = await shared.admin<

@@ -365,6 +365,8 @@ const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uui
 const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
 const SESSION_TENANCY_QUIESCENCE_ROUTINE =
   "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
+const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
+  "check_tenancy_backfill_activation_evidence(uuid)";
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
@@ -453,6 +455,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
+  TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [

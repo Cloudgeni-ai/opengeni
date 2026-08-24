@@ -294,6 +294,42 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
+  test("0332 keeps activation evidence in the dedicated schema and owner-only", async () => {
+    if (!available) return;
+    const [routine] = await admin<
+      Array<{
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+        publicAbsent: boolean;
+      }>
+    >`
+      select procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1 from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings,
+        to_regprocedure('public.check_tenancy_backfill_activation_evidence(uuid)') is null
+          as "publicAbsent"
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname = 'check_tenancy_backfill_activation_evidence'`;
+    expect(routine).toEqual({
+      securityDefiner: true,
+      appExecute: false,
+      publicExecute: false,
+      settings: [
+        `search_path=pg_catalog, ${SCHEMA}, opengeni_private, pg_temp`,
+        "statement_timeout=5min",
+      ],
+      publicAbsent: true,
+    });
+  });
+
   test("0323 pins every new definer routine to the dedicated schema", async () => {
     if (!available) return;
     const routines = await admin<

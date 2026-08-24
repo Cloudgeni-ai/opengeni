@@ -760,6 +760,12 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("keeps tenancy backfill activation evidence owner-only", () => {
+    expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(
+      "check_tenancy_backfill_activation_evidence(uuid)",
+    );
+  });
+
   test("classifies logical-turn personal-resource ledgers as FORCE-RLS with no direct DML", () => {
     for (const table of [
       "turn_personal_resource_attachment_receipts",

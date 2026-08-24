@@ -164,6 +164,7 @@ describe("release schema contract", () => {
       "0328_session_background_commands.sql",
       "0329_slack_orchestration_delivery_events.sql",
       "0330_api_key_descriptions.sql",
+      "0336_tenancy_backfill_activation_evidence.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -183,6 +184,14 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0314_unregistered_organization_invitations.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0336_tenancy_backfill_activation_evidence.sql",
+      ),
+    ).toMatchObject({
+      sha256: "9d67722439aab9044520aef1e4a49e601a65f2a39762fe0735168fe8720e5e61",
+      deploymentMode: "rolling",
+    });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0238_supergrok_realtime_model.sql",

@@ -471,7 +471,8 @@ neither has a down-migration. For each subsequent activation:
    namespace, release, database, and image digests;
 2. prove the activation preconditions in
    [`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation)
-   - completed backfill counters from
+   - completed membership, resource-classification, and final session-classifier
+   receipts under fresh run keys, current counters from
    `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
@@ -482,7 +483,7 @@ neither has a down-migration. For each subsequent activation:
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require 0303 plus every prerequisite
+6. run the new digest's migration Job and require 0303, 0332, plus every prerequisite
    migration to appear in `schema_migrations`;
 7. with the application still drained, run:
 
@@ -495,12 +496,17 @@ neither has a down-migration. For each subsequent activation:
      --activated-by '<bounded-operator-identity>'
    ```
 
-   The command reruns the canonical inventory and parity reports, retains and
-   hashes the inventory snapshot, and requires every parity invariant plus each
+   The command reruns the canonical inventory, parity, and backfill-evidence
+   reports, retains and hashes the inventory snapshot, and requires every parity invariant plus each
    exact drainable/bounded activation lane to be zero. It deliberately does not
    gate on total ownerless sessions or all-time immutable legacy writer rows;
    migration 0298 supplies their truthful attributable and observation-window
-   refinements. It durably records the exact evidence, checks the supplied exact
+   refinements. Migration 0336 also requires the newest
+   `organization_memberships`, `sessions`, `variable_sets`, `rigs`, and
+   `machines` receipts to be completed, verifies full-population counts for the
+   resource/session classifiers, requires zero unresolved resource rows, and
+   binds those five exact receipt ids into every new activation row. It durably
+   records the exact evidence, checks the supplied exact
    application-role inventory twice around write-blocking locks, and is
    idempotent only for the same evidence digests.
    A live application session rejects activation with SQLSTATE `55000`; changed

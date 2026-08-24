@@ -1123,7 +1123,8 @@ the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
 The membership and personal-workspace half of the phase is the operator command
-`bun run db:backfill-organization-memberships --organization-id <uuid>`
+`bun run db:backfill-organization-memberships --organization-id <uuid>
+--run-key <unique-key>`
 (`--dry-run`, `--limit`, default 25, max 100, `--max-passes`, default 1000,
 `--after-subject-id`). It drains exactly two of those
 counts - `workspaceMemberSubjectsWithoutMembershipAnchor` (humans who held
@@ -1179,8 +1180,16 @@ reports `drained: false` and the `lastCursor` that `--after-subject-id`
 resumes. This is what makes repeated runs *converge*: a subject the driver
 cannot resolve stays in its population permanently, so a fixed `LIMIT n` window
 over an organization with more than `n` `user:`-kind subjects would return the
-same first `n` rows on every pass and never reach subject `n + 1` at all. Durable receipt/unresolved-ledger persistence is the separate backfill
-ledger slice; today the command's structured JSON report is the operator record.
+same first `n` rows on every pass and never reach subject `n + 1` at all.
+Migration 0336 connects the driver to the durable ledger. A non-dry walk with
+`--run-key` opens one `organization_memberships` receipt, records every refusal
+with the exact organization-membership id or source workspace-membership id
+that made it an obligation, and settles only a complete-from-the-start,
+drained, uncontended walk as `completed`. A partial/resumed, contended, or
+failed walk settles `failed`; use a fresh run key for the final evidence walk.
+Dry runs still write nothing. The four membership-specific reason codes are
+part of the fixed, content-free vocabulary; no subject or proposed owner is
+stored in the ledger.
 
 #### Variable Sets, Rigs, and Connected Machines need no data rewrite
 
@@ -1762,6 +1771,17 @@ is run:
    their `byScope` breakdown against the reviewed classification instead -
    `byScope` reports every authority distinction the schema can truthfully make,
    and any non-user-scoped total is derivable from it.
+   Migration 0336 additionally requires the newest receipt in each executable
+   phase-D family to be settled: `organization_memberships`, `sessions`,
+   `variable_sets`, `rigs`, and `machines`. Produce them with one complete
+   membership walk, one resource-classification run, and a final full session
+   `--classify`, each with a fresh `--run-key`. The three resource receipts must
+   have zero unresolved rows and every resource/session receipt must cover its
+   current full-family total. Membership and session unresolved rows are not
+   blindly treated as corruption: the inventory/parity gates above decide
+   whether their current residual populations are legitimate. The newest
+   receipt wins, so a later open/failed or partial run cannot hide behind an
+   older successful one.
 2. **Parity evidence.** The phase-E read-only shadow comparison shows the
    proposed effective scope equals the legacy effective scope for every compared
    read. No mismatch may be resolved by falling back to user authority.
@@ -1806,6 +1826,11 @@ migration remains inert with the default `false`; the drained activation
 command refuses to write a per-organization receipt unless the switch is true.
 Once any receipt exists, API/worker startup and readiness also require true.
 That startup interlock is forward-only posture, not a rollback mechanism.
+Migration 0336 preserves the activation command and database function
+signatures while adding the settled-backfill proof above. New activation rows
+bind the five exact receipt ids. Older activation rows retain an explicit empty
+receipt-id array and remain replayable only for their identical pre-0332
+inventory/parity digests; the migration never invents historical evidence.
 
 ### What an operator must not do
 
