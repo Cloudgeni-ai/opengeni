@@ -14,11 +14,11 @@
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "792b3a37eb60d66c3bca69f12e5c5820a268b5b6e6229b93650a9f243c1e9138"
+      "sha256": "5d33c5a6f442c7b1afb65e8743acb6f5399f12c65b8aaef6a034fe9fe39d6df4"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "8c73674389bd6dba5ee5f452bc567076a68966f2f36c0c20787d50e6f6d9afef"
+      "sha256": "7186c2bef5ea214d46b9b05172515ee4c260803e6699e4383fe00309f23cff8b"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -50,7 +50,7 @@
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "6270b3a82413ba9c40d7011c653f468e98c33df997bc9ea195367d25bf3f4f96"
+      "sha256": "5f809237b3ca80f88bb0628da5bceeb4498485d87e5352c1301aaad58bd30d36"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
@@ -379,7 +379,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "musl",
       "step": "Build and smoke in exact musl userspace",
-      "sha256": "720f81713f39dde007ce1f37c62765988bbfcbf1d61f2ac104922b6641c80717"
+      "sha256": "3de2421cc8eec63f2ecdf28f59e7c9f775631f0e572f8927fd780179720c10e1"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -403,7 +403,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "native",
       "step": "Install pinned Rust toolchain",
-      "sha256": "fe1b6eaabd6d9b517800a2c8355adc2385ed20062328fb604e44990f4efcd6ae"
+      "sha256": "56d2197373be048720d3354d40d73f12eed8a7468a02c7c0b4d21995b1d8bfff"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -427,7 +427,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "wasm",
       "step": "Install pinned WASM toolchain",
-      "sha256": "fd8bfebde6edfa39494abfba5fd1a93a554570025a7f5080def35966db36a160"
+      "sha256": "cca351707a26012784309de7f7e837e4b9108cf4f6fa662d96d4930aa55e977a"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -625,7 +625,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Install pinned artifact-kernel build toolchain",
-      "sha256": "c705850093d508e42e7bbbe77ba9f0af2cd426359d0e7a563e3024b8996a5dbb"
+      "sha256": "4b16355061365f4914d4e87afb8eeb3c12b30cd6bf63573c548e15016bd143f0"
     },
     {
       "workflow": ".github/workflows/ci.yml",
