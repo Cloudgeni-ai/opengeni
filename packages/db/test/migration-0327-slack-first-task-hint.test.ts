@@ -286,6 +286,66 @@ describe("migration 0327 Slack first-task hint", () => {
     ).toBe(false);
   });
 
+  test("resolves across a home identity and a target interaction", async () => {
+    if (!available) return;
+    // Slack workspace routing puts the identity link in the installation's
+    // workspace and the interaction in the routed one, so the two halves of the
+    // decision live under different RLS scopes.
+    const home = await installation(`split-home-${Date.now()}`);
+    await home.link("U_SPLIT", "user:hint-split");
+    const [routed] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${home.accountId}, ${`Slack hint routed ${Date.now()}`}) returning id`;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${routed!.id}, ${home.accountId})`;
+    const channel = "C_SPLIT";
+    const created = await getOrCreateSlackInteraction(db, {
+      accountId: home.accountId,
+      workspaceId: routed!.id,
+      connectionId: home.connectionId,
+      slackTeamId: home.slackTeamId,
+      slackChannelId: channel,
+      slackThreadTs: `${Date.now()}.1`,
+      routeKey: `${channel}:${crypto.randomUUID()}`,
+      triggeringProviderEventId: `E_${crypto.randomUUID()}`,
+      initiatingSlackUserId: "U_SPLIT",
+      owningSubjectId: "user:hint-split",
+      visibility: "workspace",
+    });
+    const identity = {
+      workspaceId: home.workspaceId,
+      interactionWorkspaceId: routed!.id,
+      connectionId: home.connectionId,
+      slackUserId: "U_SPLIT",
+    };
+    expect(
+      await resolveSlackInteractionFirstTaskHint(db, {
+        ...identity,
+        interactionId: created.interaction.id,
+      }),
+    ).toBe(true);
+    // Replaying the same acknowledgement must render the same bytes.
+    expect(
+      await resolveSlackInteractionFirstTaskHint(db, {
+        ...identity,
+        interactionId: created.interaction.id,
+      }),
+    ).toBe(true);
+    // The claim is spent, and it was spent in the HOME workspace.
+    const link = await getSlackBotUserLink(db, home.workspaceId, home.connectionId, "U_SPLIT");
+    expect(link?.firstTaskHintInteractionId).toBe(created.interaction.id);
+    const next = await home.interaction("U_SPLIT", "C_SPLIT_NEXT");
+    expect(
+      await resolveSlackInteractionFirstTaskHint(db, {
+        workspaceId: home.workspaceId,
+        connectionId: home.connectionId,
+        slackUserId: "U_SPLIT",
+        interactionId: next.id,
+      }),
+    ).toBe(false);
+  });
+
   test("concurrent resolvers of distinct interactions elect a single winner", async () => {
     if (!available) return;
     const target = await installation(`race-${Date.now()}`);

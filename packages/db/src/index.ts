@@ -429,7 +429,7 @@ export * from "./organization-membership-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
 export * from "./slack-routing";
-import { personalWorkspaceIdForSubject } from "./slack-routing";
+import { personalWorkspaceIdForSubject, probeSlackInteractionTenancy } from "./slack-routing";
 export * from "./workspace-membership-permissions";
 export * from "./video-generation";
 export * from "./user-resource-authority";
@@ -9663,62 +9663,123 @@ export async function getSlackBotUserLink(
  * stored decision, and unlinking plus relinking the Slack identity cannot flip
  * an acknowledgement that was already rendered.
  *
- * The frozen decision and the per-identity claim commit in one transaction, so
- * at most one interaction per Slack identity per installation is granted the
- * hint. Failure raises instead of degrading to "no hint": a caller must never
- * bind a post operation to text that depends on an unresolved answer.
+ * The per-identity claim row is the single source of truth and is replay-stable:
+ * the frozen answer is exactly "this identity's one claim names THIS
+ * interaction". At most one interaction per Slack identity per installation is
+ * therefore granted the hint, whichever resolver wins the claim, and the freeze
+ * is a separate compare-and-set whose losers read back the stored byte rather
+ * than their own recomputed one. This is deliberately not one transaction: the
+ * claim is a home-tenancy row and the freeze is a target-tenancy row, and one
+ * transaction carries one RLS scope. Failure raises instead of degrading to "no
+ * hint": a caller must never bind a post operation to text that depends on an
+ * unresolved answer.
  */
 export async function resolveSlackInteractionFirstTaskHint(
   db: Database,
   input: {
+    /** HOME: the installation workspace that owns the identity link. */
     workspaceId: string;
     connectionId: string;
     slackUserId: string;
     interactionId: string;
+    /**
+     * TARGET: the workspace that owns the interaction row. Defaults to HOME,
+     * which is what every caller means until routing exists.
+     */
+    interactionWorkspaceId?: string;
   },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    // Interaction row first, then the identity link: one lock order for every
-    // concurrent resolver of the same interaction.
-    const [frozen] = await scopedDb
+  const identityWorkspaceId = input.workspaceId;
+  const interactionWorkspaceId = input.interactionWorkspaceId ?? input.workspaceId;
+
+  // `slack_bot_user_links` is a HOME row and `slack_interactions` is a TARGET
+  // row. One transaction carries one RLS scope, so this cannot be a single
+  // scoped transaction once the two differ. It does not need to be: the
+  // per-identity claim is itself the source of truth, and it is replay-stable.
+  //
+  // The frozen answer is `the identity's one claim names THIS interaction`. Two
+  // resolvers of the same interaction therefore always agree, whichever wins the
+  // claim; two resolvers of different interactions elect exactly one winner; and
+  // a crash between the claim and the freeze re-derives the same answer on the
+  // next call. Failure still raises rather than degrading to "no hint": a caller
+  // must never bind a post operation to text that depends on an unresolved
+  // answer.
+  const frozen = await withWorkspaceRls(db, interactionWorkspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
       .select({ firstTaskHint: schema.slackInteractions.firstTaskHint })
       .from(schema.slackInteractions)
       .where(
         and(
-          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.workspaceId, interactionWorkspaceId),
           eq(schema.slackInteractions.id, input.interactionId),
         ),
       )
-      .limit(1)
-      .for("update");
-    if (!frozen) throw new Error("Slack first-task hint requires a durable interaction row");
-    if (frozen.firstTaskHint !== null) return frozen.firstTaskHint;
+      .limit(1);
+    if (!row) throw new Error("Slack first-task hint requires a durable interaction row");
+    return row.firstTaskHint;
+  });
+  if (frozen !== null) return frozen;
 
+  const granted = await withWorkspaceRls(db, identityWorkspaceId, async (scopedDb) => {
     const claimed = await scopedDb
       .update(schema.slackBotUserLinks)
       .set({ firstTaskHintInteractionId: input.interactionId })
       .where(
         and(
-          eq(schema.slackBotUserLinks.workspaceId, input.workspaceId),
+          eq(schema.slackBotUserLinks.workspaceId, identityWorkspaceId),
           eq(schema.slackBotUserLinks.connectionId, input.connectionId),
           eq(schema.slackBotUserLinks.slackUserId, input.slackUserId),
           isNull(schema.slackBotUserLinks.firstTaskHintInteractionId),
         ),
       )
       .returning({ id: schema.slackBotUserLinks.id });
-    const granted = claimed.length > 0;
+    if (claimed.length > 0) return true;
+    // Lost the claim, or replaying after a crash between the claim and the
+    // freeze. The claim itself says which it was.
+    const [existing] = await scopedDb
+      .select({
+        firstTaskHintInteractionId: schema.slackBotUserLinks.firstTaskHintInteractionId,
+      })
+      .from(schema.slackBotUserLinks)
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, identityWorkspaceId),
+          eq(schema.slackBotUserLinks.connectionId, input.connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, input.slackUserId),
+        ),
+      )
+      .limit(1);
+    return existing?.firstTaskHintInteractionId === input.interactionId;
+  });
 
-    await scopedDb
+  return await withWorkspaceRls(db, interactionWorkspaceId, async (scopedDb) => {
+    const [written] = await scopedDb
       .update(schema.slackInteractions)
       .set({ firstTaskHint: granted, updatedAt: sql`now()` })
       .where(
         and(
-          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.workspaceId, interactionWorkspaceId),
           eq(schema.slackInteractions.id, input.interactionId),
           isNull(schema.slackInteractions.firstTaskHint),
         ),
-      );
-    return granted;
+      )
+      .returning({ firstTaskHint: schema.slackInteractions.firstTaskHint });
+    if (written) return written.firstTaskHint ?? granted;
+    // Another resolver of this exact interaction froze first. It computed the
+    // same predicate, but return the stored byte rather than a recomputed one so
+    // the digest-bound post ledger can never see two answers.
+    const [current] = await scopedDb
+      .select({ firstTaskHint: schema.slackInteractions.firstTaskHint })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, interactionWorkspaceId),
+          eq(schema.slackInteractions.id, input.interactionId),
+        ),
+      )
+      .limit(1);
+    if (!current) throw new Error("Slack first-task hint requires a durable interaction row");
+    return current.firstTaskHint ?? granted;
   });
 }
 
@@ -10091,7 +10152,7 @@ export async function getOrCreateSlackInteraction(
     | "updatedAt"
   > & { initiatingSlackUserId?: string | null },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
-  return await withRlsContext(db, input, async (scopedDb) => {
+  const outcome = await withRlsContext(db, input, async (scopedDb) => {
     const [created] = await scopedDb
       .insert(schema.slackInteractions)
       .values({
@@ -10100,7 +10161,9 @@ export async function getOrCreateSlackInteraction(
       })
       .onConflictDoNothing()
       .returning();
-    if (created) return { created: true, interaction: mapSlackInteraction(created) };
+    if (created) {
+      return { created: true, interaction: mapSlackInteraction(created) } as const;
+    }
     const [existing] = await scopedDb
       .select()
       .from(schema.slackInteractions)
@@ -10111,11 +10174,61 @@ export async function getOrCreateSlackInteraction(
         ),
       )
       .limit(1);
-    if (!existing) throw new Error("Slack route idempotency conflict could not be resolved");
-    return { created: false, interaction: mapSlackInteraction(existing) };
+    return existing
+      ? ({ created: false, interaction: mapSlackInteraction(existing) } as const)
+      : ({ created: false, interaction: null } as const);
+  });
+  if (outcome.interaction) {
+    return { created: outcome.created, interaction: outcome.interaction };
+  }
+  // The route unique index is connection-global while the recovery SELECT above
+  // runs under the intended tenancy. A thread that already belongs to another
+  // workspace in this organization therefore conflicts without being visible
+  // here. Re-probe the connection-global route and adopt the existing row's
+  // tenancy: a mapped thread keeps the workspace it was created in.
+  const probed = await probeSlackInteractionTenancy(db, {
+    connectionId: input.connectionId,
+    routeKey: input.routeKey,
+  });
+  const adopted = probed
+    ? await getSlackInteractionById(db, {
+        accountId: probed.accountId,
+        workspaceId: probed.workspaceId,
+        interactionId: probed.interactionId,
+      })
+    : null;
+  if (!adopted) throw new Error("Slack route idempotency conflict could not be resolved");
+  return { created: false, interaction: adopted };
+}
+
+/**
+ * Connection-scoped thread continuation. `slack_interactions_route_uq` is
+ * `(connection_id, route_key)`, so one Slack thread maps to exactly one
+ * interaction across every workspace this installation can address. The
+ * content-free tenancy probe resolves which workspace that is; the full row is
+ * then read under that workspace's own RLS scope, so nothing is widened.
+ */
+export async function getSlackInteractionByConnectionRoute(
+  db: Database,
+  input: { connectionId: string; routeKey: string },
+): Promise<SlackInteraction | null> {
+  const probed = await probeSlackInteractionTenancy(db, input);
+  if (!probed) return null;
+  return await getSlackInteractionById(db, {
+    accountId: probed.accountId,
+    workspaceId: probed.workspaceId,
+    interactionId: probed.interactionId,
   });
 }
 
+/**
+ * Workspace-fenced route lookup.
+ *
+ * This is NOT the thread-continuation read: `slack_interactions_route_uq` is
+ * `(connection_id, route_key)` and therefore connection-global, so a thread that
+ * belongs to another workspace this installation can address is invisible here.
+ * Use `getSlackInteractionByConnectionRoute` for continuation.
+ */
 export async function getSlackInteractionByRoute(
   db: Database,
   workspaceId: string,

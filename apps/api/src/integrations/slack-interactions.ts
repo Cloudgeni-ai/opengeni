@@ -59,12 +59,13 @@ import {
   getSlackInteractionActionHandle,
   getSlackInteractionByClientEventId,
   getSlackInteractionById,
-  getSlackInteractionByRoute,
+  getSlackInteractionByConnectionRoute,
   getActiveSlackTaskPolicy,
   getSlackSharedTaskOrigin,
   getSessionEventByClientEventId,
   getWorkspace,
   getWorkspaceGrant,
+  resolveSlackTargetAuthority,
   listSlackInteractionProgressDeliveryEvidence,
   listSessionEventPage,
   listSessionHumanInputRequests,
@@ -1237,6 +1238,26 @@ export function startSlackInteractionPump(
   };
 }
 
+/**
+ * A concurrent creator may have won this thread in another workspace between the
+ * tenancy probe and the insert, in which case `getOrCreateSlackInteraction`
+ * adopts that row. The grant, the imported attachments, and the resolved route
+ * all belong to the workspace this pass chose, so none of them may be used
+ * against the adopted row. Retry instead: the next pass sees the thread through
+ * the probe, routes to it, and authorizes it properly.
+ */
+function requireSlackInteractionMatchesTarget(
+  interaction: Pick<SlackInteraction, "accountId" | "workspaceId">,
+  target: { accountId: string; workspaceId: string },
+): void {
+  if (
+    interaction.accountId !== target.accountId ||
+    interaction.workspaceId !== target.workspaceId
+  ) {
+    throw new SlackInteractionRetryableError("slack_route_creation_pending");
+  }
+}
+
 async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
   if (entry.triggerKind === "block_action") {
     await processSlackBlockAction(deps, entry);
@@ -1246,6 +1267,11 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await processSlackReactionInboxEntry(deps, entry);
     return;
   }
+  // HOME is the installation binding's tenancy: it owns the bot credential and
+  // connection, this inbox row, the identity links, and the post ledgers. TARGET
+  // is the tenancy the resulting session lives in. They are equal today; the
+  // routing resolver is what makes them diverge.
+  const home = { accountId: entry.accountId, workspaceId: entry.workspaceId } as const;
   const installation = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
   if (
     !installation ||
@@ -1256,8 +1282,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     throw new SlackInteractionPermanentError("slack_task_installation_changed");
   }
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
+    ...home,
     connectionId: entry.connectionId,
     subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
   });
@@ -1284,17 +1309,20 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     privateHandoff: policyDecision.disposition === "private_handoff",
   });
   const routeKey = routePolicy.initialRouteKey;
-  const existing = await getSlackInteractionByRoute(
-    deps.db,
-    entry.workspaceId,
-    entry.connectionId,
+  // A mapped thread keeps the workspace it was created in, so the continuation
+  // lookup is connection-scoped rather than workspace-fenced.
+  const existing = await getSlackInteractionByConnectionRoute(deps.db, {
+    connectionId: entry.connectionId,
     routeKey,
-  );
+  });
   if (entry.triggerKind === "thread_reply" && !existing) return;
-
+  // The identity link is a HOME fact: `slack_bot_user_links` is unique on
+  // `(connection_id, slack_user_id)` and RLS-visible only under the
+  // installation's own tenancy. It is read before the target is chosen because
+  // the routing decision needs the subject it names.
   const link = await getSlackBotUserLink(
     deps.db,
-    entry.workspaceId,
+    home.workspaceId,
     entry.connectionId,
     entry.slackUserId,
   );
@@ -1306,16 +1334,21 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     });
     return;
   }
-  const grant = await getWorkspaceGrant(deps.db, link.subjectId, entry.workspaceId, {
-    principalKind: "human_session",
+  const target: { accountId: string; workspaceId: string } = existing
+    ? { accountId: existing.accountId, workspaceId: existing.workspaceId }
+    : home;
+  const grant = await resolveSlackTargetAuthority(deps.db, {
+    subjectId: link.subjectId,
+    targetAccountId: target.accountId,
+    targetWorkspaceId: target.workspaceId,
   });
-  if (!grant || grant.accountId !== entry.accountId) {
+  if (!grant) {
     throw new SlackInteractionPermanentError("identity_access_revoked");
   }
 
   const alreadyDurable = await getSlackInteractionByClientEventId(
     deps.db,
-    entry.workspaceId,
+    target.workspaceId,
     entry.connectionId,
     `slack:${entry.providerEventId}`,
   );
@@ -1344,8 +1377,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       (usesPrivateBotDm(boundInteraction, entry) && boundInteraction.ackSlackMessageTs === null);
     if (shouldRepairAcknowledgement) {
       const boundClient = await createOpenGeniSlackBotInteractionClient(deps, {
-        accountId: entry.accountId,
-        workspaceId: entry.workspaceId,
+        ...home,
         connectionId: entry.connectionId,
         subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
         sessionId: eventSessionId,
@@ -1368,6 +1400,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       deps,
       client,
       entry,
+      target,
       policyDecision.disposition === "private_handoff"
         ? async () => {
             await requireSlackSharedReadAuthorization(deps, client, entry, policyResolution);
@@ -1382,7 +1415,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   if (existing?.sessionId) {
     const remounted = await remountSlackReactionTaskForSession(
       deps,
-      entry.workspaceId,
+      target.workspaceId,
       existing.sessionId,
       preparedAttachments,
     );
@@ -1396,8 +1429,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     throw new SlackInteractionPermanentError("sessions_create_denied");
   }
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
+    ...target,
     connectionId: entry.connectionId,
     slackTeamId: entry.slackTeamId,
     slackChannelId: entry.slackChannelId,
@@ -1408,10 +1440,11 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     owningSubjectId: grant.subjectId,
     visibility: routePolicy.visibility,
   });
+  requireSlackInteractionMatchesTarget(interaction, target);
   if (interaction.sessionId) {
     const remounted = await remountSlackReactionTaskForSession(
       deps,
-      entry.workspaceId,
+      interaction.workspaceId,
       interaction.sessionId,
       preparedAttachments,
     );
@@ -1423,7 +1456,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   }
   const preferredModel = await getLatestSessionModelForSubject(
     deps.db,
-    entry.workspaceId,
+    interaction.workspaceId,
     grant.subjectId,
   );
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
@@ -1433,7 +1466,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       preparedAttachments,
       preparedModelContext,
     );
-    session = await createSessionForRequest(deps, grant, entry.workspaceId, {
+    session = await createSessionForRequest(deps, grant, interaction.workspaceId, {
       requestedSessionId: interaction.sessionReservationId,
       initialMessage: prepared.entry.text,
       ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
@@ -1469,8 +1502,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   if (!bound) throw new Error("Slack route could not bind its durable session");
   await ensureSlackSharedTaskOrigin(deps, bound, entry, policyResolution);
   const boundClient = await createOpenGeniSlackBotInteractionClient(deps, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
+    ...home,
     connectionId: entry.connectionId,
     subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
     sessionId: session.id,
@@ -1574,6 +1606,9 @@ async function prepareSlackInvocationEntry(
   deps: ApiRouteDeps,
   client: OpenGeniSlackBotClient,
   entry: SlackInteractionInboxEntry,
+  // Imported attachments become File resources of the session's workspace, so
+  // they follow TARGET tenancy rather than the installation's.
+  target: { accountId: string; workspaceId: string },
   authorizeRead?: () => Promise<void>,
 ): Promise<{
   entry: SlackInteractionInboxEntry;
@@ -1608,7 +1643,14 @@ async function prepareSlackInvocationEntry(
     exactMessage = exact.messages.find((message) => message.timestamp === entry.slackMessageTs);
   }
   const attachments = exactMessage
-    ? await prepareSlackMessageAttachments(deps, client, entry, exactMessage.files, authorizeRead)
+    ? await prepareSlackMessageAttachments(
+        deps,
+        client,
+        entry,
+        target,
+        exactMessage.files,
+        authorizeRead,
+      )
     : {
         resources: [],
         attachments: [],
@@ -1702,17 +1744,19 @@ async function acknowledgeSlackSession(
   // buttons. The how-to prose it used to repeat forever now rides along once,
   // on this Slack identity's first accepted task in this installation.
   const started = directMessageShortcut
-    ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} The source DM was not opened to the bot or made workspace-visible.`
+    ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} The source DM was not opened to the bot or made workspace-visible.`
     : privateHandoff
-      ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Results stay private unless a separate authorized publication is approved.`
-      : `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)}`;
+      ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} Results stay private unless a separate authorized publication is approved.`
+      : `OpenGeni started this task. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)}`;
   // The post ledger binds this fixed operation id to a digest over the message
   // text, and this function re-runs on every acknowledgement repair. Resolving
   // the hint freezes it durably before the post, so a repair renders identical
   // bytes; a failure here raises into the retryable inbox path rather than
   // binding the ledger to a hint-less acknowledgement it can never revise.
   const showHint = await resolveSlackInteractionFirstTaskHint(deps.db, {
+    // The identity link is HOME; the interaction row is TARGET.
     workspaceId: entry.workspaceId,
+    interactionWorkspaceId: interaction.workspaceId,
     connectionId: entry.connectionId,
     slackUserId: entry.slackUserId,
     interactionId: interaction.id,
@@ -1781,10 +1825,13 @@ async function processSlackReactionInboxEntry(
   deps: ApiRouteDeps,
   entry: SlackInteractionInboxEntry,
 ) {
+  // Reaction summon is configured on the installation surface, so the settings,
+  // the connection scopes, and the identity link are all HOME reads.
+  const home = { accountId: entry.accountId, workspaceId: entry.workspaceId } as const;
   const [workspace, connection, link] = await Promise.all([
-    getWorkspace(deps.db, entry.workspaceId),
-    getConnectionMetadata(deps.db, entry.workspaceId, entry.connectionId, null),
-    getSlackBotUserLink(deps.db, entry.workspaceId, entry.connectionId, entry.slackUserId),
+    getWorkspace(deps.db, home.workspaceId),
+    getConnectionMetadata(deps.db, home.workspaceId, entry.connectionId, null),
+    getSlackBotUserLink(deps.db, home.workspaceId, entry.connectionId, entry.slackUserId),
   ]);
   const settings = resolveWorkspaceSlackReactionSummonSettings(workspace?.settings);
   if (
@@ -1798,23 +1845,30 @@ async function processSlackReactionInboxEntry(
   ) {
     return;
   }
-  const grant = await getWorkspaceGrant(deps.db, link.subjectId, entry.workspaceId, {
-    principalKind: "human_session",
-  });
-  if (!grant || grant.accountId !== entry.accountId) {
-    throw new SlackInteractionPermanentError("identity_access_revoked");
-  }
-  if (
-    !hasPermission(grant.permissions, "sessions:create") ||
-    !hasPermission(grant.permissions, "sessions:control")
-  ) {
-    throw new SlackInteractionPermanentError("reaction_session_permissions_denied");
-  }
+  let target: { accountId: string; workspaceId: string } = home;
+  const authorizeTarget = async () => {
+    const resolved = await resolveSlackTargetAuthority(deps.db, {
+      subjectId: link.subjectId,
+      targetAccountId: target.accountId,
+      targetWorkspaceId: target.workspaceId,
+    });
+    if (!resolved) {
+      throw new SlackInteractionPermanentError("identity_access_revoked");
+    }
+    if (
+      !hasPermission(resolved.permissions, "sessions:create") ||
+      !hasPermission(resolved.permissions, "sessions:control")
+    ) {
+      throw new SlackInteractionPermanentError("reaction_session_permissions_denied");
+    }
+    return resolved;
+  };
+  let grant = await authorizeTarget();
 
   const clientEventId = `slack:${entry.providerEventId}`;
   const durableInteraction = await getSlackInteractionByClientEventId(
     deps.db,
-    entry.workspaceId,
+    target.workspaceId,
     entry.connectionId,
     clientEventId,
   );
@@ -1846,8 +1900,7 @@ async function processSlackReactionInboxEntry(
     await reopenSlackInteractionDelivery(deps.db, boundInteraction);
     if (shouldRepairAcknowledgement) {
       const client = await createOpenGeniSlackBotInteractionClient(deps, {
-        accountId: entry.accountId,
-        workspaceId: entry.workspaceId,
+        ...home,
         connectionId: entry.connectionId,
         subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
         sessionId: eventSessionId,
@@ -1858,8 +1911,7 @@ async function processSlackReactionInboxEntry(
   }
 
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
+    ...home,
     connectionId: entry.connectionId,
     subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
   });
@@ -1890,18 +1942,24 @@ async function processSlackReactionInboxEntry(
       if (!saved) throw new Error("Slack reaction inbox checkpoint claim was lost");
     },
   });
-  const preparedTask = await prepareSlackReactionTask(deps, client, entry, context);
   const routeKey = slackRouteKey(entry.slackChannelId, context.threadTimestamp);
-  const existing = await getSlackInteractionByRoute(
-    deps.db,
-    entry.workspaceId,
-    entry.connectionId,
+  const existing = await getSlackInteractionByConnectionRoute(deps.db, {
+    connectionId: entry.connectionId,
     routeKey,
-  );
+  });
+  if (
+    existing &&
+    (existing.accountId !== target.accountId || existing.workspaceId !== target.workspaceId)
+  ) {
+    // A mapped thread keeps the workspace it was created in.
+    target = { accountId: existing.accountId, workspaceId: existing.workspaceId };
+    grant = await authorizeTarget();
+  }
+  const preparedTask = await prepareSlackReactionTask(deps, client, entry, target, context);
   if (existing?.sessionId) {
     const appendedTask = await remountSlackReactionTaskForSession(
       deps,
-      entry.workspaceId,
+      existing.workspaceId,
       existing.sessionId,
       preparedTask,
     );
@@ -1915,8 +1973,7 @@ async function processSlackReactionInboxEntry(
     return;
   }
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
+    ...target,
     connectionId: entry.connectionId,
     slackTeamId: entry.slackTeamId,
     slackChannelId: entry.slackChannelId,
@@ -1927,10 +1984,11 @@ async function processSlackReactionInboxEntry(
     owningSubjectId: grant.subjectId,
     visibility: "workspace",
   });
+  requireSlackInteractionMatchesTarget(interaction, target);
   if (interaction.sessionId) {
     const appendedTask = await remountSlackReactionTaskForSession(
       deps,
-      entry.workspaceId,
+      interaction.workspaceId,
       interaction.sessionId,
       preparedTask,
     );
@@ -1953,13 +2011,13 @@ async function processSlackReactionInboxEntry(
   }
   const preferredModel = await getLatestSessionModelForSubject(
     deps.db,
-    entry.workspaceId,
+    interaction.workspaceId,
     grant.subjectId,
   );
   const preparedEntry = slackReactionPreparedEntry(entry, context, preparedTask);
   let session: Awaited<ReturnType<typeof createSessionForRequest>>;
   try {
-    session = await createSessionForRequest(deps, grant, entry.workspaceId, {
+    session = await createSessionForRequest(deps, grant, interaction.workspaceId, {
       requestedSessionId: interaction.sessionReservationId,
       initialMessage: preparedEntry.text,
       instructions: SLACK_SESSION_INSTRUCTIONS,
@@ -2126,15 +2184,23 @@ async function prepareSlackReactionTask(
   deps: ApiRouteDeps,
   client: OpenGeniSlackBotClient,
   entry: SlackInteractionInboxEntry,
+  target: { accountId: string; workspaceId: string },
   context: SlackReactionMessageContext,
 ): Promise<PreparedSlackReactionTask> {
-  return await prepareSlackMessageAttachments(deps, client, entry, context.reactedMessage.files);
+  return await prepareSlackMessageAttachments(
+    deps,
+    client,
+    entry,
+    target,
+    context.reactedMessage.files,
+  );
 }
 
 async function prepareSlackMessageAttachments(
   deps: ApiRouteDeps,
   client: OpenGeniSlackBotClient,
   entry: SlackInteractionInboxEntry,
+  target: { accountId: string; workspaceId: string },
   exactFiles: readonly { id: string; name: string; title: string }[],
   authorizeSharedRead?: () => Promise<void>,
 ): Promise<PreparedSlackReactionTask> {
@@ -2195,8 +2261,8 @@ async function prepareSlackMessageAttachments(
         await importSlackReactionImage(
           { db: deps.db, objectStorage: deps.objectStorage },
           {
-            accountId: entry.accountId,
-            workspaceId: entry.workspaceId,
+            accountId: target.accountId,
+            workspaceId: target.workspaceId,
             connectionId: entry.connectionId,
             slackTeamId: entry.slackTeamId,
             slackChannelId: entry.slackChannelId,
@@ -2335,9 +2401,11 @@ async function acceptSlackReactionTask(
   resources: FileResourceRef[],
 ) {
   const clientEventId = `slack:${entry.providerEventId}`;
+  // Session events and user messages belong to the workspace that owns the
+  // session, which is the workspace the grant authorized, not the installation.
   const existing = await getSessionEventByClientEventId(
     deps.db,
-    entry.workspaceId,
+    grant.workspaceId,
     sessionId,
     clientEventId,
   );
@@ -2347,7 +2415,7 @@ async function acceptSlackReactionTask(
     }
     return;
   }
-  await acceptSessionUserMessage(deps, grant, entry.workspaceId, sessionId, {
+  await acceptSessionUserMessage(deps, grant, grant.workspaceId, sessionId, {
     text: entry.text,
     resources,
     clientEventId,
@@ -2391,7 +2459,7 @@ async function continueSlackSession(
   }
   const pending = await listSessionHumanInputRequests(
     deps.db,
-    entry.workspaceId,
+    interaction.workspaceId,
     interaction.sessionId,
     { status: "pending", limit: 2 },
   );
@@ -2431,7 +2499,7 @@ async function continueSlackSession(
   if (!hasPermission(grant.permissions, "sessions:control")) {
     throw new SlackInteractionPermanentError("sessions_control_denied");
   }
-  await acceptSessionUserMessage(deps, grant, entry.workspaceId, interaction.sessionId, {
+  await acceptSessionUserMessage(deps, grant, interaction.workspaceId, interaction.sessionId, {
     text: entry.text,
     ...(options.modelContext ? { modelContext: options.modelContext } : {}),
     resources,
@@ -2454,6 +2522,9 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   const separator = entry.text.lastIndexOf(":");
   const actionId = separator > 0 ? entry.text.slice(0, separator) : "";
   const handleId = separator > 0 ? entry.text.slice(separator + 1) : "";
+  // The block-action inbox row carries HOME tenancy, exactly like every other
+  // inbox row: it is the installation binding that received the click.
+  const home = { accountId: entry.accountId, workspaceId: entry.workspaceId } as const;
   const route = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
   if (
     !route ||
@@ -2463,19 +2534,22 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   ) {
     throw new SlackInteractionPermanentError("slack_action_installation_changed");
   }
-  const handle = await getSlackInteractionActionHandle(deps.db, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
-    handleId,
-  });
+  // A handle lives in the workspace that owns its session, which is the routed
+  // workspace once routing exists. Every installation addresses exactly one
+  // workspace today, so the home scope is still the handle's scope.
+  const handle = await getSlackInteractionActionHandle(deps.db, { ...home, handleId });
   if (!handle || SLACK_ACTION_ID_BY_KIND[handle.actionKind] !== actionId) {
     throw new SlackInteractionPermanentError("slack_action_handle_invalid");
   }
+  // An action handle is a TARGET fact: it is composite-FK'd to its interaction
+  // and its RESTRICTIVE session-visibility policy resolves the session under the
+  // handle's own tenancy, so every read, settle and interaction lookup below
+  // uses the handle's scope rather than the installation's.
+  const target = { accountId: handle.accountId, workspaceId: handle.workspaceId } as const;
   if (handle.status !== "pending") return;
   if (handle.expiresAt.getTime() <= Date.now()) {
     await settleSlackInteractionActionHandles(deps.db, {
-      accountId: entry.accountId,
-      workspaceId: entry.workspaceId,
+      ...target,
       handleId: handle.id,
       result: "expired",
       stale: true,
@@ -2487,14 +2561,15 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   }
   const [interaction, link, post] = await Promise.all([
     getSlackInteractionById(deps.db, {
-      accountId: entry.accountId,
-      workspaceId: entry.workspaceId,
+      ...target,
       interactionId: handle.interactionId,
     }),
-    getSlackBotUserLink(deps.db, entry.workspaceId, entry.connectionId, entry.slackUserId),
+    // Identity stays HOME.
+    getSlackBotUserLink(deps.db, home.workspaceId, entry.connectionId, entry.slackUserId),
+    // The post ledger is written by the bot credential, so it stays HOME too.
     getSlackBotPostOperation(
       deps.db,
-      entry.workspaceId,
+      home.workspaceId,
       entry.connectionId,
       handle.messageOperationId,
     ),
@@ -2515,19 +2590,16 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   ) {
     throw new SlackInteractionPermanentError("slack_action_authority_changed");
   }
-  const grant = await getWorkspaceGrant(deps.db, link.subjectId, entry.workspaceId, {
-    principalKind: "human_session",
+  const grant = await resolveSlackTargetAuthority(deps.db, {
+    subjectId: link.subjectId,
+    targetAccountId: target.accountId,
+    targetWorkspaceId: target.workspaceId,
   });
-  if (
-    !grant ||
-    grant.accountId !== entry.accountId ||
-    !hasPermission(grant.permissions, "sessions:control")
-  ) {
+  if (!grant || !hasPermission(grant.permissions, "sessions:control")) {
     throw new SlackInteractionPermanentError("sessions_control_denied");
   }
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
+    ...home,
     connectionId: entry.connectionId,
     subjectId: grant.subjectId,
     sessionId: handle.sessionId,
@@ -2553,8 +2625,7 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     blocks: [{ type: "section", text: { type: "mrkdwn", text: updateText } }],
   });
   await settleSlackInteractionActionHandles(deps.db, {
-    accountId: entry.accountId,
-    workspaceId: entry.workspaceId,
+    ...target,
     handleId: handle.id,
     result: outcome.result,
     ...(outcome.stale ? { stale: true } : {}),
@@ -2872,13 +2943,16 @@ async function validatedSlackRequester(
     SlackInteraction,
     "accountId" | "workspaceId" | "connectionId" | "initiatingSlackUserId" | "owningSubjectId"
   >,
+  // Identity links are HOME facts, unique on (connection_id, slack_user_id) and
+  // RLS-visible only under the installation's own tenancy.
+  home: { accountId: string; workspaceId: string },
 ) {
   if (!interaction.initiatingSlackUserId) {
     return { authorized: false, mention: "" };
   }
   const link = await getSlackBotUserLink(
     deps.db,
-    interaction.workspaceId,
+    home.workspaceId,
     interaction.connectionId,
     interaction.initiatingSlackUserId,
   );
@@ -3338,6 +3412,30 @@ function slackGoalPausedText(
   return boundedOutput(`${mention}${headline}.${link ? ` <${link}|Open in OpenGeni>` : ""}`);
 }
 
+/**
+ * The installation tenancy that owns this interaction's Slack credential.
+ *
+ * `slack_interactions.connection_id` deliberately has no composite
+ * `(workspace_id, connection_id)` foreign key, so a routed interaction may point
+ * at the installation's connection from another workspace.
+ *
+ * A binding that does not resolve, or that now names a different connection, is
+ * NOT turned into a new delivery precondition: this code previously used the
+ * interaction's own tenancy unconditionally, so falling back to it keeps every
+ * delivery that used to succeed succeeding. The fallback cannot post from the
+ * wrong workspace either, because `claimSlackBotPostOperation` selects the
+ * connection under the tenancy it is given and fails when it does not own it.
+ */
+async function resolveSlackDeliveryHome(
+  deps: ApiRouteDeps,
+  interaction: Pick<SlackInteraction, "accountId" | "workspaceId" | "connectionId" | "slackTeamId">,
+): Promise<{ accountId: string; workspaceId: string }> {
+  const installation = await resolveSlackInstallationRoute(deps.db, interaction.slackTeamId);
+  return installation && installation.connectionId === interaction.connectionId
+    ? { accountId: installation.accountId, workspaceId: installation.workspaceId }
+    : { accountId: interaction.accountId, workspaceId: interaction.workspaceId };
+}
+
 async function deliverSlackSessionEvents(
   deps: ApiRouteDeps,
   interaction: SlackInteraction,
@@ -3357,14 +3455,17 @@ async function deliverSlackSessionEvents(
     });
     return;
   }
+  // The bot credential is owned by the installation's workspace and every
+  // provider call is fenced on it, so the delivery client is always built from
+  // HOME even when the session it reports on lives in another workspace.
+  const home = await resolveSlackDeliveryHome(deps, interaction);
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
-    accountId: interaction.accountId,
-    workspaceId: interaction.workspaceId,
+    ...home,
     connectionId: interaction.connectionId,
     subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
     sessionId: interaction.sessionId,
   });
-  const requester = await validatedSlackRequester(deps, interaction);
+  const requester = await validatedSlackRequester(deps, interaction, home);
   // Both orchestration notices are per-workspace and OFF unless this workspace
   // turned them on. Resolved lazily so an ordinary page of turn/progress events
   // costs no extra workspace read, and memoized so one page resolves once. A
@@ -3584,7 +3685,7 @@ async function deliverSlackSessionEvents(
         );
         const posted = await getSlackBotPostOperation(
           deps.db,
-          interaction.workspaceId,
+          home.workspaceId,
           interaction.connectionId,
           existingProgress.operationId,
         );
