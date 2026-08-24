@@ -514,7 +514,9 @@ state remains application-owned; durable draft and session state remain in
   previous resume semantics.
 - `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
-  visible queue order; `steer()` supersedes the current direction. Drafts
+  visible queue order (including while paused); `steer()` puts the new direction
+  directly in chat and supersedes the current direction. Resume is always an
+  explicit control action and never an implicit side effect of Send. Drafts
   autosave with optimistic concurrency, survive failed sends, and reuse one
   `clientEventId` across retries so the server dedupes. `composer.policy` and
   `setModel` / `setReasoningEffort` / `setLatencyMode` expose the exact policy
@@ -595,8 +597,9 @@ intentional changes should regenerate those snapshots and review the diff.
 
 ## Components
 
-- `ChatComposer` — auto-growing textarea, Enter-to-send (IME-safe), pause/resume
-  controls, inline error recovery. Slots for app chrome:
+- `ChatComposer` — auto-growing textarea, Enter-to-send (IME-safe), direct
+  Cmd/Ctrl+Enter steering, pause/resume controls, and inline finite error
+  recovery. Paused sends visibly join the queue without resuming. Slots for app chrome:
   `controlsStart` (footer controls like model pickers / attach buttons),
   `header` (e.g. attachment chips above the field), and `onPaste`
   (paste-image-to-attach). Its advanced controller and compound primitives are

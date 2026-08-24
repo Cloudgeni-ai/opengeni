@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, type Browser } from "playwright";
+import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
+import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
+import { Client as TemporalClient, Connection as TemporalConnection } from "@temporalio/client";
 import {
   freePort,
   startE2eWorkerTopology,
@@ -34,7 +37,7 @@ describe("browser e2e", () => {
       await services.migrate();
       apiPort = await freePort();
       webPort = await freePort();
-      const env = stackEnv(services, apiPort, "slow");
+      const env = stackEnv(services, apiPort, "browser-command-control");
       api = await startProcess(["bun", "apps/api/src/index.ts"], {
         cwd: repoRoot,
         env,
@@ -162,6 +165,335 @@ describe("browser e2e", () => {
       .waitFor({ timeout: 15_000 });
   }, 120_000);
 
+  test("runs Send, queue mutations, Steer, Pause, Resume, lost responses, reload, and two-tab reconciliation through the real worker", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    const secondPage = await context.newPage();
+    const diagnostics = observePageFailures(page);
+    let coordinates: BrowserSessionCoordinates | null = null;
+    try {
+      const response = await page.goto(`http://127.0.0.1:${webPort}`);
+      expect(response?.ok()).toBe(true);
+      await page.evaluate(() => {
+        const browserWindow = window as typeof window & {
+          __opengeniFirstSendTrace?: {
+            failures: string[];
+            main: Element | null;
+            observer: MutationObserver;
+          };
+        };
+        const failures: string[] = [];
+        const main = document.querySelector("main");
+        const sample = () => {
+          if (!/\/sessions\/[^/]+$/.test(window.location.pathname)) return;
+          const text = document.body.innerText;
+          if (text.includes("Opening session")) failures.push("Opening session");
+          if (text.includes("Loading conversation")) failures.push("Loading conversation");
+          if (text.includes("Queued to start")) failures.push("Queued to start");
+          const scroller = document.querySelector("[data-og-timeline-scroller]");
+          if (scroller && getComputedStyle(scroller).visibility === "hidden") {
+            failures.push("hidden timeline");
+          }
+          if (document.querySelector("main") !== main) failures.push("replaced app canvas");
+        };
+        const observer = new MutationObserver(sample);
+        observer.observe(document.body, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ["class", "style"],
+        });
+        browserWindow.__opengeniFirstSendTrace = { failures, main, observer };
+      });
+      await page
+        .getByPlaceholder("Describe a task for the agent…")
+        .fill("E2E HOLD INITIAL DIRECTION");
+      await page.getByRole("button", { name: "Send" }).click();
+      await waitFor(() => /\/workspaces\/[^/]+\/sessions\/[^/]+$/.test(page.url()), {
+        timeoutMs: 15_000,
+      });
+      coordinates = sessionCoordinates(page.url());
+      const sessionUrl = page.url();
+      const timeline = page.getByTestId("session-timeline");
+      const composer = page.getByRole("textbox", { name: "Message the agent" });
+      const queueChip = page.getByTestId("session-chrome-queue");
+
+      await timeline.getByText("E2E HOLD INITIAL DIRECTION", { exact: true }).waitFor();
+      const firstSendFailures = await page.evaluate(() => {
+        const browserWindow = window as typeof window & {
+          __opengeniFirstSendTrace?: {
+            failures: string[];
+            observer: MutationObserver;
+          };
+        };
+        browserWindow.__opengeniFirstSendTrace?.observer.disconnect();
+        return browserWindow.__opengeniFirstSendTrace?.failures ?? ["trace missing"];
+      });
+      expect(firstSendFailures).toEqual([]);
+      await timeline.getByText("E2E HOLD ACTIVE", { exact: false }).waitFor({ timeout: 20_000 });
+      await page.getByRole("button", { name: "Pause this workstream" }).waitFor();
+
+      // Click at the first actionable frame of the optimistic→authoritative
+      // queue-row handoff. The button must not lose the pointer gesture while
+      // React replaces the optimistic row with durable queue truth.
+      await submitSessionPrompt(page, composer, "E2E HOLD EARLIEST STEER", {
+        waitForResponse: false,
+      });
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.click();
+      const earliestSteerResponse = page.waitForResponse(
+        (candidateResponse) =>
+          candidateResponse.request().method() === "POST" &&
+          /\/queue\/[^/]+\/steer$/.test(new URL(candidateResponse.url()).pathname),
+        { timeout: 20_000 },
+      );
+      await page.getByRole("button", { name: "Steer queued prompt 1" }).click();
+      expect((await earliestSteerResponse).status()).toBe(200);
+      await timeline.getByText("E2E HOLD EARLIEST STEER", { exact: true }).waitFor();
+      await waitFor(
+        async () => (await browserQueueSnapshot(page, apiPort, coordinates)).items.length === 0,
+        { timeoutMs: 15_000 },
+      );
+
+      await submitSessionPrompt(page, composer, "E2E QUEUED FIRST");
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      expect(await timeline.getByText("E2E QUEUED FIRST", { exact: true }).count()).toBe(0);
+      await submitSessionPrompt(page, composer, "E2E HOLD QUEUED SECOND");
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      if ((await queueChip.getAttribute("aria-expanded")) !== "true") await queueChip.click();
+      const queue = page.getByRole("list", { name: "Queued prompts" });
+      const rows = queue.getByRole("listitem");
+      await waitFor(async () => (await rows.count()) === 2, { timeoutMs: 10_000 });
+      expect(await rows.nth(0).innerText()).toContain("E2E QUEUED FIRST");
+      expect(await rows.nth(1).innerText()).toContain("E2E HOLD QUEUED SECOND");
+
+      await page.getByRole("button", { name: "Move queued prompt 2 up" }).click();
+      await waitFor(async () => (await rows.nth(0).innerText()).includes("E2E HOLD QUEUED SECOND"));
+      await page.getByRole("button", { name: "Move queued prompt 1 down" }).click();
+      await waitFor(async () => (await rows.nth(1).innerText()).includes("E2E HOLD QUEUED SECOND"));
+
+      await page.getByRole("button", { name: "Edit queued prompt 2" }).click();
+      await waitFor(async () => (await composer.inputValue()) === "E2E HOLD QUEUED SECOND");
+      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await submitSessionPrompt(page, composer, "E2E HOLD QUEUED SECOND EDITED");
+      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      await waitForQueuePrompts(page, apiPort, coordinates, [
+        "E2E QUEUED FIRST",
+        "E2E HOLD QUEUED SECOND EDITED",
+      ]);
+
+      await page.reload();
+      await page.getByRole("textbox", { name: "Message the agent" }).waitFor();
+      expect(await page.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe("");
+      await page
+        .getByTestId("session-chrome-queue")
+        .getByText("2 queued prompts", { exact: true })
+        .waitFor();
+      await waitForQueuePrompts(page, apiPort, coordinates, [
+        "E2E QUEUED FIRST",
+        "E2E HOLD QUEUED SECOND EDITED",
+      ]);
+      const reloadedQueueChip = page.getByTestId("session-chrome-queue");
+      if ((await reloadedQueueChip.getAttribute("aria-expanded")) !== "true") {
+        await reloadedQueueChip.click();
+      }
+      await page.getByRole("button", { name: "Remove queued prompt 1" }).click();
+      await reloadedQueueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await waitForQueuePrompts(page, apiPort, coordinates, ["E2E HOLD QUEUED SECOND EDITED"]);
+      expect(await page.getByTestId("session-timeline").getByText("E2E QUEUED FIRST").count()).toBe(
+        0,
+      );
+
+      const beforeSteer = await browserQueueSnapshot(page, apiPort, coordinates);
+      const steeredTurnId = beforeSteer.items[0]?.id;
+      if (!steeredTurnId) throw new Error("expected one durable queued turn before Steer");
+      const steerPath = `/v1/workspaces/${coordinates.workspaceId}/sessions/${coordinates.sessionId}/queue/${steeredTurnId}/steer`;
+      let steerCommitStatus: number | null = null;
+      await page.route(`**${steerPath}`, async (route) => {
+        if (steerCommitStatus !== null) return await route.continue();
+        const committed = await route.fetch();
+        steerCommitStatus = committed.status();
+        await route.abort("connectionfailed");
+      });
+      await page.getByRole("button", { name: "Steer queued prompt 1" }).click();
+      await page
+        .getByTestId("session-timeline")
+        .getByText("E2E HOLD QUEUED SECOND EDITED", { exact: true })
+        .waitFor({ timeout: 20_000 });
+      await waitFor(() => steerCommitStatus !== null, {
+        timeoutMs: 20_000,
+        describe: () => "the committed queue Steer response did not settle",
+      });
+      expect(steerCommitStatus).toBe(200);
+      expect(await page.getByText("Changing direction…", { exact: true }).count()).toBe(0);
+      await waitFor(
+        async () => (await browserQueueSnapshot(page, apiPort, coordinates)).items.length === 0,
+        { timeoutMs: 15_000 },
+      );
+      await page.unroute(`**${steerPath}`);
+
+      // Reload while the replacement is really executing. The accepted Steer
+      // remains a single chat message and never falls back into the queue.
+      await page.reload();
+      const steeredMessage = page
+        .getByTestId("session-timeline")
+        .getByText("E2E HOLD QUEUED SECOND EDITED", { exact: true });
+      await steeredMessage.waitFor();
+      expect(await steeredMessage.count()).toBe(1);
+      expect((await browserQueueSnapshot(page, apiPort, coordinates)).items).toEqual([]);
+
+      const reloadedComposer = page.getByRole("textbox", { name: "Message the agent" });
+      await reloadedComposer.fill("E2E FAST DIRECT STEER");
+      await waitFor(
+        async () =>
+          !(await page
+            .getByRole("button", { name: /Send message|Add message to queue/ })
+            .isDisabled()),
+        {
+          timeoutMs: 30_000,
+          describe: () => "the composer did not become ready for direct Steer after reload",
+        },
+      );
+      await reloadedComposer.press("ControlOrMeta+Enter");
+      await page
+        .getByTestId("session-timeline")
+        .getByText("E2E FAST DIRECT STEER", { exact: true })
+        .waitFor();
+      await page
+        .getByTestId("session-timeline")
+        .getByText("E2E FAST COMPLETE", { exact: true })
+        .last()
+        .waitFor({ timeout: 30_000 });
+      await waitForSessionStatus(page, apiPort, coordinates, "idle");
+
+      // A committed Pause whose HTTP response is lost must still reconcile as
+      // Paused, without leaving the button spinning or surfacing a false error.
+      const controlPath = `/v1/workspaces/${coordinates.workspaceId}/sessions/${coordinates.sessionId}/control`;
+      let pauseCommitStatus: number | null = null;
+      await page.route(`**${controlPath}`, async (route) => {
+        if (route.request().method() !== "POST" || pauseCommitStatus !== null) {
+          return await route.continue();
+        }
+        const committed = await route.fetch();
+        pauseCommitStatus = committed.status();
+        await route.abort("connectionfailed");
+      });
+      await page.getByRole("button", { name: "Pause this workstream" }).click();
+      await page.getByRole("button", { name: "Resume this workstream" }).waitFor({
+        timeout: 20_000,
+      });
+      await waitFor(() => pauseCommitStatus !== null, {
+        timeoutMs: 20_000,
+        describe: () => "the committed Pause response did not settle",
+      });
+      expect(pauseCommitStatus).toBe(200);
+      expect(await page.getByText("Pause requested", { exact: true }).count()).toBe(0);
+      await page.unroute(`**${controlPath}`);
+
+      // A queued Send whose committed response is lost must appear once in the
+      // durable queue, remain outside chat, and keep the durable draft empty.
+      const submitPath = `/v1/workspaces/${coordinates.workspaceId}/sessions/${coordinates.sessionId}/composer-draft/submit`;
+      let submitCommitStatus: number | null = null;
+      await page.route(`**${submitPath}`, async (route) => {
+        if (submitCommitStatus !== null) return await route.continue();
+        const committed = await route.fetch();
+        submitCommitStatus = committed.status();
+        await route.abort("connectionfailed");
+      });
+      const pausedComposer = page.getByRole("textbox", { name: "Message the agent" });
+      await submitSessionPrompt(page, pausedComposer, "E2E FAST PAUSED LOST RESPONSE", {
+        waitForResponse: false,
+      });
+      await page
+        .getByTestId("session-chrome-queue")
+        .getByText("1 queued prompt", { exact: true })
+        .waitFor({ timeout: 20_000 });
+      await waitFor(() => submitCommitStatus !== null, {
+        timeoutMs: 20_000,
+        describe: () => "the committed queued Send response did not settle",
+      });
+      expect(submitCommitStatus).toBe(202);
+      expect(
+        await page
+          .getByTestId("session-timeline")
+          .getByText("E2E FAST PAUSED LOST RESPONSE", { exact: true })
+          .count(),
+      ).toBe(0);
+      await page.unroute(`**${submitPath}`);
+
+      await page.reload();
+      await page.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      expect(await page.getByRole("textbox", { name: "Message the agent" }).inputValue()).toBe("");
+      const persistedQueue = await browserQueueSnapshot(page, apiPort, coordinates);
+      expect(persistedQueue.items.map((item) => item.prompt)).toEqual([
+        "E2E FAST PAUSED LOST RESPONSE",
+      ]);
+      expect((await browserComposerDraft(page, apiPort, coordinates)).text).toBe("");
+
+      await secondPage.goto(sessionUrl);
+      await secondPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      await secondPage
+        .getByTestId("session-chrome-queue")
+        .getByText("1 queued prompt", { exact: true })
+        .waitFor();
+      const completedBeforeResume = await page
+        .getByTestId("session-timeline")
+        .getByText("E2E FAST COMPLETE", { exact: true })
+        .count();
+      await page.getByRole("button", { name: "Resume this workstream" }).click();
+      await page.getByRole("button", { name: "Pause this workstream" }).waitFor();
+      await secondPage.getByRole("button", { name: "Pause this workstream" }).waitFor({
+        timeout: 15_000,
+      });
+      for (const client of [page, secondPage]) {
+        await waitFor(
+          async () =>
+            (await client
+              .getByTestId("session-timeline")
+              .getByText("E2E FAST COMPLETE", { exact: true })
+              .count()) > completedBeforeResume,
+          {
+            timeoutMs: 30_000,
+            describe: () => "the resumed queued prompt did not produce a new completion",
+          },
+        );
+      }
+      await waitForSessionStatus(page, apiPort, coordinates, "idle");
+      expect((await browserQueueSnapshot(page, apiPort, coordinates)).items).toEqual([]);
+      expect((await browserComposerDraft(page, apiPort, coordinates)).text).toBe("");
+
+      // Prove the durable owner independently of every immediate optimization:
+      // manufacture one committed, due wake revision and do not trigger it.
+      // The production 10-second Schedule must claim and acknowledge it.
+      const repairRevision = await registerWorkflowWakeRepairProbe(
+        services.databaseUrl,
+        coordinates,
+      );
+      await waitFor(
+        async () =>
+          await workflowWakeRepairProbeDelivered(services.databaseUrl, coordinates, repairRevision),
+        {
+          timeoutMs: 30_000,
+          describe: () => `scheduled repair did not deliver wake revision ${repairRevision}`,
+        },
+      );
+      // Reloads intentionally abort optional reads, and the three lost-response
+      // cases intentionally surface request failures. Core command outcomes are
+      // asserted above through both the rendered UI and authoritative API.
+      expect(diagnostics.diagnostics.filter((entry) => entry.startsWith("page error:"))).toEqual(
+        [],
+      );
+    } catch (error) {
+      throw new Error(
+        `${String(error)}\n[wake schedule]\n${await sessionWorkflowWakeScheduleDiagnostics(services.temporalHost)}\n${await pageDiagnostics(page, diagnostics.diagnostics)}\n[command state]\n${await sessionCommandDiagnostics(services.databaseUrl, coordinates)}\n[api]\n${api.logs()}\n[workers]\n${worker.logs()}`,
+        { cause: error },
+      );
+    } finally {
+      diagnostics.stop();
+      await context.close();
+    }
+  }, 240_000);
+
   test("uploads an image from the composer, persists its resource, and survives refresh", async () => {
     const page = await browser.newPage({
       viewport: { width: 375, height: 740 },
@@ -170,6 +502,8 @@ describe("browser e2e", () => {
     });
     await installThemeAndWindowOpenCapture(page, "light");
     const providerMethods: string[] = [];
+    const uploadResponses: Array<{ method: string; path: string; status: number; body: string }> =
+      [];
     const observeProviderRequest = (request: import("playwright").Request) => {
       const url = new URL(request.url());
       if (url.hostname === "127.0.0.1" && Number(url.port) === services.minioPort) {
@@ -177,6 +511,19 @@ describe("browser e2e", () => {
       }
     };
     page.on("request", observeProviderRequest);
+    page.on("response", async (response) => {
+      const url = new URL(response.url());
+      if (!url.pathname.includes("/files/uploads")) return;
+      uploadResponses.push({
+        method: response.request().method(),
+        path: url.pathname,
+        status: response.status(),
+        body:
+          response.status() >= 400
+            ? await response.text().catch(() => "<unreadable>")
+            : "<success body omitted>",
+      });
+    });
     const image = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL2GQAAAABJRU5ErkJggg==",
       "base64",
@@ -217,6 +564,7 @@ describe("browser e2e", () => {
 
     // Reattach the same bytes for the durable journey, then prove the controls
     // are keyboard reachable and visibly focused before sending.
+    providerMethods.length = 0;
     await page.locator('input[type="file"]').setInputFiles({
       name: "e2e screenshot.png",
       mimeType: "image/png",
@@ -227,11 +575,28 @@ describe("browser e2e", () => {
       timeoutMs: 10_000,
       describe: () => `observed provider methods: ${providerMethods.join(", ") || "none"}`,
     });
+    await page.getByText("Uploading", { exact: true }).waitFor({
+      state: "hidden",
+      timeout: 15_000,
+    });
+    const retryUpload = page.getByRole("button", { name: "Retry e2e screenshot.png" });
+    if ((await retryUpload.count()) > 0) {
+      throw new Error(
+        `reattached upload failed: ${await retryUpload.evaluate(
+          (element) => element.parentElement?.parentElement?.innerText ?? "unknown error",
+        )}\n[upload responses]\n${JSON.stringify(uploadResponses, null, 2)}\n[api]\n${api.logs()}`,
+      );
+    }
     await more.focus();
     expect(await more.evaluate((element) => element === document.activeElement)).toBe(true);
 
     await page.getByPlaceholder("Describe a task for the agent…").fill("inspect the screenshot");
-    await page.getByRole("button", { name: "Send message" }).click();
+    const send = page.getByRole("button", { name: "Send message" });
+    await waitFor(async () => !(await send.isDisabled()), {
+      timeoutMs: 10_000,
+      describe: () => "file-backed composer did not become ready after upload finalization",
+    });
+    await send.click();
     await waitFor(() => /\/workspaces\/[^/]+\/sessions\/[^/]+$/.test(page.url()), {
       timeoutMs: 15_000,
     });
@@ -411,6 +776,10 @@ function stackEnv(
     OPENGENI_SANDBOX_BACKEND: "none",
     OPENGENI_SANDBOX_PREPARATION_PROFILES: "none",
     OPENGENI_OBJECT_STORAGE_ENDPOINT: services.objectStorageEndpoint!,
+    // The API runs on the host in this E2E topology. Override any repo-level
+    // Docker-only `garage:3900` default so authenticated HEAD/read/write calls
+    // exercise the same owned fixture through its reachable host port.
+    OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT: services.objectStorageEndpoint!,
     OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT: services.objectStorageSandboxEndpoint!,
     OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: services.objectStorageAccessKeyId!,
     OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: services.objectStorageSecretAccessKey!,
@@ -508,6 +877,294 @@ function endpointPort(value: string, fallbackProtocol: string): number {
     throw new Error(`test service endpoint must include an explicit port: ${url.origin}`);
   }
   return port;
+}
+
+type BrowserSessionCoordinates = {
+  workspaceId: string;
+  sessionId: string;
+};
+
+async function registerWorkflowWakeRepairProbe(
+  databaseUrl: string,
+  coordinates: BrowserSessionCoordinates,
+): Promise<number> {
+  const sql = postgres(databaseUrl, { max: 1, prepare: false });
+  try {
+    const rows = await sql`
+      update session_workflow_wake_outbox
+      set wake_revision = wake_revision + 1,
+        reason = 'e2e_schedule_repair_probe',
+        attempts = 0,
+        next_attempt_at = now(),
+        last_error = null,
+        updated_at = now()
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and session_id = ${coordinates.sessionId}::uuid
+      returning wake_revision
+    `;
+    const revision = Number(rows[0]?.wake_revision);
+    if (!Number.isSafeInteger(revision) || revision <= 0) {
+      throw new Error("workflow wake repair probe had no valid outbox revision");
+    }
+    return revision;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+async function workflowWakeRepairProbeDelivered(
+  databaseUrl: string,
+  coordinates: BrowserSessionCoordinates,
+  wakeRevision: number,
+): Promise<boolean> {
+  const sql = postgres(databaseUrl, { max: 1, prepare: false });
+  try {
+    const rows = await sql`
+      select delivered_revision
+      from session_workflow_wake_outbox
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and session_id = ${coordinates.sessionId}::uuid
+    `;
+    return Number(rows[0]?.delivered_revision ?? 0) >= wakeRevision;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+async function sessionWorkflowWakeScheduleDiagnostics(temporalHost: string): Promise<string> {
+  const connection = await TemporalConnection.connect({ address: temporalHost });
+  try {
+    const temporal = new TemporalClient({ connection, namespace: "default" });
+    const description = await temporal.schedule
+      .getHandle(SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID)
+      .describe();
+    return JSON.stringify(
+      {
+        state: description.state,
+        spec: description.spec,
+        action: description.action,
+        info: description.info,
+      },
+      null,
+      2,
+    );
+  } catch (error) {
+    return `schedule diagnostic failed: ${String(error)}`;
+  } finally {
+    await connection.close();
+  }
+}
+
+async function sessionCommandDiagnostics(
+  databaseUrl: string,
+  coordinates: BrowserSessionCoordinates | null,
+): Promise<string> {
+  if (!coordinates) return "session coordinates unavailable";
+  const sql = postgres(databaseUrl, { max: 1, prepare: false });
+  try {
+    const sessions = await sql`
+      select id, status, active_turn_id, temporal_workflow_id, queue_version,
+        direct_control_state, direct_pause_revision, subtree_run_override_revision,
+        control_version, updated_at
+      from sessions
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and id = ${coordinates.sessionId}::uuid
+    `;
+    const turns = await sql`
+      select id, status, source, position, prompt, version, execution_generation,
+        active_attempt_id, created_at, updated_at
+      from session_turns
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and session_id = ${coordinates.sessionId}::uuid
+      order by position
+    `;
+    const attempts = await sql`
+      select id, turn_id, execution_generation, state, outcome,
+        verified_control_revision, started_at, updated_at, closed_at, quiesced_at
+      from session_turn_attempts
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and session_id = ${coordinates.sessionId}::uuid
+      order by started_at desc
+      limit 5
+    `;
+    const interruptions = await sql`
+      select id, operation_id, attempt_id, kind, control_revision, state,
+        requested_at, delivered_at, acknowledged_at, settled_at
+      from session_attempt_interruptions
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and session_id = ${coordinates.sessionId}::uuid
+      order by requested_at desc
+      limit 5
+    `;
+    const wakes = await sql`
+      select session_id, temporal_workflow_id, wake_revision, delivered_revision,
+        control_revision, reason, attempts, next_attempt_at, last_error, updated_at
+      from session_workflow_wake_outbox
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and session_id = ${coordinates.sessionId}::uuid
+    `;
+    const receipts = await sql`
+      select action, operation_key, applied_control_revision, applied_queue_version,
+        result, created_at, updated_at
+      from session_command_receipts
+      where workspace_id = ${coordinates.workspaceId}::uuid
+        and target_session_id = ${coordinates.sessionId}::uuid
+        and action in ('session.pause', 'session.resume', 'composer.submit')
+      order by created_at desc
+      limit 5
+    `;
+    const continuable = await sql`
+      select *
+      from opengeni_private.list_continuable_sessions(
+        ${coordinates.workspaceId}::uuid,
+        ${coordinates.sessionId}::uuid
+      )
+    `;
+    return JSON.stringify(
+      { sessions, wakes, continuable, receipts, turns, attempts, interruptions },
+      null,
+      2,
+    );
+  } catch (error) {
+    return `diagnostic query failed: ${String(error)}`;
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
+function sessionCoordinates(url: string): BrowserSessionCoordinates {
+  const match = url.match(/\/workspaces\/([^/]+)\/sessions\/([^/]+)$/);
+  if (!match?.[1] || !match[2]) {
+    throw new Error(`session URL did not contain workspace and session ids: ${url}`);
+  }
+  return { workspaceId: match[1], sessionId: match[2] };
+}
+
+async function submitSessionPrompt(
+  page: import("playwright").Page,
+  composer: import("playwright").Locator,
+  text: string,
+  options: { waitForResponse?: boolean } = {},
+): Promise<void> {
+  await composer.fill(text);
+  const submit = page.getByRole("button", {
+    name: /Send message|Add message to queue/,
+  });
+  await waitFor(async () => !(await submit.isDisabled()), {
+    timeoutMs: 10_000,
+    describe: () => `composer did not become submittable for ${JSON.stringify(text)}`,
+  });
+  const submitted =
+    options.waitForResponse === false
+      ? null
+      : page.waitForResponse(
+          (response) =>
+            response.request().method() === "POST" &&
+            response.url().includes("/composer-draft/submit"),
+          { timeout: 20_000 },
+        );
+  await submit.click();
+  const response = await submitted;
+  if (response && !response.ok()) {
+    throw new Error(`composer submit failed: ${response.status()} ${await response.text()}`);
+  }
+}
+
+async function browserQueueSnapshot(
+  page: import("playwright").Page,
+  browserApiPort: number,
+  coordinates: BrowserSessionCoordinates,
+): Promise<{ items: Array<{ id: string; prompt: string }> }> {
+  return await page.evaluate(
+    async ({ port, workspaceId, sessionId }) => {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      if (!response.ok) throw new Error(`queue read failed with ${response.status}`);
+      return (await response.json()) as { items: Array<{ id: string; prompt: string }> };
+    },
+    {
+      port: browserApiPort,
+      workspaceId: coordinates.workspaceId,
+      sessionId: coordinates.sessionId,
+    },
+  );
+}
+
+async function browserComposerDraft(
+  page: import("playwright").Page,
+  browserApiPort: number,
+  coordinates: BrowserSessionCoordinates,
+): Promise<{ text: string }> {
+  return await page.evaluate(
+    async ({ port, workspaceId, sessionId }) => {
+      const response = await fetch(
+        `http://127.0.0.1:${port}/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+        { signal: AbortSignal.timeout(10_000) },
+      );
+      if (!response.ok) throw new Error(`composer draft read failed with ${response.status}`);
+      return (await response.json()) as { text: string };
+    },
+    {
+      port: browserApiPort,
+      workspaceId: coordinates.workspaceId,
+      sessionId: coordinates.sessionId,
+    },
+  );
+}
+
+async function waitForQueuePrompts(
+  page: import("playwright").Page,
+  browserApiPort: number,
+  coordinates: BrowserSessionCoordinates,
+  expectedPrompts: string[],
+): Promise<void> {
+  let latest: string[] = [];
+  await waitFor(
+    async () => {
+      latest = (await browserQueueSnapshot(page, browserApiPort, coordinates)).items.map(
+        (item) => item.prompt,
+      );
+      return JSON.stringify(latest) === JSON.stringify(expectedPrompts);
+    },
+    {
+      timeoutMs: 15_000,
+      describe: () =>
+        `queue did not reconcile to ${JSON.stringify(expectedPrompts)}; latest=${JSON.stringify(latest)}`,
+    },
+  );
+}
+
+async function waitForSessionStatus(
+  page: import("playwright").Page,
+  browserApiPort: number,
+  coordinates: BrowserSessionCoordinates,
+  expectedStatus: string,
+): Promise<void> {
+  await waitFor(
+    async () =>
+      await page.evaluate(
+        async ({ port, workspaceId, sessionId, status }) => {
+          const response = await fetch(
+            `http://127.0.0.1:${port}/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+            { signal: AbortSignal.timeout(10_000) },
+          );
+          if (!response.ok) return false;
+          return ((await response.json()) as { status?: string }).status === status;
+        },
+        {
+          port: browserApiPort,
+          workspaceId: coordinates.workspaceId,
+          sessionId: coordinates.sessionId,
+          status: expectedStatus,
+        },
+      ),
+    {
+      timeoutMs: 30_000,
+      describe: () => `session did not settle to ${expectedStatus}`,
+    },
+  );
 }
 
 async function installThemeAndWindowOpenCapture(

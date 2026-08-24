@@ -1751,6 +1751,14 @@ export const ModelProviderApi = z.enum(["responses", "chat"]);
 export type ModelProviderApi = z.infer<typeof ModelProviderApi>;
 
 /**
+ * Provider-specific request semantics that are independent of the endpoint's
+ * OpenAI-compatible wire API. Secondary Azure resources still speak the
+ * Responses API, but need Azure's stricter computer-call normalization.
+ */
+export const ModelProviderWireProfile = z.enum(["openai", "azure-openai"]);
+export type ModelProviderWireProfile = z.infer<typeof ModelProviderWireProfile>;
+
+/**
  * Registry provider kind. "api-key" providers carry their own static key/headers;
  * "anonymous" providers intentionally send no credential and are externally
  * metered; connected-subscription providers resolve a workspace account token
@@ -1822,6 +1830,7 @@ const RegistryProviderSchema = z
     id: z.string().min(1).regex(registryId), // stable provider id, e.g. "fireworks"
     label: z.string().min(1).optional(),
     api: ModelProviderApi.default("chat"),
+    wireProfile: ModelProviderWireProfile.default("openai"),
     baseUrl: z.string().url(),
     apiKey: z.string().optional(), // inline key (pragmatic) ...
     apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
@@ -1905,6 +1914,7 @@ export interface ResolvedModelProvider {
   label: string;
   kind: RegistryProviderKind; // "api-key" (built-ins + most registry) | "anonymous" | subscription
   api: ModelProviderApi;
+  wireProfile: ModelProviderWireProfile;
   builtin: boolean;
   baseUrl?: string | undefined;
   apiKey?: string | undefined;
@@ -3145,6 +3155,7 @@ function gatewayRegistryProvider(
     // Model-specific compatibility stays at the reviewed request fence rather
     // than downgrading the whole provider wire.
     api: "responses",
+    wireProfile: "openai",
     baseUrl: VERCEL_AI_GATEWAY_BASE_URL,
     ...(input.apiKey ? { apiKey: input.apiKey } : {}),
     models,
@@ -3497,6 +3508,7 @@ function definitionVersionFor(
     provider: {
       adapterKind: provider.kind,
       wireApi: provider.api,
+      wireProfile: provider.wireProfile,
       baseUrl: provider.baseUrl ?? null,
       defaultHeaders: requestMetadata.headers,
       defaultQuery: requestMetadata.query,
@@ -3544,6 +3556,7 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
     label: builtinProviderLabel(settings),
     kind: "api-key",
     api: "responses",
+    wireProfile: settings.openaiProvider === "azure" ? "azure-openai" : "openai",
     builtin: true,
     credentialSource,
     billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
@@ -3564,6 +3577,7 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
       label: provider.label ?? provider.id,
       kind: provider.kind,
       api: provider.api,
+      wireProfile: provider.wireProfile,
       builtin: false,
       baseUrl: provider.baseUrl,
       apiKey: resolveProviderApiKey(provider),
@@ -3594,6 +3608,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     id: CODEX_PROVIDER_ID,
     label: "Codex (ChatGPT subscription)",
     api: "responses",
+    wireProfile: "openai",
     baseUrl: CODEX_PROVIDER_BASE_URL,
     models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
       const capabilities = {
@@ -3651,6 +3666,7 @@ export function withXaiSubscriptionCatalogProvider(settings: Settings): Settings
     id: XAI_SUBSCRIPTION_PROVIDER_ID,
     label: "SuperGrok (xAI subscription)",
     api: "responses",
+    wireProfile: "openai",
     baseUrl: XAI_SUBSCRIPTION_PROXY_BASE_URL,
     models: XAI_SUBSCRIPTION_MODEL_SLUGS.map((slug) => {
       const capabilities = legacyModelCapabilities(settings, {

@@ -1,0 +1,32 @@
+diff --git a/lib/workflow/threaded-vm.js b/lib/workflow/threaded-vm.js
+index 343a7e2..f9992cb 100644
+--- a/lib/workflow/threaded-vm.js
++++ b/lib/workflow/threaded-vm.js
+@@ -149,7 +149,10 @@ class WorkerThreadClient {
+         this.shutDownRequested = true;
+         await this.send({ type: 'destroy' });
+         const exitCode = await (bun_1.isBun ? this.terminateWithBunWorkaround() : this.workerThread.terminate());
+-        if (exitCode !== null && exitCode !== exports.TERMINATED_EXIT_CODE) {
++        // Bun 1.4 aligned Worker.terminate() with Node and now returns 1;
++        // older supported Bun releases returned 0. Both mean the already
++        // acknowledged workflow thread terminated cleanly.
++        if (exitCode !== null && exitCode !== exports.TERMINATED_EXIT_CODE && !(bun_1.isBun && exitCode === 1)) {
+             throw new errors_1.UnexpectedError(`Failed to terminate Worker thread, exit code: ${exitCode}`);
+         }
+     }
+diff --git a/src/workflow/threaded-vm.ts b/src/workflow/threaded-vm.ts
+index 2689244..4d7070c 100644
+--- a/src/workflow/threaded-vm.ts
++++ b/src/workflow/threaded-vm.ts
+@@ -181,7 +181,10 @@ export class WorkerThreadClient {
+     this.shutDownRequested = true;
+     await this.send({ type: 'destroy' });
+     const exitCode = await (isBun ? this.terminateWithBunWorkaround() : this.workerThread.terminate());
+-    if (exitCode !== null && exitCode !== TERMINATED_EXIT_CODE) {
++    // Bun 1.4 aligned Worker.terminate() with Node and now returns 1;
++    // older supported Bun releases returned 0. Both mean the already
++    // acknowledged workflow thread terminated cleanly.
++    if (exitCode !== null && exitCode !== TERMINATED_EXIT_CODE && !(isBun && exitCode === 1)) {
+       throw new UnexpectedError(`Failed to terminate Worker thread, exit code: ${exitCode}`);
+     }
+   }

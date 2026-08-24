@@ -3876,7 +3876,26 @@ describe("worker shutdown preemption", () => {
 });
 
 describe("settled run-credential finalization", () => {
-  for (const activityStatus of ["idle", "failed"] as const) {
+  test("drains active tools before submitting terminal credential cleanup", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/finalization.ts", import.meta.url),
+    ).text();
+    const drainAt = source.indexOf("await drainAttemptOwnedSandboxWriters({");
+    const credentialClearAt = source.indexOf(
+      "await clearAttemptCredentialsWithSettledFence({",
+      drainAt,
+    );
+    const receiptAt = source.indexOf(
+      "const proof: SessionAttemptQuiescenceProof",
+      credentialClearAt,
+    );
+
+    expect(drainAt).toBeGreaterThan(-1);
+    expect(credentialClearAt).toBeGreaterThan(drainAt);
+    expect(receiptAt).toBeGreaterThan(credentialClearAt);
+  });
+
+  for (const activityStatus of ["idle", "failed", "cancelled"] as const) {
     test(`retries exact attempt cleanup after ${activityStatus} terminal settlement`, async () => {
       const calls: string[] = [];
       const fence = new SandboxWorkspaceMutationFencedError(
@@ -5217,13 +5236,19 @@ describe("lazyToolTransportForTurn", () => {
   const resolved = (
     kind: RegistryProviderKind,
     api: ModelProviderApi,
-    options: { id?: string; builtin?: boolean; baseUrl?: string } = {},
+    options: {
+      id?: string;
+      wireProfile?: "openai" | "azure-openai";
+      builtin?: boolean;
+      baseUrl?: string;
+    } = {},
   ) =>
     ({
       provider: {
         id: options.id ?? "registry",
         kind,
         api,
+        wireProfile: options.wireProfile ?? "openai",
         builtin: options.builtin ?? false,
         ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
       },
@@ -5235,7 +5260,7 @@ describe("lazyToolTransportForTurn", () => {
     );
   });
 
-  test("uses native client search only for direct built-in OpenAI/Azure Responses", () => {
+  test("uses native client search for direct OpenAI and every Azure Responses resource", () => {
     expect(
       lazyToolTransportForTurn(resolved("api-key", "responses", { id: "openai", builtin: true })),
     ).toBe("openai_native");
@@ -5243,8 +5268,18 @@ describe("lazyToolTransportForTurn", () => {
       lazyToolTransportForTurn(
         resolved("api-key", "responses", {
           id: "azure",
+          wireProfile: "azure-openai",
           builtin: true,
           baseUrl: "https://example.openai.azure.com/openai/v1",
+        }),
+      ),
+    ).toBe("openai_native");
+    expect(
+      lazyToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "azure-secondary",
+          wireProfile: "azure-openai",
+          baseUrl: "https://secondary.openai.azure.com/openai/v1",
         }),
       ),
     ).toBe("openai_native");

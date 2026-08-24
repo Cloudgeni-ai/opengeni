@@ -2773,6 +2773,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         accepted: result.accepted,
         turn: result.turn,
         draft: result.draft,
+        receipt: result.receipt,
+        routing: result.routing,
         interruptionCount: result.interruptionCount,
         replay: result.replay,
       },

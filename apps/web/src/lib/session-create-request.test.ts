@@ -293,6 +293,7 @@ describe("buildCreateSessionRequest", () => {
       freshIdempotencyKey: "fresh-retry",
     });
     expect(exactRetry.request.idempotencyKey).toBe("fresh-first");
+    expect(exactRetry.request.clientEventId).toBe("event-first");
 
     for (const changed of [
       {
@@ -355,6 +356,7 @@ describe("buildCreateSessionRequest", () => {
       freshIdempotencyKey: "fresh-retry",
     });
     expect(exactRetry.request.idempotencyKey).toBe("fresh-first");
+    expect(exactRetry.request.clientEventId).toBe("event-first");
 
     const definitive = new OpenGeniApiError(409, "personal authority changed", {
       mutation: true,

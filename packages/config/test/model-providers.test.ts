@@ -339,10 +339,27 @@ describe("parseModelProvidersJson", () => {
     );
     expect(providers).toHaveLength(1);
     const provider = providers[0]!;
-    // api defaults to "chat" for registry providers; label is optional here.
+    // Registry providers default to generic OpenAI-compatible request semantics.
     expect(provider.api).toBe("chat");
+    expect(provider.wireProfile).toBe("openai");
     expect(provider.label).toBeUndefined();
     expect(provider.models[0]?.id).toBe("accounts/fireworks/models/glm-5p2");
+  });
+
+  test("parses an explicit Azure OpenAI wire profile", () => {
+    const [provider] = parseModelProvidersJson(
+      JSON.stringify([
+        {
+          id: "azure-secondary",
+          api: "responses",
+          wireProfile: "azure-openai",
+          baseUrl: "https://secondary.openai.azure.com/openai/v1",
+          apiKey: "az-test",
+          models: [{ id: "gpt-5.6-terra" }],
+        },
+      ]),
+    );
+    expect(provider?.wireProfile).toBe("azure-openai");
   });
 
   test("parses an explicit anonymous provider without a key", () => {
@@ -621,6 +638,7 @@ describe("configuredProviders", () => {
       id: "openai",
       label: "OpenAI",
       api: "responses",
+      wireProfile: "openai",
       builtin: true,
       apiKey: "sk-test",
     });
@@ -628,6 +646,7 @@ describe("configuredProviders", () => {
       id: "fireworks",
       label: "Fireworks AI",
       api: "chat",
+      wireProfile: "openai",
       builtin: false,
       baseUrl: "https://api.fireworks.ai/inference/v1",
       apiKey: "fw_inline",
@@ -667,6 +686,7 @@ describe("configuredProviders", () => {
       id: "azure",
       label: "Azure OpenAI",
       api: "responses",
+      wireProfile: "azure-openai",
       builtin: true,
       baseUrl: "https://res.openai.azure.com/openai/v1",
       apiKey: "az-key",
@@ -1177,7 +1197,7 @@ describe("normalized model definitions", () => {
   test("pins the V1 digest and excludes labels, aliases, API keys, and secret metadata values", () => {
     const baseline = definitionFor();
     expect(baseline.definitionVersion).toBe(
-      "sha256:23cd3e997f915c25fb5305acf718039839af3a8731249c8711beb321c4d42861",
+      "sha256:a26eefb346f36932c41dcd0df64ebe3dfc5841fc02dd7a1c32cc8551adc98314",
     );
     expect(
       definitionFor({

@@ -717,6 +717,64 @@ describe("buildTimeline", () => {
     expect(turnBIndex).toBeGreaterThan(followUpIndex);
   });
 
+  test("an accepted Steer stays directly in chat before start and across reconstruction", () => {
+    const items = buildTimeline([
+      eventAt(
+        16,
+        "user.message",
+        { text: "Change direction now", delivery: "steer" },
+        { turnId: null },
+      ),
+      eventAt(
+        17,
+        "turn.queued",
+        { turnId: "turn-steer", triggerEventId: "evt-16", source: "user" },
+        { turnId: "turn-steer" },
+      ),
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "user-message",
+        id: "evt-16",
+        text: "Change direction now",
+      }),
+    ]);
+  });
+
+  test("queue-row Steer moves the existing prompt into chat at the control event", () => {
+    const items = buildTimeline([
+      eventAt(16, "user.message", { text: "Previously queued direction" }, { turnId: null }),
+      eventAt(
+        17,
+        "turn.queued",
+        { turnId: "turn-steer", triggerEventId: "evt-16", source: "user" },
+        { turnId: "turn-steer" },
+      ),
+      eventAt(20, "agent.message.completed", { text: "Older active work" }, { turnId: "turn-a" }),
+      eventAt(
+        25,
+        "session.control.steer_requested",
+        { targetTurnId: "turn-steer", stopping: true },
+        { turnId: "turn-a" },
+      ),
+    ]);
+
+    const olderWorkIndex = items.findIndex(
+      (item) => item.kind === "agent-message" && item.text === "Older active work",
+    );
+    const steerIndex = items.findIndex(
+      (item) => item.kind === "user-message" && item.text === "Previously queued direction",
+    );
+    expect(olderWorkIndex).toBeGreaterThan(-1);
+    expect(steerIndex).toBeGreaterThan(olderWorkIndex);
+    expect(
+      items.filter(
+        (item) => item.kind === "user-message" && item.text === "Previously queued direction",
+      ),
+    ).toHaveLength(1);
+  });
+
   test("a queued user message cancelled before start is omitted without touching a running turn", () => {
     const groups = groupTimeline(
       buildTimeline([
@@ -780,6 +838,28 @@ describe("buildTimeline", () => {
     expect(turn?.outcome).toBe("complete");
     expect(flattenActivityIds(turn)).toEqual(["evt-6-queue", "evt-9", "evt-41"]);
   });
+
+  for (const operation of ["edit", "delete"] as const) {
+    test(`a queued user message withdrawn by ${operation} never resurrects in chat`, () => {
+      const items = buildTimeline([
+        eventAt(16, "user.message", { text: "Waiting prompt" }, { turnId: null }),
+        eventAt(
+          17,
+          "turn.queued",
+          { turnId: "turn-waiting", triggerEventId: "evt-16", source: "user" },
+          { turnId: "turn-waiting" },
+        ),
+        eventAt(
+          18,
+          "session.queue.changed",
+          { operation, turnId: "turn-waiting", queueVersion: 2 },
+          { turnId: "turn-waiting" },
+        ),
+      ]);
+
+      expect(items).toEqual([]);
+    });
+  }
 
   test("a queued turn without turn.started anchors on the first same-turn activity", () => {
     const items = buildTimeline([

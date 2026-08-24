@@ -158,8 +158,14 @@ const budgets = {
   // bytes. Gzip stays comfortably under its existing envelope; advance only
   // the raw aggregate to its next whole KiB above one KiB of headroom. Every
   // other cap, including gzip, stays fixed.
-  directSessionRaw: 2088 * kib,
-  directSessionGzip: 581 * kib,
+  // Receipt-routed chat/queue placement, finite interactive-command settlement,
+  // local recovery states, and the first-message route handoff measure
+  // 2,147,168 raw / 596,777 gzip bytes on the current merged macOS/arm64 graph.
+  // Advance only those aggregates: raw to the next whole KiB above one KiB of
+  // headroom and gzip above the observed 1.5-KiB Linux/x64 skew. Initial,
+  // per-file, file-count, lazy-chunk, and CSS caps remain fixed.
+  directSessionRaw: 2098 * kib,
+  directSessionGzip: 585 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

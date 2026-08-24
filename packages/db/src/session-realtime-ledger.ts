@@ -1326,11 +1326,12 @@ export async function syncSessionRealtimeLedgerInTransaction(
   }
   // Realtime sync may admit canonical Steer work. Preserve the global lock
   // order before owner proof locks the session row. The prefix is shared while
-  // the session branch is active; the delegation Send below re-enters the same
+  // the session branch is active; the delegation Steer below re-enters the same
   // admission helper and observes this already-held prefix.
   await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
+    resumePausedBranch: true,
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
       : {}),

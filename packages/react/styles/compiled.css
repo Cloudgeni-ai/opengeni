@@ -1048,6 +1048,9 @@
 :where(.og-root).min-h-0,:where(.og-root) .min-h-0 {
     min-height: calc(var(--spacing) * 0);
   }
+:where(.og-root).min-h-6,:where(.og-root) .min-h-6 {
+    min-height: calc(var(--spacing) * 6);
+  }
 :where(.og-root).min-h-7,:where(.og-root) .min-h-7 {
     min-height: calc(var(--spacing) * 7);
   }
@@ -1965,6 +1968,12 @@
 :where(.og-root).bg-og-accent-soft,:where(.og-root) .bg-og-accent-soft {
     background-color: var(--_og-color-accent-soft);
   }
+:where(.og-root).bg-og-accent-soft\/45,:where(.og-root) .bg-og-accent-soft\/45 {
+    background-color: var(--_og-color-accent-soft);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--_og-color-accent-soft) 45%, transparent);
+    }
+  }
 :where(.og-root).bg-og-accent\/10,:where(.og-root) .bg-og-accent\/10 {
     background-color: var(--og-color-accent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2006,6 +2015,12 @@
   }
 :where(.og-root).bg-og-border,:where(.og-root) .bg-og-border {
     background-color: var(--og-color-border);
+  }
+:where(.og-root).bg-og-danger\/8,:where(.og-root) .bg-og-danger\/8 {
+    background-color: var(--og-color-danger);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-danger) 8%, transparent);
+    }
   }
 :where(.og-root).bg-og-fg,:where(.og-root) .bg-og-fg {
     background-color: var(--og-color-fg);
@@ -2711,6 +2726,9 @@
   }
 :where(.og-root).text-og-bg,:where(.og-root) .text-og-bg {
     color: var(--og-color-bg);
+  }
+:where(.og-root).text-og-danger,:where(.og-root) .text-og-danger {
+    color: var(--og-color-danger);
   }
 :where(.og-root).text-og-fg,:where(.og-root) .text-og-fg {
     color: var(--og-color-fg);

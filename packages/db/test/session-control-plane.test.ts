@@ -4795,11 +4795,14 @@ describe("clean session control plane", () => {
     expect(resumed.control.state).toBe("active");
   });
 
-  test("a human send through Pause writes one automatic Resume invalidation", async () => {
+  test("a human Send through Pause remains queued without a Resume invalidation", async () => {
     const { grant, session } = await fixture();
     const paused = await controlWorkspace(grant, "pause", "maintenance");
     const accepted = await send(grant, session.id, "continue through the pause");
-    expect(accepted.workspaceControlEventId).toEqual(expect.any(String));
+    expect(accepted).toMatchObject({
+      routing: "queued_for_execution",
+      workspaceControlEventId: null,
+    });
     const events = await listWorkspaceControlEvents(client.db, grant.workspaceId!, 0, 10);
     expect(events).toEqual([
       expect.objectContaining({
@@ -4808,14 +4811,6 @@ describe("clean session control plane", () => {
         rootSessionId: null,
         action: "pause",
         automatic: false,
-      }),
-      expect.objectContaining({
-        revision: paused.revision + 1,
-        scope: "session",
-        rootSessionId: session.id,
-        action: "resume",
-        automatic: true,
-        reason: "human_send",
       }),
     ]);
   });
@@ -5079,7 +5074,7 @@ describe("clean session control plane", () => {
     });
   });
 
-  test("Send reopens admission without erasing an unsettled Pause interruption", async () => {
+  test("Send stays queued without erasing or bypassing an unsettled Pause interruption", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "running prompt");
     const attemptId = crypto.randomUUID();
@@ -5125,7 +5120,7 @@ describe("clean session control plane", () => {
         evaluateSessionControl(db, grant.workspaceId!, session.id),
       ),
     ).toMatchObject({
-      state: "active",
+      state: "paused",
       settlement: {
         state: "stopping",
         attemptCount: 1,

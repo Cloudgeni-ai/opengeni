@@ -156,7 +156,7 @@ export type ChatComposerMessages = {
 
 export const defaultChatComposerMessages: ChatComposerMessages = {
   messagePlaceholder: "Message the agent…",
-  pausedPlaceholder: "Sending will resume this workstream…",
+  pausedPlaceholder: "Message the agent — it will wait in the queue…",
   inputLabel: "Message the agent",
   keyboardHint: "Enter to queue · Cmd/Ctrl+Enter to steer · Shift+Enter for a new line",
   slashCommandBlocked:
@@ -169,18 +169,18 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   pauseAriaLabel: "Pause this workstream",
   pauseTitle: "Pause this workstream; queued prompts and approvals are preserved",
   sendMessageAriaLabel: "Send message",
-  sendAndResumeAriaLabel: "Send and resume",
+  sendAndResumeAriaLabel: "Add message to queue",
   sendTitle: "Queue message (Enter); steer with Cmd/Ctrl+Enter",
-  sendAndResumeTitle: "Send & resume (Enter); Steer & resume with Cmd/Ctrl+Enter",
+  sendAndResumeTitle: "Add to queue (Enter); steer now with Cmd/Ctrl+Enter",
   workspacePaused: "Workspace paused",
   pausedHere: "Paused here",
   parentBlocker: "parent",
   narrowerPause: "a narrower pause",
   pausedBy: (displayName) => `Paused by ${displayName}`,
   queuedAhead: (count) =>
-    `Send & resume queues behind ${count} waiting prompt${count === 1 ? "" : "s"}.`,
-  resumingAndSending: "Resuming and sending…",
-  nextMessageResumes: "Your next message resumes this workstream automatically.",
+    `${count} waiting prompt${count === 1 ? "" : "s"}; your message joins the queue.`,
+  resumingAndSending: "Sending…",
+  nextMessageResumes: "Messages wait in the queue until you resume.",
   resumeThisWorkstream: "Resume this workstream",
   resumeShort: "Resume",
   hidePauseDetails: "Hide pause details",

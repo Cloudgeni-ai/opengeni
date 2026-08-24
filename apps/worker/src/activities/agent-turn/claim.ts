@@ -120,6 +120,19 @@ export type ClaimTurnOk = {
   emittedModelUsageSourceKeys: Set<string>;
 };
 
+/**
+ * Stable for Temporal retries of one scheduled turn attempt, but unique across
+ * workflow runs. Temporal activity ids restart at `1` after continue-as-new or
+ * workflow restart, so they are not safe durable producer identities by
+ * themselves.
+ */
+export function turnAttemptProducerId(
+  input: Pick<RunAgentTurnInput, "workflowId" | "attemptId">,
+  turnId: string,
+): string {
+  return `${input.workflowId}:${turnId}:${input.attemptId}`;
+}
+
 export type ClaimTurnOutcome = { exit: RunAgentTurnResult } | { ok: ClaimTurnOk };
 
 export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOutcome> {
@@ -317,22 +330,16 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const opJournal = makeTurnOpJournal(activityContext, heartbeatDetails);
   eventing.heartbeatTimer = startActivityHeartbeat(activityContext, heartbeatDetails);
   let producerSeq = 0;
-  // One producer per activity execution, not per turn: a turn can run
-  // again on the same workflow (recovery, approval rerun), and
-  // each execution restarts producerSeq at 1 — a shared producer id would
-  // trip the per-producer uniqueness constraint on the event log. The
-  // Temporal activity id is unique per scheduled execution.
-  const producerId = `${input.workflowId}:${attempt.turnId}${activityContext ? `:${activityContext.info.activityId}` : ""}`;
-  // Unique per scheduled activity execution (Temporal activityId). Folded
-  // into positional usage source keys so a re-dispatch of this turn does
-  // not collide its model-call charges with the prior dispatch's. A genuine
-  // activity retry reuses the same activityId, so its re-emitted calls keep
-  // deduping (no double charge).
-  // Local/tests have no Temporal activity id; still generate an execution-
-  // unique holder so a second dispatch of the same durable turn fences this
-  // one exactly like production.
+  // One producer per scheduled turn attempt, not per turn. A turn can run
+  // again after Pause/Steer/recovery, and each attempt restarts producerSeq at
+  // 1. `attemptId` is stable across a genuine Temporal activity retry and
+  // unique across workflow runs; `activityId` is not, because Temporal resets
+  // it after continue-as-new or a new workflow execution.
+  const producerId = turnAttemptProducerId(input, attempt.turnId);
+  // Fold the same durable attempt identity into positional usage source keys.
+  // A retry dedupes; a re-dispatch cannot collide with the prior attempt.
   leases.codex.holderId = dispatchId;
-  const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
+  const modelUsageDispatchId = input.attemptId;
   const claimedModelUsageSourceKeys = new Set<string>();
   const emittedModelUsageSourceKeys = new Set<string>();
   const recordCanonicalStartupMilestones = (

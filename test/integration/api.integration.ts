@@ -87,6 +87,7 @@ import {
   startTestMcpServer,
   startTestServices,
   testSettings,
+  waitFor,
   type TestServices,
 } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
@@ -2521,12 +2522,27 @@ describe("API component integration", () => {
   test("returns a committed prompt before replayable fanout and wake work runs", async () => {
     class FailingPromptBus extends MemoryEventBus {
       fail = false;
+      private publishGate: Promise<void> | null = null;
+      private releasePublishGate: (() => void) | null = null;
+
+      holdPublishes(): void {
+        this.publishGate = new Promise<void>((resolve) => {
+          this.releasePublishGate = resolve;
+        });
+      }
+
+      releasePublishes(): void {
+        this.releasePublishGate?.();
+        this.releasePublishGate = null;
+        this.publishGate = null;
+      }
 
       override async publish(
         workspaceId: string,
         sessionId: string,
         events: SessionEvent[],
       ): Promise<void> {
+        await this.publishGate;
         if (this.fail) throw new Error("nats unavailable");
         await super.publish(workspaceId, sessionId, events);
       }
@@ -2589,9 +2605,79 @@ describe("API component integration", () => {
       }),
     ).toBe(usageBefore + 1);
 
-    bus.fail = true;
+    const pausedResponse = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/control`),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: "pause",
+          clientEventId: "pause-response-boundary",
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(pausedResponse.status).toBe(200);
+    expect(await pausedResponse.json()).toMatchObject({
+      effectiveControl: { state: "paused" },
+    });
+    expect(postCommitTasks).toHaveLength(2);
+    expect(bus.published).toHaveLength(publishedBefore);
+
+    const queueResponse = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/queue`),
+    );
+    expect(queueResponse.status).toBe(200);
+    const queue = (await queueResponse.json()) as {
+      version: number;
+      items: Array<{ id: string; version: number }>;
+    };
+    const queuedTurnId = queue.items[0]?.id;
+    if (!queuedTurnId) throw new Error("committed prompt did not create a queue row");
+    const movedResponse = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/queue/${queuedTurnId}/move`),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          clientEventId: "queue-response-boundary",
+          expectedQueueVersion: queue.version,
+          beforeTurnId: null,
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(movedResponse.status).toBe(200);
+    expect(postCommitTasks).toHaveLength(3);
+    expect(bus.published).toHaveLength(publishedBefore);
+    expect(workflowClient.wakeups).toHaveLength(wakeupsBefore);
+
+    const steeredResponse = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/queue/${queuedTurnId}/steer`),
+      {
+        method: "POST",
+        body: JSON.stringify({
+          clientEventId: "queue-steer-response-boundary",
+          expectedTurnVersion: queue.items[0]!.version,
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(steeredResponse.status).toBe(200);
+    expect(postCommitTasks).toHaveLength(4);
+    expect(workflowClient.wakeups).toHaveLength(wakeupsBefore);
+
+    bus.holdPublishes();
     workflowClient.wakeError = new Error("temporal unavailable");
-    await expect(postCommitTasks[0]!()).resolves.toBeUndefined();
+    const postCommitExecution = Promise.all(postCommitTasks.map(async (task) => await task()));
+    await waitFor(() => workflowClient.wakeups.length === wakeupsBefore + 2);
+    bus.fail = true;
+    bus.releasePublishes();
+    await expect(postCommitExecution).resolves.toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(workflowClient.wakeups).toHaveLength(wakeupsBefore + 2);
   });
 
   test("rejects concurrent removed one-turn tool overrides without partial mutation", async () => {
@@ -5033,7 +5119,7 @@ describe("API component integration", () => {
       effectiveControl: { state: "paused" },
       interruptionCount: 1,
     });
-    expect(workflow.wakeDispatches).toBe(dispatchCountBeforePause + 1);
+    await waitFor(() => workflow.wakeDispatches === dispatchCountBeforePause + 1);
 
     const resumed = await app.request(
       workspacePath(workspaceId, `/sessions/${session.id}/control`),
@@ -8428,7 +8514,7 @@ describe("API component integration", () => {
       idempotency: { status: "applied" },
     });
     expect(JSON.stringify(sent)).not.toContain("also enable the health alerts");
-    expect(wf.wakeups).toHaveLength(2);
+    await waitFor(() => wf.wakeups.length === 2);
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, created.id);
     expect(turns.some((turn) => turn.id === sent.resource.id && turn.status === "queued")).toBe(
       true,
@@ -8539,7 +8625,7 @@ describe("API component integration", () => {
       facts: { interruptionCount: 1 },
     });
     expect(JSON.stringify(agentPause)).not.toContain("manager inspection");
-    expect(wf.wakeDispatches).toBe(dispatchCountBeforeAgentPause + 1);
+    await waitFor(() => wf.wakeDispatches === dispatchCountBeforeAgentPause + 1);
     const turnsBeforeAgentResume = await listSessionTurns(
       dbClient.db,
       grant.workspaceId,

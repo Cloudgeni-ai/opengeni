@@ -42,6 +42,17 @@ function queueSnapshotCovers(
 export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
 const EMPTY_PENDING_BY_TURN: Readonly<Record<string, QueueMutationKind>> = {};
 
+export type AcceptedQueueSteer = {
+  turnId: string;
+  triggerEventId: string;
+  text: string;
+  annotations: SessionTurn["annotations"];
+  resources: SessionTurn["resources"];
+  tools: SessionTurn["tools"];
+  occurredAt: string;
+  state: "sending" | "queued";
+};
+
 export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
@@ -77,6 +88,8 @@ export type UseTurnQueueResult = {
   mutating: boolean;
   mutationError: Error | null;
   clearMutationError: () => void;
+  /** Immediate chat bridge while the durable Steer event catches up over SSE. */
+  acceptedSteers?: AcceptedQueueSteer[] | undefined;
 };
 
 /**
@@ -99,6 +112,7 @@ export function useTurnQueue(
   const [error, setError] = useState<Error | null>(null);
   const [mutationError, setMutationError] = useState<Error | null>(null);
   const [pendingByTurn, setPendingByTurn] = useState<Record<string, QueueMutationKind>>({});
+  const [acceptedSteers, setAcceptedSteers] = useState<AcceptedQueueSteer[]>([]);
   const pendingRef = useRef<Record<string, QueueMutationKind>>({});
   const readGeneration = useRef(0);
   const targetKeyRef = useRef(targetKey);
@@ -118,7 +132,25 @@ export function useTurnQueue(
     setError(null);
     setMutationError(null);
     setPendingByTurn({});
+    setAcceptedSteers([]);
   }, [enabled, targetKey]);
+
+  useEffect(() => {
+    if (acceptedSteers.length === 0 || options.events === undefined) return;
+    const durablyStartedTurnIds = new Set(
+      options.events.flatMap((event) =>
+        event.type === "turn.started" && event.turnId ? [event.turnId] : [],
+      ),
+    );
+    if (durablyStartedTurnIds.size === 0) return;
+    // steer_requested can reach the browser before the timeline projection
+    // that moves the queued user.message into chat. Keep this bridge through
+    // physical cancellation; turn.started is the first boundary at which the
+    // replacement timeline must already be visible.
+    setAcceptedSteers((current) =>
+      current.filter((steer) => !durablyStartedTurnIds.has(steer.turnId)),
+    );
+  }, [acceptedSteers.length, options.events]);
 
   const acceptSnapshot = useCallback(
     (ownedTargetKey: string, next: SessionQueueSnapshot | null): boolean => {
@@ -234,6 +266,7 @@ export function useTurnQueue(
       command: (
         current: SessionQueueSnapshot,
         turn: SessionTurn,
+        clientEventId: string,
       ) => Promise<SessionQueueMutationResponse>,
     ): Promise<SessionQueueMutationResponse | null> => {
       const ownedTargetKey = targetKey;
@@ -247,8 +280,17 @@ export function useTurnQueue(
       setStateTargetKey(ownedTargetKey);
       setPendingByTurn(pendingRef.current);
       setMutationError(null);
+      const clientEventId = operationKey();
       try {
-        const result = await command(current, turn);
+        let result: SessionQueueMutationResponse;
+        try {
+          result = await command(current, turn, clientEventId);
+        } catch (cause) {
+          if (!isOutcomeUnknownError(cause)) throw cause;
+          // Same-key replay is a fact check against the durable receipt. It
+          // cannot duplicate the command even if the first response was lost.
+          result = await command(current, turn, clientEventId);
+        }
         if (targetKeyRef.current !== ownedTargetKey) return null;
         acceptSnapshot(ownedTargetKey, result.snapshot);
         return result;
@@ -272,9 +314,9 @@ export function useTurnQueue(
 
   const moveTurn = useCallback(
     async (turnId: string, beforeTurnId: string | null): Promise<boolean> => {
-      const result = await mutate(turnId, "move", (current) =>
+      const result = await mutate(turnId, "move", (current, _turn, clientEventId) =>
         client.moveQueueItem(workspaceId, sessionId!, turnId, {
-          clientEventId: operationKey(),
+          clientEventId,
           expectedQueueVersion: current.version,
           beforeTurnId,
         }),
@@ -289,9 +331,9 @@ export function useTurnQueue(
       turnId: string,
       edit: { expectedDraftRevision: number; replaceDraft: boolean },
     ): Promise<ComposerDraft | null> => {
-      const result = await mutate(turnId, "edit", (_current, turn) =>
+      const result = await mutate(turnId, "edit", (_current, turn, clientEventId) =>
         client.editQueueItem(workspaceId, sessionId!, turnId, {
-          clientEventId: operationKey(),
+          clientEventId,
           expectedTurnVersion: turn.version,
           expectedDraftRevision: edit.expectedDraftRevision,
           replaceDraft: edit.replaceDraft,
@@ -304,23 +346,71 @@ export function useTurnQueue(
 
   const steerTurn = useCallback(
     async (turnId: string): Promise<boolean> => {
-      const result = await mutate(turnId, "steer", (current, turn) =>
+      const ownedTargetKey = targetKey;
+      const turn = snapshotRef.current?.items.find((candidate) => candidate.id === turnId);
+      if (targetKeyRef.current !== ownedTargetKey) return false;
+      if (!turn) {
+        setMutationError(new Error("That queued prompt changed before Steer could be sent."));
+        await load();
+        return false;
+      }
+      const optimistic: AcceptedQueueSteer = {
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
+        text: turn.prompt,
+        annotations: turn.annotations ?? [],
+        resources: turn.resources,
+        tools: turn.tools,
+        occurredAt: new Date().toISOString(),
+        state: "sending",
+      };
+      setAcceptedSteers((current) => [
+        ...current.filter((steer) => steer.turnId !== turnId),
+        optimistic,
+      ]);
+      const result = await mutate(turnId, "steer", (current, queuedTurn, clientEventId) =>
         client.steerQueueItem(workspaceId, sessionId!, turnId, {
-          clientEventId: operationKey(),
-          expectedTurnVersion: turn.version,
+          clientEventId,
+          expectedTurnVersion: queuedTurn.version,
           controlEtag: current.effectiveControl.controlEtag,
         }),
       );
-      return result !== null;
+      if (targetKeyRef.current !== ownedTargetKey) return false;
+      // The active turn can finish while the operator clicks Steer. In that
+      // race the queued prompt is atomically claimed before the steer command,
+      // so the command conflicts but the user's prompt already advanced into
+      // chat. Reconciled absence is success, not a scary unknown-outcome lie.
+      const advancedWithoutSteer =
+        result === null &&
+        snapshotRef.current !== null &&
+        !snapshotRef.current.items.some((candidate) => candidate.id === turnId);
+      if (advancedWithoutSteer) {
+        setMutationError(null);
+        setAcceptedSteers((current) => current.filter((steer) => steer.turnId !== turnId));
+        return true;
+      }
+      const accepted =
+        result !== null ||
+        snapshotRef.current?.items.some(
+          (candidate) => candidate.id === turnId && candidate.metadata.delivery === "steer",
+        ) === true;
+      setAcceptedSteers((current) =>
+        accepted
+          ? current.map((steer) =>
+              steer.turnId === turnId ? { ...steer, state: "queued" as const } : steer,
+            )
+          : current.filter((steer) => steer.turnId !== turnId),
+      );
+      return accepted;
     },
-    [client, mutate, sessionId, workspaceId],
+    [client, load, mutate, sessionId, targetKey, workspaceId],
   );
 
   const removeTurn = useCallback(
     async (turnId: string): Promise<boolean> => {
-      const result = await mutate(turnId, "delete", (_current, turn) =>
+      const result = await mutate(turnId, "delete", (_current, turn, clientEventId) =>
         client.deleteQueueItem(workspaceId, sessionId!, turnId, {
-          clientEventId: operationKey(),
+          clientEventId,
           expectedTurnVersion: turn.version,
           reason: "Deleted from the prompt queue",
         }),
@@ -364,6 +454,7 @@ export function useTurnQueue(
     clearMutationError: useCallback(() => {
       if (targetKeyRef.current === targetKey) setMutationError(null);
     }, [targetKey]),
+    acceptedSteers: identityMatches ? acceptedSteers : [],
   };
 }
 
@@ -373,4 +464,12 @@ function operationKey(): string {
 
 function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function isOutcomeUnknownError(cause: unknown): boolean {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    (cause as { outcomeUnknown?: unknown }).outcomeUnknown === true
+  );
 }

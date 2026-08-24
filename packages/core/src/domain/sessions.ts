@@ -33,6 +33,7 @@ import {
   type ReasoningEffort,
   type ResourceRef,
   type Session,
+  type SessionCommandReceipt,
   type SessionSkill,
   type SessionEvent,
   SessionMcpApprovalPolicy,
@@ -46,6 +47,7 @@ import {
   type SessionAuthorizationPort,
   type SessionToolPolicy,
   type SessionTurn,
+  type SessionPromptRouting,
   type SessionGoalSnapshot,
   type ToolRef,
   type TurnInitiator,
@@ -1216,6 +1218,8 @@ export async function postUserMessageTurn(input: {
   accepted: SessionEvent;
   turn: SessionTurn;
   draft: ComposerDraft | null;
+  receipt: SessionCommandReceipt;
+  routing: SessionPromptRouting;
   interruptionCount: number;
   replay: boolean;
 }> {
@@ -1317,46 +1321,52 @@ export async function postUserMessageTurn(input: {
     throw error;
   }
   const postCommitTask = async () => {
-    try {
-      await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
-      if (result.workspaceControlEventId) {
-        const controlEvent = await getWorkspaceControlEvent(
-          db,
-          workspaceId,
-          result.workspaceControlEventId,
-        );
-        if (!controlEvent) {
-          throw new Error(
-            `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
-          );
+    await Promise.all([
+      (async () => {
+        try {
+          await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+          if (result.workspaceControlEventId) {
+            const controlEvent = await getWorkspaceControlEvent(
+              db,
+              workspaceId,
+              result.workspaceControlEventId,
+            );
+            if (!controlEvent) {
+              throw new Error(
+                `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
+              );
+            }
+            await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
+          }
+        } catch {
+          console.warn("[sessions] prompt event fanout failed; durable rows remain replayable", {
+            errorClass: "PromptEventFanoutOperationError",
+            errorCode: "session_prompt_event_fanout_failed",
+            origin: "core",
+          });
         }
-        await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
-      }
-    } catch {
-      console.warn("[sessions] prompt event fanout failed; durable rows remain replayable", {
-        errorClass: "PromptEventFanoutOperationError",
-        errorCode: "session_prompt_event_fanout_failed",
-        origin: "core",
-      });
-    }
-    try {
-      await workflowClient.wakeSessionWorkflow({
-        accountId,
-        workspaceId,
-        sessionId,
-        workflowId: result.turn.temporalWorkflowId,
-        wakeRevision: result.wakeRevision,
-        ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
-          ? { interruptionRequested: true }
-          : {}),
-      });
-    } catch {
-      console.warn("[sessions] workflow wake failed; durable outbox will retry", {
-        errorClass: "WorkflowWakeOperationError",
-        errorCode: "session_workflow_wake_failed",
-        origin: "core",
-      });
-    }
+      })(),
+      (async () => {
+        try {
+          await workflowClient.wakeSessionWorkflow({
+            accountId,
+            workspaceId,
+            sessionId,
+            workflowId: result.turn.temporalWorkflowId,
+            wakeRevision: result.wakeRevision,
+            ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+              ? { interruptionRequested: true }
+              : {}),
+          });
+        } catch {
+          console.warn("[sessions] workflow wake failed; durable outbox will retry", {
+            errorClass: "WorkflowWakeOperationError",
+            errorCode: "session_workflow_wake_failed",
+            origin: "core",
+          });
+        }
+      })(),
+    ]);
   };
   const schedulePostCommit =
     input.schedulePostCommit ??
@@ -1375,6 +1385,19 @@ export async function postUserMessageTurn(input: {
   return {
     accepted: result.accepted,
     turn: result.turn,
+    receipt: {
+      id: result.receipt.id,
+      action: result.receipt.action,
+      operationKey: result.receipt.operationKey,
+      targetSessionId: result.receipt.targetSessionId,
+      targetTurnId: result.receipt.targetTurnId,
+      appliedControlRevision: result.receipt.appliedControlRevision,
+      appliedQueueVersion: result.receipt.appliedQueueVersion,
+      appliedTurnVersion: result.receipt.appliedTurnVersion,
+      appliedDraftRevision: result.receipt.appliedDraftRevision,
+      createdAt: result.receipt.createdAt.toISOString(),
+    },
+    routing: result.routing,
     draft: result.draft
       ? {
           revision: result.draft.revision,
@@ -2399,6 +2422,8 @@ export async function acceptSessionUserMessageWithOutcome(
   accepted: SessionEvent;
   turn: SessionTurn;
   draft: ComposerDraft | null;
+  receipt: SessionCommandReceipt;
+  routing: SessionPromptRouting;
   interruptionCount: number;
   replay: boolean;
 }> {
@@ -2523,53 +2548,56 @@ export async function acceptSessionUserMessageWithOutcome(
         existingSession.firstPartyMcpPermissions.includes("connections:read")),
     ...(input.connectionAuthorities ? { authoritySelections: input.connectionAuthorities } : {}),
   });
-  const { accepted, turn, draft, interruptionCount, replay } = await postUserMessageTurn({
-    db,
-    bus,
-    workflowClient,
-    settings,
-    accountId: grant.accountId,
-    workspaceId,
-    sessionId,
-    text: input.text,
-    annotations,
-    modelContext: input.modelContext ?? null,
-    resources: requestedResources,
-    model: input.model ?? null,
-    reasoningEffort: input.reasoningEffort ?? null,
-    latencyMode: input.latencyMode ?? null,
-    reasoningEffortFallback: sessionReasoningEffort,
-    turnExecutionPolicy,
-    mcpCredentialUpdates,
-    personalConnectionDelegations,
-    ...(input.personalResourceAttachment
-      ? { personalResourceAttachment: input.personalResourceAttachment }
-      : {}),
-    delivery: input.delivery ?? "send",
-    origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
-    actor: grant.subjectId,
-    ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
-    ...(delegatedServiceInitiator
-      ? {
-          commandActor: {
-            type: "service" as const,
-            subjectId: delegatedServiceInitiator.initiator.subjectId,
-            ...(delegatedServiceInitiator.initiator.label
-              ? { subjectLabel: delegatedServiceInitiator.initiator.label }
-              : {}),
-            context: delegatedServiceInitiator.context,
-          },
-        }
-      : {}),
-    ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
-    ...(input.expectedDraftRevision !== undefined
-      ? { expectedDraftRevision: input.expectedDraftRevision }
-      : {}),
-    ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-    recordAgentRunUsage: true,
-    ...(deps.schedulePromptPostCommit ? { schedulePostCommit: deps.schedulePromptPostCommit } : {}),
-  });
-  return { accepted, turn, draft, interruptionCount, replay };
+  const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
+    await postUserMessageTurn({
+      db,
+      bus,
+      workflowClient,
+      settings,
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      text: input.text,
+      annotations,
+      modelContext: input.modelContext ?? null,
+      resources: requestedResources,
+      model: input.model ?? null,
+      reasoningEffort: input.reasoningEffort ?? null,
+      latencyMode: input.latencyMode ?? null,
+      reasoningEffortFallback: sessionReasoningEffort,
+      turnExecutionPolicy,
+      mcpCredentialUpdates,
+      personalConnectionDelegations,
+      ...(input.personalResourceAttachment
+        ? { personalResourceAttachment: input.personalResourceAttachment }
+        : {}),
+      delivery: input.delivery ?? "send",
+      origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
+      actor: grant.subjectId,
+      ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+      ...(delegatedServiceInitiator
+        ? {
+            commandActor: {
+              type: "service" as const,
+              subjectId: delegatedServiceInitiator.initiator.subjectId,
+              ...(delegatedServiceInitiator.initiator.label
+                ? { subjectLabel: delegatedServiceInitiator.initiator.label }
+                : {}),
+              context: delegatedServiceInitiator.context,
+            },
+          }
+        : {}),
+      ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
+      ...(input.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: input.expectedDraftRevision }
+        : {}),
+      ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+      recordAgentRunUsage: true,
+      ...(deps.schedulePromptPostCommit
+        ? { schedulePostCommit: deps.schedulePromptPostCommit }
+        : {}),
+    });
+  return { accepted, turn, draft, receipt, routing, interruptionCount, replay };
 }
 
 /** Backward-compatible entity-returning path used by existing REST callers. */
@@ -2582,17 +2610,14 @@ export async function acceptSessionUserMessage(
 ): Promise<{
   accepted: SessionEvent;
   turn: SessionTurn;
+  receipt: SessionCommandReceipt;
+  routing: SessionPromptRouting;
   interruptionCount: number;
   replay: boolean;
 }> {
-  const { accepted, turn, interruptionCount, replay } = await acceptSessionUserMessageWithOutcome(
-    deps,
-    grant,
-    workspaceId,
-    sessionId,
-    input,
-  );
-  return { accepted, turn, interruptionCount, replay };
+  const { accepted, turn, receipt, routing, interruptionCount, replay } =
+    await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, input);
+  return { accepted, turn, receipt, routing, interruptionCount, replay };
 }
 
 /**
