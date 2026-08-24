@@ -1,11 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { SessionAuthorizationOperation, SessionAuthorizationPort } from "@opengeni/contracts";
 import {
+  acceptOrganizationInvitation,
   createDb,
+  createOrganizationInvitation,
   createSession,
   ensureManagedAccessForUser,
   getSessionForSubject,
+  SessionTenancyConflictError,
   SessionTenancyNotActivatedError,
+  transitionSessionVisibility,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -540,11 +544,7 @@ describe("managed-human session tenancy application service", () => {
       eventId: forked.eventId,
     });
     expect(bus.published[2]?.[0]?.id).toBe(forked.eventId);
-    expect(operations).toEqual([
-      "session.visibility.write",
-      "session.fork.create",
-      "session.fork.create",
-    ]);
+    expect(operations).toEqual(["session.visibility.write", "session.fork.create"]);
 
     const destination = await getSessionForSubject(
       client.db,
@@ -558,6 +558,156 @@ describe("managed-human session tenancy application service", () => {
       ownedByCurrentUser: true,
       fork: { sourceVisibility: "private", sourceAuthorityEpoch: 2 },
     });
+  }, 180_000);
+
+  test("replays an exact applied fork after the shared source becomes private", async () => {
+    if (!shared || !client) return;
+    const ownerUserId = `core-fork-replay-owner-${crypto.randomUUID()}`;
+    const memberUserId = `core-fork-replay-member-${crypto.randomUUID()}`;
+    const ownerSubjectId = `user:${ownerUserId}`;
+    const memberSubjectId = `user:${memberUserId}`;
+    const ownerAccess = await ensureManagedAccessForUser(client.db, {
+      userId: ownerUserId,
+      email: `${ownerUserId}@example.test`,
+      name: "Fork replay source owner",
+    });
+    await ensureManagedAccessForUser(client.db, {
+      userId: memberUserId,
+      email: `${memberUserId}@example.test`,
+      name: "Fork replay member",
+    });
+    const ownerWorkspaceGrant = ownerAccess.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === ownerAccess.defaultWorkspaceId,
+    );
+    if (!ownerWorkspaceGrant) throw new Error("source owner has no shared workspace grant");
+
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: ownerWorkspaceGrant.accountId,
+      actorSubjectId: ownerSubjectId,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: memberSubjectId,
+      targetEmail: `${memberUserId}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    await acceptOrganizationInvitation(client.db, {
+      organizationId: ownerWorkspaceGrant.accountId,
+      actorSubjectId: memberSubjectId,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: invitation.revision,
+    });
+    await shared.admin`
+      insert into workspace_memberships (
+        account_id, workspace_id, subject_id, role, permissions
+      ) values (
+        ${ownerWorkspaceGrant.accountId}, ${ownerWorkspaceGrant.workspaceId},
+        ${memberSubjectId}, 'member',
+        '["sessions:read","sessions:create","sessions:control"]'::jsonb
+      )`;
+    const memberAccess = await ensureManagedAccessForUser(client.db, {
+      userId: memberUserId,
+      email: `${memberUserId}@example.test`,
+      name: "Fork replay member",
+    });
+    const memberGrant = memberAccess.workspaceGrants.find(
+      (candidate) =>
+        candidate.accountId === ownerWorkspaceGrant.accountId &&
+        candidate.workspaceId === ownerWorkspaceGrant.workspaceId,
+    );
+    if (!memberGrant) throw new Error("member has no shared workspace grant");
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${ownerWorkspaceGrant.accountId}, 1, ${"7".repeat(64)}, ${"8".repeat(64)},
+        'core-fork-replay-test'
+      )`;
+
+    const source = await createSession(client.db, {
+      accountId: ownerWorkspaceGrant.accountId,
+      workspaceId: ownerWorkspaceGrant.workspaceId,
+      initialMessage: "fork before privacy transition",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: ownerSubjectId },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const authorization = {
+      grant: memberGrant,
+      accountGrant:
+        memberAccess.accountGrants.find(
+          (candidate) => candidate.accountId === ownerWorkspaceGrant.accountId,
+        ) ?? null,
+      authenticatedSubjectId: memberSubjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+    const operations: SessionAuthorizationOperation[] = [];
+    const deps = {
+      db: client.db,
+      bus: new MemoryEventBus(),
+      sessionAuthorization: {
+        authorizeSession: async (input) => {
+          operations.push(input.operation);
+          return { allowed: true as const, relatedSessionAccess: "root" as const };
+        },
+        resolveListScope: async () => ({ kind: "all" as const }),
+      },
+    };
+    const request = {
+      idempotencyKey: `core-private-fork-${crypto.randomUUID()}`,
+      visibility: "private" as const,
+      workspaceSharedAcknowledged: false,
+    };
+    const created = await forkManagedHumanSession(
+      deps,
+      authorization,
+      ownerWorkspaceGrant.workspaceId,
+      source.id,
+      request,
+    );
+    expect(created).toMatchObject({ visibility: "private", replay: false });
+
+    await transitionSessionVisibility(client.db, {
+      workspaceId: ownerWorkspaceGrant.workspaceId,
+      sessionId: source.id,
+      actorSubjectId: ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `core-source-private-${crypto.randomUUID()}`,
+    });
+
+    await expect(
+      forkManagedHumanSession(
+        deps,
+        authorization,
+        ownerWorkspaceGrant.workspaceId,
+        source.id,
+        request,
+      ),
+    ).resolves.toMatchObject({
+      replay: true,
+      sessionId: created.sessionId,
+      eventId: created.eventId,
+    });
+    await expect(
+      forkManagedHumanSession(deps, authorization, ownerWorkspaceGrant.workspaceId, source.id, {
+        ...request,
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+      }),
+    ).rejects.toBeInstanceOf(SessionTenancyConflictError);
+    await expect(
+      forkManagedHumanSession(deps, authorization, ownerWorkspaceGrant.workspaceId, source.id, {
+        ...request,
+        idempotencyKey: `core-fresh-fork-${crypto.randomUUID()}`,
+      }),
+    ).rejects.toBeInstanceOf(SessionAuthorizationDeniedError);
+    expect(operations).toEqual(["session.fork.create"]);
   }, 180_000);
 
   test("rejects a human-shaped bearer before activation, target resolution, or host authorization", async () => {

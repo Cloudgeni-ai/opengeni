@@ -475,3 +475,61 @@ export async function forkSessionContent(
     mapSessionTenancyPersistenceError(error, { authorityEpochConflict: false });
   }
 }
+
+/**
+ * Recover one exact committed fork before mutable source-session authorization.
+ *
+ * The database capability requires the authenticated actor's active workspace
+ * authority and matches the complete actor/workspace/source/key/request-hash
+ * tuple. A fresh key returns null; changed intent raises the ordinary tenancy
+ * idempotency conflict. This is receipt recovery, not session discovery.
+ */
+export async function replayAppliedSessionFork(
+  db: Database,
+  input: ForkSessionContentInput,
+): Promise<ForkSessionContentResult | null> {
+  if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
+    throw new Error("The first session fork contract is same-workspace only");
+  }
+  const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
+  await assertSessionTenancyProductActivated(db, input.sourceWorkspaceId);
+  const requestHash = canonicalSessionForkHash(input);
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      input.sourceWorkspaceId,
+      input.actorSubjectId,
+      async (scopedDb) => {
+        const rows = await rawRows<ForkSessionContentResult>(
+          scopedDb,
+          sql`select
+          operation_id as "operationId",
+          event_id as "eventId",
+          event_sequence as "eventSequence",
+          session_id as "sessionId",
+          workspace_id as "workspaceId",
+          visibility,
+          authority_epoch as "authorityEpoch",
+          copied_history_item_count as "copiedHistoryItemCount",
+          replay
+        from replay_applied_session_fork(
+          ${accountId}::uuid,
+          ${input.sourceWorkspaceId}::uuid,
+          ${input.sourceSessionId}::uuid,
+          ${input.actorSubjectId},
+          ${input.destinationWorkspaceId}::uuid,
+          ${input.destinationVisibility},
+          ${input.workspaceSharedAcknowledged},
+          ${input.operationKey},
+          ${requestHash},
+          ${SESSION_TENANCY_ACTIVATION_VERSION}
+        )`,
+        );
+        return rows[0] ?? null;
+      },
+    );
+  } catch (error) {
+    mapSessionTenancyPersistenceError(error, { authorityEpochConflict: false });
+  }
+}

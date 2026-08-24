@@ -104,8 +104,9 @@ describe("session visibility and fork product activation stays on its exact publ
       expect(posture).toContain(marker);
     }
     expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
-    // One probe plus the exact version supplied to both lifecycle functions.
-    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(3);
+    // One probe plus the exact version supplied to both lifecycle functions
+    // and the exact applied-fork receipt recovery capability.
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(4);
   });
 
   test("the sole later-migration direct caller supplies the durable receipt and exact version", async () => {

@@ -51,8 +51,12 @@ describe("migration 0303 session tenancy product activation", () => {
       from pg_proc procedure
       join pg_namespace namespace on namespace.oid = procedure.pronamespace
       where namespace.nspname = current_schema()
-        and procedure.proname in ('transition_session_visibility', 'fork_session_content')
-      order by procedure.proname
+        and procedure.proname in (
+          'transition_session_visibility',
+          'fork_session_content',
+          'replay_applied_session_fork'
+        )
+      order by procedure.proname, procedure.pronargs
     `;
     expect(Array.from(routines)).toEqual([
       {
@@ -63,6 +67,12 @@ describe("migration 0303 session tenancy product activation", () => {
       },
       {
         name: "fork_session_content",
+        argumentCount: 10,
+        defaultCount: 0,
+        runtimeExecutable: true,
+      },
+      {
+        name: "replay_applied_session_fork",
         argumentCount: 10,
         defaultCount: 0,
         runtimeExecutable: true,
@@ -82,6 +92,7 @@ describe("migration 0303 session tenancy product activation", () => {
         legacyForkAbsent: boolean;
         versionedForkPresent: boolean;
         atomicForkPresent: boolean;
+        appliedForkReplayPresent: boolean;
       }>
     >`
       select
@@ -99,7 +110,10 @@ describe("migration 0303 session tenancy product activation", () => {
         ) is not null as "versionedForkPresent",
         to_regprocedure(
           'fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)'
-        ) is not null as "atomicForkPresent"
+        ) is not null as "atomicForkPresent",
+        to_regprocedure(
+          'replay_applied_session_fork(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)'
+        ) is not null as "appliedForkReplayPresent"
     `;
     expect(signatures).toEqual({
       legacyTransitionAbsent: true,
@@ -107,6 +121,7 @@ describe("migration 0303 session tenancy product activation", () => {
       legacyForkAbsent: true,
       versionedForkPresent: true,
       atomicForkPresent: true,
+      appliedForkReplayPresent: true,
     });
   });
 

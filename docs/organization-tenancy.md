@@ -1002,7 +1002,12 @@ The activated database contract is intentionally narrow:
   content allowlist (including typed reasoning/latency), and copies no live
   grant, credential, Connection/delegation, goal/turn, MCP, Variable Set, Rig,
   sandbox identity/process, personal-resource authority, or pin. It never
-  creates a private fork and then transitions it.
+  creates a private fork and then transitions it. A separate read-only replay
+  capability resolves only an exact applied actor/workspace/source/key/request-
+  hash receipt before mutable source authorization, so a lost successful
+  response remains recoverable after a shared source becomes private. Changed
+  intent conflicts, and an absent or fresh key returns no result and must pass
+  current source plus embedding-host authorization.
 - Both adapters return the exact durable event id and sequence required by a
   later core publisher.
 
@@ -1017,6 +1022,8 @@ and external non-cookie clients have no product control. The SDK requires an
 explicit idempotency key.
 Fork requests additionally require an explicit destination visibility and
 acknowledgement boolean; visibility changes require the current public authority epoch.
+Applied fork replay still requires the exact actor's live workspace authority
+and cannot be used to discover another destination or source.
 Subject-authorized session reads expose the secret-safe `tenancy` projection
 only after activation. The console renders state only when that projection is
 present. Its app-lifetime controller retains one exact operation key across

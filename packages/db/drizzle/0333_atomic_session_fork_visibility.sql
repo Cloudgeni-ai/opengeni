@@ -5,6 +5,123 @@
 -- destination visibility and the private-to-workspace acknowledgement are
 -- bound into the caller-supplied canonical request hash.
 
+-- Exact receipt recovery is a separate read-only capability so the application
+-- can resolve a committed result before asking mutable source-session authority
+-- again. It returns nothing for a fresh key, conflicts on changed intent, and
+-- requires the exact authenticated actor plus current workspace authority. The
+-- result is therefore not a general session or destination discovery oracle.
+CREATE FUNCTION replay_applied_session_fork(
+  p_account_id uuid,
+  p_source_workspace_id uuid,
+  p_source_session_id uuid,
+  p_actor_subject_id text,
+  p_destination_workspace_id uuid,
+  p_destination_visibility text,
+  p_workspace_shared_acknowledged boolean,
+  p_operation_key text,
+  p_canonical_request_hash text,
+  p_activation_version integer
+) RETURNS TABLE (
+  operation_id uuid,
+  event_id uuid,
+  event_sequence integer,
+  session_id uuid,
+  workspace_id uuid,
+  visibility text,
+  authority_epoch integer,
+  copied_history_item_count integer,
+  replay boolean
+)
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+DECLARE
+  actor_membership organization_memberships%ROWTYPE;
+  receipt_row session_command_receipts%ROWTYPE;
+BEGIN
+  IF p_account_id IS NULL OR p_source_workspace_id IS NULL
+    OR p_source_session_id IS NULL OR p_actor_subject_id IS NULL
+    OR p_destination_workspace_id IS NULL OR p_destination_visibility IS NULL
+    OR p_workspace_shared_acknowledged IS NULL
+    OR p_operation_key IS NULL OR p_canonical_request_hash IS NULL
+    OR p_activation_version IS NULL
+  THEN RAISE EXCEPTION 'session fork replay requires complete authority'
+    USING ERRCODE = '42501'; END IF;
+  IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+    OR p_source_workspace_id IS DISTINCT FROM opengeni_private.current_workspace_id()
+    OR p_actor_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+  THEN RAISE EXCEPTION 'session fork replay authority is invalid'
+    USING ERRCODE = '42501'; END IF;
+  IF p_destination_workspace_id IS DISTINCT FROM p_source_workspace_id
+    OR p_destination_visibility NOT IN ('user_private', 'workspace_shared')
+    OR (p_destination_visibility = 'user_private' AND p_workspace_shared_acknowledged)
+    OR p_actor_subject_id <> btrim(p_actor_subject_id)
+    OR length(p_actor_subject_id) NOT BETWEEN 1 AND 1024
+    OR p_operation_key <> btrim(p_operation_key)
+    OR length(p_operation_key) NOT BETWEEN 1 AND 1024
+    OR p_canonical_request_hash !~ '^[0-9a-f]{64}$'
+    OR p_activation_version <> 1
+  THEN RAISE EXCEPTION 'session fork replay request is invalid'
+    USING ERRCODE = '22023'; END IF;
+  IF NOT session_tenancy_product_activated(p_account_id, p_activation_version) THEN
+    RAISE EXCEPTION 'session tenancy product surface is not activated for this organization'
+      USING ERRCODE = '55000';
+  END IF;
+
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'organization-membership:' || p_account_id::text, 0
+  ));
+  PERFORM 1 FROM workspaces workspace_row
+  WHERE workspace_row.account_id = p_account_id
+    AND workspace_row.id = p_source_workspace_id
+  FOR KEY SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'session fork replay workspace is unavailable'
+    USING ERRCODE = '42501'; END IF;
+
+  SELECT membership.* INTO actor_membership
+  FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = p_actor_subject_id
+    AND membership.status = 'active'
+  FOR KEY SHARE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'session fork replay requires active workspace authority'
+    USING ERRCODE = '42501'; END IF;
+  IF actor_membership.personal_workspace_id IS DISTINCT FROM p_source_workspace_id THEN
+    PERFORM 1 FROM workspace_memberships workspace_membership
+    WHERE workspace_membership.account_id = p_account_id
+      AND workspace_membership.workspace_id = p_source_workspace_id
+      AND workspace_membership.subject_id = p_actor_subject_id
+    FOR KEY SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION 'session fork replay requires active workspace authority'
+      USING ERRCODE = '42501'; END IF;
+  END IF;
+
+  SELECT receipt.* INTO receipt_row FROM session_command_receipts receipt
+  WHERE receipt.account_id = p_account_id
+    AND receipt.workspace_id = p_source_workspace_id
+    AND receipt.actor_type = 'human' AND receipt.actor_subject_id = p_actor_subject_id
+    AND receipt.actor_attempt_id IS NULL AND receipt.action = 'session.fork'
+    AND receipt.target_session_id = p_source_session_id
+    AND receipt.target_turn_id IS NULL AND receipt.operation_key = p_operation_key;
+  IF NOT FOUND OR receipt_row.result ->> 'status' <> 'applied' THEN RETURN; END IF;
+  IF receipt_row.canonical_request_hash <> p_canonical_request_hash THEN
+    RAISE EXCEPTION 'session fork idempotency conflict' USING ERRCODE = '23505';
+  END IF;
+
+  operation_id := receipt_row.id;
+  event_id := nullif(receipt_row.result ->> 'eventId', '')::uuid;
+  event_sequence := (receipt_row.result ->> 'eventSequence')::integer;
+  session_id := (receipt_row.result ->> 'sessionId')::uuid;
+  workspace_id := (receipt_row.result ->> 'workspaceId')::uuid;
+  visibility := receipt_row.result ->> 'visibility';
+  authority_epoch := 1;
+  copied_history_item_count :=
+    (receipt_row.result ->> 'copiedHistoryItemCount')::integer;
+  replay := true;
+  RETURN NEXT;
+END
+$$;
+
 CREATE FUNCTION fork_session_content(
   p_account_id uuid,
   p_source_workspace_id uuid,
@@ -466,8 +583,8 @@ AS $$
   )
 $$;
 
--- Both overloads remain runtime-callable during this rolling expansion. Pin
--- each SECURITY DEFINER body and their private nested quiescence helper to the
+-- Both overloads and exact receipt recovery remain runtime-callable during this
+-- rolling expansion. Pin each SECURITY DEFINER body and their private nested quiescence helper to the
 -- exact migration target schema, with pg_temp last, so a caller-created
 -- temporary relation cannot shadow authority, activity, or receipt tables. The
 -- broad creation-time paths are replaced before this transaction can commit.
@@ -475,6 +592,11 @@ DO $atomic_session_fork_search_path$
 DECLARE
   target_schema text := current_schema();
 BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.replay_applied_session_fork(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema, target_schema
+  );
   EXECUTE format(
     'ALTER FUNCTION %I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer) '
       || 'SET search_path = pg_catalog, %I, pg_temp',
@@ -493,6 +615,10 @@ BEGIN
 END
 $atomic_session_fork_search_path$;
 
+REVOKE ALL ON FUNCTION replay_applied_session_fork(
+  uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer
+) FROM PUBLIC;
+
 REVOKE ALL ON FUNCTION fork_session_content(
   uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer
 ) FROM PUBLIC;
@@ -500,12 +626,19 @@ REVOKE ALL ON FUNCTION fork_session_content(
 DO $atomic_session_fork_runtime_grant$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION replay_applied_session_fork(
+      uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer
+    ) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION fork_session_content(
       uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer
     ) TO opengeni_app;
   END IF;
 END
 $atomic_session_fork_runtime_grant$;
+
+COMMENT ON FUNCTION replay_applied_session_fork(
+  uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer
+) IS 'Exact actor/workspace/source/key/hash-bound recovery of one already-applied fork receipt; fresh keys return no row and mutable source authority is not consulted.';
 
 COMMENT ON FUNCTION fork_session_content(
   uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer

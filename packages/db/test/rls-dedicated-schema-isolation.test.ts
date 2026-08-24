@@ -743,6 +743,34 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
       },
     ]);
+    const [receiptReplay] = await admin<
+      Array<{
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      select procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname = 'replay_applied_session_fork'
+        and pg_catalog.oidvectortypes(procedure.proargtypes)
+          = 'uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer'`;
+    expect(receiptReplay).toEqual({
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+    });
     const [quiescenceHelper] = await admin<
       Array<{
         securityDefiner: boolean;
@@ -803,7 +831,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
 
     const app = postgres(APP_URL, { max: 1, prepare: false });
     try {
-      const runShadowedFork = (kind: "atomic" | "legacy") =>
+      const runShadowedFork = (kind: "atomic" | "legacy" | "replay") =>
         app.begin(async (transactionSql) => {
           await transactionSql`select set_config('search_path', ${SEARCH_PATH}, true)`;
           await transactionSql`select
@@ -819,6 +847,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           await transactionSql`create temporary table sessions (
             shadow_marker boolean
           ) on commit drop`;
+          await transactionSql`create temporary table session_command_receipts (
+            shadow_marker boolean
+          ) on commit drop`;
 
           if (kind === "atomic") {
             const [atomic] = await transactionSql<Array<{ sessionId: string; visibility: string }>>`
@@ -829,6 +860,16 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
                 ${`atomic-shadow:${suffix}`}, ${"a".repeat(64)}, 1
               )`;
             return atomic;
+          }
+          if (kind === "replay") {
+            const [replay] = await transactionSql<Array<{ sessionId: string; visibility: string }>>`
+              select session_id as "sessionId", visibility
+              from replay_applied_session_fork(
+                ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${source.id}::uuid,
+                ${subjectId}, ${grant.workspaceId}::uuid, 'user_private', false,
+                ${`atomic-shadow:${suffix}`}, ${"a".repeat(64)}, 1
+              )`;
+            return replay;
           }
           const [legacy] = await transactionSql<Array<{ sessionId: string; visibility: string }>>`
             select session_id as "sessionId", visibility
@@ -841,9 +882,11 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         });
       const forked = {
         atomic: await runShadowedFork("atomic"),
+        replay: await runShadowedFork("replay"),
         legacy: await runShadowedFork("legacy"),
       };
       expect(forked.atomic).toMatchObject({ visibility: "user_private" });
+      expect(forked.replay).toEqual(forked.atomic);
       expect(forked.legacy).toMatchObject({ visibility: "user_private" });
       expect(forked.atomic?.sessionId).not.toBe(source.id);
       expect(forked.legacy?.sessionId).not.toBe(source.id);

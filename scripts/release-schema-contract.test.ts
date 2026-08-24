@@ -187,7 +187,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0333_atomic_session_fork_visibility.sql",
       ),
     ).toMatchObject({
-      sha256: "a3249b3966540281a4cf2c5515fbce39f6986965e7bc22dbec7985692adf39d4",
+      sha256: "231a748733e2a6df5404b236693c728fdd2d62aeeb8b8e4a2cbc16c478e7d8de",
       deploymentMode: "rolling",
     });
     const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];

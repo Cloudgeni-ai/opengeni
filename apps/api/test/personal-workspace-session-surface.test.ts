@@ -583,11 +583,7 @@ describe("managed-human session surface inside their own personal workspace", ()
       sessionId: created.sessionId,
       eventId: created.eventId,
     });
-    expect(hostOperations).toEqual([
-      "session.visibility.write",
-      "session.fork.create",
-      "session.fork.create",
-    ]);
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
   }, 180_000);
 
   test("tenancy pre-gates are target-blind and each allowed request host-authorizes once", async () => {
@@ -756,6 +752,103 @@ describe("managed-human session surface inside their own personal workspace", ()
       });
     }
     expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
+  }, 180_000);
+
+  test("an exact fork receipt replays after its shared source becomes private", async () => {
+    if (!shared || !client) return;
+    const caller = await provisionManagedHuman();
+    const sourceOwner = await inviteIntoOrganization(caller, "member");
+    await addOrdinaryWorkspaceMember(caller, sourceOwner);
+    await activateSessionTenancy(caller);
+    const sourceSessionId = await seedSession(sourceOwner, caller.legacyWorkspaceId);
+    const idempotencyKey = `api-private-source-replay-${crypto.randomUUID()}`;
+    const hostOperations: SessionAuthorizationOperation[] = [];
+    const app = buildApp(
+      {
+        authorizeSession: async (input) => {
+          hostOperations.push(input.operation);
+          return { allowed: true, relatedSessionAccess: "root" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      true,
+    );
+    const url = `http://x/v1/workspaces/${caller.legacyWorkspaceId}/sessions/${sourceSessionId}/forks`;
+    const headers = { cookie: caller.cookie, "content-type": "application/json" };
+    const request = {
+      idempotencyKey,
+      visibility: "private",
+      workspaceSharedAcknowledged: false,
+    };
+
+    const created = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { sessionId: string; eventId: string };
+    expect(createdBody).toMatchObject({ visibility: "private", replay: false });
+
+    await transitionSessionVisibility(client.db, {
+      workspaceId: caller.legacyWorkspaceId,
+      sessionId: sourceSessionId,
+      actorSubjectId: sourceOwner.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `api-source-private-${crypto.randomUUID()}`,
+    });
+
+    const replay = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      replay: true,
+      sessionId: createdBody.sessionId,
+      eventId: createdBody.eventId,
+    });
+
+    const changedBody = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...request,
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+      }),
+    });
+    expect(await tenancyErrorFact(changedBody)).toEqual({
+      status: 409,
+      error: {
+        status: 409,
+        code: "idempotency_conflict",
+        message: "The idempotency key was already used with different input.",
+        retryable: false,
+        details: { reason: "operation_reuse" },
+      },
+    });
+
+    const freshKey = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...request,
+        idempotencyKey: `api-fresh-private-source-${crypto.randomUUID()}`,
+      }),
+    });
+    expect(await tenancyErrorFact(freshKey)).toEqual({
+      status: 404,
+      error: {
+        status: 404,
+        code: "not_found",
+        message: "Session not found.",
+        retryable: false,
+      },
+    });
+    expect(hostOperations).toEqual(["session.fork.create"]);
   }, 180_000);
 
   test("the premise: the personal workspace has no workspace_memberships row", async () => {

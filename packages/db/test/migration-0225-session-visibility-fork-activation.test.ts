@@ -347,6 +347,7 @@ describe("migration 0303 session tenancy product activation", () => {
     const migration = await readFile(atomicForkMigrationPath, "utf8");
     expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(migration).toContain("p_workspace_shared_acknowledged boolean");
+    expect(migration).toContain("CREATE FUNCTION replay_applied_session_fork(");
     expect(migration).toContain(
       "p_destination_visibility NOT IN ('user_private', 'workspace_shared')",
     );
@@ -355,7 +356,7 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(migration).toContain("'workspaceSharedAcknowledged'");
     expect(migration).toContain("CREATE OR REPLACE FUNCTION fork_session_content(");
     expect(migration).toContain("p_destination_visibility,\n    false,");
-    expect(migration.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(3);
+    expect(migration.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(4);
     expect(migration).toContain("provider_artifact_invalidated_at timestamptz");
     expect(migration).toContain("source_item.provider_artifact_invalidated_at");
     expect(migration).toContain("source_item.provider_artifact_invalidation_reason");

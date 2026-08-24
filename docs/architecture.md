@@ -507,8 +507,13 @@ and acknowledgement bit into idempotency. A private-to-workspace fork requires
 the owning human to acknowledge the content exposure; the database records that
 evidence and inserts the destination directly at workspace visibility. Navigation
 additionally requires a fresh owned destination in the same workspace at the
-receipt's selected visibility. Late results remain
-inert after a principal, workspace, or session transition. The canonical caller
+receipt's selected visibility. An exact applied fork receipt is recoverable
+before mutable source-session authorization by only the same authenticated
+actor with current authority in the same workspace, and is bound to the source,
+operation key, destination intent, and canonical request hash. Changed intent
+conflicts, while a fresh key still requires current source and host authority;
+the receipt seam cannot enumerate arbitrary sources or destinations. Late
+results remain inert after a principal, workspace, or session transition. The canonical caller
 is only `apps/web`; there is no cross-workspace fork, attachment,
 personal-resource-grant, worker, runtime, MCP, or `packages/react` caller.
 Canonical: `apps/web/src/lib/session-tenancy-operation-controller.ts`,
