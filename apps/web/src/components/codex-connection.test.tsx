@@ -1,10 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { copyTextToClipboard } from "@opengeni/react/clipboard";
+import type { CodexAccountOverview } from "@opengeni/sdk";
 import { act, type ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
 
-import { CodexDeviceCodePanel } from "./codex-connection";
+import { CodexDeviceCodePanel, ResetCreditInventory } from "./codex-connection";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -229,5 +230,81 @@ describe("CodexDeviceCodePanel", () => {
 
     expect(writes).toEqual([]);
     container.remove();
+  });
+});
+
+describe("ResetCreditInventory", () => {
+  test("explains unavailable managed-human authority without offering ownership recovery", async () => {
+    const overview: CodexAccountOverview = {
+      accountId: "account-unavailable",
+      usage: {
+        source: "none",
+        fetchedAt: null,
+        stale: false,
+        error: null,
+        value: null,
+      },
+      resetCredits: {
+        source: "provider",
+        fetchedAt: null,
+        stale: false,
+        error: null,
+        detailState: "detailed",
+        detailsComplete: true,
+        availableCount: 1,
+        credits: [
+          {
+            id: "credit-view-only",
+            resetType: "codexRateLimits",
+            status: "available",
+            grantedAt: 1,
+            expiresAt: null,
+            title: "Full reset",
+            description: null,
+            actionable: false,
+          },
+        ],
+      },
+      canRedeem: false,
+      redemptionAccess: {
+        ownership: "managed_human_unavailable",
+        canClaimUnownedViaReconnect: false,
+      },
+      canResumeRedemption: false,
+      redemptions: [],
+    };
+    let reconnectCalls = 0;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <ResetCreditInventory
+            overview={overview}
+            now={0}
+            busy={false}
+            recoveryAttempts={[]}
+            onRedeem={() => undefined}
+            onReconnectSameAccount={() => {
+              reconnectCalls += 1;
+            }}
+          />,
+        );
+      });
+
+      expect(container.textContent).toContain(
+        "OpenGeni could not verify a managed human for this browser session.",
+      );
+      expect(container.textContent).toContain(
+        "Reset credits are view only, and ownership cannot be claimed or changed here.",
+      );
+      expect(container.querySelectorAll("button")).toHaveLength(0);
+      expect(reconnectCalls).toBe(0);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });
