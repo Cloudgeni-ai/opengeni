@@ -294,7 +294,7 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
-  test("0338 pins Document migration routines and rejects TEMP relation shadows", async () => {
+  test("0339 pins Document migration routines and rejects TEMP relation shadows", async () => {
     if (!available) return;
     const routines = await admin<
       Array<{ schema: string; name: string; securityDefiner: boolean; settings: string[] | null }>

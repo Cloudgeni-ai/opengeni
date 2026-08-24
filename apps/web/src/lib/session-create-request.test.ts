@@ -233,7 +233,7 @@ describe("buildCreateSessionRequest", () => {
     ]);
   });
 
-  test("a connected-machine route request strips fixed managed resources and personal intent", () => {
+  test("a connected-machine route request strips managed resources but keeps personal intent", () => {
     const personalResourceAttachment = {
       mode: "session" as const,
       workspaceSharedAcknowledged: true,
@@ -260,7 +260,7 @@ describe("buildCreateSessionRequest", () => {
     expect(request.targetSandboxId).toBe(draft.compute.sandboxId);
     expect(request).not.toHaveProperty("variableSetId");
     expect(request).not.toHaveProperty("rigId");
-    expect(request).not.toHaveProperty("personalResourceAttachment");
+    expect(request.personalResourceAttachment).toEqual(personalResourceAttachment);
   });
 
   test("reuses create keys only for the same client, workspace, and logical request", () => {

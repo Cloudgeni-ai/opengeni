@@ -3,6 +3,7 @@ import {
   CreateSessionRequest,
   PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
   PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION,
+  PersonalResourceAttachmentSummary,
   SessionUserMessagePayload,
   SteerSessionMessageRequest,
   SubmitComposerDraftRequest,
@@ -24,6 +25,18 @@ describe("atomic personal-resource attachment contracts", () => {
     expect(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING).toContain(
       "credentials and secret values are not shared",
     );
+  });
+
+  test("projects a selected Connected Machine in the credential-free summary", () => {
+    expect(
+      PersonalResourceAttachmentSummary.parse({
+        mode: "once",
+        context: "workspace_shared",
+        resourceCount: 1,
+        resourceKinds: ["connected_machine"],
+        sharedOutputWarningVersion: 1,
+      }).resourceKinds,
+    ).toEqual(["connected_machine"]);
   });
 
   test("lets create bind the epoch server-side but rejects realtime staging", () => {

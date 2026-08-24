@@ -10,6 +10,7 @@ const DEFAULT_APPLICATION_DATABASE_ROLE = "opengeni_app";
 const GOAL_REVISION_CUTOVER_MIGRATION = "0257_goal_revision_decisions_and_root_constraints.sql";
 const ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION = "0306_atomic_personal_resource_attachments.sql";
 const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organization_invitations.sql";
+const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
@@ -376,7 +377,8 @@ export async function migrate(
     if (
       !applied.has(GOAL_REVISION_CUTOVER_MIGRATION) ||
       !applied.has(ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION) ||
-      !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION)
+      !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION) ||
+      !applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION)
     ) {
       const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);
       await sql`select set_config(

@@ -190,7 +190,7 @@ Configured/local
 subjects without an eligible active organization membership and legacy private
 rows keep the workspace binding established by migration 0165.
 
-Migration 0338 adds the only supported authority-reclassification lifecycle for
+Migration 0339 adds the only supported authority-reclassification lifecycle for
 those retained rows. It never guesses from a collection, creator other than the
 original personal owner, origin workspace, or present-day access. A caller must
 supply a UUID operation id and the exact current four-field authority tuple;

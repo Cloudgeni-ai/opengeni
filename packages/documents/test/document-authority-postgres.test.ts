@@ -287,7 +287,7 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
   // domain contract, not the production FORCE-RLS boundary: the personal
   // authority activation asserted below is exercised against a
   // NOSUPERUSER/NOBYPASSRLS owner in
-  // `packages/db/test/migration-0338-document-authority-reclassification.test.ts`.
+  // `packages/db/test/migration-0339-document-authority-reclassification.test.ts`.
   test("reclassification preserves portable personal get, search, and browse isolation", async () => {
     if (!available) return;
     const subjectId = `human:${crypto.randomUUID()}`;

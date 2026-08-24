@@ -171,7 +171,8 @@ describe("release schema contract", () => {
       "0335_slack_workspace_routing.sql",
       "0336_atomic_session_fork_visibility.sql",
       "0337_slack_routed_action_handles.sql",
-      "0338_document_authority_reclassification.sql",
+      "0338_atomic_connected_machine_attachments.sql",
+      "0339_document_authority_reclassification.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -181,16 +182,23 @@ describe("release schema contract", () => {
     const routedSlackHandles = completeSourceContract.migrations.some(
       (migration) => migration.path === "0337_slack_routed_action_handles.sql",
     );
+    const atomicConnectedMachineAttachments = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0338_atomic_connected_machine_attachments.sql",
+    );
     const documentAuthorityReclassification = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0338_document_authority_reclassification.sql",
+      (migration) => migration.path === "0339_document_authority_reclassification.sql",
     );
     expect(completeSourceContract).toMatchObject({
-      fileCount: (routedSlackHandles ? 346 : 345) + (documentAuthorityReclassification ? 1 : 0),
+      fileCount:
+        (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
+        (documentAuthorityReclassification ? 1 : 0),
       latestMigration: documentAuthorityReclassification
-        ? "0338_document_authority_reclassification.sql"
-        : routedSlackHandles
-          ? "0337_slack_routed_action_handles.sql"
-          : "0336_atomic_session_fork_visibility.sql",
+        ? "0339_document_authority_reclassification.sql"
+        : atomicConnectedMachineAttachments
+          ? "0338_atomic_connected_machine_attachments.sql"
+          : routedSlackHandles
+            ? "0337_slack_routed_action_handles.sql"
+            : "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -255,6 +263,14 @@ describe("release schema contract", () => {
     ).toMatchObject({
       sha256: "6cf8700390b42b354ba66414a94a7d2d48ce4756110037e9b4f104bdd8d92a9c",
       deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0338_atomic_connected_machine_attachments.sql",
+      ),
+    ).toMatchObject({
+      sha256: "0bd5490d1e7f2b9b9195c89d602478ffd023b6c035f7151dd2fc89e898daf053",
+      deploymentMode: "maintenance",
     });
     expect(
       completeSourceContract.migrations.find(

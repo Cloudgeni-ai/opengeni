@@ -103,7 +103,7 @@ Two rules, both of which fail silently when broken:
    raises. Where a referential pin is genuinely needed, take it through a foreign
    key: RI checks bypass row security and lock the referenced row `FOR KEY SHARE`.
 
-`packages/db/drizzle/0338_document_authority_reclassification.sql`'s
+`packages/db/drizzle/0339_document_authority_reclassification.sql`'s
 `reclassify_document_authority` follows both rules and asserts the window is live
 before the read, so a regression aborts instead of quietly pinning a personal
 Document to its origin workspace forever.
