@@ -180,7 +180,8 @@ const budgets = {
   // one KiB of headroom, gzip above the observed 1.5-KiB Linux/x64 skew. Every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
   //
-  // OPE-157 adds `reclassifyDocumentAuthority`,
+  // The document-authority reclassification work adds
+  // `reclassifyDocumentAuthority`,
   // `listDocumentAuthorityReclassifications` and
   // `runDocumentDefaultCollectionBackfill` to the SDK. The web app calls none of
   // them, but they are instance methods on the single `OpenGeniCoreClient` class
