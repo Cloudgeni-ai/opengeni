@@ -1426,7 +1426,7 @@ describe("worker activities integration", () => {
       }),
     ).resolves.toMatchObject({
       status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
 
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
@@ -1437,7 +1437,7 @@ describe("worker activities integration", () => {
     expect(events[recoveryIndex]?.payload).toMatchObject({
       code: "mcp_transport_timeout",
       retryable: true,
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      continueDelayMs: 2_000,
     });
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(events.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);

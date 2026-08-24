@@ -388,8 +388,10 @@ else, so each is a broken feature, not an authority hole:
   `transition_session_visibility` and `fork_session_content` with the exact
   active-membership personal-workspace-or-ordinary-membership disjunction. The
   API/core/SDK caller is now active for explicitly activated organizations;
-  the web console is its managed-owner caller, while worker, MCP, runtime, and
-  React package callers remain future work. 0225's
+  the web console is its managed-human caller. Visibility transitions and
+  private-source forks remain owner-only, while any currently authorized
+  workspace member may fork a shared source into fresh authority of their own.
+  Worker, MCP, runtime, and React package callers remain future work. 0225's
   `guard_session_authority_write` was the same defect and is repaired by
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
@@ -866,7 +868,7 @@ Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
 
-## Session-visibility and private-fork public activation
+## Session-visibility and fork public activation
 
 `0225_session_visibility_fork_activation.sql` shipped the first database
 surface; `0303_session_tenancy_product_activation.sql` replaces its unsafe
@@ -959,7 +961,7 @@ as contextual evidence, before inserting one immutable
 `session_tenancy_activations` receipt. A mutation without that exact version-1
 organization receipt fails closed.
 
-0303 is also an intentional signature cutover: it removes the historical
+0303 was also an intentional signature cutover: it removes the historical
 eight-argument transition and fork routines and installs only the corresponding
 nine-argument routines with a mandatory activation-version argument and no SQL
 default. There is no compatibility wrapper because no legacy product caller
@@ -968,6 +970,11 @@ undefined-function rather than infer or bypass activation. The 0225/0289
 migration bodies remain historical checkpoints;
 anything running against the fully migrated schema, including later migration
 tests, must supply version `1` and operate under the exact durable receipt.
+Migration 0336 is a rolling expansion on top of that cutover. It retains the
+nine-argument private-only overload for an in-flight old caller's exact retry
+and adds the ten-argument product overload with an explicit acknowledgement
+boolean. New callers use only the ten-argument overload. No defaulted or
+activation-free signature is reintroduced.
 
 The activated database contract is intentionally narrow:
 
@@ -985,21 +992,38 @@ The activated database contract is intentionally narrow:
   proven transition advances the epoch, revokes old-epoch personal grants,
   clears staged personal delegations, preserves 0301 cache/pin behavior, and
   appends one event without a workflow wake.
-- The first fork contract is same-workspace and private-only. It serializes a
-  quiescent source, creates a new root and singleton group, copies the durable
+- The fork contract is same-workspace with an explicit `user_private` or
+  `workspace_shared` destination. A private source may fork to workspace scope
+  only when the request durably acknowledges that its complete conversation
+  will be exposed there. The acknowledgement and destination visibility are
+  bound into the idempotency hash. One atomic function serializes a quiescent
+  source, inserts the destination directly at its selected visibility, creates
+  a fresh owner/epoch/provenance/root/singleton group, copies the exact durable
   content allowlist (including typed reasoning/latency), and copies no live
-  goal/turn, MCP, Variable Set, Rig, sandbox identity, credential, or personal
-  grant.
+  grant, credential, Connection/delegation, goal/turn, MCP, Variable Set, Rig,
+  sandbox identity/process, personal-resource authority, or pin. It never
+  creates a private fork and then transitions it. A separate read-only replay
+  capability resolves only an exact applied actor/workspace/source/key/request-
+  hash receipt before mutable source authorization, so a lost successful
+  response remains recoverable after a shared source becomes private. Changed
+  intent conflicts, and an absent or fresh key returns no result and must pass
+  current source plus embedding-host authorization.
 - Both adapters return the exact durable event id and sequence required by a
   later core publisher.
 
 The practical product consequence is deliberately bounded. Only an activated
 organization's canonical managed-human owner may change an otherwise quiescent
-same-workspace session between `workspace_shared` and `user_private`, or make an
-independent same-workspace private fork. API keys, delegated/service callers,
-administrators acting on another human's session, workers, MCP, runtime, React,
-and external non-cookie clients have no product control. The SDK requires an explicit idempotency key, and
-visibility changes additionally require the current public authority epoch.
+same-workspace session between `workspace_shared` and `user_private`, or fork a
+private source. Any canonical managed human with current access to a
+workspace-shared source may make an independent same-workspace private or
+workspace-shared fork, which is owned by that actor and retains no source
+authority. API keys, delegated/service callers, workers, MCP, runtime, React,
+and external non-cookie clients have no product control. The SDK requires an
+explicit idempotency key.
+Fork requests additionally require an explicit destination visibility and
+acknowledgement boolean; visibility changes require the current public authority epoch.
+Applied fork replay still requires the exact actor's live workspace authority
+and cannot be used to discover another destination or source.
 Subject-authorized session reads expose the secret-safe `tenancy` projection
 only after activation. The console renders state only when that projection is
 present. Its app-lifetime controller retains one exact operation key across
@@ -1007,7 +1031,8 @@ same-target component reload and outcome-unknown/replay recovery, while exact
 principal, workspace-transition, and session changes retire old keys. A replay
 refetches current tenancy before presentation, so a superseding epoch or missing
 projection cannot be mistaken for the historical receipt. Same-workspace fork
-navigation additionally requires a fresh owned-private destination. Route and
+navigation additionally requires a fresh owned destination at the receipt's
+selected visibility. Route and
 principal transitions make delayed browser outcomes inert.
 `test/session-visibility-contract-surface.test.ts` pins the server caller
 boundary; the web component and Chromium acceptance tests pin the browser
@@ -1181,7 +1206,7 @@ resumes. This is what makes repeated runs *converge*: a subject the driver
 cannot resolve stays in its population permanently, so a fixed `LIMIT n` window
 over an organization with more than `n` `user:`-kind subjects would return the
 same first `n` rows on every pass and never reach subject `n + 1` at all.
-Migration 0336 connects the driver to the durable ledger. A non-dry walk with
+Migration 0338 connects the driver to the durable ledger. A non-dry walk with
 `--run-key` opens one `organization_memberships` receipt, records every refusal
 with the exact organization-membership id or source workspace-membership id
 that made it an obligation, and settles only a complete-from-the-start,
@@ -1191,7 +1216,7 @@ Dry runs still write nothing. The four membership-specific reason codes are
 part of the fixed, content-free vocabulary; no subject or proposed owner is
 stored in the ledger.
 
-Migration 0336 also repairs the two seams that walk feeds on. Migration 0290
+Migration 0338 also repairs the two seams that walk feeds on. Migration 0290
 gave `list_organization_membership_backfill_anchors` and
 `list_organization_memberships_without_personal_workspace` the
 `organization_membership_backfill` marker on the shared
@@ -1204,7 +1229,7 @@ owner's RLS, so only a superuser-migrated database (every prior test harness)
 hid it. The consequence was that an already-anchored subject read as
 provisionable and the memberships carrying no personal workspace - the actual
 target population - were invisible, so the walk could not converge them and its
-receipt counts were wrong. 0336 restores that visibility as its own narrow
+receipt counts were wrong. 0338 restores that visibility as its own narrow
 read-only policy, `organization_membership_backfill_read`, so the next migration
 to restate the shared list cannot delete it again.
 
@@ -1236,7 +1261,7 @@ Migration 0256 remains the one sibling family with a genuine discriminator:
 `connections.subject_id` plus an active `organization_memberships` row. None of
 these three tables has a `subject_id`, so the same shape does not transfer.
 
-#### Connection authority convergence (migration 0336)
+#### Connection authority convergence (migration 0338)
 
 Connections use that genuine discriminator through a separate bounded command:
 
@@ -1256,7 +1281,7 @@ on a complete converged walk produces the sixth activation receipt,
 `connections`; a partial walk must resume without a run key and classify under
 a fresh key only after convergence.
 
-Migration 0336 also closes both ways this compatibility population could reopen.
+Migration 0338 also closes both ways this compatibility population could reopen.
 After an organization activates, `bind_connection_authority` refuses to mint a
 new personal connection without a live membership, surviving `legacy_user`
 rows are invisible to runtime reads, and the worker refuses a pre-snapshot
@@ -1271,7 +1296,7 @@ Both of those paths depend on one seam,
 NON-superuser owner without `BYPASSRLS`. Migration 0256's inline
 `SELECT ... FOR SHARE` plus authority `INSERT` therefore matched nothing on
 every real deployment: a personal connection whose subject *did* hold a live
-membership silently degraded to `legacy_user`, and 0336's convergence would
+membership silently degraded to `legacy_user`, and 0338's convergence would
 have raised `42501 connection backfill membership authority is unavailable` on
 every deterministic candidate. The seam opens one read-only
 `connection_authority_binding` marker window - owner-only policies on two
@@ -1285,7 +1310,7 @@ this invisible: `SELECT ... FOR SHARE` is gated on the UPDATE/ALL policy
 `FOR SELECT` leaves a row-locking lookup blind. See
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) and the
 production-posture regression harness
-`packages/db/test/migration-0336-owner-migrated-tenancy-cutover.test.ts`.
+`packages/db/test/migration-0338-owner-migrated-tenancy-cutover.test.ts`.
 
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>
@@ -1370,7 +1395,7 @@ repairable, and `--apply` repairs only those:
   Slice B provisions a personal workspace *without* a `workspace_memberships`
   row. Migration 0302 extended live derivation to the membership's exact
   `personal_workspace_id`, so this is now a finite historical population;
-  migration 0336 makes parity count that pointer form as well as ordinary
+  migration 0338 makes parity count that pointer form as well as ordinary
   workspace membership.
 - **Parent-inheritance closure.** An ownerless session whose same-workspace
   parent now has an owner pair: branch 1 of the live trigger replayed against
@@ -1652,11 +1677,13 @@ fencing is delivered by migration 0222.
 
 Migration 0225 delivered the first database half. Migration 0303 replaces its
 auto-cancelling mutation functions with the activated, proven-quiescent
-contract described in "Session-visibility and private-fork public activation".
-The bounded API/core/SDK owner caller is now active behind the per-organization
-receipt, and the bounded managed web UI is its active owning-human SDK caller.
-Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace or
-public fork, attachments, and personal-resource grant UX remain out of scope.
+contract described in "Session-visibility and fork public activation".
+The bounded API/core/SDK managed-human caller is now active behind the
+per-organization receipt. The managed web UI keeps visibility changes and
+private-source forks owner-only, and exposes shared-source forks to current
+workspace members.
+Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace
+forks, attachments, and personal-resource grant UX remain out of scope.
 
 Cache and pin stripping is delivered by migration
 `0301_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
@@ -1840,7 +1867,7 @@ is run:
    their `byScope` breakdown against the reviewed classification instead -
    `byScope` reports every authority distinction the schema can truthfully make,
    and any non-user-scoped total is derivable from it.
-   Migration 0336 additionally requires the newest receipt in each executable
+   Migration 0338 additionally requires the newest receipt in each executable
    phase-D family to be settled: `organization_memberships`, `sessions`,
    `variable_sets`, `rigs`, `machines`, and `connections`. Produce them with one
    complete membership walk, one resource-classification run, a converged
@@ -1896,7 +1923,7 @@ migration remains inert with the default `false`; the drained activation
 command refuses to write a per-organization receipt unless the switch is true.
 Once any receipt exists, API/worker startup and readiness also require true.
 That startup interlock is forward-only posture, not a rollback mechanism.
-Migration 0336 preserves the activation command and database function
+Migration 0338 preserves the activation command and database function
 signatures while adding the settled-backfill proof above. New activation rows
 bind the six exact receipt ids. Older activation rows retain their existing
 zero-receipt evidence and remain replayable only for their identical stored
@@ -1905,7 +1932,7 @@ database recomputes inventory, parity, and receipt evidence while holding the
 complete source-table fence and rejects a stale or fabricated supplied digest
 with SQLSTATE `40001`.
 
-Migration 0336 additionally makes that receipt writable. Migration 0303 created
+Migration 0338 additionally makes that receipt writable. Migration 0303 created
 `session_tenancy_activations` with FORCE ROW LEVEL SECURITY and a
 `FOR SELECT`-only policy and no INSERT policy at all, so under the documented
 non-superuser-owner posture the activation was denied `42501` on its own append
@@ -1918,7 +1945,7 @@ is the complete write set: the table is append-only, no `UPDATE` or `DELETE`
 writer exists anywhere in the tree, and activation is one-way. The runtime role
 keeps `SELECT` and nothing else.
 
-Migration 0336 also freezes the deployment-wide advisory boundary
+Migration 0338 also freezes the deployment-wide advisory boundary
 `session-tenancy-canonical-boundary:v1` behind the owner-only
 `lock_session_tenancy_activation_boundary()` seam. Operator activation keeps
 the organization advisory prefix, acquires every source-table
@@ -1929,7 +1956,7 @@ graph first, take this same boundary last, and then inspect the already-committe
 version-1 witness. This ordering means a setup transaction either commits
 unactivated before the first boundary or waits and observes it afterward; taking
 the global boundary before the operator's source locks would introduce a
-RowExclusive/global-lock deadlock and is forbidden. Migration 0336 does not
+RowExclusive/global-lock deadlock and is forbidden. Migration 0338 does not
 itself auto-activate new organizations.
 
 ### What an operator must not do
@@ -1961,10 +1988,11 @@ itself auto-activate new organizations.
 - resource CRUD or discovery changes;
 - worker, MCP, runtime, or `packages/react` callers for the activated
   `transition_session_visibility` and `fork_session_content` lifecycle
-  functions; cross-workspace/public fork, session sharing, attachment APIs, and
-  personal-grant UI also remain out of scope. The bounded API/core/SDK owner
-  caller, bounded managed web owning-human SDK caller, and activation-gated
-  subject read projection are active (see "Session-visibility and private-fork
+  functions; cross-workspace fork, attachment APIs, and
+  personal-grant UI also remain out of scope. The bounded API/core/SDK
+  managed-human caller, managed web owner controls plus shared-member Fork
+  action, and activation-gated subject read projection are active (see
+  "Session-visibility and fork
   public activation");
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;

@@ -386,10 +386,46 @@ function createProviderCallLimiter(limit: number): CodexProviderCall {
   };
 }
 
+type CodexRedemptionAccess = {
+  ownership: "current_human" | "unowned" | "different_human" | "managed_human_unavailable";
+  canClaimUnownedViaReconnect: boolean;
+};
+
+function codexRedemptionAccess(input: {
+  connectedBySubjectId: string | null;
+  grantSubjectId: string;
+  managedHumanSubjectId: string | null;
+  canManage: boolean;
+}): CodexRedemptionAccess {
+  if (
+    input.managedHumanSubjectId === null ||
+    input.managedHumanSubjectId !== input.grantSubjectId
+  ) {
+    return {
+      ownership: "managed_human_unavailable",
+      canClaimUnownedViaReconnect: false,
+    };
+  }
+  if (input.connectedBySubjectId === null) {
+    return {
+      ownership: "unowned",
+      canClaimUnownedViaReconnect: input.canManage,
+    };
+  }
+  return {
+    ownership:
+      input.connectedBySubjectId === input.managedHumanSubjectId
+        ? "current_human"
+        : "different_human",
+    canClaimUnownedViaReconnect: false,
+  };
+}
+
 async function fetchCodexAccountOverview(
   deps: ApiRouteDeps,
   workspaceId: string,
   row: CodexAccountStatus,
+  redemptionAccess: CodexRedemptionAccess,
   canRedeem: boolean,
   canResumeRedemption: boolean,
   redemptions: Awaited<ReturnType<typeof listCodexResetRedemptionRecoveries>> = [],
@@ -496,6 +532,7 @@ async function fetchCodexAccountOverview(
       })),
     },
     canRedeem,
+    redemptionAccess,
     canResumeRedemption,
     redemptions: redemptions.map((redemption) => ({
       attemptId: redemption.attemptId,
@@ -1166,10 +1203,17 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           hasPermission(grant.permissions, "workspace:admin"),
         );
         const canRedeem = canResumeRedemption && account.status === "active";
+        const redemptionAccess = codexRedemptionAccess({
+          connectedBySubjectId: account.connectedBySubjectId,
+          grantSubjectId: grant.subjectId,
+          managedHumanSubjectId: human?.subjectId ?? null,
+          canManage: hasPermission(grant.permissions, "workspace:admin"),
+        });
         overview[account.id] = await fetchCodexAccountOverview(
           deps,
           workspaceId,
           account,
+          redemptionAccess,
           canRedeem,
           canResumeRedemption,
           canResumeRedemption
@@ -1216,6 +1260,12 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
               deps,
               workspaceId,
               account,
+              codexRedemptionAccess({
+                connectedBySubjectId: account.connectedBySubjectId,
+                grantSubjectId: grant.subjectId,
+                managedHumanSubjectId: human?.subjectId ?? null,
+                canManage: hasPermission(grant.permissions, "workspace:admin"),
+              }),
               false,
               canResumeRedemption,
               canResumeRedemption

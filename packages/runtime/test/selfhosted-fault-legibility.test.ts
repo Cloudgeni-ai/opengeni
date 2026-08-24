@@ -314,6 +314,7 @@ function sessionWithNeverSentStarts(failures: number) {
   };
   const session = new SelfhostedSession({
     workspaceId: WS,
+    workspaceRoot: "/home/user/project",
     agentId: AGENT,
     connectionInstanceId: CONNECTION_INSTANCE,
     controlRpc,

@@ -294,7 +294,7 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
-  test("0336 keeps activation evidence in the dedicated schema and owner-only", async () => {
+  test("0338 keeps activation evidence in the dedicated schema and owner-only", async () => {
     if (!available) return;
     const [routine] = await admin<
       Array<{
@@ -330,7 +330,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     });
   });
 
-  test("0336 pins connection convergence and activation to the dedicated schema", async () => {
+  test("0338 pins connection convergence and activation to the dedicated schema", async () => {
     if (!available) return;
     const routines = await admin<
       Array<{ name: string; appExecute: boolean; settings: string[] | null }>
@@ -793,6 +793,210 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
       expect(policy.usingExpression).toContain("personal_resource_grant_management");
     }
   });
+
+  test("0336 fork overloads pin the dedicated schema ahead of caller TEMP shadows", async () => {
+    if (!available) return;
+    const routines = await admin<
+      Array<{
+        arguments: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      select pg_catalog.oidvectortypes(procedure.proargtypes) as arguments,
+        procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname = 'fork_session_content'
+        and procedure.pronargs in (9, 10)
+      order by procedure.pronargs`;
+    expect(Array.from(routines)).toEqual([
+      {
+        arguments: "uuid, uuid, uuid, text, uuid, text, text, text, integer",
+        securityDefiner: true,
+        appExecute: true,
+        publicExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        arguments: "uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer",
+        securityDefiner: true,
+        appExecute: true,
+        publicExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
+    const [receiptReplay] = await admin<
+      Array<{
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      select procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname = 'replay_applied_session_fork'
+        and pg_catalog.oidvectortypes(procedure.proargtypes)
+          = 'uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer'`;
+    expect(receiptReplay).toEqual({
+      securityDefiner: true,
+      appExecute: true,
+      publicExecute: false,
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+    });
+    const [quiescenceHelper] = await admin<
+      Array<{
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      select procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname = 'assert_session_tenancy_quiescent'
+        and pg_catalog.oidvectortypes(procedure.proargtypes) = 'uuid, uuid, uuid, boolean'`;
+    expect(quiescenceHelper).toEqual({
+      securityDefiner: true,
+      appExecute: false,
+      publicExecute: false,
+      settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+    });
+
+    const suffix = crypto.randomUUID();
+    const userId = `fork-shadow-${suffix}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Fork shadow owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    await admin`
+      insert into ${admin(SCHEMA)}.session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+      on conflict (account_id) do nothing`;
+    // A private fork destination in a shared workspace carries the same
+    // organization owner/admin product decision as a private create; this
+    // organization has enabled it, so the test exercises schema pinning rather
+    // than the product gate.
+    await admin`
+      insert into ${admin(SCHEMA)}.organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
+    const source = await withSessionRlsActorContext({ subjectId }, async () =>
+      createSession(db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initialMessage: "TEMP-shadow-resistant fork source",
+        resources: [],
+        metadata: {},
+        model: "dedicated-schema-test",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId },
+        createdByContext: {},
+      }),
+    );
+
+    const app = postgres(APP_URL, { max: 1, prepare: false });
+    try {
+      const runShadowedFork = (kind: "atomic" | "legacy" | "replay") =>
+        app.begin(async (transactionSql) => {
+          await transactionSql`select set_config('search_path', ${SEARCH_PATH}, true)`;
+          await transactionSql`select
+            set_config('opengeni.account_id', ${grant.accountId}, true),
+            set_config('opengeni.workspace_id', ${grant.workspaceId}, true),
+            set_config('opengeni.subject_id', ${subjectId}, true)`;
+          await transactionSql`create temporary table workspaces (
+            shadow_marker boolean
+          ) on commit drop`;
+          await transactionSql`create temporary table organization_memberships (
+            shadow_marker boolean
+          ) on commit drop`;
+          await transactionSql`create temporary table sessions (
+            shadow_marker boolean
+          ) on commit drop`;
+          await transactionSql`create temporary table session_command_receipts (
+            shadow_marker boolean
+          ) on commit drop`;
+
+          if (kind === "atomic") {
+            const [atomic] = await transactionSql<Array<{ sessionId: string; visibility: string }>>`
+              select session_id as "sessionId", visibility
+              from fork_session_content(
+                ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${source.id}::uuid,
+                ${subjectId}, ${grant.workspaceId}::uuid, 'user_private', false,
+                ${`atomic-shadow:${suffix}`}, ${"a".repeat(64)}, 1
+              )`;
+            return atomic;
+          }
+          if (kind === "replay") {
+            const [replay] = await transactionSql<Array<{ sessionId: string; visibility: string }>>`
+              select session_id as "sessionId", visibility
+              from replay_applied_session_fork(
+                ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${source.id}::uuid,
+                ${subjectId}, ${grant.workspaceId}::uuid, 'user_private', false,
+                ${`atomic-shadow:${suffix}`}, ${"a".repeat(64)}, 1
+              )`;
+            return replay;
+          }
+          const [legacy] = await transactionSql<Array<{ sessionId: string; visibility: string }>>`
+            select session_id as "sessionId", visibility
+            from fork_session_content(
+              ${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${source.id}::uuid,
+              ${subjectId}, ${grant.workspaceId}::uuid, 'user_private',
+              ${`legacy-shadow:${suffix}`}, ${"b".repeat(64)}, 1
+            )`;
+          return legacy;
+        });
+      const forked = {
+        atomic: await runShadowedFork("atomic"),
+        replay: await runShadowedFork("replay"),
+        legacy: await runShadowedFork("legacy"),
+      };
+      expect(forked.atomic).toMatchObject({ visibility: "user_private" });
+      expect(forked.replay).toEqual(forked.atomic);
+      expect(forked.legacy).toMatchObject({ visibility: "user_private" });
+      expect(forked.atomic?.sessionId).not.toBe(source.id);
+      expect(forked.legacy?.sessionId).not.toBe(source.id);
+      expect(forked.atomic?.sessionId).not.toBe(forked.legacy?.sessionId);
+    } finally {
+      await app.end();
+    }
+  }, 180_000);
 
   test("migrate-then-provision grants the exact target-schema knowledge authority lock", async () => {
     if (!available) return;

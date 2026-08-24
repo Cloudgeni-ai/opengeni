@@ -1,4 +1,5 @@
 import {
+  getEnrollment,
   getSandbox,
   readActiveSandbox,
   getLiveEnrollmentConnection,
@@ -18,6 +19,7 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
   type SelfhostedSession,
+  resolveConnectedMachineWorkspaceRoot,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { mergeResourceRefs } from "../common";
@@ -390,13 +392,29 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // Whether the machine's latest Hello advertised the op-stream engine
         // (refreshed on every connect). Read only when the server flag is on —
         // one indexed lookup, and the flag off keeps this path byte-identical.
-        const machineEnrollment = await getLiveEnrollmentConnection(
+        const liveMachineEnrollment = await getLiveEnrollmentConnection(
           db,
           activeSandboxRecord!.workspaceId,
           activeSandboxRecord!.enrollmentId!,
         );
+        const machineEnrollment =
+          liveMachineEnrollment ??
+          (await getEnrollment(
+            db,
+            activeSandboxRecord!.workspaceId,
+            activeSandboxRecord!.enrollmentId!,
+          ));
+        if (!machineEnrollment?.workspaceRoot) {
+          throw new Error(
+            "Connected Machine has not reported an absolute workspace root; reconnect it with a current agent",
+          );
+        }
+        const machineWorkspaceRoot = resolveConnectedMachineWorkspaceRoot(
+          machineEnrollment.workspaceRoot,
+          activeSandboxPointer!.workingDir,
+        );
         const machineOpStream =
-          settings.agentOpStreamEnabled === true && machineEnrollment?.opStream === true;
+          settings.agentOpStreamEnabled === true && liveMachineEnrollment?.opStream === true;
         const established = await establishSelfhostedTurnSession(
           {
             db,
@@ -421,9 +439,10 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             // intentionally unserved token so the model receives the normal
             // typed agent_offline tool result; a later turn resolves a fresh
             // claimed process instance.
-            connectionInstanceId: machineEnrollment?.connectionInstanceId ?? "unavailable",
+            connectionInstanceId: liveMachineEnrollment?.connectionInstanceId ?? "unavailable",
+            workspaceRoot: machineWorkspaceRoot,
             opStream: machineOpStream,
-            operationResourcePolicy: machineEnrollment?.operationPolicy ?? {
+            operationResourcePolicy: liveMachineEnrollment?.operationPolicy ?? {
               memoryMaxBytes: null,
               memoryHighBytes: null,
               cpuMaxMillicores: null,
@@ -431,9 +450,9 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               updatedAt: null,
             },
             operationResourcePolicySupported:
-              machineEnrollment?.agentCapabilities.operationResourcePolicy === true,
+              liveMachineEnrollment?.agentCapabilities.operationResourcePolicy === true,
             operationCpuQuotaSupported:
-              machineEnrollment?.agentCapabilities.operationCpuQuota === true,
+              liveMachineEnrollment?.agentCapabilities.operationCpuQuota === true,
             ...(activeSandboxRecord!.scope === "user" && fileAuthoritySubjectId
               ? {
                   personalMachineAttempt: {

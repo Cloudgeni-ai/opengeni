@@ -195,6 +195,11 @@ async function claimTestConnection(input: {
       })
     ).updated,
   ).toBe(true);
+  await admin`
+    update enrollments
+    set workspace_root = '/home/user/project'
+    where id = ${input.enrollmentId}
+  `;
   return connectionInstanceId;
 }
 
@@ -511,6 +516,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         controlWorkspaceId: originWorkspace!.id,
         agentId: machine.enrollmentId,
         connectionInstanceId,
+        workspaceRoot: "/home/user/project",
         opStream: true,
         operationResourcePolicy: {
           memoryMaxBytes: null,
@@ -682,6 +688,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
         controlWorkspaceId: originWorkspace!.id,
         agentId: machine.enrollmentId,
         connectionInstanceId,
+        workspaceRoot: "/home/user/project",
         opStream: true,
         operationResourcePolicy: {
           memoryMaxBytes: null,

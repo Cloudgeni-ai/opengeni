@@ -202,6 +202,7 @@ describe("lazy provisioning synthetic manifest", () => {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
       activeSandboxBackend: "selfhosted",
+      sandboxWorkspaceRoot: "/srv/project",
       fileResourceDownloads: downloads,
       rigSetup: {
         rigId: "rig-1",
@@ -214,7 +215,12 @@ describe("lazy provisioning synthetic manifest", () => {
     const commands: Array<{ cmd: string; workdir?: string }> = [];
     const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const backend = {
-      state: { manifest: buildManifest(settings, resources, environment, downloads) },
+      state: {
+        manifest: buildManifest(settings, resources, environment, downloads, {
+          root: "/srv/project",
+          includeResourceEntries: false,
+        }),
+      },
       exec: async (args: { cmd: string; workdir?: string }) => {
         commands.push(args);
         return { exitCode: 0, output: "" };

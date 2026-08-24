@@ -463,7 +463,7 @@ activation:
   forward-only per-organization activation.
 
 The first two migration files declare `-- deployment-mode: maintenance`; 0303
-and 0336 install their contracts as rolling migrations but the separate
+and 0338 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
@@ -485,7 +485,7 @@ For each subsequent activation:
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require 0303, 0336, plus every prerequisite
+6. run the new digest's migration Job and require 0303, 0338, plus every prerequisite
    migration to appear in `schema_migrations`;
 7. with the application still drained, run:
 
@@ -503,7 +503,7 @@ For each subsequent activation:
    exact drainable/bounded activation lane to be zero. It deliberately does not
    gate on total ownerless sessions or all-time immutable legacy writer rows;
    migration 0298 supplies their truthful attributable and observation-window
-   refinements. Migration 0336 also requires the newest
+   refinements. Migration 0338 also requires the newest
    `organization_memberships`, `sessions`, `variable_sets`, `rigs`, `machines`,
    and `connections` receipts to be completed, verifies full-population counts
    for the resource/session/connection classifiers, requires zero unresolved
@@ -523,10 +523,10 @@ For each subsequent activation:
    Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
    SECURITY` and a `FOR SELECT`-only policy, so under this exact
    non-superuser-owner posture the activation's own receipt `INSERT` was denied
-   with SQLSTATE `42501` after every gate had already passed. Migration 0336
+   with SQLSTATE `42501` after every gate had already passed. Migration 0338
    re-opens that single command behind an owner-only marker policy; the runtime
    role keeps `SELECT` and nothing else, and the table has no `UPDATE` or
-   `DELETE` writer at all. `packages/db/test/migration-0336-owner-migrated-tenancy-cutover.test.ts`
+   `DELETE` writer at all. `packages/db/test/migration-0338-owner-migrated-tenancy-cutover.test.ts`
    commits a real receipt through this posture, so the cutover is executable end
    to end ([`force-rls-migration-backfills.md`](force-rls-migration-backfills.md)).
 8. start only that same digest's API and workers, and require the startup and
@@ -1059,7 +1059,11 @@ Protected main CI uses the separate `canary-sha-<source>` namespace for its
 SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
-produce different digests from the same source tree.
+produce different digests from the same source tree. Every protected-main
+canary and release-candidate workload image carries
+`org.opencontainers.image.revision=<exact source SHA>` and the repository's
+`org.opencontainers.image.source` label; inspect those labels together with the
+immutable digest when diagnosing a deployed image.
 Each attempt refuses pre-existing run-scoped tags and builds the complete image
 set from scratch. A retry receives a different tag, so an interrupted attempt's
 partial registry state can never be mistaken for the next attempt's output.

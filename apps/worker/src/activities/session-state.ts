@@ -20,6 +20,10 @@ import {
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
+import {
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+  providerRecoveryCountFromMetadata,
+} from "./agent-turn/errors";
 import type {
   ControlActivityServices,
   ExpireSessionHumanInputInput,
@@ -370,7 +374,9 @@ export function createSessionStateActivities(
       turn.id !== input.turnId ||
       turn.triggerEventId !== input.triggerEventId ||
       turn.executionGeneration !== input.executionGeneration ||
-      input.executionGeneration <= 1
+      input.executionGeneration <= 1 ||
+      input.providerRecoveryCount !== providerRecoveryCountFromMetadata(turn.metadata) + 1 ||
+      input.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES
     ) {
       return { action: "ineligible" };
     }
@@ -380,10 +386,12 @@ export function createSessionStateActivities(
       triggerEventId: input.triggerEventId,
       attemptId: input.attemptId,
       reason: "mcp_transport_timeout",
+      providerRecoveryCount: input.providerRecoveryCount,
       detail: {
         code: "mcp_transport_timeout",
         retryable: true,
-        continueDelayMs: 60_000,
+        continueDelayMs: input.continueDelayMs,
+        providerRecoveryCount: input.providerRecoveryCount,
         recoverySource: "workflow_activity_failure",
       },
       fromStatuses: ["running"],

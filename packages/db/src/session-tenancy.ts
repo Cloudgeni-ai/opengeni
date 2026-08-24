@@ -119,6 +119,7 @@ export type ForkSessionContentInput = {
   actorSubjectId: string;
   destinationWorkspaceId: string;
   destinationVisibility: SessionTenancyVisibility;
+  workspaceSharedAcknowledged: boolean;
   operationKey: string;
 };
 
@@ -324,17 +325,32 @@ export function canonicalSessionVisibilityTransitionHash(
 export function canonicalSessionForkHash(
   input: Pick<
     ForkSessionContentInput,
-    "sourceSessionId" | "destinationWorkspaceId" | "destinationVisibility"
+    | "sourceSessionId"
+    | "destinationWorkspaceId"
+    | "destinationVisibility"
+    | "workspaceSharedAcknowledged"
   >,
 ): string {
+  const legacyCompatiblePrivateRequest =
+    input.destinationVisibility === "user_private" && !input.workspaceSharedAcknowledged;
   return createHash("sha256")
     .update(
-      JSON.stringify({
-        version: 1,
-        sourceSessionId: input.sourceSessionId,
-        destinationWorkspaceId: input.destinationWorkspaceId,
-        destinationVisibility: input.destinationVisibility,
-      }),
+      JSON.stringify(
+        legacyCompatiblePrivateRequest
+          ? {
+              version: 1,
+              sourceSessionId: input.sourceSessionId,
+              destinationWorkspaceId: input.destinationWorkspaceId,
+              destinationVisibility: input.destinationVisibility,
+            }
+          : {
+              version: 2,
+              sourceSessionId: input.sourceSessionId,
+              destinationWorkspaceId: input.destinationWorkspaceId,
+              destinationVisibility: input.destinationVisibility,
+              workspaceSharedAcknowledged: input.workspaceSharedAcknowledged,
+            },
+      ),
     )
     .digest("hex");
 }
@@ -416,9 +432,6 @@ export async function forkSessionContent(
   if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
     throw new Error("The first session fork contract is same-workspace only");
   }
-  if (input.destinationVisibility !== "user_private") {
-    throw new Error("The first session fork contract is private-only");
-  }
   const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
   await assertSessionTenancyProductActivated(db, input.sourceWorkspaceId);
   const requestHash = canonicalSessionForkHash(input);
@@ -447,6 +460,7 @@ export async function forkSessionContent(
           ${input.actorSubjectId},
           ${input.destinationWorkspaceId}::uuid,
           ${input.destinationVisibility},
+          ${input.workspaceSharedAcknowledged},
           ${input.operationKey},
           ${requestHash},
           ${SESSION_TENANCY_ACTIVATION_VERSION}
@@ -455,6 +469,71 @@ export async function forkSessionContent(
         const result = rows[0];
         if (!result) throw new Error("Session fork returned no result");
         return result;
+      },
+    );
+  } catch (error) {
+    // A private destination inside a shared workspace carries the same
+    // organization owner/admin product decision the create path enforces
+    // (migration 0323), and the fork routine raises the same 55000. Surface it
+    // as the not-activated product state rather than an opaque database error.
+    if (nestedPostgresSqlState(error) === "55000") {
+      throw new SessionTenancyNotActivatedError({ cause: error });
+    }
+    mapSessionTenancyPersistenceError(error, { authorityEpochConflict: false });
+  }
+}
+
+/**
+ * Recover one exact committed fork before mutable source-session authorization.
+ *
+ * The database capability requires the authenticated actor's active workspace
+ * authority and matches the complete actor/workspace/source/key/request-hash
+ * tuple. A fresh key returns null; changed intent raises the ordinary tenancy
+ * idempotency conflict. This is receipt recovery, not session discovery.
+ */
+export async function replayAppliedSessionFork(
+  db: Database,
+  input: ForkSessionContentInput,
+): Promise<ForkSessionContentResult | null> {
+  if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
+    throw new Error("The first session fork contract is same-workspace only");
+  }
+  const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
+  await assertSessionTenancyProductActivated(db, input.sourceWorkspaceId);
+  const requestHash = canonicalSessionForkHash(input);
+  try {
+    return await withWorkspaceSubjectRls(
+      db,
+      input.sourceWorkspaceId,
+      input.actorSubjectId,
+      async (scopedDb) => {
+        const rows = await rawRows<ForkSessionContentResult>(
+          scopedDb,
+          sql`select
+          operation_id as "operationId",
+          event_id as "eventId",
+          event_sequence as "eventSequence",
+          session_id as "sessionId",
+          workspace_id as "workspaceId",
+          visibility,
+          authority_epoch as "authorityEpoch",
+          copied_history_item_count as "copiedHistoryItemCount",
+          replay
+        from replay_applied_session_fork(
+          ${accountId}::uuid,
+          ${input.sourceWorkspaceId}::uuid,
+          ${input.sourceSessionId}::uuid,
+          ${input.actorSubjectId},
+          ${input.destinationWorkspaceId}::uuid,
+          ${input.destinationVisibility},
+          ${input.workspaceSharedAcknowledged},
+          ${input.operationKey},
+          ${requestHash},
+          ${SESSION_TENANCY_ACTIVATION_VERSION}
+        )`,
+        );
+        return rows[0] ?? null;
       },
     );
   } catch (error) {

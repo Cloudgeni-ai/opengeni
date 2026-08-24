@@ -1157,14 +1157,14 @@ describe("session create draft", () => {
       compute: {
         kind: "machine" as const,
         sandboxId: "sbx-machine-1",
-        folder: { kind: "path" as const, path: "  ~/repos/opengeni  " },
+        folder: { kind: "path" as const, path: "  packages/runtime  " },
       },
     };
     expect(submissionFromSessionDraft(draft)).toEqual({
       extras: {},
       options: {
         targetSandboxId: "sbx-machine-1",
-        workingDir: "~/repos/opengeni",
+        workingDir: "packages/runtime",
         visibility: "workspace",
       },
       omitWorkspaceResources: true,
