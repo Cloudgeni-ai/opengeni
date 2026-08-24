@@ -158,14 +158,17 @@ const budgets = {
   // bytes. Gzip stays comfortably under its existing envelope; advance only
   // the raw aggregate to its next whole KiB above one KiB of headroom. Every
   // other cap, including gzip, stays fixed.
-  // Capability bundle defaults add bounded UI to the direct-session shared
-  // graph. Dedicated composer-launch and route-aware workspace-settings groups
-  // isolate the accidental settings/startup fanout; the exact clean macOS/arm64
-  // build measures 2,150,624 raw / 600,784 gzip bytes across 24 files. Advance
-  // only those three direct-session envelopes; initial, per-file, lazy-chunk,
-  // and CSS caps remain unchanged.
-  directSessionRaw: 2102 * kib,
-  directSessionGzip: 589 * kib,
+  // Receipt-routed chat/queue placement, finite interactive-command settlement,
+  // local recovery states, and the first-message route handoff measure
+  // 2,147,168 raw / 596,777 gzip bytes on the current merged macOS/arm64 graph.
+  // Advance only those aggregates: raw to the next whole KiB above one KiB of
+  // headroom and gzip above the observed 1.5-KiB Linux/x64 skew. Initial,
+  // per-file, file-count, lazy-chunk, and CSS caps remain fixed.
+  // Capability bundle defaults on that merged graph measure 2,161,915 raw /
+  // 602,728 gzip bytes across 24 files. Advance only these direct-session
+  // envelopes; initial, per-file, lazy-chunk, and CSS caps remain unchanged.
+  directSessionRaw: 2113 * kib,
+  directSessionGzip: 591 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

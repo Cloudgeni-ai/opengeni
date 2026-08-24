@@ -193,6 +193,7 @@ export type PendingCreateAttempt = {
   workspaceId: string;
   signature: string;
   idempotencyKey: string;
+  eventId: string;
 };
 
 export function classifyCreateSessionFailure(error: unknown): {
@@ -294,9 +295,10 @@ export function buildCreateSessionRequest(
 }
 
 /**
- * Bind a create idempotency key to the exact logical session request. Retry-only
- * fields do not define session identity: the event id is fresh per call, and a
- * draft may acquire a new OCC revision while retaining the same create value.
+ * Bind create and first-message identities to the exact logical request. A
+ * transport retry must retain both: otherwise a committed first event cannot
+ * reconcile with the optimistic handoff returned by the replay. A draft may
+ * acquire a new OCC revision while retaining the same create value.
  * A changed value, workspace, or authenticated client starts a new logical
  * create instead of reviving a partially initialized session with stale input.
  */
@@ -320,14 +322,19 @@ export function prepareCreateSessionAttempt(input: {
     input.pending.signature === signature
       ? input.pending.idempotencyKey
       : input.freshIdempotencyKey;
+  const clientEventId =
+    idempotencyKey === input.pending?.idempotencyKey
+      ? input.pending.eventId
+      : (input.request.clientEventId ?? idempotencyKey);
   return {
     pending: {
       client: input.client,
       workspaceId: input.workspaceId,
       signature,
       idempotencyKey,
+      eventId: clientEventId,
     },
-    request: { ...input.request, idempotencyKey },
+    request: { ...input.request, idempotencyKey, clientEventId },
   };
 }
 

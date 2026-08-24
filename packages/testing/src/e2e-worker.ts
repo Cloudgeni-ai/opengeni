@@ -1,8 +1,13 @@
 import { getSettings } from "@opengeni/config";
 import { createDb } from "@opengeni/db";
 import { createNatsEventBus } from "@opengeni/events";
+import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
-import { createOpenGeniWorker } from "@opengeni/worker-bundle";
+import {
+  createOpenGeniWorker,
+  createWorkerWorkflowSignaler,
+  registerSessionWorkflowWakeDispatcherSchedule,
+} from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
 import {
   functionCall,
@@ -20,6 +25,16 @@ const dbClient = createDb(settings.databaseUrl);
 const bus = await createNatsEventBus(settings.natsUrl);
 const model = scriptedModelForScenario(process.env.OPENGENI_TEST_SCENARIO ?? "default");
 const runtime = createProductionAgentRuntime({ model });
+const observability = createObservability(settings, { component: `e2e-worker-${role}` });
+const workflowSignaler = await createWorkerWorkflowSignaler(settings, dbClient.db);
+// The browser acceptance must include the same durable wake-repair owner as a
+// production control worker. Starting only the raw Temporal pollers makes a
+// committed Pause/Resume look successful while its outbox trigger targets a
+// schedule that does not exist, stranding the resumed queue forever.
+const wakeSchedule =
+  role === "control"
+    ? await registerSessionWorkflowWakeDispatcherSchedule(settings, observability)
+    : null;
 const { worker, connection } = await createOpenGeniWorker({
   role,
   settings,
@@ -28,6 +43,13 @@ const { worker, connection } = await createOpenGeniWorker({
     db: dbClient.db,
     bus,
     runtime,
+    observability,
+    wakeSessionWorkflow: workflowSignaler.wakeSessionWorkflow,
+    signalSessionAttemptQuiesced: workflowSignaler.signalSessionAttemptQuiesced,
+    inspectSessionAttemptActivity: workflowSignaler.inspectSessionAttemptActivity,
+    signalCodexCapacityWorkflow: workflowSignaler.signalCodexCapacityWorkflow,
+    startSandboxReaperWorkflow: workflowSignaler.startSandboxReaperWorkflow,
+    startVideoGenerationWorkflow: workflowSignaler.startVideoGenerationWorkflow,
   },
 });
 
@@ -38,12 +60,21 @@ console.log(
 try {
   await worker.run();
 } finally {
-  await Promise.allSettled([bus.close(), dbClient.close(), connection.close()]);
+  await Promise.allSettled([
+    wakeSchedule?.close(),
+    workflowSignaler.close(),
+    bus.close(),
+    dbClient.close(),
+    connection.close(),
+  ]);
 }
 
 function scriptedModelForScenario(scenario: string): Model {
   if (scenario === "sandbox") {
     return new SandboxScriptedModel();
+  }
+  if (scenario === "browser-command-control") {
+    return new BrowserCommandControlModel();
   }
   if (scenario === "slow") {
     return new ScriptedModel([
@@ -70,6 +101,61 @@ function scriptedModelForScenario(scenario: string): Model {
       outputText: "hello from e2e",
     },
   ]);
+}
+
+class BrowserCommandControlModel implements Model {
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return await new ScriptedModel([browserCommandStepForRequest(request)]).getResponse(request);
+  }
+
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([browserCommandStepForRequest(request)]).getStreamedResponse(request);
+  }
+}
+
+function browserCommandStepForRequest(request: ModelRequest): ScriptedModelStep {
+  const body = JSON.stringify(request.input ?? request);
+  const latestHold = body.lastIndexOf("E2E HOLD");
+  const latestFast = body.lastIndexOf("E2E FAST");
+  if (latestHold >= 0 && latestHold > latestFast) {
+    // The browser acceptance performs real autosaves, queue mutations, reloads,
+    // and lost-response reconciliation before it cancels this call. Keep the
+    // fixture alive for the whole finite test budget so queue rows cannot start
+    // merely because a fast CI host reached the old synthetic stream boundary.
+    const chunks = Array.from({ length: 6_000 }, (_, index) =>
+      index === 0 ? "E2E HOLD ACTIVE " : "working ",
+    );
+    return {
+      id: `browser-command-hold-${crypto.randomUUID()}`,
+      chunks,
+      outputText: chunks.join(""),
+      delayMs: 50,
+    };
+  }
+  if (latestFast >= 0) {
+    return {
+      id: `browser-command-fast-${crypto.randomUUID()}`,
+      chunks: ["E2E ", "FAST ", "COMPLETE"],
+      outputText: "E2E FAST COMPLETE",
+      delayMs: 25,
+    };
+  }
+  return {
+    id: `browser-command-markdown-${crypto.randomUUID()}`,
+    chunks: [
+      "slow **stream**\n\n",
+      "| Name | Value |\n| --- | --- |\n| inline code | `ok` |\n\n",
+      "```ts\nconst ok = true;\n```\n\n",
+      "still ",
+      "running ",
+      "long ",
+      "enough ",
+      "to interrupt",
+    ],
+    outputText:
+      "slow **stream**\n\n| Name | Value |\n| --- | --- |\n| inline code | `ok` |\n\n```ts\nconst ok = true;\n```\n\nstill running long enough to interrupt",
+    delayMs: 1_000,
+  };
 }
 
 class SandboxScriptedModel implements Model {

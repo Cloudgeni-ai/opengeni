@@ -142,6 +142,7 @@ Prerequisites:
 
 - Bun
 - Docker
+- rustup (the artifact kernel uses its checked-in exact Rust toolchain)
 - OpenAI or Azure OpenAI credentials for real model runs
 
 Start the full local stack:
@@ -151,6 +152,16 @@ bun run dev
 ```
 
 `bun run dev` installs dependencies, creates `.env` from `.env.example` when missing, starts Docker infrastructure, runs migrations, builds the local sandbox image, and starts the API, both workers (control and turn), and the web app.
+
+The first development start also prepares the current-host editable-artifact
+kernel. OpenGeni reads `packages/artifact-tool/kernel/rust-toolchain.toml` and
+invokes Cargo and rustc through `rustup run <exact-pin>`; unrelated Homebrew or
+system Rust binaries earlier on `PATH` are ignored. Cargo is also bound to the
+pinned toolchain's absolute compiler path, so ambient compiler/wrapper variables
+and user Cargo configuration cannot substitute another rustc. Missing pinned
+toolchains and declared targets are installed without changing the rustup
+default or the shell `PATH`. Set `RUSTUP_AUTO_INSTALL=0` to forbid that setup
+and receive the exact manual install command instead.
 
 Open:
 

@@ -113,7 +113,11 @@ export type AppDependencies = {
   editableArtifactOfficeImports?: EditableArtifactOfficeImportPort;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
-  /** Injectable structural seam for replayable prompt fanout and wake work. */
+  /**
+   * Injectable structural seam for replayable post-commit fanout and wake work.
+   * The historical name is retained for host compatibility; every interactive
+   * session command now uses this boundary, not only prompt submission.
+   */
   schedulePromptPostCommit?: (task: () => Promise<void>) => void;
   /** Optional provider override for deterministic API/object-storage tests. */
   objectStorage?: ObjectStorageDependency;

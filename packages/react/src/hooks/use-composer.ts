@@ -11,6 +11,7 @@ import {
   type SaveComposerDraftRequest,
   type SendMessageInput,
   type SessionEvent,
+  type SubmitComposerDraftResponse,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
@@ -50,6 +51,8 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     sendBlocked?: (() => boolean) | undefined;
     /** Latest server-derived workstream control; bound into Send/Steer OCC. */
     effectiveControl?: EffectiveSessionControl | null | undefined;
+    /** Immediate user-visible destination for an ordinary Send before admission replies. */
+    sendDestination?: (() => "chat" | "queue") | undefined;
     /** Disable remote composer-draft reads and writes for embedded hosts. */
     draftPersistence?: "durable" | "disabled" | undefined;
     /** Required explicit authority when durable draft persistence is disabled. */
@@ -83,11 +86,16 @@ type StoredPendingComposerOperation = Omit<PendingComposerOperation, "input" | "
 
 export type ComposerOptimisticMessage = {
   clientEventId: string;
+  delivery: "send" | "steer";
+  destination: "chat" | "queue";
   text: string;
   annotations: DraftTimelineAnnotation[];
   resources: ResourceRef[];
   occurredAt: string;
   state: "sending" | "queued" | "failed";
+  turnId?: string | null | undefined;
+  triggerEventId?: string | null | undefined;
+  appliedQueueVersion?: number | null | undefined;
   error?: string | undefined;
   outcomeUnknown?: boolean | undefined;
 };
@@ -166,6 +174,8 @@ function restoreOptimisticSendOperations(key: string | null): OptimisticSendOper
   }
   return stored.map(({ hasMcpCredentialUpdates, ...operation }) => ({
     ...operation,
+    delivery: "send",
+    destination: operation.destination === "queue" ? "queue" : "chat",
     newerShadow: operation.newerShadow ?? { text: "", resources: [], annotations: [] },
     state:
       operation.state === "sending" || operation.state === "queued" ? "sending" : operation.state,
@@ -428,6 +438,8 @@ export type ComposerState = {
   resume: (reason?: string) => Promise<void>;
   resumeScope: (option: EffectiveControlResumeOption) => Promise<void>;
   resuming: boolean;
+  /** Mutation-confirmed control while the streamed queue projection catches up. */
+  effectiveControl?: EffectiveSessionControl | null | undefined;
   draft: ComposerDraft | null;
   draftRevision: number;
   draftLoading: boolean;
@@ -458,18 +470,15 @@ export type ComposerControllerState = ComposerState & {
 };
 
 export type ComposerSteeringState = {
-  phase: "submitting" | "accepted";
+  phase: "submitting" | "accepted" | "failed";
   text: string;
   clientEventId: string | null;
   triggerEventId: string | null;
   turnId: string | null;
   /** True only when the accepted Steer durably interrupted a live attempt. */
   stoppingPreviousAttempt?: boolean | undefined;
-};
-
-type ComposerControlStoppingState = {
-  controlVersion: number;
-  controlEtag: string;
+  error?: string | undefined;
+  outcomeUnknown?: boolean | undefined;
 };
 
 const STEERING_SETTLEMENT_EVENT_TYPES = new Set([
@@ -496,6 +505,32 @@ function steeringAcceptedEvent(
   );
 }
 
+function promptTurnIdForTrigger(
+  triggerEventId: string | null | undefined,
+  events: readonly SessionEvent[],
+): string | null {
+  if (!triggerEventId) return null;
+  const queued = events.find((event) => {
+    if (event.type !== "turn.queued") return false;
+    const payload = event.payload;
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      "triggerEventId" in payload &&
+      payload.triggerEventId === triggerEventId
+    );
+  });
+  if (!queued) return null;
+  if (queued.turnId) return queued.turnId;
+  const payload = queued.payload;
+  return typeof payload === "object" &&
+    payload !== null &&
+    "turnId" in payload &&
+    typeof payload.turnId === "string"
+    ? payload.turnId
+    : null;
+}
+
 function steeringSettledByEvents(
   steering: ComposerSteeringState,
   events: readonly SessionEvent[],
@@ -515,6 +550,63 @@ function steeringSettledByEvents(
       payload.triggerEventId === acceptedEventId
     );
   });
+}
+
+function reconcileOptimisticSendFromEvents(
+  operation: OptimisticSendOperation,
+  events: readonly SessionEvent[],
+): { operation: OptimisticSendOperation; admitted: boolean; settled: boolean } {
+  const accepted = events.find(
+    (event) => event.type === "user.message" && event.clientEventId === operation.clientEventId,
+  );
+  const triggerEventId = operation.triggerEventId ?? accepted?.id ?? null;
+  const turnId = operation.turnId ?? promptTurnIdForTrigger(triggerEventId, events);
+  const needsAdmissionUpdate =
+    accepted !== undefined &&
+    (operation.state !== "queued" ||
+      operation.triggerEventId !== triggerEventId ||
+      operation.turnId !== turnId ||
+      operation.error !== undefined ||
+      operation.outcomeUnknown !== false);
+  const reconciled: OptimisticSendOperation = needsAdmissionUpdate
+    ? {
+        ...operation,
+        state: "queued",
+        triggerEventId,
+        turnId,
+        error: undefined,
+        outcomeUnknown: false,
+      }
+    : operation;
+  const withdrawnFromQueue = events.some((event) => {
+    if (event.type !== "session.queue.changed" || !turnId) return false;
+    const payload = event.payload;
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return false;
+    const record = payload as Record<string, unknown>;
+    return (
+      record.turnId === turnId && (record.operation === "edit" || record.operation === "delete")
+    );
+  });
+  return {
+    operation: reconciled,
+    admitted: accepted !== undefined,
+    // Edit/Delete atomically withdraw the queued turn. Keeping its optimistic
+    // send alive after that point lets its old `newerShadow` become the newest
+    // composer draft again when a later turn settles, duplicating submitted
+    // text. The queue mutation is the durable terminal fact for this send.
+    settled:
+      withdrawnFromQueue ||
+      steeringSettledByEvents(
+        {
+          phase: "accepted",
+          text: reconciled.text,
+          clientEventId: reconciled.clientEventId,
+          triggerEventId: reconciled.triggerEventId ?? null,
+          turnId: reconciled.turnId ?? null,
+        },
+        events,
+      ),
+  };
 }
 
 /**
@@ -552,16 +644,18 @@ export function useComposer(
   const [steering, setSteering] = useState<ComposerSteeringState | null>(() =>
     initialPendingOperation?.delivery === "steer"
       ? {
-          phase: "submitting",
+          phase: "failed",
           text: initialPendingOperation.input.text,
           clientEventId: initialPendingOperation.input.clientEventId ?? null,
           triggerEventId: null,
           turnId: null,
+          error: "Not confirmed. Retry to check the same direction change.",
+          outcomeUnknown: true,
         }
       : null,
   );
   const [pausing, setPausing] = useState(false);
-  const [controlStopping, setControlStopping] = useState<ComposerControlStoppingState | null>(null);
+  const [acceptedControl, setAcceptedControl] = useState<EffectiveSessionControl | null>(null);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [draft, setDraft] = useState<ComposerDraft | null>(null);
@@ -580,6 +674,7 @@ export function useComposer(
   const optimisticCallbackIdsRef = useRef(new Set<string>());
   const steeringSettlementEventsRef = useRef<SessionEvent[]>([]);
   const steeringRef = useRef(steering);
+  const steeringOccurredAtRef = useRef(new Date().toISOString());
   const pendingClientEventId = useRef<string | null>(
     initialPendingOperation?.input.clientEventId ?? null,
   );
@@ -606,8 +701,14 @@ export function useComposer(
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
   sendExtrasRef.current = options.sendExtras;
+  const sendDestinationRef = useRef(options.sendDestination);
+  sendDestinationRef.current = options.sendDestination;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
+  const effectiveControlRef = useRef<EffectiveSessionControl | null>(
+    acceptedControl ?? options.effectiveControl ?? null,
+  );
+  effectiveControlRef.current = acceptedControl ?? options.effectiveControl ?? null;
   const liveExtrasVersion = JSON.stringify(resolveSendExtras(options.sendExtras));
 
   // A composer is bound to one session: switching targets must not leak the
@@ -647,16 +748,18 @@ export function useComposer(
     setSteering(
       pendingOperationRef.current?.delivery === "steer"
         ? {
-            phase: "submitting",
+            phase: "failed",
             text: pendingOperationRef.current.input.text,
             clientEventId: pendingOperationRef.current.input.clientEventId ?? null,
             triggerEventId: null,
             turnId: null,
+            error: "Not confirmed. Retry to check the same direction change.",
+            outcomeUnknown: true,
           }
         : null,
     );
     setPausing(false);
-    setControlStopping(null);
+    setAcceptedControl(null);
     setResuming(false);
     setError(null);
     setDraft(null);
@@ -978,23 +1081,13 @@ export function useComposer(
   }, [options.events, steering]);
 
   useEffect(() => {
-    if (!controlStopping) return;
+    if (!acceptedControl) return;
     const effectiveControl = options.effectiveControl;
-    if (!effectiveControl || effectiveControl.controlVersion < controlStopping.controlVersion) {
+    if (!effectiveControl || effectiveControl.controlVersion < acceptedControl.controlVersion) {
       return;
     }
-    if (
-      effectiveControl.controlVersion === controlStopping.controlVersion &&
-      effectiveControl.controlEtag === controlStopping.controlEtag &&
-      effectiveControl.settlement !== null
-    ) {
-      return;
-    }
-    // A newer control revision, an impossible same-version/different-etag
-    // projection, or quiescence at this exact revision supersedes the local
-    // mutation receipt. SessionChrome then falls back to durable queue truth.
-    setControlStopping((current) => (current === controlStopping ? null : current));
-  }, [controlStopping, options.effectiveControl]);
+    setAcceptedControl((current) => (current === acceptedControl ? null : current));
+  }, [acceptedControl, options.effectiveControl]);
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
     if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
@@ -1109,17 +1202,46 @@ export function useComposer(
   );
 
   useEffect(() => {
-    const acceptedIds = new Set(
-      (options.events ?? [])
-        .filter((event) => event.type === "user.message" && event.clientEventId)
-        .map((event) => event.clientEventId as string),
+    const events = options.events ?? [];
+    if (events.length === 0 || optimisticSendsRef.current.length === 0) return;
+    const reconciled = optimisticSendsRef.current.map((operation) =>
+      reconcileOptimisticSendFromEvents(operation, events),
     );
-    if (acceptedIds.size === 0) return;
-    const accepted = optimisticSendsRef.current.filter((operation) =>
-      acceptedIds.has(operation.clientEventId),
+    const settledIds = new Set(
+      reconciled.filter((item) => item.settled).map((item) => item.operation.clientEventId),
     );
-    for (const operation of accepted) markOptimisticAccepted(operation);
-  }, [markOptimisticAccepted, options.events]);
+    const changed = reconciled.some(
+      (item, index) =>
+        item.operation !== optimisticSendsRef.current[index] &&
+        !settledIds.has(item.operation.clientEventId),
+    );
+    for (const item of reconciled) {
+      if (item.admitted && !optimisticCallbackIdsRef.current.has(item.operation.clientEventId)) {
+        optimisticCallbackIdsRef.current.add(item.operation.clientEventId);
+        onSent?.(item.operation.input.text, item.operation.input);
+      }
+      if (item.settled) markOptimisticAccepted(item.operation);
+    }
+    if (changed) {
+      replaceOptimisticSends((current) =>
+        current
+          .map(
+            (operation) =>
+              reconciled.find((item) => item.operation.clientEventId === operation.clientEventId)
+                ?.operation ?? operation,
+          )
+          .filter((operation) => !settledIds.has(operation.clientEventId)),
+      );
+    }
+    if (durableDrafts && reconciled.some((item) => item.admitted)) void loadDraft(false);
+  }, [
+    durableDrafts,
+    loadDraft,
+    markOptimisticAccepted,
+    onSent,
+    options.events,
+    replaceOptimisticSends,
+  ]);
 
   const processOptimisticSends = useCallback((): void => {
     if (!sessionId || optimisticProcessorBusyRef.current) return;
@@ -1159,9 +1281,17 @@ export function useComposer(
           let events: SessionEvent[];
           try {
             events = await client.listEvents(workspaceId, sessionId, {
-              includeTypes: ["user.message"],
-              limit: 100,
-              payloadMode: "none",
+              includeTypes: [
+                "user.message",
+                "turn.queued",
+                "turn.started",
+                "turn.completed",
+                "turn.failed",
+                "turn.cancelled",
+                "turn.superseded",
+              ],
+              limit: 250,
+              payloadMode: "full",
             });
           } catch (cause) {
             // This read cannot settle the prior mutation in either direction.
@@ -1170,14 +1300,24 @@ export function useComposer(
             markFailed(asError(cause), true);
             return;
           }
-          if (
-            events.some(
-              (event) =>
-                event.type === "user.message" && event.clientEventId === operation.clientEventId,
-            )
-          ) {
+          const reconciled = reconcileOptimisticSendFromEvents(operation, events);
+          if (reconciled.admitted) {
             if (durableDrafts) await loadDraft(false);
-            markOptimisticAccepted(operation);
+            if (reconciled.settled) {
+              markOptimisticAccepted(reconciled.operation);
+            } else {
+              replaceOptimisticSends((current) =>
+                current.map((candidate) =>
+                  candidate.clientEventId === operation.clientEventId
+                    ? reconciled.operation
+                    : candidate,
+                ),
+              );
+              if (!optimisticCallbackIdsRef.current.has(operation.clientEventId)) {
+                optimisticCallbackIdsRef.current.add(operation.clientEventId);
+                onSent?.(reconciled.operation.input.text, reconciled.operation.input);
+              }
+            }
             return;
           }
           if (!operation.canRetry) {
@@ -1203,6 +1343,8 @@ export function useComposer(
           ...operation.input,
           ...(expectedDraftRevision !== undefined ? { expectedDraftRevision } : {}),
         };
+        let acceptedResult: SubmitComposerDraftResponse | null = null;
+        let acceptedEvent: SessionEvent | null = null;
         if (durableDrafts) {
           if (!operation.draftPayload || expectedDraftRevision === undefined) {
             throw new Error("The durable composer draft is not ready for delivery.");
@@ -1234,12 +1376,15 @@ export function useComposer(
               mutationFailureObserved = true;
               throw cause;
             });
+          acceptedResult = result;
           adoptDraftBase(result.draft);
         } else {
-          await client.sendMessage(workspaceId, sessionId, wireInput).catch((cause: unknown) => {
-            mutationFailureObserved = true;
-            throw cause;
-          });
+          acceptedEvent = await client
+            .sendMessage(workspaceId, sessionId, wireInput)
+            .catch((cause: unknown) => {
+              mutationFailureObserved = true;
+              throw cause;
+            });
         }
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -1247,13 +1392,30 @@ export function useComposer(
         ) {
           return;
         }
-        if (options.events === undefined) {
+        const acceptedDestination =
+          acceptedResult?.routing === "queued_for_execution"
+            ? "queue"
+            : acceptedResult?.routing === "accepted_for_execution"
+              ? "chat"
+              : operation.destination;
+        if (options.events === undefined && acceptedDestination === "chat") {
           markOptimisticAccepted({ ...operation, input: wireInput });
         } else {
           replaceOptimisticSends((current) =>
             current.map((candidate) =>
               candidate.clientEventId === operation.clientEventId
-                ? { ...candidate, input: wireInput, state: "queued", error: undefined }
+                ? {
+                    ...candidate,
+                    input: wireInput,
+                    destination: acceptedDestination,
+                    turnId: acceptedResult?.turn.id ?? candidate.turnId,
+                    triggerEventId:
+                      acceptedResult?.accepted.id ?? acceptedEvent?.id ?? candidate.triggerEventId,
+                    appliedQueueVersion:
+                      acceptedResult?.receipt?.appliedQueueVersion ?? candidate.appliedQueueVersion,
+                    state: "queued",
+                    error: undefined,
+                  }
                 : candidate,
             ),
           );
@@ -1263,6 +1425,14 @@ export function useComposer(
           onSent?.(wireInput.text, wireInput);
         }
       } catch (cause) {
+        const current = optimisticSendsRef.current.find(
+          (candidate) => candidate.clientEventId === operation.clientEventId,
+        );
+        // A live durable event can prove admission before the original HTTP
+        // response times out. Never regress that confirmed state to failure.
+        if (!current || (current.state === "queued" && current.outcomeUnknown === false)) {
+          return;
+        }
         const problem = asError(cause);
         onDeliveryErrorRef.current?.(problem, operation.input, "send");
         // Only an actual mutation replay can replace prior uncertainty with a
@@ -1486,6 +1656,9 @@ export function useComposer(
       };
 
       if (delivery === "steer") {
+        if (steeringRef.current?.clientEventId !== pending?.input.clientEventId) {
+          steeringOccurredAtRef.current = new Date().toISOString();
+        }
         setSteering({
           phase: "submitting",
           text: rawText,
@@ -1516,7 +1689,20 @@ export function useComposer(
               targetKeyRef.current === ownedTargetKey &&
               targetGeneration.current === ownedGeneration
             ) {
-              setError(asError(cause));
+              const problem = asError(cause);
+              setError(problem);
+              if (pending.delivery === "steer") {
+                keepSteering = true;
+                setSteering({
+                  phase: "failed",
+                  text: pending.input.text,
+                  clientEventId: pending.input.clientEventId ?? null,
+                  triggerEventId: null,
+                  turnId: null,
+                  error: "Not confirmed. Retry.",
+                  outcomeUnknown: true,
+                });
+              }
             }
             return false;
           }
@@ -1572,6 +1758,15 @@ export function useComposer(
               keepSteering = false;
             } else if (pending.delivery === "steer") {
               keepSteering = true;
+              setSteering({
+                phase: "failed",
+                text: pending.input.text,
+                clientEventId: pending.input.clientEventId ?? null,
+                triggerEventId: null,
+                turnId: null,
+                error: "Not confirmed. Retry.",
+                outcomeUnknown: true,
+              });
             }
             if (
               targetKeyRef.current === ownedTargetKey &&
@@ -1609,11 +1804,10 @@ export function useComposer(
         // worker rejects whitespace-only text; a file-only message therefore
         // carries a minimal default so the attachments still get delivered.
         pendingClientEventId.current ??= generateClientEventId();
+        const effectiveControl = effectiveControlRef.current;
         const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
           ...currentPolicy,
-          ...(options.effectiveControl?.controlEtag
-            ? { controlEtag: options.effectiveControl.controlEtag }
-            : {}),
+          ...(effectiveControl?.controlEtag ? { controlEtag: effectiveControl.controlEtag } : {}),
           ...(durableDrafts && draftRef.current
             ? { expectedDraftRevision: draftRef.current.revision }
             : {}),
@@ -1666,6 +1860,15 @@ export function useComposer(
             clearPending();
           } else if (delivery === "steer") {
             keepSteering = true;
+            setSteering({
+              phase: "failed",
+              text: operation.input.text,
+              clientEventId: operation.input.clientEventId ?? null,
+              triggerEventId: null,
+              turnId: null,
+              error: "Not confirmed. Retry.",
+              outcomeUnknown: true,
+            });
           }
           if (
             targetKeyRef.current === ownedTargetKey &&
@@ -1698,7 +1901,6 @@ export function useComposer(
       currentDraftPayload,
       durableDrafts,
       onSent,
-      options.effectiveControl?.controlEtag,
       persistPayload,
       restoredResources,
       annotations,
@@ -1740,17 +1942,21 @@ export function useComposer(
       }
       const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT;
       const clientEventId = generateClientEventId();
+      const effectiveControl = effectiveControlRef.current;
       const input = composeSendInput(sendText, clientEventId, extras, {
         ...currentPolicy,
-        ...(options.effectiveControl?.controlEtag
-          ? { controlEtag: options.effectiveControl.controlEtag }
-          : {}),
+        ...(effectiveControl?.controlEtag ? { controlEtag: effectiveControl.controlEtag } : {}),
         resources,
         annotations: annotationsAtSend,
       });
       const currentPayload = currentDraftPayload();
       const operation: OptimisticSendOperation = {
         clientEventId,
+        delivery: "send",
+        destination:
+          effectiveControl?.state === "paused"
+            ? "queue"
+            : (sendDestinationRef.current?.() ?? "chat"),
         text: sendText,
         annotations: annotationsAtSend,
         resources,
@@ -1786,7 +1992,6 @@ export function useComposer(
       currentDraftPayload,
       dispatch,
       onSubmitted,
-      options.effectiveControl?.controlEtag,
       processOptimisticSends,
       replaceOptimisticSends,
       sending,
@@ -1799,6 +2004,11 @@ export function useComposer(
   const retryOptimisticMessage = useCallback(
     (clientEventId: string): void => {
       if (sendBlockedRef.current?.() === true) return;
+      const currentSteering = steeringRef.current;
+      if (currentSteering?.phase === "failed" && currentSteering.clientEventId === clientEventId) {
+        void dispatch("steer");
+        return;
+      }
       replaceOptimisticSends((current) =>
         current.map((operation) => {
           if (operation.clientEventId !== clientEventId || operation.state !== "failed") {
@@ -1821,8 +2031,8 @@ export function useComposer(
                 : {}),
             },
             {
-              ...(options.effectiveControl?.controlEtag
-                ? { controlEtag: options.effectiveControl.controlEtag }
+              ...(effectiveControlRef.current?.controlEtag
+                ? { controlEtag: effectiveControlRef.current.controlEtag }
                 : {}),
               resources: operation.resources,
               annotations: operation.annotations,
@@ -1843,16 +2053,24 @@ export function useComposer(
       );
       queueMicrotask(processOptimisticSends);
     },
-    [options.effectiveControl?.controlEtag, processOptimisticSends, replaceOptimisticSends],
+    [dispatch, processOptimisticSends, replaceOptimisticSends],
   );
 
   const removeOptimisticMessage = useCallback(
     (clientEventId: string): void => {
+      if (steeringRef.current?.clientEventId === clientEventId) {
+        pendingOperationRef.current = null;
+        pendingClientEventId.current = null;
+        forgetPendingComposerOperation(pendingComposerOperationKey(workspaceId, sessionId));
+        setSteering(null);
+        setError(null);
+        return;
+      }
       replaceOptimisticSends((current) =>
         current.filter((operation) => operation.clientEventId !== clientEventId),
       );
     },
-    [replaceOptimisticSends],
+    [replaceOptimisticSends, sessionId, workspaceId],
   );
 
   // A send is possible with non-empty text OR with ≥1 attached resource (a
@@ -1876,26 +2094,22 @@ export function useComposer(
       setPausing(true);
       setError(null);
       try {
-        const result = await client.pauseSession(workspaceId, sessionId, {
-          ...(reason !== undefined ? { reason } : {}),
-          ...(options.effectiveControl?.controlEtag
-            ? { expectedControlEtag: options.effectiveControl.controlEtag }
-            : {}),
-        });
+        const clientEventId = generateClientEventId();
+        const effectiveControl = effectiveControlRef.current;
+        const result = await replayOutcomeUnknown(() =>
+          client.pauseSession(workspaceId, sessionId, {
+            clientEventId,
+            ...(reason !== undefined ? { reason } : {}),
+            ...(effectiveControl?.controlEtag
+              ? { expectedControlEtag: effectiveControl.controlEtag }
+              : {}),
+          }),
+        );
         if (
           targetKeyRef.current === ownedTargetKey &&
           targetGeneration.current === ownedGeneration
         ) {
-          setControlStopping(
-            result.interruptionCount > 0 &&
-              result.effectiveControl.state === "paused" &&
-              result.effectiveControl.settlement !== null
-              ? {
-                  controlVersion: result.effectiveControl.controlVersion,
-                  controlEtag: result.effectiveControl.controlEtag,
-                }
-              : null,
-          );
+          setAcceptedControl(result.effectiveControl);
         }
       } catch (cause) {
         if (
@@ -1913,7 +2127,7 @@ export function useComposer(
         }
       }
     },
-    [client, workspaceId, sessionId, pausing, options.effectiveControl?.controlEtag, targetKey],
+    [client, workspaceId, sessionId, pausing, targetKey],
   );
 
   const resume = useCallback(
@@ -1924,12 +2138,23 @@ export function useComposer(
       setResuming(true);
       setError(null);
       try {
-        await client.resumeSession(workspaceId, sessionId, {
-          ...(reason !== undefined ? { reason } : {}),
-          ...(options.effectiveControl?.controlEtag
-            ? { expectedControlEtag: options.effectiveControl.controlEtag }
-            : {}),
-        });
+        const clientEventId = generateClientEventId();
+        const effectiveControl = effectiveControlRef.current;
+        const result = await replayOutcomeUnknown(() =>
+          client.resumeSession(workspaceId, sessionId, {
+            clientEventId,
+            ...(reason !== undefined ? { reason } : {}),
+            ...(effectiveControl?.controlEtag
+              ? { expectedControlEtag: effectiveControl.controlEtag }
+              : {}),
+          }),
+        );
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setAcceptedControl(result.effectiveControl);
+        }
       } catch (cause) {
         if (
           targetKeyRef.current === ownedTargetKey &&
@@ -1946,7 +2171,7 @@ export function useComposer(
         }
       }
     },
-    [client, workspaceId, sessionId, resuming, options.effectiveControl?.controlEtag, targetKey],
+    [client, workspaceId, sessionId, resuming, targetKey],
   );
 
   const resumeScope = useCallback(
@@ -1958,7 +2183,7 @@ export function useComposer(
       setError(null);
       try {
         if (option.scope === "workspace") {
-          const workspaceBlocker = options.effectiveControl?.blockers.find(
+          const workspaceBlocker = effectiveControlRef.current?.blockers.find(
             (blocker) => blocker.kind === "workspace",
           );
           if (!client.setWorkspaceInferenceState) {
@@ -1966,11 +2191,14 @@ export function useComposer(
               "@opengeni/react: workspace-scoped resume requires setWorkspaceInferenceState.",
             );
           }
-          await client.setWorkspaceInferenceState(workspaceId, {
-            action: "resume",
-            clientEventId: generateClientEventId(),
-            ...(workspaceBlocker ? { expectedRevision: workspaceBlocker.revision } : {}),
-          });
+          const clientEventId = generateClientEventId();
+          await replayOutcomeUnknown(() =>
+            client.setWorkspaceInferenceState!(workspaceId, {
+              action: "resume",
+              clientEventId,
+              ...(workspaceBlocker ? { expectedRevision: workspaceBlocker.revision } : {}),
+            }),
+          );
         } else if (option.scope === "session" && option.targetId) {
           const target = await client.getQueue(workspaceId, option.targetId);
           if (
@@ -1979,15 +2207,30 @@ export function useComposer(
           ) {
             return;
           }
-          await client.resumeSession(workspaceId, option.targetId, {
-            expectedControlEtag: target.effectiveControl.controlEtag,
-          });
+          const clientEventId = generateClientEventId();
+          await replayOutcomeUnknown(() =>
+            client.resumeSession(workspaceId, option.targetId!, {
+              clientEventId,
+              expectedControlEtag: target.effectiveControl.controlEtag,
+            }),
+          );
         } else {
-          await client.resumeSession(workspaceId, sessionId, {
-            ...(options.effectiveControl?.controlEtag
-              ? { expectedControlEtag: options.effectiveControl.controlEtag }
-              : {}),
-          });
+          const clientEventId = generateClientEventId();
+          const effectiveControl = effectiveControlRef.current;
+          const result = await replayOutcomeUnknown(() =>
+            client.resumeSession(workspaceId, sessionId, {
+              clientEventId,
+              ...(effectiveControl?.controlEtag
+                ? { expectedControlEtag: effectiveControl.controlEtag }
+                : {}),
+            }),
+          );
+          if (
+            targetKeyRef.current === ownedTargetKey &&
+            targetGeneration.current === ownedGeneration
+          ) {
+            setAcceptedControl(result.effectiveControl);
+          }
         }
       } catch (cause) {
         if (
@@ -2005,7 +2248,7 @@ export function useComposer(
         }
       }
     },
-    [client, options.effectiveControl, resuming, sessionId, targetKey, workspaceId],
+    [client, resuming, sessionId, targetKey, workspaceId],
   );
 
   const updateValue = useCallback(
@@ -2230,6 +2473,44 @@ export function useComposer(
 
   const identityMatches = stateTargetKey === targetKey;
   const visibleSteering = identityMatches ? steering : null;
+  const visibleOptimisticMessages: ComposerOptimisticMessage[] = identityMatches
+    ? [
+        ...optimisticSends.map(
+          ({ input: _input, draftPayload: _payload, canRetry: _retry, ...item }) => item,
+        ),
+        ...(visibleSteering?.clientEventId
+          ? [
+              {
+                clientEventId: visibleSteering.clientEventId,
+                delivery: "steer" as const,
+                destination: "chat" as const,
+                text: visibleSteering.text,
+                annotations:
+                  pendingOperationRef.current?.delivery === "steer"
+                    ? pendingOperationRef.current.annotationsAtSend
+                    : [],
+                resources:
+                  pendingOperationRef.current?.delivery === "steer"
+                    ? pendingOperationRef.current.resourcesAtSend
+                    : [],
+                occurredAt: steeringOccurredAtRef.current,
+                state:
+                  visibleSteering.phase === "submitting"
+                    ? ("sending" as const)
+                    : visibleSteering.phase === "failed"
+                      ? ("failed" as const)
+                      : ("queued" as const),
+                turnId: visibleSteering.turnId,
+                triggerEventId: visibleSteering.triggerEventId,
+                ...(visibleSteering.error ? { error: visibleSteering.error } : {}),
+                ...(visibleSteering.outcomeUnknown !== undefined
+                  ? { outcomeUnknown: visibleSteering.outcomeUnknown }
+                  : {}),
+              },
+            ]
+          : []),
+      ]
+    : [];
   const reloadDraft = useCallback(async () => await loadDraft(true), [loadDraft]);
   const clearError = useCallback(() => {
     if (targetKeyRef.current !== targetKey) return;
@@ -2248,21 +2529,15 @@ export function useComposer(
     clearAnnotationReviewTarget,
     hasDraftContent,
     send,
-    optimisticMessages: identityMatches
-      ? optimisticSends.map(
-          ({ input: _input, draftPayload: _payload, canRetry: _retry, ...item }) => item,
-        )
-      : [],
+    optimisticMessages: visibleOptimisticMessages,
     retryOptimisticMessage,
     removeOptimisticMessage,
     steer,
     steering: visibleSteering,
     stoppingAttempt: identityMatches
-      ? controlStopping
-        ? "current"
-        : visibleSteering?.phase === "accepted" && visibleSteering.stoppingPreviousAttempt === true
-          ? "previous"
-          : null
+      ? visibleSteering?.phase === "accepted" && visibleSteering.stoppingPreviousAttempt === true
+        ? "previous"
+        : null
       : null,
     sending: identityMatches ? sending : false,
     canSend:
@@ -2282,6 +2557,7 @@ export function useComposer(
     resume,
     resumeScope,
     resuming: identityMatches ? resuming : false,
+    effectiveControl: identityMatches ? effectiveControlRef.current : null,
     draft: identityMatches ? draft : null,
     draftRevision: identityMatches ? (draft?.revision ?? 0) : 0,
     draftLoading: identityMatches ? draftLoading : Boolean(sessionId) && durableDrafts,
@@ -2364,6 +2640,15 @@ function isOutcomeUnknownError(cause: unknown): boolean {
     cause !== null &&
     (cause as { outcomeUnknown?: unknown }).outcomeUnknown === true
   );
+}
+
+async function replayOutcomeUnknown<T>(command: () => Promise<T>): Promise<T> {
+  try {
+    return await command();
+  } catch (cause) {
+    if (!isOutcomeUnknownError(cause)) throw cause;
+    return await command();
+  }
 }
 
 function asError(cause: unknown): Error {

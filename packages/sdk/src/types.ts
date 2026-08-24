@@ -4209,6 +4209,11 @@ export type SessionCommandReceipt = {
   createdAt: string;
 };
 
+export type SessionPromptRouting =
+  | "accepted_for_execution"
+  | "queued_for_execution"
+  | "accepted_for_steering";
+
 export type ComposerDraft = {
   revision: number;
   text: string;
@@ -4425,6 +4430,8 @@ export type SubmitComposerDraftResponse = {
   accepted: SessionEvent;
   turn: SessionTurn;
   draft: ComposerDraft;
+  receipt: SessionCommandReceipt;
+  routing: SessionPromptRouting;
   interruptionCount: number;
   replay: boolean;
 };

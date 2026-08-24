@@ -176,7 +176,7 @@ export function modelRequestPolicyForProvider(
   provider: ResolvedModelProvider,
 ): ModelJsonRequestPolicy {
   return ({ path, body }) => {
-    if (provider.id === "azure") {
+    if (provider.wireProfile === "azure-openai") {
       return azureModelRequestPolicy({ body });
     }
     if (provider.kind === "codex-subscription") {

@@ -6,7 +6,10 @@ import {
 import { type SandboxFileDownload, type SandboxFileDownloadFailure } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { mergeResourceRefs } from "../common";
-import { gitHubTokenMintSelections } from "../environment";
+import {
+  gitHubTokenAuthorizationSelections,
+  type GitHubTokenMintAuthorization,
+} from "../environment";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
 import { CAPABILITY_DESCRIPTORS, resourceMountPath, type ResourceRef } from "@opengeni/contracts";
@@ -42,16 +45,21 @@ export async function assertGitHubResourcesRemainAuthorized(
   db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
   workspaceId: string,
   resources: ResourceRef[],
+  authorize?: GitHubTokenMintAuthorization,
 ): Promise<void> {
   // Must check exactly what sandboxEnvironmentForRun would mint a token for,
   // so the selection is derived from the same extraction as the mint path.
-  for (const selection of gitHubTokenMintSelections(resources)) {
-    await assertGitHubTokenMintSelectionAuthorized(
-      db,
-      workspaceId,
-      selection.installationId,
-      selection.repositoryIds,
-    );
+  for (const selection of gitHubTokenAuthorizationSelections(resources)) {
+    if (authorize) {
+      await authorize(selection);
+    } else {
+      await assertGitHubTokenMintSelectionAuthorized(
+        db,
+        workspaceId,
+        selection.installationId,
+        selection.repositoryIds,
+      );
+    }
   }
 }
 

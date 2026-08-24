@@ -560,6 +560,12 @@ describe("transactional session workflow wake outbox", () => {
       ),
     );
     expect(paused.interruptionCount).toBe(1);
+    expect(paused.workflowWake).toMatchObject({
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+    });
     const claimed = (await claimPendingSessionWorkflowWakes(client.db, 1000)).find(
       (entry) => entry.sessionId === ctx.session.id,
     );
@@ -641,7 +647,7 @@ describe("transactional session workflow wake outbox", () => {
         payload: expect.objectContaining({ status: "idle", reason: "paused_recovery_settled" }),
       }),
     ]);
-    await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+    const resumed = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
         mutateSessionControlInTransaction(tx as unknown as typeof db, {
           accountId: ctx.grant.accountId,
@@ -653,6 +659,12 @@ describe("transactional session workflow wake outbox", () => {
         }),
       ),
     );
+    expect(resumed.workflowWake).toMatchObject({
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+    });
 
     const [attempt] = await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
       db

@@ -28,6 +28,10 @@ import {
   spreadsheetFormulaProjectionCorpusBytes,
   type FormulaCorpusInput,
 } from "./formula-projection-corpus";
+import {
+  captureArtifactKernelRustTool,
+  resolveArtifactKernelRustToolchain,
+} from "../../../../scripts/artifact-kernel-rust";
 
 const root = import.meta.dir;
 const nativePath = process.env.OPENGENI_ARTIFACT_KERNEL_NATIVE_PATH;
@@ -38,9 +42,11 @@ if (!nativePath || !wasmDirectory) {
   );
 }
 
-const fixtureProcess = Bun.spawn(
+const rustToolchain = await resolveArtifactKernelRustToolchain(resolve(root, "../../../.."));
+const fixtureText = await captureArtifactKernelRustTool(
+  rustToolchain,
+  "cargo",
   [
-    "cargo",
     "run",
     "--locked",
     "--quiet",
@@ -49,10 +55,8 @@ const fixtureProcess = Bun.spawn(
     "--bin",
     "conformance_fixture",
   ],
-  { cwd: root, stdout: "pipe", stderr: "inherit" },
+  { cwd: root },
 );
-const fixtureText = await new Response(fixtureProcess.stdout).text();
-if ((await fixtureProcess.exited) !== 0) throw new Error("Direct-kernel fixture generation failed");
 const fixture = JSON.parse(fixtureText) as Record<
   | "buildIdentity"
   | "namespace"

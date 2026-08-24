@@ -1636,6 +1636,7 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
       label: "Gateway",
       kind: "vercel-gateway-managed",
       api: "responses",
+      wireProfile: "openai",
       builtin: false,
     });
     const gatewayResult = gatewayPolicy({ path: "/responses", body: gatewayBody });
@@ -1656,11 +1657,12 @@ describe("buildModelInstance — chat vs responses Model selection per provider 
     const azureInput = Object.freeze([computerCall, computerOutput]);
     const azureBody = Object.freeze({ model: "gpt-5.6-sol", input: azureInput });
     const azurePolicy = modelRequestPolicyForProvider({
-      id: "azure",
-      label: "Azure OpenAI",
+      id: "azure-secondary",
+      label: "Secondary Azure OpenAI",
       kind: "api-key",
       api: "responses",
-      builtin: true,
+      wireProfile: "azure-openai",
+      builtin: false,
     });
     const azureResult = azurePolicy({ path: "/responses", body: azureBody });
     const projected = azureResult?.body?.input as Array<Record<string, unknown>>;

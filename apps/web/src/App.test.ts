@@ -1356,6 +1356,70 @@ describe("projectSessionTimeline", () => {
     expect(items).toEqual([]);
   });
 
+  test("keeps an accepted create prompt in chat while its initial turn is queued", () => {
+    const clientEventId = "create-client-event";
+    const items = projectSessionTimeline(
+      session({ initialMessage: "Queued bootstrap" }),
+      [
+        {
+          ...event(1, "user.message", { text: "Queued bootstrap" }),
+          clientEventId,
+          turnId: null,
+        },
+        event(2, "turn.queued", {
+          turnId: "turn-1",
+          triggerEventId: "event-1",
+          source: "user",
+        }),
+      ],
+      clientEventId,
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
+      text: "Queued bootstrap",
+      reconciliationKey: `user-message:${clientEventId}`,
+    });
+  });
+
+  test("renders exactly one reconciled create prompt before any event arrives", () => {
+    const clientEventId = "create-before-events";
+    const items = projectSessionTimeline(
+      session({ initialMessage: "Bootstrap immediately" }),
+      [],
+      clientEventId,
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
+      text: "Bootstrap immediately",
+      reconciliationKey: `user-message:${clientEventId}`,
+    });
+  });
+
+  test("hands an accepted create prompt to its durable row without duplicating it", () => {
+    const clientEventId = "create-client-event";
+    const items = projectSessionTimeline(
+      session({ initialMessage: "Bootstrap" }),
+      [
+        {
+          ...event(1, "user.message", { text: "Bootstrap" }),
+          clientEventId,
+        },
+        event(2, "turn.started", {}),
+      ],
+      clientEventId,
+    );
+
+    expect(items.filter((item) => item.kind === "user-message")).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: "event-1",
+      reconciliationKey: `user-message:${clientEventId}`,
+    });
+  });
+
   test("preserves archived terminal failure payloads in the main timeline projection", () => {
     const items = projectSessionTimeline(session({ status: "cancelled" }), [
       event(1, "user.message", { text: "Inspect" }),

@@ -6743,6 +6743,14 @@ export const SessionCommandReceipt = z.object({
 });
 export type SessionCommandReceipt = z.infer<typeof SessionCommandReceipt>;
 
+/** The server-owned destination of an accepted human prompt at admission time. */
+export const SessionPromptRouting = z.enum([
+  "accepted_for_execution",
+  "queued_for_execution",
+  "accepted_for_steering",
+]);
+export type SessionPromptRouting = z.infer<typeof SessionPromptRouting>;
+
 export const ComposerDraft = z.object({
   revision: z.number().int().nonnegative(),
   text: z.string(),
@@ -14137,6 +14145,10 @@ export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageReque
 export const SteerSessionMessageResponse = z.object({
   accepted: SessionEvent,
   turn: SessionTurn,
+  receipt: SessionCommandReceipt,
+  routing: SessionPromptRouting,
+  interruptionCount: z.number().int().nonnegative(),
+  replay: z.boolean(),
 });
 export type SteerSessionMessageResponse = z.infer<typeof SteerSessionMessageResponse>;
 
@@ -14144,6 +14156,8 @@ export const SubmitComposerDraftResponse = z.object({
   accepted: SessionEvent,
   turn: SessionTurn,
   draft: ComposerDraft,
+  receipt: SessionCommandReceipt,
+  routing: SessionPromptRouting,
   interruptionCount: z.number().int().nonnegative(),
   replay: z.boolean(),
 });

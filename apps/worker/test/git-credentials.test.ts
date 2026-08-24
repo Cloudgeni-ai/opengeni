@@ -194,7 +194,20 @@ describe("sandbox git credentials", () => {
       authority,
       authorizeGitHubTokenMint: async (selection) => {
         events.push("authorize");
-        expect(selection).toEqual({ installationId: 123, repositoryIds: [456] });
+        expect(selection).toEqual({
+          credentialBindingId: "github-installation:123",
+          installationId: 123,
+          repositoryIds: [456],
+          repositoryRefs: [
+            {
+              uri: "https://github.com/acme/private.git",
+              ref: "main",
+              provider: "github",
+              repositoryId: 456,
+              installationId: 123,
+            },
+          ],
+        });
       },
       gitCredentials: async (input) => {
         events.push("mint");

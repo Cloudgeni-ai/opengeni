@@ -932,6 +932,17 @@ fi
     printf 'OPENGENI_SELFHOSTED_RELAY_URL=%s\n' "${OPENGENI_SELFHOSTED_RELAY_URL}"
     printf 'OPENGENI_PUBLIC_BASE_URL=%s\n' "${OPENGENI_PUBLIC_BASE_URL}"
     printf 'OPENGENI_AGENT_STABLE_VERSION=%s\n' "${OPENGENI_AGENT_STABLE_VERSION}"
+    # Component launchers (`bun run dev:api`, `dev:worker:*`) source .env and
+    # then this file. Persist the complete NATS auth-callout identity here so a
+    # restarted component does not silently lose the in-process defaults and
+    # reconnect anonymously to a server that now requires authentication.
+    printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED=%s\n' "${OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED}"
+    printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY=%s\n' "${OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY}"
+    printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME=%s\n' "${OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME}"
+    printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_USER=%s\n' "${OPENGENI_SELFHOSTED_NATS_CALLOUT_USER}"
+    printf 'OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD=%s\n' "${OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD}"
+    printf 'OPENGENI_SELFHOSTED_NATS_CONTROL_USER=%s\n' "${OPENGENI_SELFHOSTED_NATS_CONTROL_USER}"
+    printf 'OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD=%s\n' "${OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD}"
   fi
   if [ "$start_local_relay" = "1" ]; then
     printf 'OPENGENI_RELAY_BIND=%s\n' "${OPENGENI_RELAY_BIND}"

@@ -245,37 +245,41 @@ describe("workspace control lock fairness", () => {
     await held;
   });
 
-  test("a Send on a paused branch escalates to the exclusive prefix without a deadlock", async () => {
+  test("a Send on a paused branch stays shared, queued, and inert", async () => {
     const { grant, sessions } = await fixture(8);
     for (const sessionId of sessions) await controlSession(grant, sessionId, "pause");
     const admitted = deferred();
     const release = deferred();
-    const held = send(grant, sessions[0]!, "resume by send", {
+    const held = send(grant, sessions[0]!, "queue while paused", {
       holdOpen: { admitted: admitted.resolve, release: release.promise },
     });
     await admitted.promise;
     try {
       const probe = await probeControlPrefix(grant.workspaceId);
-      expect(probe.advisoryShared).toBe(false);
-      expect(probe.rowShare).toBe(false);
+      expect(probe.advisoryShared).toBe(true);
+      expect(probe.rowShare).toBe(true);
+      expect(probe.advisoryExclusive).toBe(false);
+      expect(probe.rowUpdate).toBe(false);
     } finally {
       release.resolve();
     }
     const first = await held;
-    expect(first.workspaceControlEventId).not.toBeNull();
-    expect(await effectiveState(grant, sessions[0]!)).toBe("active");
+    expect(first.workspaceControlEventId).toBeNull();
+    expect(first.routing).toBe("queued_for_execution");
+    expect(await effectiveState(grant, sessions[0]!)).toBe("paused");
 
-    // Concurrent Sends to paused sessions all take the shared prefix, observe
-    // the pause, release it through the savepoint, and queue for the exclusive
-    // prefix. None may fail with a deadlock (no retry wrapper is involved here).
+    // Concurrent Sends to paused sessions share the prefix and remain queued.
     const results = await Promise.all(
-      sessions.slice(1).map((sessionId, index) => send(grant, sessionId, `resume ${index}`)),
+      sessions.slice(1).map((sessionId, index) => send(grant, sessionId, `queue ${index}`)),
     );
-    for (const result of results) expect(result.workspaceControlEventId).not.toBeNull();
-    for (const sessionId of sessions) expect(await effectiveState(grant, sessionId)).toBe("active");
+    for (const result of results) {
+      expect(result.workspaceControlEventId).toBeNull();
+      expect(result.routing).toBe("queued_for_execution");
+    }
+    for (const sessionId of sessions) expect(await effectiveState(grant, sessionId)).toBe("paused");
   });
 
-  test("a Send arriving during a Pause waits for it and then resumes its branch", async () => {
+  test("a Send arriving during a Pause waits for it and then stays queued", async () => {
     const { grant, sessions } = await fixture();
     const applied = deferred();
     const release = deferred();
@@ -288,10 +292,11 @@ describe("workspace control lock fairness", () => {
     release.resolve();
     await pause;
     const result = await blockedSend;
-    // The Send took the shared prefix after the Pause committed, observed the
-    // paused workspace, and escalated to resume its own branch.
-    expect(result.workspaceControlEventId).not.toBeNull();
-    expect(await effectiveState(grant, sessions[0]!)).toBe("active");
+    // The Send takes the shared prefix after Pause commits, but does not hide
+    // a Resume inside ordinary queue admission.
+    expect(result.workspaceControlEventId).toBeNull();
+    expect(result.routing).toBe("queued_for_execution");
+    expect(await effectiveState(grant, sessions[0]!)).toBe("paused");
 
     // And the mirror image: a Pause waits for an in-flight Send to commit.
     const admitted = deferred();
@@ -484,11 +489,13 @@ describe("workspace control lock fairness", () => {
       const outer = await lockWorkspaceInferenceControlForAdmission(db, {
         workspaceId: grant.workspaceId,
         sessionId: sessions[0]!,
+        resumePausedBranch: true,
       });
       expect(outer.mode).toBe("update");
       const inner = await lockWorkspaceInferenceControlForAdmission(db, {
         workspaceId: grant.workspaceId,
         sessionId: sessions[0]!,
+        resumePausedBranch: true,
       });
       expect(inner.mode).toBe("update");
       expect(inner.control.revision).toEqual(outer.control.revision);

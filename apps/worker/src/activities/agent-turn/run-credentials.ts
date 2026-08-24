@@ -1,4 +1,5 @@
-import { getSessionRootId } from "@opengeni/db";
+import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
+import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
 import {
   materializeRunCredentials,
   clearRunCredentials,
@@ -198,6 +199,42 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     ? runCredentialModelNote(initialRunCredentialMaterial)
     : undefined;
   throwIfTurnOperationCancelled(cancellationSignal);
+  const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
+    const registrationId = prReviewRegistrationIdFromCredentialBinding(
+      selection.credentialBindingId,
+    );
+    if (registrationId) {
+      await resolvePrReviewGitCredential(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        registrationId,
+        provider: "github",
+        sessionId: input.sessionId,
+        rootSessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
+        repositoryRefs: selection.repositoryRefs.map((reference) => ({
+          uri: reference.uri,
+          ...(reference.expectedCommitSha !== undefined
+            ? { expectedCommitSha: reference.expectedCommitSha }
+            : {}),
+          ...(reference.repositoryId !== undefined ? { repositoryId: reference.repositoryId } : {}),
+          ...(reference.installationId !== undefined
+            ? { installationId: reference.installationId }
+            : {}),
+          ...(reference.projectId !== undefined ? { projectId: reference.projectId } : {}),
+        })),
+      });
+      return;
+    }
+    await assertGitHubTokenMintSelectionAuthorized(
+      db,
+      input.workspaceId,
+      selection.installationId,
+      selection.repositoryIds,
+    );
+  };
   await Promise.all([
     waitForTurnOperation(
       ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
@@ -205,7 +242,12 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
       undefined,
     ),
     activeSandboxBackend !== "selfhosted"
-      ? assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources)
+      ? assertGitHubResourcesRemainAuthorized(
+          db,
+          input.workspaceId,
+          turnResources,
+          authorizeGitHubTokenMint,
+        )
       : Promise.resolve(),
     assertFileResourcesRemainAuthorized(
       db,
@@ -234,14 +276,6 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   // provider may supply it; unset still self-mints GitHub from settings.
   // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
   // uses its own git creds).
-  const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
-    await assertGitHubTokenMintSelectionAuthorized(
-      db,
-      input.workspaceId,
-      selection.installationId,
-      selection.repositoryIds,
-    );
-  };
   // Git and MCP credentials share one lineage snapshot for this turn. A
   // host that supplies both ports must never see two independently resolved
   // roots for the same execution merely because the call sites are far apart.

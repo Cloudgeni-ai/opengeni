@@ -923,6 +923,59 @@ describe("OpenGeniClient", () => {
     expect((error as Error).message).not.toContain("bearer");
   });
 
+  test("interactive session commands stop waiting and preserve outcome-unknown truth", async () => {
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      sessionCommandTimeoutMs: 5,
+      // The SDK boundary must remain finite even when a custom transport
+      // incorrectly ignores AbortSignal.
+      fetch: async () => await new Promise<Response>(() => undefined),
+    });
+
+    const error = await client
+      .pauseSession(WORKSPACE_ID, SESSION_ID, { clientEventId: "bounded-pause" })
+      .catch((cause) => cause);
+
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({
+      status: 0,
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+    });
+  });
+
+  test("rejects invalid interactive command deadlines instead of creating instant or immortal timeouts", () => {
+    expect(
+      () =>
+        new OpenGeniClient({
+          baseUrl: "https://api.example.test",
+          sessionCommandTimeoutMs: Number.NaN,
+        }),
+    ).toThrow("sessionCommandTimeoutMs must be a finite positive number");
+    expect(
+      () =>
+        new OpenGeniClient({
+          baseUrl: "https://api.example.test",
+          sessionCommandTimeoutMs: Number.POSITIVE_INFINITY,
+        }),
+    ).toThrow("sessionCommandTimeoutMs must be a finite positive number");
+    expect(
+      () =>
+        new OpenGeniClient({
+          baseUrl: "https://api.example.test",
+          sessionCommandTimeoutMs: -1,
+        }),
+    ).toThrow("sessionCommandTimeoutMs must be a finite positive number");
+    expect(
+      () =>
+        new OpenGeniClient({
+          baseUrl: "https://api.example.test",
+          sessionCommandTimeoutMs: 0,
+        }),
+    ).toThrow("sessionCommandTimeoutMs must be a finite positive number");
+  });
+
   test("non-JSON error responses discard the body instead of surfacing proxy text", async () => {
     const { client } = makeClient(() => new Response("workspace not found", { status: 404 }));
     const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(

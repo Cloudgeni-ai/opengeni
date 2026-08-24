@@ -10,9 +10,11 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  coalesceSessionEventDeltas,
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+  sessionEventResumeSequence,
   type EventBus,
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -325,36 +327,47 @@ export async function sseSessionStream(
         });
     }, heartbeatIntervalMs);
   };
-  const send = async (event: SessionEvent) => {
-    if (event.sequence <= lastSent) return;
-    if (event.sequence > lastSent + 1) {
-      while (lastSent + 1 < event.sequence) {
-        const previousLastSent = lastSent;
-        const missing = await listSessionEvents(db, workspaceId, sessionId, {
-          after: lastSent,
-          limit: Math.min(SESSION_REPLAY_PAGE_SIZE, event.sequence - lastSent - 1),
-        });
-        if (missing.length === 0) {
-          throw new Error(
-            `Session event replay stalled before sequence ${event.sequence}; last sent ${lastSent}`,
-          );
-        }
-        for (const missed of missing) {
-          if (missed.sequence >= event.sequence) break;
-          if (missed.sequence > lastSent) {
-            await writeFrame(formatSessionEventSse(missed));
-            lastSent = missed.sequence;
-          }
-        }
-        if (lastSent === previousLastSent) {
-          throw new Error(
-            `Session event replay made no progress before sequence ${event.sequence}; last sent ${lastSent}`,
-          );
-        }
+  const deliverDurableThrough = async (targetSequence?: number) => {
+    while (true) {
+      if (targetSequence !== undefined && lastSent >= targetSequence) return;
+      const previousLastSent = lastSent;
+      const limit =
+        targetSequence === undefined
+          ? SESSION_REPLAY_PAGE_SIZE
+          : Math.min(SESSION_REPLAY_PAGE_SIZE, targetSequence - lastSent);
+      const page = await listSessionEvents(db, workspaceId, sessionId, {
+        after: lastSent,
+        limit,
+      });
+      const eligible =
+        targetSequence === undefined
+          ? page
+          : page.filter((event) => event.sequence <= targetSequence);
+      if (eligible.length === 0) {
+        if (targetSequence === undefined) return;
+        throw new Error(
+          `Session event replay stalled before sequence ${targetSequence}; last sent ${lastSent}`,
+        );
       }
+      // The durable audit log remains exact. The browser transport combines
+      // adjacent text deltas into bounded frames carrying `coalescedUntil`, so
+      // a long answer cannot create thousands of React renders and starve
+      // command acknowledgements behind its own token stream.
+      for (const projected of coalesceSessionEventDeltas(eligible)) {
+        await writeFrame(formatSessionEventSse(projected));
+        lastSent = sessionEventResumeSequence(projected);
+      }
+      if (lastSent <= previousLastSent) {
+        throw new Error(`Session event replay made no progress after sequence ${lastSent}`);
+      }
+      if (targetSequence !== undefined && lastSent >= targetSequence) return;
+      if (targetSequence === undefined && page.length < limit) return;
     }
-    await writeFrame(formatSessionEventSse(event));
-    lastSent = event.sequence;
+  };
+  const send = async (event: SessionEvent) => {
+    const targetSequence = sessionEventResumeSequence(event);
+    if (targetSequence <= lastSent) return;
+    await deliverDurableThrough(targetSequence);
   };
   delivery = createLatestWinsDelivery(send, fail);
 
@@ -376,12 +389,7 @@ export async function sseSessionStream(
     }
     unsubscribe = release;
 
-    await replaySessionEvents(
-      (cursor, limit) => listSessionEvents(db, workspaceId, sessionId, cursor, limit),
-      send,
-      after,
-      SESSION_REPLAY_PAGE_SIZE,
-    );
+    await deliverDurableThrough();
     await writeFrame(": connected\n\n");
     scheduleHeartbeat();
     bootstrapping = false;

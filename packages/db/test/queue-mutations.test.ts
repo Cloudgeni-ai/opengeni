@@ -880,7 +880,7 @@ describe("canonical queue commands", () => {
     expect(settledInterruption).toMatchObject({ state: "settled" });
   });
 
-  test("Send atomically resumes a paused branch, submits the exact draft, and replays", async () => {
+  test("Send stays queued behind Pause, submits the exact draft, and replays", async () => {
     const value = await fixture();
     const paused = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
@@ -944,7 +944,11 @@ describe("canonical queue commands", () => {
       await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
         evaluateSessionControl(db, value.grant.workspaceId!, value.session.id),
       ),
-    ).toMatchObject({ state: "active" });
+    ).toMatchObject({ state: "paused" });
+    expect(submitted).toMatchObject({
+      routing: "queued_for_execution",
+      workspaceControlEventId: null,
+    });
     const drafts = await withWorkspaceSubjectRls(
       client.db,
       value.grant.workspaceId!,

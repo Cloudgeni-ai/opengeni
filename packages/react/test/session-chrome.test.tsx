@@ -308,7 +308,7 @@ describe("SessionChrome", () => {
     expect(panel?.textContent).not.toContain("realtime_delegation");
   });
 
-  test("presents an accepted Steer as changing direction instead of queued", async () => {
+  test("keeps accepted Steer out of queue chrome", async () => {
     const steeringTurn = fakeTurn({
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       prompt: "Focus on the authentication failure first",
@@ -324,22 +324,13 @@ describe("SessionChrome", () => {
       <SessionChrome queue={queue({ queue: [steeringTurn, laterTurn] })} composer={composer()} />,
     );
 
-    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="steering"]',
-    );
     const queueChip = mounted.container.querySelector<HTMLButtonElement>(
       '[data-og-session-chrome-signal="queue"]',
     );
-    expect(steeringChip?.textContent).toContain("Changing direction");
-    expect(steeringChip?.textContent).toContain("Focus on the authentication failure first");
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
+    ).toBeNull();
     expect(queueChip?.textContent).toContain("1 queued prompt");
-
-    await act(async () => steeringChip?.click());
-    const steeringPanel = mounted.container.querySelector(
-      '[data-og-session-chrome-panel="steering"]',
-    );
-    expect(steeringPanel?.textContent).toContain("Direction accepted");
-    expect(steeringPanel?.textContent).not.toContain("stopped");
 
     await act(async () => queueChip?.click());
     const queuePanel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
@@ -347,7 +338,7 @@ describe("SessionChrome", () => {
     expect(queuePanel?.textContent).not.toContain("Focus on the authentication failure first");
   });
 
-  test("shows a composer Steer optimistically before the server responds", async () => {
+  test("does not manufacture chrome for an optimistic Steer", async () => {
     mounted = await renderComponent(
       <SessionChrome
         queue={queue({ queue: [] })}
@@ -364,12 +355,225 @@ describe("SessionChrome", () => {
       />,
     );
 
-    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="steering"]',
-    );
-    expect(steeringChip?.textContent).toContain("Changing direction");
-    expect(steeringChip?.textContent).toContain("Use the smaller patch");
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
+    ).toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).toBeNull();
+  });
+
+  test("lands an optimistic Send in the queue instead of chat chrome", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "client-send-queued-1",
+              delivery: "send",
+              destination: "queue",
+              text: "Run this after the current task",
+              annotations: [],
+              resources: [],
+              occurredAt: new Date().toISOString(),
+              state: "sending",
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
+    ).toContain("1 queued prompt");
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expect(
+      mounted.container.querySelector("[data-optimistic-queue-message]")?.textContent,
+    ).toContain("Run this after the current task");
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
+    ).toBeNull();
+  });
+
+  test("a live queued Send marks the stable queue chip without opening or moving the drawer", async () => {
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} composer={composer()} />,
+    );
+
+    await mounted.rerender(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "client-send-arrival-1",
+              delivery: "send",
+              destination: "queue",
+              text: "Run after the active turn",
+              annotations: [],
+              resources: [],
+              occurredAt: new Date().toISOString(),
+              state: "sending",
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
+    ).toContain("1 queued prompt");
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).toBeNull();
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-queue-arrival"]'),
+    ).not.toBeNull();
+  });
+
+  test("stops animating once an optimistic queue placement is confirmed", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        composer={composer({
+          optimisticMessages: [
+            {
+              clientEventId: "client-send-confirmed-1",
+              delivery: "send",
+              destination: "queue",
+              text: "Confirmed queued work",
+              annotations: [],
+              resources: [],
+              occurredAt: new Date().toISOString(),
+              state: "queued",
+            },
+          ],
+        })}
+      />,
+    );
+
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    const row = mounted.container.querySelector("[data-optimistic-queue-message]");
+    expect(row?.textContent).toContain("Queued");
+    expect(row?.querySelector(".animate-og-spin")).toBeNull();
+  });
+
+  test("surfaces and retries an empty authoritative queue load failure", async () => {
+    let refreshCalls = 0;
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({
+          queue: [],
+          error: new Error("gateway timeout"),
+          refresh: async () => {
+            refreshCalls += 1;
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    expect(chip?.textContent).toContain("Queue needs attention");
+    await act(async () => chip?.click());
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
+    expect(panel?.textContent).toContain("Queue unavailable");
+    await act(async () => {
+      Array.from(panel?.querySelectorAll("button") ?? [])
+        .find((button) => button.textContent === "Retry")
+        ?.click();
+    });
+    expect(refreshCalls).toBe(1);
+  });
+
+  test("keeps an empty queue mutation failure visible until dismissed", async () => {
+    let dismissed = 0;
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({
+          queue: [],
+          mutationError: new Error("outcome unknown"),
+          clearMutationError: () => {
+            dismissed += 1;
+          },
+        })}
+        composer={composer()}
+      />,
+    );
+
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="queue"]',
+    );
+    expect(chip?.textContent).toContain("Queue needs attention");
+    await act(async () => chip?.click());
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="queue"]');
+    expect(panel?.textContent).toContain("Not confirmed");
+    await act(async () => {
+      Array.from(panel?.querySelectorAll("button") ?? [])
+        .find((button) => button.textContent === "Dismiss")
+        ?.click();
+    });
+    expect(dismissed).toBe(1);
+  });
+
+  test("retires the optimistic queue row once an authoritative snapshot passes its receipt", async () => {
+    const effectiveControl = pausedEffectiveControl();
+    const optimisticMessages: NonNullable<ComposerState["optimisticMessages"]> = [
+      {
+        clientEventId: "client-send-started-1",
+        delivery: "send",
+        destination: "queue",
+        turnId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        appliedQueueVersion: 4,
+        text: "This turn has already started",
+        annotations: [],
+        resources: [],
+        occurredAt: new Date().toISOString(),
+        state: "queued",
+      },
+    ];
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [], effectiveControl })}
+        composer={composer({ optimisticMessages })}
+      />,
+    );
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expect(mounted.container.querySelector("[data-optimistic-queue-message]")).not.toBeNull();
+
+    await mounted.rerender(
+      <SessionChrome
+        queue={queue({
+          snapshot: {
+            version: 4,
+            effectiveControl,
+            stoppingPreviousAttempt: false,
+            items: [],
+            pendingInputs: [],
+            pendingInputAttachment: null,
+            activePersonalConnections: [],
+          },
+          queue: [],
+          effectiveControl,
+        })}
+        composer={composer({ optimisticMessages })}
+      />,
+    );
+
+    expect(mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')).toBeNull();
+    expect(mounted.container.querySelector("[data-optimistic-queue-message]")).toBeNull();
   });
 
   test("shows accepted Steer as stopping while physical quiescence is pending", async () => {
@@ -384,19 +588,13 @@ describe("SessionChrome", () => {
       />,
     );
 
-    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="steering"]',
-    );
-    expect(steeringChip?.textContent).toContain("Stopping previous work");
-    expect(steeringChip?.textContent).not.toContain("Changing direction");
-
-    await act(async () => steeringChip?.click());
-    const steeringPanel = mounted.container.querySelector(
-      '[data-og-session-chrome-panel="steering"]',
-    );
-    expect(steeringPanel?.textContent).toContain("Direction saved");
-    expect(steeringPanel?.textContent).toContain("previous command to stop safely");
-    expect(steeringPanel?.textContent).not.toContain("agent will continue");
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
+    ).toBeNull();
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
+    ).toContain("Previous work stopping");
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
   test("shows an accepted composer Steer receipt before the queue refresh arrives", async () => {
@@ -417,11 +615,12 @@ describe("SessionChrome", () => {
       />,
     );
 
-    const steeringChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="steering"]',
-    );
-    expect(steeringChip?.textContent).toContain("Stopping previous work");
-    expect(steeringChip?.textContent).not.toContain("Changing direction");
+    expect(
+      mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
+    ).toContain("Previous work stopping");
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="steering"]'),
+    ).toBeNull();
   });
 
   test("shows a Pause receipt as stopping current work before the queue refresh arrives", async () => {
@@ -432,14 +631,10 @@ describe("SessionChrome", () => {
       />,
     );
 
-    const stoppingChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="steering"]',
-    );
-    expect(stoppingChip?.textContent).toContain("Stopping current work");
-    await act(async () => stoppingChip?.click());
     expect(
-      mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')?.textContent,
-    ).toContain("current command to stop safely");
+      mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
+    ).toContain("Current work stopping");
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
   test("shows stopping even when no Steer is queued", async () => {
@@ -453,18 +648,26 @@ describe("SessionChrome", () => {
       />,
     );
 
-    const stoppingChip = mounted.container.querySelector<HTMLButtonElement>(
-      '[data-og-session-chrome-signal="steering"]',
-    );
-    expect(stoppingChip?.textContent).toContain("Stopping current work");
-    await act(async () => stoppingChip?.click());
     expect(
-      mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')?.textContent,
-    ).toContain("current command to stop safely");
+      mounted.container.querySelector('[data-testid="session-chrome-stopping"]')?.textContent,
+    ).toContain("Current work stopping");
+    expect(mounted.container.querySelector('[data-og-session-chrome-panel="steering"]')).toBeNull();
   });
 
   test("expands queue and reveals hover actions wired to queue APIs", async () => {
     const calls: string[] = [];
+    const appliedDrafts: Array<NonNullable<ComposerState["draft"]>> = [];
+    const checkedOut: NonNullable<ComposerState["draft"]> = {
+      revision: 3,
+      text: "first queued prompt",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: "11111111-1111-4111-8111-111111111111",
+      sourceTurnVersion: 1,
+      updatedAt: new Date().toISOString(),
+    };
     const q = queue({
       removeTurn: async (turnId) => {
         calls.push(`remove:${turnId}`);
@@ -480,10 +683,17 @@ describe("SessionChrome", () => {
       },
       editTurn: async (turnId) => {
         calls.push(`edit:${turnId}`);
-        return null;
+        return checkedOut;
       },
     });
-    mounted = await renderComponent(<SessionChrome queue={q} composer={composer()} />);
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={q}
+        composer={composer({
+          applyDraft: (draft) => appliedDrafts.push(draft),
+        })}
+      />,
+    );
 
     const queueChip = mounted.container.querySelector<HTMLButtonElement>(
       '[data-og-session-chrome-signal="queue"]',
@@ -513,6 +723,14 @@ describe("SessionChrome", () => {
     expect(steer).not.toBeNull();
     expect(edit).not.toBeNull();
     expect(moveDown).not.toBeNull();
+    expect(steer?.disabled).toBe(true);
+
+    // The optimistic→authoritative row handoff must settle before pointer
+    // actions become available; otherwise a press can be lost on DOM replace.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 260));
+    });
+    expect(steer?.disabled).toBe(false);
 
     await act(async () => {
       steer?.click();
@@ -523,6 +741,7 @@ describe("SessionChrome", () => {
     expect(calls).toContain("steer:11111111-1111-4111-8111-111111111111");
     expect(calls).toContain("remove:11111111-1111-4111-8111-111111111111");
     expect(calls).toContain("edit:11111111-1111-4111-8111-111111111111");
+    expect(appliedDrafts).toEqual([checkedOut]);
     expect(
       calls.some((entry) => entry.startsWith("move:11111111-1111-4111-8111-111111111111:")),
     ).toBe(true);
@@ -658,7 +877,7 @@ describe("SessionChrome", () => {
       agentsChip?.click();
     });
     const body = mounted.container.querySelector<HTMLElement>(
-      "[data-og-session-chrome-panel-shell] > div",
+      "[data-og-session-chrome-panel-shell] > div > div",
     );
     expect(body).not.toBeNull();
     expect(body?.style.maxHeight).toBe("var(--og-session-chrome-panel-max-height)");

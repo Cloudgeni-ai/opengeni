@@ -18,6 +18,7 @@ let client: DbClient;
 let app: Hono;
 let bus: MemoryEventBus;
 let grant: Awaited<ReturnType<typeof bootstrapWorkspace>>["workspaceGrants"][number];
+let postCommitTasks: Array<() => Promise<void>> = [];
 
 beforeAll(async () => {
   const explicitDatabaseUrl = process.env.OPENGENI_WORKSPACE_CONTROL_TEST_DATABASE_URL;
@@ -65,15 +66,25 @@ beforeAll(async () => {
     objectStorage: null,
     documentIndexer: { indexDocument: noop },
     getDocumentServices: () => ({}) as never,
+    schedulePromptPostCommit: (task: () => Promise<void>) => {
+      postCommitTasks.push(task);
+    },
   } as unknown as ApiRouteDeps;
   app = new Hono();
   registerWorkspaceRoutes(app, deps);
 }, 180_000);
 
 afterAll(async () => {
+  await flushPostCommitTasks();
   await client?.close();
   await shared?.release();
 }, 60_000);
+
+async function flushPostCommitTasks(): Promise<void> {
+  const tasks = postCommitTasks;
+  postCommitTasks = [];
+  await Promise.all(tasks.map(async (task) => await task()));
+}
 
 async function authorization(subjectId = grant.subjectId): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(SECRET, {
@@ -156,6 +167,9 @@ describe("workspace control event API", () => {
       },
     );
     expect(changed.status).toBe(200);
+    expect(postCommitTasks).toHaveLength(1);
+    expect(bus.publishedWorkspaceControl).toHaveLength(0);
+    await flushPostCommitTasks();
     expect(bus.publishedWorkspaceControl).toHaveLength(1);
     expect(bus.publishedWorkspaceControl[0]).toMatchObject({
       sequence: 1,
@@ -205,6 +219,7 @@ describe("workspace control event API", () => {
       },
     );
     expect(resumed.status).toBe(200);
+    await flushPostCommitTasks();
     const afterFailure = await app.request(
       `http://x/v1/workspaces/${grant.workspaceId}/control-events?after=1&limit=10`,
       { headers: { authorization: auth } },

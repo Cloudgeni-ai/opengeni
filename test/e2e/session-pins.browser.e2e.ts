@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
 import { createDb, createSession, grantWorkspaceAccess, removeWorkspaceMember } from "@opengeni/db";
-import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import { signDelegatedAccessToken, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
   acquireSharedTestDatabase,
@@ -1017,7 +1017,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         "A second prompt queued from the composer",
       );
       await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 20_000 });
-      await queueChip.click();
+      // A freshly queued prompt intentionally opens the queue for the transfer
+      // animation. Preserve that open state; only click when an older client
+      // or reduced host did not open it.
+      if ((await queueChip.getAttribute("aria-expanded")) !== "true") {
+        await queueChip.click();
+      }
       await chrome.getByRole("list", { name: "Queued prompts" }).waitFor();
       const queuePanel = chrome.locator('[data-og-session-chrome-panel-frame="queue"]');
       await waitFor(
@@ -1100,8 +1105,23 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await chrome.getByRole("button", { name: "Steer queued prompt 2" }).click();
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
-      await chrome.getByText("Changing direction…", { exact: true }).waitFor();
-      await chrome.getByText("A second prompt queued from the composer (edited)").waitFor();
+      const timeline = desktopPage.getByTestId("session-timeline");
+      try {
+        await timeline
+          .getByText("A second prompt queued from the composer (edited)", { exact: true })
+          .waitFor({ timeout: 10_000 });
+      } catch (cause) {
+        const eventResponse = await fetch(
+          `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${manager.id}/events?limit=100&payloadMode=full`,
+          { headers: ownerHeaders },
+        );
+        const eventDiagnostics = (await eventResponse.json()) as SessionEvent[];
+        throw new Error(
+          `Steered queue prompt did not enter chat. Timeline=${JSON.stringify(await timeline.innerText())}; relevantEvents=${JSON.stringify(eventDiagnostics.filter((event) => event.type === "user.message" || event.type === "turn.queued" || event.type === "session.control.steer_requested"))}`,
+          { cause },
+        );
+      }
+      expect(await chrome.getByText("Changing direction…", { exact: true }).count()).toBe(0);
       await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
       await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
 
@@ -1118,14 +1138,25 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         "A replacement prompt after delete",
       );
       await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
-      const timeline = desktopPage.getByTestId("session-timeline");
       expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
-      expect(await timeline.getByText("A second prompt queued from the composer").count()).toBe(0);
+      const withdrawnPromptCount = await timeline
+        .getByText("A second prompt queued from the composer", { exact: true })
+        .count();
+      if (withdrawnPromptCount !== 0) {
+        const eventResponse = await fetch(
+          `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${manager.id}/events?limit=100&payloadMode=full`,
+          { headers: ownerHeaders },
+        );
+        const eventDiagnostics = (await eventResponse.json()) as SessionEvent[];
+        throw new Error(
+          `Withdrawn queue prompt remained in chat. Timeline=${JSON.stringify(await timeline.innerText())}; relevantEvents=${JSON.stringify(eventDiagnostics.filter((event) => event.type === "user.message" || event.type === "turn.queued" || event.type === "session.queue.changed" || event.type === "session.control.steer_requested"))}`,
+        );
+      }
 
       // A recursive Pause is visible and actionable from a deeply nested
-      // session. Sending there atomically resumes only that selected branch;
-      // it does not silently resume the manager or make the submitted prompt
-      // sit inert. The header breadcrumb remains bounded and exposes every
+      // session. Sending there remains inert in that selected branch's queue;
+      // it does not silently resume the child, manager, or workspace. The
+      // header breadcrumb remains bounded and exposes every
       // ancestor (the middle ancestors collapse into one explicit menu).
       await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
@@ -1153,14 +1184,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         deepChild.id,
         "Run this selected nested session through the parent Pause",
       );
-      await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage
         .getByTestId("session-chrome-queue")
         .getByText("1 queued prompt", { exact: true })
         .waitFor();
 
-      // The manager remains paused: explicit nested execution is a scoped
-      // override, never a hidden workspace/ancestor Resume.
+      // The manager remains paused: queueing in a descendant is never a hidden
+      // workspace/ancestor Resume.
       await desktopPage.goto(managerUrl);
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
@@ -1822,7 +1853,7 @@ async function submitQueuedComposerPrompt(
   expectedText: string,
 ): Promise<void> {
   await waitForComposerDraftText(page, apiBaseUrl, workspaceId, sessionId, expectedText);
-  const send = page.getByRole("button", { name: /Send message|Send and resume/ });
+  const send = page.getByRole("button", { name: /Send message|Add message to queue/ });
   await waitFor(async () => !(await send.isDisabled()), { timeoutMs: 10_000 });
   const submitted = page.waitForResponse(
     (response) =>
