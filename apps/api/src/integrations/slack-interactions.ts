@@ -1327,8 +1327,7 @@ async function resolveSlackRouteForEntry(
     candidates,
     // The candidate set is built from the same derived pointer, so reading it
     // again would be a second query for an answer already in hand.
-    personalWorkspaceId:
-      candidates.find((candidate) => candidate.personal)?.workspaceId ?? null,
+    personalWorkspaceId: candidates.find((candidate) => candidate.personal)?.workspaceId ?? null,
     routingEnabled: true,
     askEnabled: options.askEnabled,
   });

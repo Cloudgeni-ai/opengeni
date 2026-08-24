@@ -1371,9 +1371,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       select count(*)::int as n from sessions
       where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
     expect(sessions!.n).toBe(0);
-    const refusal = value.slack.posts.find((post) =>
-      post.text.includes("No session was created."),
-    );
+    const refusal = value.slack.posts.find((post) => post.text.includes("No session was created."));
     expect(refusal?.text).toContain("do not have access");
   });
 

@@ -107,9 +107,9 @@ describe("the strict workspace prefix", () => {
 
 describe("direct message detection", () => {
   test("covers both the dm trigger and a D-prefixed channel", () => {
-    expect(
-      isSlackDirectMessageConversation({ triggerKind: "dm", slackChannelId: "C-OPEN" }),
-    ).toBe(true);
+    expect(isSlackDirectMessageConversation({ triggerKind: "dm", slackChannelId: "C-OPEN" })).toBe(
+      true,
+    );
     expect(
       isSlackDirectMessageConversation({ triggerKind: "app_mention", slackChannelId: "D-SAM" }),
     ).toBe(true);

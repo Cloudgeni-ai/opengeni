@@ -161,12 +161,14 @@ describe("migration 0337 routed Slack action handles", () => {
     // The one UPDATE in this file is over a FORCE-RLS table, so it must be
     // wrapped in the owner-only window or it matches zero rows and reports
     // success.
-    const update = source.indexOf("UPDATE \"slack_shared_task_origins\"");
+    const update = source.indexOf('UPDATE "slack_shared_task_origins"');
     expect(update).toBeGreaterThan(0);
     expect(source.lastIndexOf("NO FORCE ROW LEVEL SECURITY", update)).toBeGreaterThan(0);
     expect(source.indexOf("FORCE ROW LEVEL SECURITY;", update)).toBeGreaterThan(update);
     // The handle backfill reads a FORCE-RLS table and needs the same window.
-    const backfill = source.indexOf("INSERT INTO opengeni_private.slack_action_handle_tenancy (\n  handle_id");
+    const backfill = source.indexOf(
+      "INSERT INTO opengeni_private.slack_action_handle_tenancy (\n  handle_id",
+    );
     expect(backfill).toBeGreaterThan(0);
     expect(source.lastIndexOf("NO FORCE ROW LEVEL SECURITY", backfill)).toBeGreaterThan(0);
     expect(source).toContain("REVOKE ALL ON FUNCTION");
@@ -206,9 +208,7 @@ describe("migration 0337 routed Slack action handles", () => {
       });
       expect(observed.direct).toBe(0);
       expect(observed.after).toBe(0);
-      expect(observed.probed).toEqual([
-        { account_id: ACCOUNT, workspace_id: TARGET_WORKSPACE },
-      ]);
+      expect(observed.probed).toEqual([{ account_id: ACCOUNT, workspace_id: TARGET_WORKSPACE }]);
     } finally {
       await app.end({ timeout: 5 });
     }
@@ -303,9 +303,7 @@ describe("migration 0337 routed Slack action handles", () => {
       select count(*)::int as n from opengeni_private.slack_action_handle_tenancy
       where handle_id = ${doomed}::uuid`;
     expect(present?.n).toBe(1);
-    await owned.admin.unsafe(
-      `delete from slack_interaction_action_handles where id = '${doomed}'`,
-    );
+    await owned.admin.unsafe(`delete from slack_interaction_action_handles where id = '${doomed}'`);
     const [gone] = await owned.admin<Array<{ n: number }>>`
       select count(*)::int as n from opengeni_private.slack_action_handle_tenancy
       where handle_id = ${doomed}::uuid`;
