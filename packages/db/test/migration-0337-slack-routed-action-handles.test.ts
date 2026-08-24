@@ -38,8 +38,8 @@ let probeRole: string | null = null;
  * the tenant context and the gate state a real writer establishes, and 0214's
  * commit guard rejects a transaction that reaches COMMIT unfinalized.
  */
-async function insertTargetSession(owned: OwnerMigratedTestDatabase): Promise<void> {
-  await owned.admin.begin(async (sql) => {
+async function insertTargetSession(database: OwnerMigratedTestDatabase): Promise<void> {
+  await database.admin.begin(async (sql) => {
     await sql`select set_config('opengeni.account_id', ${ACCOUNT}, true)`;
     await sql`select set_config('opengeni.workspace_id', ${TARGET_WORKSPACE}, true)`;
     await sql`select set_config('opengeni.subject_id', 'user:probe', true)`;
@@ -170,6 +170,14 @@ describe("migration 0337 routed Slack action handles", () => {
     expect(backfill).toBeGreaterThan(0);
     expect(source.lastIndexOf("NO FORCE ROW LEVEL SECURITY", backfill)).toBeGreaterThan(0);
     expect(source).toContain("REVOKE ALL ON FUNCTION");
+    // Both owner-bound guards must be restored, or the table is left readable by
+    // its owner and mutable through the immutability trigger.
+    expect(source).toContain(
+      'ALTER TABLE "slack_shared_task_origins" ENABLE TRIGGER "slack_shared_task_origins_immutable";',
+    );
+    expect(source).toContain(
+      'ALTER TABLE "slack_interaction_action_handles" FORCE ROW LEVEL SECURITY;',
+    );
     // The installation authority stays frozen.
     expect(source).not.toContain("resolve_slack_installation");
     expect(source).not.toContain("sync_slack_installation_binding");
@@ -220,7 +228,48 @@ describe("migration 0337 routed Slack action handles", () => {
     }
   }, 120_000);
 
-  test("denies the runtime role every direct privilege on the tenancy mapping", async () => {
+  test("grants opengeni_app the probe but never the tenancy mapping", async () => {
+    if (!owned) return;
+    // The probe role above is granted by this test, so what it can do proves
+    // nothing about the migration. Assert the shape the migration actually
+    // produced for the real runtime role, through the catalog.
+    const [privileges] = await owned.admin<
+      Array<{ probe: boolean; select: boolean; insert: boolean }>
+    >`
+      select
+        has_function_privilege(
+          'opengeni_app',
+          'opengeni_private.resolve_slack_action_handle_tenancy(uuid, uuid)',
+          'EXECUTE') as probe,
+        has_table_privilege(
+          'opengeni_app',
+          'opengeni_private.slack_action_handle_tenancy',
+          'SELECT') as select,
+        has_table_privilege(
+          'opengeni_app',
+          'opengeni_private.slack_action_handle_tenancy',
+          'INSERT') as insert`;
+    expect(privileges).toEqual({ probe: true, select: false, insert: false });
+  }, 120_000);
+
+  test("keeps the mapping in step when a handle is moved between workspaces", async () => {
+    if (!owned) return;
+    // The trigger watches the tenancy columns, so a corrected handle must not
+    // leave the probe answering with the old workspace.
+    await owned.admin.unsafe(`
+      select set_config('opengeni.account_id', '${ACCOUNT}', false),
+             set_config('opengeni.workspace_id', '${TARGET_WORKSPACE}', false);
+      update slack_interaction_action_handles
+        set workspace_id = '${TARGET_WORKSPACE}'
+        where id = '${HANDLE}';
+    `);
+    const [row] = await owned.admin<Array<{ workspaceId: string }>>`
+      select workspace_id as "workspaceId" from opengeni_private.slack_action_handle_tenancy
+      where handle_id = ${HANDLE}::uuid`;
+    expect(row?.workspaceId).toBe(TARGET_WORKSPACE);
+  }, 120_000);
+
+  test("denies the probe role every direct privilege on the tenancy mapping", async () => {
     if (!owned || !probeUrl) return;
     const app = postgres(probeUrl, { max: 1, onnotice: () => undefined });
     try {

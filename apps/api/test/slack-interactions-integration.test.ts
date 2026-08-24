@@ -1322,6 +1322,61 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(refusal?.text).toContain("No session was created.");
   });
 
+  test("a routed workspace the person cannot reach never falls back to another one", async () => {
+    if (!available) return;
+    // The headline rule: OpenGeni does not quietly serve this from a workspace
+    // the person does happen to belong to.
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+      linkOther: true,
+    });
+    const routed = value.routed!;
+    const channelId = "C_NO_ACCESS";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    // The other linked human is a member of the installation's workspace only.
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NO_ACCESS_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.otherSlackUserId,
+            channel: channelId,
+            ts: "1700000600.0001",
+            text: "please do this",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(await interactions(routed.workspaceId)).toHaveLength(0);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [sessions] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from sessions
+      where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
+    expect(sessions!.n).toBe(0);
+    const refusal = value.slack.posts.find((post) =>
+      post.text.includes("No session was created."),
+    );
+    expect(refusal?.text).toContain("do not have access");
+  });
+
   test("one workspace is not a choice, so an ordinary install never notices the flag", async () => {
     if (!available) return;
     // Same event, flag on, but the subject can only use the installation's

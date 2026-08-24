@@ -64,6 +64,39 @@ export function isSlackDirectMessageConversation(
 const PREFIX = "in ";
 
 /**
+ * Trigger kinds whose text the invoking human wrote themselves. A message
+ * shortcut and a reaction both act on another person's message.
+ */
+const AUTHORED_BY_INVOKER: ReadonlySet<string> = new Set([
+  "app_mention",
+  "dm",
+  "slash_command",
+  "thread_reply",
+]);
+
+/**
+ * Split a leading bot mention off the message text.
+ *
+ * Slack delivers an `app_mention` with the mention still in the text
+ * (`<@U123> do the thing`), and OpenGeni stores it verbatim. The workspace
+ * prefix is only an override when it is the first thing the person typed, so it
+ * is parsed after the mention rather than at byte 0 of the raw text. Everything
+ * split off here is put back, so the message the model sees is unchanged apart
+ * from the addressing the person used to route it.
+ */
+export function splitSlackLeadingMention(
+  text: string,
+  botUserId: string | null,
+): { lead: string; rest: string } {
+  if (!botUserId || !/^[UWB][A-Z0-9]{1,63}$/u.test(botUserId)) return { lead: "", rest: text };
+  const mention = `<@${botUserId}>`;
+  if (!text.startsWith(mention)) return { lead: "", rest: text };
+  const remainder = text.slice(mention.length);
+  const trimmed = remainder.replace(/^[ \t]+/u, "");
+  return { lead: text.slice(0, text.length - trimmed.length), rest: trimmed };
+}
+
+/**
  * The strict `in <workspace>: ...` override.
  *
  * Parsed only at byte 0, so ordinary prose that happens to contain the word
@@ -82,6 +115,8 @@ export function parseSlackWorkspacePrefix(text: string): {
   if (separator <= PREFIX.length) return null;
   const requested = text.slice(PREFIX.length, separator).trim();
   if (requested.length === 0) return null;
+  // A bare address with nothing after it is not a request.
+  if (text.slice(separator + 1).trim().length === 0) return null;
   // A label is one line. A colon further down a multi-line message is not a
   // prefix, it is punctuation.
   if (/[\r\n]/u.test(requested)) return null;
@@ -91,9 +126,13 @@ export function parseSlackWorkspacePrefix(text: string): {
 function matchCandidate(
   candidates: readonly SlackRoutableWorkspace[],
   requested: string,
-): SlackRoutableWorkspace | null {
+): SlackRoutableWorkspace | null | "ambiguous" {
   const wanted = requested.toLowerCase();
-  return candidates.find((candidate) => candidate.label.toLowerCase() === wanted) ?? null;
+  const matches = candidates.filter((candidate) => candidate.label.toLowerCase() === wanted);
+  // Two workspaces whose labels differ only by case are not a tie to break
+  // silently: guessing one is the same failure as ignoring the override.
+  if (matches.length > 1) return "ambiguous";
+  return matches[0] ?? null;
 }
 
 export type SlackRouteInputs = {
@@ -114,6 +153,8 @@ export type SlackRouteInputs = {
   personalWorkspaceId: string | null;
   /** Workspaces this subject may actually start work in, ordered stably. */
   candidates: readonly SlackRoutableWorkspace[];
+  /** The installation's bot user, so a mention does not hide the prefix. */
+  botUserId: string | null;
   /** `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`. */
   routingEnabled: boolean;
   /** Whether the first-use picker exists yet. Until it does, ambiguity keeps home. */
@@ -142,9 +183,22 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
     source: "installation" as const,
   };
 
-  // 0. With routing off this returns before any routing read is consulted, so an
-  //    existing install is byte-identical.
-  if (!input.routingEnabled) return installation;
+  // 0. With routing off no routing read is consulted, so an existing install is
+  //    byte-identical. A thread that a previous flag-on window already mapped is
+  //    still honoured, because its interaction, session and events genuinely
+  //    live there: turning the flag off must stop new routing, not strand a
+  //    conversation by addressing it in a workspace it is not in.
+  if (!input.routingEnabled) {
+    return input.threadTenancy
+      ? {
+          kind: "resolved",
+          accountId: input.threadTenancy.accountId,
+          workspaceId: input.threadTenancy.workspaceId,
+          label: null,
+          source: "thread",
+        }
+      : installation;
+  }
 
   // 1. A mapped thread keeps its workspace, even if the channel moved since.
   if (input.threadTenancy) {
@@ -159,10 +213,16 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
 
   // 2. The strict prefix override. It applies to this message only and never
   //    writes a route row: an override is not a decision about the channel.
-  const prefix = parseSlackWorkspacePrefix(input.entry.text);
+  //
+  //    Only text the invoking human actually typed can address anything. A
+  //    message shortcut and a reaction both carry SOMEONE ELSE'S message, so a
+  //    prefix found there was never an instruction to OpenGeni.
+  const prefix = AUTHORED_BY_INVOKER.has(input.entry.triggerKind)
+    ? parseSlackWorkspacePrefix(splitSlackLeadingMention(input.entry.text, input.botUserId).rest)
+    : null;
   if (prefix) {
     const named = matchCandidate(input.candidates, prefix.requested);
-    if (!named) {
+    if (named === "ambiguous" || !named) {
       return {
         kind: "denied",
         reason: "no_access_to_named",
@@ -213,12 +273,9 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
         source: "dm_personal",
       };
     }
-    return {
-      kind: "denied",
-      reason: "no_candidates",
-      requested: null,
-      candidates: input.candidates,
-    };
+    // No workspace of their own is not the same as no workspace at all. Fall
+    // through to the ordinary rules so a member of exactly one shared workspace
+    // can still work in their bot DM.
   }
 
   // 5. One workspace is not a choice. This is what keeps the flag quiet for
@@ -252,9 +309,14 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
 export function slackRoutedRequestText(
   text: string,
   resolution: SlackRouteResolution,
+  botUserId: string | null,
 ): string {
   if (resolution.kind !== "resolved" || resolution.source !== "prefix") return text;
-  return parseSlackWorkspacePrefix(text)?.remainder ?? text;
+  const { lead, rest } = splitSlackLeadingMention(text, botUserId);
+  // Reached only for a `prefix` resolution, which the authorship rule above
+  // already restricted to text the invoking human wrote.
+  const parsed = parseSlackWorkspacePrefix(rest);
+  return parsed ? `${lead}${parsed.remainder}` : text;
 }
 
 export type SlackRouteAuthorization =

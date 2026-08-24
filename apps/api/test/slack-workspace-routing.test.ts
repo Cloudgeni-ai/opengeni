@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   isSlackDirectMessageConversation,
+  splitSlackLeadingMention,
   parseSlackWorkspacePrefix,
   resolveSlackWorkspaceRoute,
   slackRoutedRequestText,
@@ -42,6 +43,7 @@ function inputs(overrides: Partial<SlackRouteInputs> = {}): SlackRouteInputs {
     dmRoute: null,
     personalWorkspaceId: null,
     candidates: [ACME, LABS],
+    botUserId: "U0BOT",
     routingEnabled: true,
     askEnabled: true,
     ...overrides,
@@ -92,12 +94,14 @@ describe("the strict workspace prefix", () => {
       inputs({ entry: { ...inputs().entry, text: "in Acme:   ship it" } }),
     );
     expect(resolution).toMatchObject({ kind: "resolved", source: "prefix" });
-    expect(slackRoutedRequestText("in Acme:   ship it", resolution)).toBe("ship it");
+    expect(slackRoutedRequestText("in Acme:   ship it", resolution, "U0BOT")).toBe("ship it");
   });
 
   test("leaves the text alone for every other source", () => {
     const resolution = resolveSlackWorkspaceRoute(inputs({ routingEnabled: false }));
-    expect(slackRoutedRequestText("in Acme: ship it", resolution)).toBe("in Acme: ship it");
+    expect(slackRoutedRequestText("in Acme: ship it", resolution, "U0BOT")).toBe(
+      "in Acme: ship it",
+    );
   });
 });
 
@@ -117,10 +121,12 @@ describe("direct message detection", () => {
 
 describe("the routing decision order", () => {
   test("with the flag off it is the installation workspace and nothing is read", () => {
+    // A channel route and an explicit prefix are both ignored. A mapped thread
+    // is NOT: its session genuinely lives there, and rollback must not address
+    // a live conversation in a workspace it is not in.
     const resolution = resolveSlackWorkspaceRoute(
       inputs({
         routingEnabled: false,
-        threadTenancy: { accountId: ACCOUNT, workspaceId: LABS.workspaceId },
         channelRoute: channelRoute(ACME.workspaceId),
         entry: { ...inputs().entry, text: "in Acme Labs: ship it" },
       }),
@@ -212,7 +218,7 @@ describe("the routing decision order", () => {
     ).toMatchObject({ kind: "resolved", workspaceId: ACME.workspaceId, source: "dm_route" });
   });
 
-  test("a direct message from someone with no workspace of their own is refused", () => {
+  test("a direct message from someone with no workspace of their own still asks", () => {
     expect(
       resolveSlackWorkspaceRoute(
         inputs({
@@ -220,7 +226,7 @@ describe("the routing decision order", () => {
           personalWorkspaceId: null,
         }),
       ),
-    ).toMatchObject({ kind: "denied", reason: "no_candidates" });
+    ).toEqual({ kind: "ask", candidates: [ACME, LABS] });
   });
 
   test("one workspace is not a choice, so it never asks", () => {
@@ -251,5 +257,115 @@ describe("the routing decision order", () => {
       workspaceId: HOME.workspaceId,
       source: "installation",
     });
+  });
+});
+
+describe("the bot mention", () => {
+  test("is split off so the prefix is the first thing the person typed", () => {
+    expect(splitSlackLeadingMention("<@U0BOT> in Acme: ship it", "U0BOT")).toEqual({
+      lead: "<@U0BOT> ",
+      rest: "in Acme: ship it",
+    });
+    expect(splitSlackLeadingMention("in Acme: ship it", "U0BOT")).toEqual({
+      lead: "",
+      rest: "in Acme: ship it",
+    });
+    // Only a LEADING mention of THIS bot.
+    expect(splitSlackLeadingMention("hi <@U0BOT> in Acme: x", "U0BOT").lead).toBe("");
+    expect(splitSlackLeadingMention("<@U0OTHER> in Acme: x", "U0BOT").lead).toBe("");
+    expect(splitSlackLeadingMention("<@U0BOT> in Acme: x", null).lead).toBe("");
+  });
+
+  test("does not hide an override on the surface routing exists for", () => {
+    // Slack delivers an app_mention with the mention still in the text. Parsing
+    // the prefix at byte 0 of the raw text would silently ignore every override
+    // typed the natural way.
+    const resolution = resolveSlackWorkspaceRoute(
+      inputs({
+        channelRoute: channelRoute(ACME.workspaceId),
+        entry: { ...inputs().entry, text: "<@U0BOT> in Acme Labs: ship it" },
+      }),
+    );
+    expect(resolution).toMatchObject({ kind: "resolved", workspaceId: LABS.workspaceId });
+    expect(slackRoutedRequestText("<@U0BOT> in Acme Labs: ship it", resolution, "U0BOT")).toBe(
+      "<@U0BOT> ship it",
+    );
+  });
+});
+
+describe("what may address a message", () => {
+  test("a message shortcut never takes a prefix out of someone else's message", () => {
+    // The text belongs to the message being acted on, not to the person
+    // invoking OpenGeni, so a prefix there was never an instruction.
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          entry: {
+            ...inputs().entry,
+            triggerKind: "message_shortcut",
+            text: "in Acme Labs: something a colleague wrote",
+          },
+          channelRoute: channelRoute(ACME.workspaceId),
+        }),
+      ),
+    ).toMatchObject({ kind: "resolved", workspaceId: ACME.workspaceId, source: "channel" });
+  });
+
+  test("a bare address with no request is not an override", () => {
+    expect(parseSlackWorkspacePrefix("in Acme:")).toBeNull();
+    expect(parseSlackWorkspacePrefix("in Acme:   ")).toBeNull();
+  });
+
+  test("two workspaces with the same label are a refusal, not a coin flip", () => {
+    const twin = { ...LABS, workspaceId: "workspace-twin", label: "Acme" };
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          candidates: [ACME, twin],
+          entry: { ...inputs().entry, text: "in acme: ship it" },
+        }),
+      ),
+    ).toMatchObject({ kind: "denied", reason: "no_access_to_named", requested: "acme" });
+  });
+});
+
+describe("turning the flag back off", () => {
+  test("still keeps a mapped thread in the workspace it actually lives in", () => {
+    // Rollback must stop NEW routing, not strand a live conversation by
+    // addressing it in a workspace its session is not in.
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          routingEnabled: false,
+          threadTenancy: { accountId: ACCOUNT, workspaceId: LABS.workspaceId },
+        }),
+      ),
+    ).toMatchObject({ kind: "resolved", workspaceId: LABS.workspaceId, source: "thread" });
+  });
+});
+
+describe("a direct message with no workspace of one's own", () => {
+  test("falls through to the ordinary rules instead of refusing", () => {
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          entry: { ...inputs().entry, triggerKind: "dm", slackChannelId: "D-SAM" },
+          personalWorkspaceId: null,
+          candidates: [ACME],
+        }),
+      ),
+    ).toMatchObject({ kind: "resolved", workspaceId: ACME.workspaceId, source: "sole_candidate" });
+  });
+
+  test("is refused only when there is genuinely nowhere to work", () => {
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          entry: { ...inputs().entry, triggerKind: "dm", slackChannelId: "D-SAM" },
+          personalWorkspaceId: null,
+          candidates: [],
+        }),
+      ),
+    ).toMatchObject({ kind: "denied", reason: "no_candidates" });
   });
 });

@@ -64,7 +64,6 @@ import {
   getSlackChannelRoute,
   getSlackUserDmRoute,
   listSlackRoutableWorkspacesForSubject,
-  personalWorkspaceIdForSubject,
   getActiveSlackTaskPolicy,
   getSlackSharedTaskOrigin,
   getSessionEventByClientEventId,
@@ -1282,11 +1281,16 @@ async function resolveSlackRouteForEntry(
   home: SlackRouteTenancy,
   entry: SlackInteractionInboxEntry,
   subjectId: string,
-  options: { threadTenancy: SlackRouteTenancy | null; askEnabled: boolean },
+  options: {
+    threadTenancy: SlackRouteTenancy | null;
+    askEnabled: boolean;
+    botUserId: string | null;
+  },
 ): Promise<SlackRouteResolution> {
   const base = {
     home,
     entry,
+    botUserId: options.botUserId,
     threadTenancy: options.threadTenancy,
     channelRoute: null,
     dmRoute: null,
@@ -1295,11 +1299,13 @@ async function resolveSlackRouteForEntry(
     routingEnabled: false,
     askEnabled: false,
   } as const;
-  if (!deps.settings.slackWorkspaceRoutingEnabled) {
+  // A mapped thread wins outright, and with the flag off nothing is consulted at
+  // all, so neither case reads anything.
+  if (!deps.settings.slackWorkspaceRoutingEnabled || options.threadTenancy) {
     return resolveSlackWorkspaceRoute(base);
   }
   const directMessage = isSlackDirectMessageConversation(entry);
-  const [channelRoute, dmRoute, candidates, personalWorkspaceId] = await Promise.all([
+  const [channelRoute, dmRoute, candidates] = await Promise.all([
     directMessage
       ? Promise.resolve(null)
       : getSlackChannelRoute(deps.db, home, {
@@ -1313,16 +1319,16 @@ async function resolveSlackRouteForEntry(
         })
       : Promise.resolve(null),
     listSlackRoutableWorkspacesForSubject(deps.db, { accountId: home.accountId, subjectId }),
-    directMessage
-      ? personalWorkspaceIdForSubject(deps.db, { accountId: home.accountId, subjectId })
-      : Promise.resolve(null),
   ]);
   return resolveSlackWorkspaceRoute({
     ...base,
     channelRoute,
     dmRoute,
     candidates,
-    personalWorkspaceId,
+    // The candidate set is built from the same derived pointer, so reading it
+    // again would be a second query for an answer already in hand.
+    personalWorkspaceId:
+      candidates.find((candidate) => candidate.personal)?.workspaceId ?? null,
     routingEnabled: true,
     askEnabled: options.askEnabled,
   });
@@ -1332,9 +1338,13 @@ async function resolveSlackRouteForEntry(
  * Tell the person exactly why nothing started, in their own bot DM.
  *
  * Every branch ends with "No session was created." because the one thing a
- * refusal must never do is leave someone believing work is under way. When the
- * refusal is about a specific workspace, the access-request link is minted for
- * THAT workspace, not the installation's.
+ * refusal must never do is leave someone believing work is under way.
+ *
+ * No access-request link is minted here. The existing link flow signs a token
+ * for the installation's own workspace, and offering one for a workspace it
+ * cannot yet resolve would send people to a page that refuses them. Until that
+ * flow accepts a routed workspace, the refusal names the workspace and points
+ * at an administrator.
  */
 async function postSlackRouteRefusal(
   deps: ApiRouteDeps,
@@ -1437,6 +1447,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     return;
   }
   const resolution = await resolveSlackRouteForEntry(deps, home, entry, link.subjectId, {
+    botUserId: installation.botUserId,
     threadTenancy: existing
       ? { accountId: existing.accountId, workspaceId: existing.workspaceId }
       : null,
@@ -1481,7 +1492,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   // An override addresses the message; it is not part of the request.
   const routedEntry: SlackInteractionInboxEntry = {
     ...entry,
-    text: slackRoutedRequestText(entry.text, resolution),
+    text: slackRoutedRequestText(entry.text, resolution, installation.botUserId),
   };
 
   const alreadyDurable = await getSlackInteractionByClientEventId(
@@ -1994,6 +2005,8 @@ async function processSlackReactionInboxEntry(
   // workspace. It runs before the provider context read so an unauthorized
   // subject never causes OpenGeni to read the Slack conversation.
   const routeResolution = await resolveSlackRouteForEntry(deps, home, entry, link.subjectId, {
+    // A reaction carries no message text of the reacting person, so no prefix.
+    botUserId: null,
     threadTenancy: null,
     askEnabled: false,
   });
@@ -3006,18 +3019,25 @@ async function publishSlackSharedResult(
   if (!handle.targetId || !interaction.sessionId) {
     throw new SlackInteractionPermanentError("slack_shared_publication_target_invalid");
   }
-  const [origin, activePolicy, event] = await Promise.all([
+  const publicationHome = await resolveSlackDeliveryHome(deps, interaction);
+  const [origin, event] = await Promise.all([
     getSlackSharedTaskOrigin(deps.db, {
       accountId: interaction.accountId,
       workspaceId: interaction.workspaceId,
       interactionId: interaction.id,
     }),
-    getActiveSlackTaskPolicy(deps.db, {
-      accountId: interaction.accountId,
-      workspaceId: interaction.workspaceId,
-    }),
     getSessionEvent(deps.db, interaction.workspaceId, handle.targetId),
   ]);
+  // The Slack task policy governs what may be read out of, and published back
+  // to, the Slack conversation, so it is an installation-surface fact. The
+  // origin froze which tenancy that was; a row written before routing existed
+  // carries null and implied its own, because the two could not differ then.
+  const activePolicy = origin
+    ? await getActiveSlackTaskPolicy(deps.db, {
+        accountId: origin.policyAccountId ?? origin.accountId,
+        workspaceId: origin.policyWorkspaceId ?? origin.workspaceId,
+      })
+    : null;
   if (
     !origin ||
     origin.connectionId !== interaction.connectionId ||
@@ -3039,8 +3059,7 @@ async function publishSlackSharedResult(
     };
   }
   const client = await createOpenGeniSlackBotInteractionClient(deps, {
-    accountId: interaction.accountId,
-    workspaceId: interaction.workspaceId,
+    ...publicationHome,
     connectionId: interaction.connectionId,
     subjectId: grant.subjectId,
     sessionId: interaction.sessionId,

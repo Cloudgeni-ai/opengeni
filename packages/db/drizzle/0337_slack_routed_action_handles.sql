@@ -129,17 +129,28 @@ ALTER TABLE "slack_shared_task_origins"
   ADD COLUMN "policy_account_id" uuid,
   ADD COLUMN "policy_workspace_id" uuid;
 
+-- Two owner-bound guards stand between this backfill and the rows it must reach.
+--
 -- FORCE ROW LEVEL SECURITY binds the table owner and no tenant GUC is set during
--- a migration, so a bare UPDATE here would match ZERO rows and report success.
--- Relax the owner-only posture for exactly this statement; the app role stays
--- policy-bound throughout.
+-- a migration, so a bare UPDATE would match ZERO rows and report success.
+--
+-- `slack_shared_task_origins_immutable` is an unconditional BEFORE UPDATE OR
+-- DELETE trigger, so the same UPDATE would instead RAISE and abort this whole
+-- migration on any deployment that has ever recorded one shared-task origin.
+--
+-- Relax both for exactly this statement. The value written is the one each row
+-- already implied - before routing, the policy revision was always frozen in the
+-- row's own workspace - so no evidence changes meaning. The app role stays
+-- policy-bound and the immutability guard is restored immediately.
 ALTER TABLE "slack_shared_task_origins" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "slack_shared_task_origins" DISABLE TRIGGER "slack_shared_task_origins_immutable";
 
 UPDATE "slack_shared_task_origins"
    SET "policy_account_id" = "account_id",
        "policy_workspace_id" = "workspace_id"
  WHERE "policy_account_id" IS NULL;
 
+ALTER TABLE "slack_shared_task_origins" ENABLE TRIGGER "slack_shared_task_origins_immutable";
 ALTER TABLE "slack_shared_task_origins" FORCE ROW LEVEL SECURITY;
 
 ALTER TABLE "slack_shared_task_origins"

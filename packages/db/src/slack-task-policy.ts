@@ -318,6 +318,16 @@ export async function saveSlackSharedTaskOrigin(
       .limit(1);
     if (!existing) throw new Error("Slack shared-task origin conflict could not be resolved");
     for (const [key, value] of Object.entries(input)) {
+      // A row written before Slack workspace routing carries no policy tenancy
+      // and implied its own, because the two could not differ then. A replay
+      // from a new image supplies it, which is not a change of evidence and
+      // must not be reported as one.
+      if (
+        (key === "policyAccountId" || key === "policyWorkspaceId") &&
+        existing[key as keyof OriginRow] === null
+      ) {
+        continue;
+      }
       if (existing[key as keyof OriginRow] !== value) {
         throw new SlackTaskPolicyInvalidOperationError(
           "Slack shared-task origin identity conflicted with immutable evidence",
