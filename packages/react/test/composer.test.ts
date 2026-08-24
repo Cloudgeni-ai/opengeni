@@ -21,7 +21,8 @@ describe("composeSendInput", () => {
         "hello",
         "ce-1",
         {
-          tools: [{ kind: "mcp", id: "opengeni" }],
+          controlEtag: "control-1",
+          expectedDraftRevision: 3,
         },
         { model: "gpt-5.6-sol" },
       ),
@@ -29,7 +30,8 @@ describe("composeSendInput", () => {
       text: "hello",
       clientEventId: "ce-1",
       model: "gpt-5.6-sol",
-      tools: [{ kind: "mcp", id: "opengeni" }],
+      controlEtag: "control-1",
+      expectedDraftRevision: 3,
     });
   });
 
