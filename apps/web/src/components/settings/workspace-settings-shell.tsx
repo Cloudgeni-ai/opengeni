@@ -1,7 +1,16 @@
 import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  ArrowUpRightIcon,
+  BarChart3Icon,
+  BookOpenIcon,
+  BotIcon,
+  BoxIcon,
+  BoxesIcon,
+  BrainCircuitIcon,
+  DatabaseIcon,
   KeyRoundIcon,
+  LaptopIcon,
   PlugIcon,
   Settings2Icon,
   ShieldAlertIcon,
@@ -17,7 +26,7 @@ import { cn } from "@/lib/utils";
 export type WorkspaceSettingsSection =
   | "general"
   | "members"
-  | "permissions"
+  | "tools"
   | "plugins"
   | "models"
   | "api-keys"
@@ -32,9 +41,9 @@ type SettingsItem = {
 const SETTINGS_ITEMS: readonly SettingsItem[] = [
   { id: "general", label: "General", icon: Settings2Icon },
   { id: "members", label: "Members", icon: UsersIcon },
-  { id: "permissions", label: "Agent permissions", icon: ShieldCheckIcon },
-  { id: "plugins", label: "Plugin defaults", icon: PlugIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
+  { id: "tools", label: "Agent tools", icon: ShieldCheckIcon },
+  { id: "plugins", label: "Plugins", icon: PlugIcon },
   { id: "api-keys", label: "API keys", icon: KeyRoundIcon },
   { id: "danger", label: "Danger zone", icon: ShieldAlertIcon },
 ];
@@ -48,12 +57,12 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
     title: "Members",
     description: "Manage who can access this workspace and what they can do.",
   },
-  permissions: {
-    title: "Agent permissions",
-    description: "Choose which built-in OpenGeni actions new sessions can use.",
+  tools: {
+    title: "Agent tools",
+    description: "Choose which built-in OpenGeni tools new sessions can use.",
   },
   plugins: {
-    title: "Plugin defaults",
+    title: "Plugins",
     description: "Choose which plugins new sessions may use when they are available.",
   },
   models: {
@@ -70,6 +79,56 @@ const SECTION_COPY: Record<WorkspaceSettingsSection, { title: string; descriptio
   },
 };
 
+const WORKSPACE_PAGE_GROUPS = [
+  {
+    label: "Workspace activity",
+    items: [
+      { to: "/workspaces/$workspaceId/agents" as const, label: "Agents", icon: BotIcon },
+      {
+        to: "/workspaces/$workspaceId/insights" as const,
+        label: "Insights",
+        icon: BarChart3Icon,
+      },
+    ],
+  },
+  {
+    label: "Knowledge",
+    items: [
+      {
+        to: "/workspaces/$workspaceId/documents" as const,
+        label: "Documents",
+        icon: BookOpenIcon,
+      },
+      {
+        to: "/workspaces/$workspaceId/memory" as const,
+        label: "Memory",
+        icon: DatabaseIcon,
+      },
+      {
+        to: "/workspaces/$workspaceId/state" as const,
+        label: "Company Brain",
+        icon: BrainCircuitIcon,
+      },
+    ],
+  },
+  {
+    label: "Runtime",
+    items: [
+      {
+        to: "/workspaces/$workspaceId/variable-sets" as const,
+        label: "Credentials & variables",
+        icon: BoxesIcon,
+      },
+      { to: "/workspaces/$workspaceId/rigs" as const, label: "Rigs", icon: BoxIcon },
+      {
+        to: "/workspaces/$workspaceId/machines" as const,
+        label: "Machines",
+        icon: LaptopIcon,
+      },
+    ],
+  },
+] as const;
+
 export function WorkspaceSettingsShell({
   workspaceId,
   workspaceName,
@@ -83,8 +142,8 @@ export function WorkspaceSettingsShell({
 }) {
   const copy = SECTION_COPY[section];
   return (
-    <main className="min-h-dvh bg-bg text-fg lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
-      <aside className="border-b border-border bg-surface/35 lg:sticky lg:top-0 lg:h-dvh lg:border-r lg:border-b-0">
+    <main className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
+      <aside className="border-b border-border bg-surface/35 lg:sticky lg:top-0 lg:h-dvh lg:min-h-0 lg:overflow-y-auto lg:overscroll-y-contain lg:border-r lg:border-b-0">
         <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
           <Link
             to="/workspaces/$workspaceId/sessions"
@@ -107,13 +166,16 @@ export function WorkspaceSettingsShell({
           </Link>
 
           <div className="mt-4 min-w-0 px-2 lg:mt-6">
-            <p className="text-base font-semibold">Settings</p>
+            <p className="text-base font-semibold">Workspace</p>
             <p className="mt-1 truncate text-xs text-fg-muted">{workspaceName}</p>
           </div>
 
+          <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+            Settings
+          </p>
           <nav
             aria-label="Workspace settings"
-            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
+            className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
           >
             {SETTINGS_ITEMS.map((item) => {
               const Icon = item.icon;
@@ -139,10 +201,38 @@ export function WorkspaceSettingsShell({
               );
             })}
           </nav>
+
+          {WORKSPACE_PAGE_GROUPS.map((group) => (
+            <div key={group.label}>
+              <p className="mt-4 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                {group.label}
+              </p>
+              <nav
+                aria-label={group.label}
+                className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
+              >
+                {group.items.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <Link
+                      key={item.to}
+                      to={item.to}
+                      params={{ workspaceId }}
+                      className="flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg lg:w-full"
+                    >
+                      <Icon className="size-4 shrink-0" />
+                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                      <ArrowUpRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
+                    </Link>
+                  );
+                })}
+              </nav>
+            </div>
+          ))}
         </div>
       </aside>
 
-      <div className="min-w-0 px-4 py-7 sm:px-8 lg:px-12 lg:py-10">
+      <div className="min-w-0 px-4 py-7 sm:px-8 lg:min-h-0 lg:overflow-y-auto lg:px-12 lg:py-10">
         <div className="mx-auto max-w-4xl">
           <header className="border-b border-border pb-5">
             <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>

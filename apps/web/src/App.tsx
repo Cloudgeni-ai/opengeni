@@ -43,7 +43,7 @@ type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
 type WorkspaceSettingsSection =
   | "general"
   | "members"
-  | "permissions"
+  | "tools"
   | "plugins"
   | "models"
   | "api-keys"
@@ -324,14 +324,14 @@ const workspaceSettingsRoute = createRoute({
     const section =
       search.section === "general" ||
       search.section === "members" ||
-      search.section === "permissions" ||
+      search.section === "tools" ||
       search.section === "plugins" ||
       search.section === "models" ||
       search.section === "api-keys" ||
       search.section === "danger"
         ? search.section
-        : search.section === "capabilities"
-          ? "permissions"
+        : search.section === "capabilities" || search.section === "permissions"
+          ? "tools"
           : undefined;
     return section ? { section } : {};
   },

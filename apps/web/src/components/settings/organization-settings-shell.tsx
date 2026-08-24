@@ -57,8 +57,8 @@ export function OrganizationSettingsShell({
 }) {
   const copy = COPY[section];
   return (
-    <main className="min-h-dvh bg-bg text-fg lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
-      <aside className="border-b border-border bg-surface/35 lg:sticky lg:top-0 lg:h-dvh lg:border-r lg:border-b-0">
+    <main className="h-dvh overflow-x-hidden overflow-y-auto overscroll-y-contain bg-bg text-fg lg:grid lg:min-h-0 lg:grid-cols-[15rem_minmax(0,1fr)] lg:overflow-hidden">
+      <aside className="border-b border-border bg-surface/35 lg:sticky lg:top-0 lg:h-dvh lg:min-h-0 lg:overflow-y-auto lg:overscroll-y-contain lg:border-r lg:border-b-0">
         <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
           <Link
             to="/workspaces/$workspaceId/sessions"
@@ -115,7 +115,7 @@ export function OrganizationSettingsShell({
         </div>
       </aside>
 
-      <div className="min-w-0 px-4 py-7 sm:px-8 lg:px-12 lg:py-10">
+      <div className="min-w-0 px-4 py-7 sm:px-8 lg:min-h-0 lg:overflow-y-auto lg:px-12 lg:py-10">
         <div className="mx-auto max-w-4xl">
           <header className="border-b border-border pb-5">
             <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>

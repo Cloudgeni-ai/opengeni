@@ -17,7 +17,12 @@ describe("session capability product groups", () => {
 
   test("keeps native files and knowledge out of connected apps", () => {
     expect(builtInMcpCapability({ id: "files" })?.name).toBe("Files");
-    expect(builtInMcpCapability({ id: "docs" })?.name).toBe("Workspace knowledge");
+    expect(builtInMcpCapability({ id: "docs" })?.name).toBe("Documents");
+    expect(
+      sessionCapabilityGroupsFor(firstPartySessionToolOptions).find(
+        (group) => group.id === "knowledge",
+      )?.name,
+    ).toBe("Memory & learning");
     expect(builtInMcpCapability({ id: "gmail" })).toBeNull();
   });
 });

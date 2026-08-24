@@ -22,8 +22,8 @@ const BUILT_IN_MCP_CAPABILITIES: Record<BuiltInMcpCapability["id"], BuiltInMcpCa
   },
   docs: {
     id: "docs",
-    name: "Workspace knowledge",
-    description: "Search approved documents and workspace knowledge.",
+    name: "Documents",
+    description: "Search approved documents indexed in this workspace.",
   },
 };
 
@@ -82,8 +82,8 @@ const CONNECTED_APP_GROUPS: CapabilityGroupDefinition[] = [
 const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "knowledge",
-    name: "Knowledge and memory",
-    description: "Search knowledge, keep task notes, and propose durable guidance.",
+    name: "Memory & learning",
+    description: "Use durable facts, task notes, preferences, and workspace guidance.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("memory_") ||

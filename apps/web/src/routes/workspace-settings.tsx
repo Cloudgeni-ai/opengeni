@@ -2,8 +2,9 @@
 // name/rename, members, API keys, memory/transcription/Codex policy, Codex
 // subscriptions, and a danger zone with workspace deletion. The org/billing
 // console lives at Organization settings.
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
+  ArrowUpRightIcon,
   BrainCircuitIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -455,7 +456,7 @@ export function WorkspaceSettingsRoute({
           )
         ) : null}
 
-        {section === "permissions" ? (
+        {section === "tools" ? (
           <WorkspaceCapabilityDefaults
             workspaceId={workspaceId}
             canManage={canRename}
@@ -464,11 +465,27 @@ export function WorkspaceSettingsRoute({
         ) : null}
 
         {section === "plugins" ? (
-          <WorkspaceCapabilityDefaults
-            workspaceId={workspaceId}
-            canManage={canRename}
-            kind="plugins"
-          />
+          <>
+            <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">
+              <div>
+                <h2 className="text-sm font-medium">Install and manage plugins</h2>
+                <p className="mt-1 text-xs text-fg-muted">
+                  Connect apps, MCP servers, skills, and packs on the Plugins page.
+                </p>
+              </div>
+              <Button asChild type="button" variant="secondary" size="sm">
+                <Link to="/workspaces/$workspaceId/plugins" params={{ workspaceId }}>
+                  Open Plugins
+                  <ArrowUpRightIcon className="size-3.5" />
+                </Link>
+              </Button>
+            </section>
+            <WorkspaceCapabilityDefaults
+              workspaceId={workspaceId}
+              canManage={canRename}
+              kind="plugins"
+            />
+          </>
         ) : null}
 
         {section === "models" ? (

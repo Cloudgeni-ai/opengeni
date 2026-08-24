@@ -3,7 +3,7 @@ import {
   type FirstPartyMcpToolName,
   type WorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
-import { Loader2Icon, PlugIcon } from "lucide-react";
+import { BookOpenIcon, FileIcon, Loader2Icon, PlugIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -180,7 +180,7 @@ export function WorkspaceCapabilityDefaultsView({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 id="workspace-tool-defaults-heading" className="text-sm font-medium">
-            {permissions ? "Built-in permissions" : "Plugins for new sessions"}
+            {permissions ? "Built-in tools" : "Plugins for new sessions"}
           </h2>
           <p className="mt-1 text-xs text-fg-muted">
             {permissions
@@ -202,14 +202,20 @@ export function WorkspaceCapabilityDefaultsView({
 
       <div className="overflow-hidden rounded-lg border border-border bg-surface">
         <CapabilitySectionLabel>
-          {permissions ? "OpenGeni" : "Plugin access"}
+          {permissions ? "Session content" : "Plugin access"}
         </CapabilitySectionLabel>
         <div className="divide-y divide-border/70 px-3">
           {permissions
             ? builtInServers.map(({ server, capability }) => (
                 <PreferenceToggleRow
                   key={server.id}
-                  icon={<PlugIcon className="size-3.5 text-brand" />}
+                  icon={
+                    capability.id === "files" ? (
+                      <FileIcon className="size-3.5 text-brand" />
+                    ) : (
+                      <BookOpenIcon className="size-3.5 text-brand" />
+                    )
+                  }
                   label={capability.name}
                   description={capability.description}
                   checked={mcpIds.has(server.id)}
@@ -230,6 +236,13 @@ export function WorkspaceCapabilityDefaultsView({
                   onToggle={() => toggleMcp(server.id)}
                 />
               ))}
+          {permissions ? (
+            <div className="-mx-3 border-y border-border px-3 py-2">
+              <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                Agent actions
+              </p>
+            </div>
+          ) : null}
           {(permissions ? openGeniGroups : connectedAppGroups).map((group) => (
             <CapabilityDefaultRow
               key={group.id}
