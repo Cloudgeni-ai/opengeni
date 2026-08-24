@@ -1,5 +1,32 @@
 # @opengeni/react
 
+## 2.2.0
+
+### Minor Changes
+
+- 4be2055: `requireSessionAuthorization` denies `session.approval.write` to every agent attempt on every surface: tool approvals stay human-only, while structured human input (`session.human_input.write`) remains answerable by a live attempt. The React queue chrome and timeline label the new child lifecycle notice kinds (`child_requires_action`, `child_requires_action_resolved`, `child_paused`, `child_waiting_capacity`, `child_progress`) instead of dropping them.
+- 5d664d8: Surface why a goal is not pursuing and how long children have waited for a human. `Session.treeStats` gains optional `attentionSince` (earliest `requires_action` entry among the counted attention descendants), `Session` gains optional `requiresActionSince` on list and lineage reads, and the goal continuation projection gains optional `holdReason` for a `held_for_input` hold. `SessionChrome`'s goal pill spells out the pause reason ("Paused · cap" / "budget" / "by you" / "agent"), explains an idle-backoff check time and an agent `goal_wait` hold, and exports `sessionChromeGoalPillLabel` / `sessionChromeGoalPillExplanation`.
+
+### Patch Changes
+
+- e6ffdc7: Add the `backoff_pending` goal continuation reason (idle pacing between consecutive no-input continuations, `nextAttemptAt` at the pacing deadline) and the `SessionGoalResumedReason` / `SessionGoalResumedEventPayload` contracts for `goal.resumed` (`api` for the operator PATCH, `external_input` for the system resume of a `max_auto_continuations` pause). The React goal pill treats `backoff_pending` as ordinary scheduled work.
+- 5e9795c: Derive Connected Machine list state from the durable heartbeat cursor instead of a live ControlRpc ping on every `GET /machines`, and share one `useMachines` poll per workspace+session.
+- acd38d1: Retire Browser and Desktop resources when their source task leaves the Connected Machine that owns their controller, stop retrying the terminal placement conflict, and let Desktop create one replacement on the task's current placement.
+- e91d89e: Open Markdown `sandbox:` file links in the current session's Files workbench, preserve exact decoded paths through the selected filesystem authority, reveal deep lazy-tree ancestors, and handle malformed references safely.
+- Updated dependencies [4be2055]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [5d664d8]
+  - @opengeni/sdk@2.2.0
+
+## 2.1.1
+
+### Patch Changes
+
+- Updated dependencies [ab81e47]
+  - @opengeni/sdk@2.1.1
+
 ## 2.1.0
 
 ### Minor Changes

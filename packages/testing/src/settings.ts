@@ -1,4 +1,9 @@
-import { DEFAULT_AGENT_INSTRUCTIONS, type Settings } from "@opengeni/config";
+import {
+  DEFAULT_AGENT_INSTRUCTIONS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MS,
+  type Settings,
+} from "@opengeni/config";
 
 export function testSettings(overrides: Partial<Settings> = {}): Settings {
   return {
@@ -62,6 +67,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,
     integrationsOauthClientsJson: "{}",
+    slackBotDisplayName: "OpenGeni",
     slackCommand: "/opengeni",
     googleDriveSyncMaxItems: 500,
     googleDriveSyncMaxBytes: 500_000_000,
@@ -76,6 +82,9 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     googleDriveProviderRetryBudgetMs: 15_000,
     socialOauthClientsJson: "{}",
     goalMaxAutoContinuations: 20,
+    goalIdleBackoffMs: DEFAULT_GOAL_IDLE_BACKOFF_MS,
+    goalIdleBackoffMaxMs: DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+    childLifecycleNoticesEnabled: false,
     agentMaxModelCallsPerTurn: 40,
     contextWindowTokens: 1_050_000,
     contextCompactionThresholdRatio: 0.9,
@@ -318,6 +327,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     githubAppId: undefined,
     githubClientId: undefined,
     githubClientSecret: undefined,
+    githubRestMcpEnabled: false,
     githubPersonalOauthEnabled: false,
     githubPersonalOauthClientId: undefined,
     githubPersonalOauthClientSecret: undefined,

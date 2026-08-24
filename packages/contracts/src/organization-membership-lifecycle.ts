@@ -45,6 +45,27 @@ export const OrganizationSummary = z.object({
 });
 export type OrganizationSummary = z.infer<typeof OrganizationSummary>;
 
+export const OrganizationPrivateSessionSettings = z.object({
+  organizationId: z.string().uuid(),
+  enabled: z.boolean(),
+  available: z.boolean(),
+  version: z.number().int().nonnegative(),
+  updatedAt: z.string().datetime({ offset: true }),
+  changed: z.boolean().optional(),
+});
+export type OrganizationPrivateSessionSettings = z.infer<typeof OrganizationPrivateSessionSettings>;
+
+export const UpdateOrganizationPrivateSessionSettingsRequest = z
+  .object({
+    enabled: z.boolean(),
+    expectedVersion: z.number().int().nonnegative(),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type UpdateOrganizationPrivateSessionSettingsRequest = z.infer<
+  typeof UpdateOrganizationPrivateSessionSettingsRequest
+>;
+
 export const OrganizationWorkspaceAccessMember = z.object({
   membershipId: z.string().uuid(),
   subjectId: z.string().min(1).max(1024),

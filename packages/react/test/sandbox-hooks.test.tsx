@@ -966,6 +966,102 @@ describe("useSandboxFiles", () => {
     await hook.unmount();
   });
 
+  test("canonical roots keep list, tree, status, and top-level mutations in one namespace", async () => {
+    const listedPaths: string[] = [];
+    let created = false;
+    const client = fakeClient({
+      gitStatus: async (_workspaceId, _sessionId, request) => {
+        expect(request?.path).toBe("/workspace");
+        return {
+          isRepo: true,
+          head: "main",
+          detached: false,
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          files: [
+            {
+              path: "README.md",
+              oldPath: null,
+              index: null,
+              worktree: "modified",
+              isConflicted: false,
+            },
+          ],
+          revision: 1,
+        };
+      },
+      fsList: async (_workspaceId, _sessionId, request) => {
+        const path = request?.path ?? "";
+        listedPaths.push(path);
+        return {
+          root: {
+            name: "workspace",
+            path: "/workspace",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            truncated: false,
+            children: [
+              {
+                name: "README.md",
+                path: "/workspace/README.md",
+                type: "file",
+                sizeBytes: 10,
+                mtimeMs: null,
+                mode: null,
+                truncated: false,
+              },
+              ...(created
+                ? [
+                    {
+                      name: "new",
+                      path: "/workspace/new",
+                      type: "dir" as const,
+                      sizeBytes: null,
+                      mtimeMs: null,
+                      mode: null,
+                      truncated: false,
+                      children: [],
+                    },
+                  ]
+                : []),
+            ],
+          },
+          revision: 1,
+          truncated: false,
+        };
+      },
+      fsMkdir: async (_workspaceId, _sessionId, request) => {
+        expect(request.path).toBe("/workspace/new");
+        created = true;
+        return { path: request.path, revision: 2 };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxFiles(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          rootPath: "/workspace",
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(listedPaths[0]).toBe("/workspace");
+    expect(hook.result.current.tree[0]).toMatchObject({
+      path: "/workspace/README.md",
+      status: "modified",
+    });
+    await actRun(() => hook.result.current.createDir("/workspace/new"));
+    await flush();
+    expect(hook.result.current.tree.some((node) => node.path === "/workspace/new")).toBe(true);
+    expect(listedPaths).toContain("/workspace");
+    await hook.unmount();
+  });
+
   test("a depth-bounded dir (children: []) is treated as unexpanded so lazy expand fires", async () => {
     // The REAL bug: a live depth-1 fsList returns each dir at the boundary with
     // `children: []` (listed, but grandchildren not). If we kept `[]` the

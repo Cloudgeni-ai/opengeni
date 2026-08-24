@@ -8,9 +8,11 @@
 //     (provably not executed), while an ambiguous post-send fault is not.
 
 import { describe, expect, test } from "bun:test";
-import { type ControlRequest, type ControlResponse, ErrorCode } from "@opengeni/agent-proto";
+import { type ControlRequest, ErrorCode } from "@opengeni/agent-proto";
 import {
   type ControlRpc,
+  FakeOpRunner,
+  InMemoryOpStreamTransport,
   type RoutableBackendSession,
   type SelfhostedRetryClock,
   NatsControlRpc,
@@ -36,9 +38,8 @@ import {
 
 const WS = "11111111-1111-1111-1111-111111111111";
 const AGENT = "agent-abc";
+const CONNECTION_INSTANCE = "connection-fault";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
-const encoder = new TextEncoder();
-
 const ALL_FIELDS = [
   FAULT_FIELD_WHAT_HAPPENED,
   FAULT_FIELD_WHICH_LAYER,
@@ -286,66 +287,66 @@ describe("G3-remnant — the transport marks never-sent only pre-send", () => {
 
 // ── call()-level never-sent heal (a reconnect blip that provably never sent) ────
 
-type Step = (req: ControlRequest) => ControlResponse;
-class ScriptedRpc implements ControlRpc {
-  readonly requests: ControlRequest[] = [];
-  constructor(private readonly steps: Step[]) {}
-  async request(_s: string, req: ControlRequest): Promise<ControlResponse> {
-    this.requests.push(req);
-    return this.steps[Math.min(this.requests.length - 1, this.steps.length - 1)]!(req);
-  }
-}
 function fakeClock(jitter = 0): SelfhostedRetryClock {
   return { sleep: async () => {}, jitter: () => jitter };
 }
-function neverSentStep(req: ControlRequest): ControlResponse {
-  return offlineControlResponse(req.requestId, true);
-}
-function execOkStep(req: ControlRequest): ControlResponse {
-  return {
-    requestId: req.requestId,
-    error: undefined,
-    result: {
-      $case: "exec",
-      exec: {
-        exitCode: 0,
-        stdout: encoder.encode("ok\n"),
-        stderr: new Uint8Array(0),
-        timedOut: false,
-        durationMs: "1",
-      },
-    },
-  };
-}
-function sessionWith(rpc: ControlRpc): SelfhostedSession {
-  return new SelfhostedSession({
+
+function sessionWithNeverSentStarts(failures: number) {
+  const transport = new InMemoryOpStreamTransport();
+  const runner = new FakeOpRunner({
+    transport,
     workspaceId: WS,
     agentId: AGENT,
-    controlRpc: rpc,
+    connectionInstanceId: CONNECTION_INSTANCE,
+    defaultScript: () => ({ frames: [{ channel: "stdout", bytes: "ok\n" }] }),
+  });
+  const requests: ControlRequest[] = [];
+  let remaining = failures;
+  const controlRpc: ControlRpc = {
+    request: async (subject, request, opts) => {
+      requests.push(request);
+      if (request.op?.$case === "opStart" && remaining > 0) {
+        remaining -= 1;
+        return offlineControlResponse(request.requestId, true);
+      }
+      return await runner.request(subject, request, opts);
+    },
+  };
+  const session = new SelfhostedSession({
+    workspaceId: WS,
+    agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
+    controlRpc,
+    opStream: { transport },
     relay: RELAY,
     retryClock: fakeClock(),
   });
+  return { requests, session };
 }
 
-describe("G3-remnant — call() heals a never-sent blip and surfaces a real outage", () => {
-  test("never-sent then success: a state-changing exec is safely re-issued", async () => {
-    const rpc = new ScriptedRpc([neverSentStep, neverSentStep, execOkStep]);
-    const res = await sessionWith(rpc).exec({ cmd: "true" });
+describe("G3-remnant — OpStart heals a never-sent blip and surfaces a real outage", () => {
+  test("never-sent then success: one durable exec admission is safely re-issued", async () => {
+    const { requests, session } = sessionWithNeverSentStarts(2);
+    const res = await session.exec({ cmd: "true" });
     expect(res.exitCode).toBe(0);
-    expect(rpc.requests).toHaveLength(3);
+    const starts = requests.filter((request) => request.op?.$case === "opStart");
+    expect(starts).toHaveLength(3);
+    expect(new Set(starts.map((request) => request.requestId)).size).toBe(1);
   });
 
   test("persistent never-sent surfaces offline after the bounded budget", async () => {
-    const rpc = new ScriptedRpc([neverSentStep]);
+    const { requests, session } = sessionWithNeverSentStarts(Number.POSITIVE_INFINITY);
     let err: unknown;
     try {
-      await sessionWith(rpc).exec({ cmd: "true" });
+      await session.exec({ cmd: "true" });
     } catch (e) {
       err = e;
     }
     expect(err).toBeInstanceOf(SelfhostedControlError);
     expect((err as SelfhostedControlError).agentOffline).toBe(true);
-    expect(rpc.requests).toHaveLength(SELFHOSTED_NEVER_SENT_MAX_RETRIES + 1);
+    expect(requests.filter((request) => request.op?.$case === "opStart")).toHaveLength(
+      SELFHOSTED_NEVER_SENT_MAX_RETRIES + 1,
+    );
   });
 });
 

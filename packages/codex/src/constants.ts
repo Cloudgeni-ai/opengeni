@@ -54,12 +54,19 @@ export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
 // this pinned to the latest stable Codex release we have verified end-to-end.
 export const CODEX_CLIENT_VERSION = "0.145.0";
 
-// Native ChatGPT/Codex subscription WebRTC call creation. Verified against
-// openai/codex 0.145.0 commit bd2de422aa287b97b06ca6425a10935bcf1b3731.
+// Public OpenGeni selector for native ChatGPT/Codex subscription WebRTC. This
+// remains stable for persisted sessions; the provider's remotely configured
+// model is resolved separately before call creation.
 export const CODEX_REALTIME_MODEL = "gpt-live-1-boulder-alpha";
 export const CODEX_REALTIME_VERSION = "v3";
 export const CODEX_REALTIME_DEFAULT_VOICE = "cove";
 export const CODEX_REALTIME_CALL_TIMEOUT_MS = 15_000;
+export const CODEX_REALTIME_CONFIG_TIMEOUT_MS = 5_000;
+export const CODEX_REALTIME_CONFIG_ID = "3566525122";
+// Verified live on 2026-08-23. Used only when the authenticated remote config
+// is transiently unavailable or malformed; it is not the persisted model id.
+export const CODEX_REALTIME_PROVIDER_MODEL_FALLBACK = "gpt-live-1-codex";
+export const CODEX_REALTIME_PROVIDER_ARCHITECTURE_FALLBACK = "avas";
 
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)
 export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when exp is unparseable

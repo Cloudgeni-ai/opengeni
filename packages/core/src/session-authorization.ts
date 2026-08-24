@@ -168,6 +168,15 @@ export async function requireSessionAuthorization(
       ? relatedSessionAccessForAgentAttempt(actor, target.sessionId)
       : null;
 
+  // Tool approvals are a human decision. An agent attempt may answer another
+  // session's structured human-input request (`session.human_input.write`,
+  // through `session_human_input_respond`) but may never approve or reject a
+  // pending tool approval on any session, including a child it spawned; an
+  // embedding-host port cannot widen this.
+  if (actor.kind === "agent_attempt" && input.operation === "session.approval.write") {
+    throw new SessionAuthorizationDeniedError("forbidden");
+  }
+
   if (authority.visibility === "user_private") {
     const allowed =
       authority.ownerSubjectId !== null &&

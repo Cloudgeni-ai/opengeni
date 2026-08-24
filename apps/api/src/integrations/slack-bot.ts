@@ -8,6 +8,7 @@ import {
   hasOpenGeniSlackBotSearchScopes,
   type AccessGrant,
   type ConnectionMetadata,
+  type OpenGeniSlackBotDisplayName,
   type OpenGeniSlackBotConnectionMetadata,
 } from "@opengeni/contracts";
 import {
@@ -113,6 +114,11 @@ export type DownloadedSlackReactionImage = Readonly<{
   bytes: Uint8Array;
 }>;
 
+export type ExchangedOpenGeniSlackAuthorization = Readonly<{
+  accessToken: string;
+  appId: string;
+}>;
+
 export async function exchangeOpenGeniSlackAuthorizationCode(
   input: {
     code: string;
@@ -121,7 +127,7 @@ export async function exchangeOpenGeniSlackAuthorizationCode(
     redirectUri: string;
   },
   fetchImpl: FetchLike = fetch,
-): Promise<string> {
+): Promise<ExchangedOpenGeniSlackAuthorization> {
   const body = new URLSearchParams({
     code: input.code,
     client_id: input.clientId,
@@ -165,7 +171,13 @@ export async function exchangeOpenGeniSlackAuthorizationCode(
       message: "Slack installation did not return a bot token",
     });
   }
-  return accessToken;
+  const appId = slackString(record.app_id);
+  if (!appId) {
+    throw new HTTPException(502, {
+      message: "Slack installation did not return an app identity",
+    });
+  }
+  return { accessToken, appId };
 }
 
 export type SlackBotReceipt = {
@@ -361,12 +373,16 @@ export class SlackBotCredentialVerificationError extends HTTPException {
 
 /**
  * Validates a write-only xoxb credential before it can enter encrypted storage.
- * Slack does not expose the app's display_information name to this scope set;
- * users.info provides the authoritative installed bot display name, while the
- * documented manifest fixes the app name itself to the same exact value.
+ * The OAuth exchange's app_id is the immutable app authority. Slack bot profile
+ * names are mutable presentation data and may lag manifest/App Home changes, so
+ * they must not decide whether a credential belongs to this installation.
  */
 export async function verifyOpenGeniSlackBotCredential(
   token: string,
+  expected: Readonly<{
+    appId: string;
+    displayName: OpenGeniSlackBotDisplayName;
+  }>,
   fetchImpl: FetchLike = fetch,
   now: Date = new Date(),
 ): Promise<VerifiedOpenGeniSlackBot> {
@@ -390,11 +406,11 @@ export async function verifyOpenGeniSlackBotCredential(
     );
   }
   const profile = slackRecord(user.profile);
-  const displayName = slackString(profile?.display_name) || slackString(profile?.real_name);
-  if (displayName !== "OpenGeni") {
+  const installedAppId = slackString(profile?.api_app_id);
+  if (installedAppId !== expected.appId) {
     throw new SlackBotCredentialVerificationError(
       "identity_mismatch",
-      'Slack bot display name must be exactly "OpenGeni"',
+      "Slack credential does not belong to the authorized Slack app",
     );
   }
 
@@ -407,7 +423,7 @@ export async function verifyOpenGeniSlackBotCredential(
       slackTeamName,
       botUserId,
       botId,
-      botDisplayName: "OpenGeni",
+      botDisplayName: expected.displayName,
       verifiedAt: now.toISOString(),
     },
   };

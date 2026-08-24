@@ -367,6 +367,11 @@ describe("embedded worker lifecycle contract", () => {
       [],
       [
         ...[
+          "company_profile_activation_events",
+          "company_profile_agent_confirmation_receipts",
+          "company_profile_agent_proposal_receipts",
+          "company_profile_heads",
+          "company_profile_revisions",
           "connections",
           "files",
           "google_drive_object_acl_evidence",
@@ -377,11 +382,14 @@ describe("embedded worker lifecycle contract", () => {
           "knowledge_source_sync_index_obligations",
           "knowledge_source_sync_states",
           "knowledge_sources",
+          "managed_accounts",
           "organization_invitation_binding_events",
           "organization_membership_invitations",
           "organization_membership_lifecycle_events",
           "organization_membership_operation_receipts",
           "organization_memberships",
+          "organization_private_session_setting_events",
+          "organization_private_session_settings",
           "organization_profile_events",
           "organization_user_resource_authorities",
           "organization_user_resource_grants",
@@ -390,6 +398,13 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_object_deletion_receipts",
           "organization_user_retention_object_obligations",
           "organization_user_retention_policies",
+          "session_human_input_requests",
+          "session_tenancy_activations",
+          "session_turn_attempts",
+          "session_turns",
+          "sessions",
+          "workspace_memberships",
+          "workspaces",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -598,6 +613,32 @@ describe("embedded worker lifecycle contract", () => {
       })(),
     ).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
+  });
+
+  test("database readiness coalesces overlapping probe attempts", async () => {
+    let executions = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const db = {
+      execute: async () => {
+        executions += 1;
+        if (executions === 1) await blocked;
+        return [];
+      },
+    } as unknown as Database;
+    const check = dbReadyCheck(db);
+
+    const first = check();
+    const second = check();
+    expect(first).toBe(second);
+    expect(executions).toBe(1);
+
+    release();
+    await Promise.all([first, second]);
+    await check();
+    expect(executions).toBe(2);
   });
 
   test("readiness follows role lifecycle while health stays live during drain", async () => {

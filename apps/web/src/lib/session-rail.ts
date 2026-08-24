@@ -26,6 +26,17 @@ export function sessionStatusLabel(status: Session["status"]): string {
 
 /** Honest user-facing state: lifecycle first, then the effective pause policy. */
 export function sessionStateLabel(session: Session): string {
+  const commandActivity = session.backgroundCommandActivity;
+  if (commandActivity?.state === "stopping") {
+    return commandActivity.count === 1
+      ? "Stopping background command…"
+      : `Stopping ${commandActivity.count} background commands…`;
+  }
+  if (commandActivity?.state === "running") {
+    return commandActivity.count === 1
+      ? "Background command running"
+      : `${commandActivity.count} background commands running`;
+  }
   const lifecycle = sessionStatusLabel(session.status);
   const attentionOrTerminal =
     session.status === "requires_action" ||

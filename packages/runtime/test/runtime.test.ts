@@ -136,7 +136,11 @@ import {
   readSkillLibraryArtifact,
   verifySkillLibraryArtifact,
 } from "../src/skill-library";
-import { MCP_MAX_CONCURRENT_SERVER_OPERATIONS } from "../src/mcp-network";
+import {
+  MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  guardedMcpFetch,
+  mcpTransportRequestFailureDiagnostic,
+} from "../src/mcp-network";
 import {
   ScriptedModel,
   functionCall as scriptedFunctionCall,
@@ -2279,6 +2283,116 @@ describe("runtime event normalization", () => {
           "begin:call-drive:Quarterly",
           "complete:request-drive:completed",
         ]);
+      } finally {
+        await prepared.close();
+      }
+    });
+
+    test("attempt-local connector bindings preserve unmanaged read execution", async () => {
+      const executions: Record<string, unknown>[] = [];
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "github_app", toolName: "repository_get" },
+            modelName: "github_app__repository_get",
+            inputSchema: {
+              type: "object",
+              properties: { repository: { type: "string" } },
+              required: ["repository"],
+              additionalProperties: false,
+            },
+            source: "mcp",
+            approval: "policy",
+            execute: async (args) => {
+              if (args.repository === "fail-before-provider") {
+                return {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "provider was not called",
+                      _meta: { testConnectorOutcome: "not_executed" },
+                    },
+                  ],
+                  _meta: { testConnectorOutcome: "not_executed" },
+                };
+              }
+              executions.push(args);
+              return { content: [{ type: "text", text: "repository" }] };
+            },
+          },
+        ],
+      });
+      let managed = false;
+      const completed: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () =>
+          managed
+            ? { managed: true, decision: "allow" }
+            : { managed: false, decision: "unmanaged" },
+        begin: async () =>
+          managed
+            ? { allowed: true, managed: true, requestId: "request-read" }
+            : { allowed: true, managed: false },
+        complete: async ({ outcome }) => {
+          completed.push(outcome);
+        },
+      };
+      const agent = buildOpenGeniAgent(testSettings(), [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+        attemptConnectorActionBindings: [
+          {
+            modelName: "github_app__repository_get",
+            resultOutcome: (output) => {
+              const row = output as { _meta?: { testConnectorOutcome?: unknown } };
+              return row._meta?.testConnectorOutcome === "not_executed" ? "not_executed" : null;
+            },
+            call: (approvalId, arguments_) => ({
+              approvalId,
+              connectionId: "github-app:71",
+              serverId: "github_app",
+              toolName: "repository_get",
+              arguments: arguments_,
+            }),
+          },
+        ],
+      });
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "github_app__repository_get",
+        );
+        if (!tool || tool.type !== "function") throw new Error("attempt connector tool missing");
+        expect(
+          await tool.needsApproval(
+            new RunContext(),
+            { repository: "Cloudgeni-ai/opengeni" },
+            "call-read",
+          ),
+        ).toBe(false);
+        expect(
+          await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ repository: "Cloudgeni-ai/opengeni" }),
+            { toolCall: { callId: "call-read" } } as any,
+          ),
+        ).toBeDefined();
+        expect(executions).toEqual([{ repository: "Cloudgeni-ai/opengeni" }]);
+        expect(completed).toEqual([]);
+        managed = true;
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({ repository: "fail-before-provider" }), {
+            toolCall: { callId: "call-not-executed" },
+          } as any),
+        ).rejects.toThrow("Attempt connector action was not executed");
+        expect(completed).toEqual(["not_executed"]);
       } finally {
         await prepared.close();
       }
@@ -8078,6 +8192,256 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("keeps published local and eager servers live when deferred preparation fails", async () => {
+    const deferredFailure = new Error("synthetic deferred MCP preparation failure");
+    let rejectDeferred!: (error: Error) => void;
+    const deferredConnect = new Promise<void>((_resolve, reject) => {
+      rejectDeferred = reject;
+    });
+    let eagerCloseCount = 0;
+    let deferredCloseCount = 0;
+    const makeServer = (
+      name: string,
+      connect: () => Promise<void>,
+      onClose: () => void,
+    ): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      connect,
+      async close() {
+        onClose();
+      },
+      async listTools() {
+        return [
+          {
+            name: "lookup",
+            description: `Lookup through ${name}`,
+            inputSchema: {
+              type: "object" as const,
+              properties: {},
+              additionalProperties: false,
+            },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text", text: name }];
+      },
+      async invalidateToolsCache() {},
+    });
+    const eager = makeServer(
+      "eager-inner",
+      async () => {},
+      () => {
+        eagerCloseCount += 1;
+      },
+    );
+    const deferred = makeServer(
+      "deferred-inner",
+      async () => await deferredConnect,
+      () => {
+        deferredCloseCount += 1;
+      },
+    );
+    const settings = testSettings({
+      sandboxBackend: "none",
+      mcpServers: [
+        {
+          id: "eager",
+          name: "Eager",
+          url: "https://eager.invalid/mcp",
+          cacheToolsList: false,
+        },
+        {
+          id: "deferred",
+          name: "Deferred",
+          url: "https://deferred.invalid/mcp",
+          cacheToolsList: false,
+        },
+      ],
+    });
+    const prepared = await prepareAgentTools(
+      settings,
+      [
+        { kind: "mcp", id: "eager", eager: true },
+        { kind: "mcp", id: "deferred" },
+      ],
+      {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 2,
+        deferNonEagerUntilToolDemand: true,
+        localMcpServers: [
+          { id: "eager", server: eager },
+          { id: "deferred", server: deferred },
+        ],
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "interaction", toolName: "browser_observe" },
+            modelName: "interaction__browser_observe",
+            codemodePath: ["interaction", "browser", "observe"],
+            description: "Observe one exact browser target.",
+            inputSchema: {
+              type: "object",
+              properties: { targetId: { type: "string" } },
+              required: ["targetId"],
+              additionalProperties: false,
+            },
+            source: "interaction",
+            approval: "none",
+            execute: async () => ({ content: [{ type: "text", text: "observed" }] }),
+          },
+        ],
+      },
+    );
+    const local = prepared.mcpServers.find(
+      (server) => server.name === "opengeni-attempt-local-tools",
+    );
+    const publishedEager = prepared.mcpServers.find((server) => server.name.includes("eager"));
+    expect(local).toBeDefined();
+    expect(publishedEager).toBeDefined();
+    expect((await local!.listTools()).map((tool) => tool.name)).toEqual([
+      "interaction__browser_observe",
+    ]);
+
+    rejectDeferred(deferredFailure);
+    await expect(prepared.ready!).rejects.toBe(deferredFailure);
+
+    expect(eagerCloseCount).toBe(0);
+    expect(deferredCloseCount).toBe(1);
+    expect((await local!.listTools()).map((tool) => tool.name)).toEqual([
+      "interaction__browser_observe",
+    ]);
+    expect((await publishedEager!.listTools()).map((tool) => tool.name)).toEqual(["eager__lookup"]);
+
+    await expect(prepared.close()).rejects.toBe(deferredFailure);
+    expect(eagerCloseCount).toBe(1);
+    expect(deferredCloseCount).toBe(1);
+    await expect(local!.listTools()).rejects.toThrow("local model tool server is closed");
+  });
+
+  test("closes unpublished eager and deferred servers when eager schema freezing fails", async () => {
+    const eagerFailure = new Error("synthetic eager schema failure");
+    let eagerCloseCount = 0;
+    let deferredCloseCount = 0;
+    const settings = testSettings({
+      sandboxBackend: "none",
+      mcpServers: [
+        { id: "eager", name: "Eager", url: "https://eager.invalid/mcp" },
+        { id: "deferred", name: "Deferred", url: "https://deferred.invalid/mcp" },
+      ],
+    });
+    const server = (
+      name: string,
+      listTools: () => Promise<RuntimeMcpTool[]>,
+      onClose: () => void,
+    ): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      async connect() {},
+      async close() {
+        onClose();
+      },
+      listTools,
+      async callTool() {
+        return [];
+      },
+      async invalidateToolsCache() {},
+    });
+
+    await expect(
+      prepareAgentTools(
+        settings,
+        [
+          { kind: "mcp", id: "eager", eager: true },
+          { kind: "mcp", id: "deferred" },
+        ],
+        {
+          deferNonEagerUntilToolDemand: true,
+          localMcpServers: [
+            {
+              id: "eager",
+              server: server(
+                "eager-inner",
+                async () => {
+                  throw eagerFailure;
+                },
+                () => {
+                  eagerCloseCount += 1;
+                },
+              ),
+            },
+            {
+              id: "deferred",
+              server: server(
+                "deferred-inner",
+                async () => [],
+                () => {
+                  deferredCloseCount += 1;
+                },
+              ),
+            },
+          ],
+        },
+      ),
+    ).rejects.toBe(eagerFailure);
+    expect(eagerCloseCount).toBe(1);
+    expect(deferredCloseCount).toBe(1);
+  });
+
+  test("does not close eager servers twice when fully prepared cleanup fails", async () => {
+    const closeFailure = new Error("synthetic eager close failure");
+    let eagerCloseCount = 0;
+    let deferredCloseCount = 0;
+    const makeServer = (name: string, eager: boolean): MCPServer => ({
+      name,
+      cacheToolsList: false,
+      async connect() {},
+      async close() {
+        if (eager) {
+          eagerCloseCount += 1;
+          throw closeFailure;
+        }
+        deferredCloseCount += 1;
+      },
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        return [];
+      },
+      async invalidateToolsCache() {},
+    });
+    const settings = testSettings({
+      sandboxBackend: "none",
+      mcpServers: [
+        { id: "eager", name: "Eager", url: "https://eager.invalid/mcp" },
+        { id: "deferred", name: "Deferred", url: "https://deferred.invalid/mcp" },
+      ],
+    });
+    const prepared = await prepareAgentTools(
+      settings,
+      [
+        { kind: "mcp", id: "eager", eager: true },
+        { kind: "mcp", id: "deferred" },
+      ],
+      {
+        deferNonEagerUntilToolDemand: true,
+        localMcpServers: [
+          { id: "eager", server: makeServer("eager-inner", true) },
+          { id: "deferred", server: makeServer("deferred-inner", false) },
+        ],
+      },
+    );
+    await prepared.ready;
+    await expect(prepared.close()).rejects.toBe(closeFailure);
+    expect(eagerCloseCount).toBe(1);
+    expect(deferredCloseCount).toBe(1);
+  });
+
   test("SDK MCP lifecycle logs are structural while callers receive exact errors", async () => {
     const sentinel = "synthetic-mcp-lifecycle-boundary-123456";
     const registryId = "registry-mcp-lifecycle-boundary";
@@ -8087,6 +8451,28 @@ describe("runtime event normalization", () => {
       status: 503,
       responseBody: { sentinel },
       cause: { exact: sentinel },
+    });
+    const guarded = guardedMcpFetch(
+      testSettings(),
+      async () => {
+        throw exactSourceError;
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+    await expect(
+      guarded("https://example.test/mcp", {
+        method: "POST",
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+      }),
+    ).rejects.toBe(exactSourceError);
+    const transportDiagnostic = mcpTransportRequestFailureDiagnostic(exactSourceError);
+    expect(transportDiagnostic).toMatchObject({
+      httpMethod: "POST",
+      rpcMethod: "initialize",
+      causeChainComplete: true,
     });
     const makeFacade = () =>
       new PrefixedMcpServer(
@@ -8120,6 +8506,7 @@ describe("runtime event normalization", () => {
       });
       const returnedError = bestEffort.errors.get(bestEffortFacade);
       expect(returnedError).toBe(exactSourceError);
+      expect(mcpTransportRequestFailureDiagnostic(returnedError)).toEqual(transportDiagnostic);
       await bestEffort.close();
 
       const strictFacade = makeFacade();
@@ -8130,6 +8517,7 @@ describe("runtime event normalization", () => {
         (error) => error as Error,
       );
       expect(strictError).toBe(exactSourceError);
+      expect(mcpTransportRequestFailureDiagnostic(strictError)).toEqual(transportDiagnostic);
 
       const renderedLogs = [...warnings, ...errors]
         .flat()

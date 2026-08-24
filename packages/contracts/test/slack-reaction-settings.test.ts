@@ -117,11 +117,12 @@ describe("Slack reaction summon workspace settings", () => {
 
     const staging = buildOpenGeniSlackBotManifest("https://staging.app.opengeni.ai", {
       appName: "OpenGeni Staging",
+      botDisplayName: "OpenGeni Staging",
       slashCommand: "/opengeni-staging",
       shortcutName: "Open in OpenGeni Staging",
     });
     expect(staging.display_information.name).toBe("OpenGeni Staging");
-    expect(staging.features.bot_user.display_name).toBe("OpenGeni");
+    expect(staging.features.bot_user.display_name).toBe("OpenGeni Staging");
     expect(staging.features.slash_commands[0]!.command).toBe("/opengeni-staging");
     expect(staging.features.shortcuts[0]!.name).toBe("Open in OpenGeni Staging");
     expect(staging.settings.interactivity.request_url).toBe(

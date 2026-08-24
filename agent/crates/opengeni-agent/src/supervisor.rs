@@ -1040,26 +1040,13 @@ impl<P: Platform + 'static> Supervisor<P> {
                 self.spawn_agent_update(link, client, &request, update, reply)
                     .await;
             }
-            Route::LegacyExec(exec) => {
-                let resource_policy = request.resource_policy;
-                self.spawn_adapter(
-                    link,
-                    client,
-                    &request,
-                    AdapterWork::Exec(exec),
-                    resource_policy,
-                    reply,
-                    label,
-                    rpc_tasks,
-                );
-            }
             Route::LegacyGit(git) => {
                 let resource_policy = request.resource_policy;
-                self.spawn_adapter(
+                self.spawn_git_adapter(
                     link,
                     client,
                     &request,
-                    AdapterWork::Git(git),
+                    git,
                     resource_policy,
                     reply,
                     label,
@@ -1339,16 +1326,16 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
     }
 
-    /// Spawns a legacy-adapter op (exec/git as an engine job) onto its own
-    /// task. The adapter path fences epochs BEFORE the engine, exactly like
-    /// the dispatch table does for every other op.
+    /// Spawns a request/reply Git op as an engine job on its own task. The
+    /// adapter path fences epochs before the engine, exactly like the dispatch
+    /// table does for every other op.
     #[allow(clippy::too_many_arguments)] // a routing seam; bundling would just rename the parts
-    fn spawn_adapter(
+    fn spawn_git_adapter(
         &self,
         link: &WorkspaceLink<P>,
         client: &async_nats::Client,
         request: &ControlRequest,
-        work: AdapterWork,
+        git: v1::GitRequest,
         resource_policy: Option<v1::OperationResourcePolicy>,
         reply: async_nats::Subject,
         label: &'static str,
@@ -1365,30 +1352,15 @@ impl<P: Platform + 'static> Supervisor<P> {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
-                match work {
-                    AdapterWork::Exec(exec) => {
-                        crate::legacy::serve_exec_scoped_with_policy(
-                            &engine,
-                            &platform,
-                            &scope,
-                            request_id,
-                            exec,
-                            resource_policy,
-                        )
-                        .await
-                    }
-                    AdapterWork::Git(git) => {
-                        crate::legacy::serve_git_scoped_with_policy(
-                            &engine,
-                            &platform,
-                            &scope,
-                            request_id,
-                            git,
-                            resource_policy,
-                        )
-                        .await
-                    }
-                }
+                crate::legacy::serve_git_scoped_with_policy(
+                    &engine,
+                    &platform,
+                    &scope,
+                    request_id,
+                    git,
+                    resource_policy,
+                )
+                .await
             };
             publish_response(&client, reply, response, label, max_payload).await;
         });
@@ -1737,14 +1709,6 @@ impl<P: Platform + 'static> Supervisor<P> {
     }
 }
 
-/// A legacy op the adapter serves as an engine job.
-enum AdapterWork {
-    /// A monolithic exec request.
-    Exec(v1::ExecRequest),
-    /// A monolithic git request.
-    Git(v1::GitRequest),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpdateReservation {
     Started,
@@ -1757,8 +1721,6 @@ enum UpdateReservation {
 enum Route {
     /// Answered inline on the serve loop — liveness never enters admission.
     Liveness,
-    /// Runs as an engine job through the legacy exec adapter.
-    LegacyExec(v1::ExecRequest),
     /// Runs as an engine job through the legacy git adapter.
     LegacyGit(v1::GitRequest),
     /// Starts an op-stream job (admission may park; runs on its own task).
@@ -1772,14 +1734,13 @@ enum Route {
     Work(JobClass),
 }
 
-/// Classifies a decoded RPC. `exec`/`git` are heavy (long-running, resource-
-/// owning); everything else platform-backed is light; `ping` bypasses
+/// Classifies a decoded RPC. Request/reply Git is heavy (long-running and
+/// resource-owning); everything else platform-backed is light; `ping` bypasses
 /// admission entirely (liveness ⊥ work — invariant #4).
 fn classify(request: &ControlRequest) -> Route {
     use v1::control_request::Op;
     match &request.op {
         Some(Op::Ping(_)) => Route::Liveness,
-        Some(Op::Exec(req)) => Route::LegacyExec(req.clone()),
         Some(Op::Git(req)) => Route::LegacyGit(req.clone()),
         Some(Op::OpStart(start)) => Route::OpStart(start.clone()),
         Some(Op::OpCancel(_) | Op::OpQuery(_) | Op::OpAttach(_)) => Route::OpControl,
@@ -1987,7 +1948,6 @@ fn op_label(req: &ControlRequest) -> &'static str {
         Some(Op::Ping(_)) => "ping",
         Some(Op::Hello(_)) => "hello",
         Some(Op::Resume(_)) => "resume",
-        Some(Op::Exec(_)) => "exec",
         Some(Op::FsRead(_)) => "fs_read",
         Some(Op::FsWrite(_)) => "fs_write",
         Some(Op::FsList(_)) => "fs_list",
@@ -2153,7 +2113,6 @@ mod tests {
         use v1::control_request::Op;
         let cases = [
             Op::Ping(v1::PingRequest::default()),
-            Op::Exec(v1::ExecRequest::default()),
             Op::FsRead(v1::FsReadRequest::default()),
             Op::Git(v1::GitRequest::default()),
             Op::Metrics(v1::MetricsRequest::default()),
@@ -2172,7 +2131,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_routes_liveness_exec_and_classed_work() {
+    fn classify_routes_liveness_git_and_classed_work() {
         use v1::control_request::Op;
 
         let request = |op| ControlRequest {
@@ -2185,11 +2144,6 @@ mod tests {
         assert!(matches!(
             classify(&request(Op::Ping(v1::PingRequest { nonce: 1 }))),
             Route::Liveness
-        ));
-        // Exec runs as an engine job through the legacy adapter.
-        assert!(matches!(
-            classify(&request(Op::Exec(v1::ExecRequest::default()))),
-            Route::LegacyExec(_)
         ));
         // Git runs as an engine job through its adapter; fs ops are light.
         assert!(matches!(

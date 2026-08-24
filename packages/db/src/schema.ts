@@ -564,6 +564,59 @@ export const sessionTenancyActivations = pgTable(
   }),
 );
 
+export const organizationPrivateSessionSettings = pgTable(
+  "organization_private_session_settings",
+  {
+    accountId: uuid("account_id")
+      .primaryKey()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    version: bigint("version", { mode: "number" }).notNull().default(1),
+    updatedByMembershipId: uuid("updated_by_membership_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    updater: foreignKey({
+      name: "organization_private_session_settings_updater_fk",
+      columns: [table.updatedByMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    versionValid: check(
+      "organization_private_session_settings_version_check",
+      sql`${table.version} > 0`,
+    ),
+  }),
+);
+
+export const organizationPrivateSessionSettingEvents = pgTable(
+  "organization_private_session_setting_events",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    actorMembershipId: uuid("actor_membership_id").notNull(),
+    requestedEnabled: boolean("requested_enabled").notNull(),
+    expectedVersion: bigint("expected_version", { mode: "number" }).notNull(),
+    resultEnabled: boolean("result_enabled").notNull(),
+    resultVersion: bigint("result_version", { mode: "number" }).notNull(),
+    resultUpdatedAt: timestamp("result_updated_at", { withTimezone: true }).notNull(),
+    changed: boolean("changed").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actor: foreignKey({
+      name: "organization_private_session_setting_events_actor_fk",
+      columns: [table.actorMembershipId, table.accountId],
+      foreignColumns: [organizationMemberships.id, organizationMemberships.accountId],
+    }).onDelete("restrict"),
+    versionsValid: check(
+      "organization_private_session_setting_events_versions_check",
+      sql`${table.expectedVersion} >= 0 and ${table.resultVersion} > 0`,
+    ),
+  }),
+);
+
 export const organizationUserRetentionPolicies = pgTable(
   "organization_user_retention_policies",
   {
@@ -1763,7 +1816,7 @@ export const slackInstallationBindings = pgTable(
         and octet_length(${table.slackTeamName}) between 1 and 256
         and octet_length(${table.botId}) between 1 and 64
         and octet_length(${table.botUserId}) between 1 and 64
-        and ${table.botDisplayName} = 'OpenGeni'`,
+        and ${table.botDisplayName} in ('OpenGeni', 'OpenGeni Staging')`,
     ),
     versionPositive: check("slack_installation_bindings_version_check", sql`${table.version} > 0`),
   }),
@@ -1872,6 +1925,9 @@ export const slackBotUserLinks = pgTable(
     slackUserId: text("slack_user_id").notNull(),
     subjectId: text("subject_id").notNull(),
     linkedBySubjectId: text("linked_by_subject_id").notNull(),
+    // The exact interaction id that won this identity's one-time onboarding
+    // hint. NULL means the hint has not been shown yet.
+    firstTaskHintInteractionId: uuid("first_task_hint_interaction_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2222,6 +2278,9 @@ export const slackInteractions = pgTable(
     deliveryRetryAt: timestamp("delivery_retry_at", { withTimezone: true }),
     deliveryLastErrorCode: text("delivery_last_error_code"),
     ackSlackMessageTs: text("ack_slack_message_ts"),
+    // Frozen once: whether this interaction's acknowledgement renders the
+    // one-time onboarding hint. NULL means the decision has not been resolved.
+    firstTaskHint: boolean("first_task_hint"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
@@ -5506,6 +5565,11 @@ export const sessionTurns = pgTable(
     oneCurrentInference: uniqueIndex("session_turns_one_current_inference_uq")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} in ('running','requires_action','recovering','waiting_capacity')`),
+    // Agent-monitoring "was this prompt's turn ever claimed" probe
+    // (`excludeUnclaimedHumanPromptEventFilter`), migration 0322.
+    unclaimedPromptTrigger: index("session_turns_unclaimed_prompt_trigger_idx")
+      .on(table.workspaceId, table.sessionId, table.triggerEventId)
+      .where(sql`${table.startedAt} is null`),
     latencyModeValid: check(
       "session_turns_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
@@ -6751,7 +6815,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result', 'media_generation_result')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -6772,6 +6836,11 @@ export const sessionSystemUpdates = pgTable(
       table.state,
       table.createdAt,
     ),
+    // Producer-side supersession / resolution of one child's pending notices
+    // of one kind on the parent (migration 0325).
+    pendingKindSource: index("session_system_updates_pending_kind_source_idx")
+      .on(table.workspaceId, table.sessionId, table.kind, table.sourceId)
+      .where(sql`${table.state} = 'pending'`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
@@ -6838,11 +6907,11 @@ export const sessionSystemUpdateOutbox = pgTable(
   (table) => ({
     kindValid: check(
       "system_update_outbox_kind_check",
-      sql`${table.kind} = 'child_terminal_result'`,
+      sql`${table.kind} in ('child_terminal_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
     ),
     payloadKindValid: check(
       "system_update_outbox_payload_kind_check",
-      sql`${table.payload} ->> 'type' = 'child_terminal_result'`,
+      sql`${table.payload} ->> 'type' = ${table.kind}`,
     ),
     dedupe: uniqueIndex("session_system_update_outbox_dedupe_uq").on(
       table.workspaceId,
@@ -8606,6 +8675,166 @@ export const sandboxRetainedProcesses = pgTable(
             'provider_instance_terminated'
           )
           and ${table.reconcileProofObservedAt} is not null
+        )`,
+    ),
+  }),
+);
+
+export const sessionBackgroundCommands = pgTable(
+  "session_background_commands",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    provider: text("provider", { enum: ["managed", "connected_machine"] }).notNull(),
+    state: text("state", { enum: ["running", "stopping", "exited", "lost"] })
+      .notNull()
+      .default("running"),
+    retainedProcessId: uuid("retained_process_id"),
+    controlWorkspaceId: uuid("control_workspace_id"),
+    enrollmentId: uuid("enrollment_id"),
+    connectionInstanceId: text("connection_instance_id"),
+    opId: text("op_id"),
+    commandPreview: text("command_preview").notNull().default(""),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true }),
+    cancelRequestedBy: text("cancel_requested_by"),
+    exitCode: integer("exit_code"),
+    settlementReason: text("settlement_reason"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
+    reconcileClaimId: uuid("reconcile_claim_id"),
+    reconcileClaimedAt: timestamp("reconcile_claimed_at", { withTimezone: true }),
+    reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
+    lastReconcileOutcome: text("last_reconcile_outcome"),
+    reconcileProofOutcome: text("reconcile_proof_outcome", { enum: ["exited", "lost"] }),
+    reconcileProofExitCode: integer("reconcile_proof_exit_code"),
+    reconcileProofReason: text("reconcile_proof_reason"),
+    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_background_commands_workspace_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_background_commands_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    controlWorkspaceAccount: foreignKey({
+      name: "session_background_commands_control_workspace_fk",
+      columns: [table.controlWorkspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("restrict"),
+    retainedProcess: foreignKey({
+      name: "session_background_commands_process_fk",
+      columns: [table.retainedProcessId],
+      foreignColumns: [sandboxRetainedProcesses.id],
+    }).onDelete("restrict"),
+    managedProcess: uniqueIndex("session_background_commands_process_uq")
+      .on(table.retainedProcessId)
+      .where(sql`${table.retainedProcessId} is not null`),
+    connectedOp: uniqueIndex("session_background_commands_connected_op_uq")
+      .on(table.controlWorkspaceId, table.enrollmentId, table.connectionInstanceId, table.opId)
+      .where(sql`${table.provider} = 'connected_machine'`),
+    activeSession: index("session_background_commands_active_session_idx")
+      .on(table.workspaceId, table.sessionId, table.state, table.startedAt, table.id)
+      .where(sql`${table.state} in ('running', 'stopping')`),
+    stopping: index("session_background_commands_stopping_idx")
+      .on(table.reconcileAfter, table.cancelRequestedAt, table.id)
+      .where(sql`${table.state} in ('running', 'stopping')`),
+    providerValid: check(
+      "session_background_commands_provider_check",
+      sql`${table.provider} in ('managed', 'connected_machine')`,
+    ),
+    stateValid: check(
+      "session_background_commands_state_check",
+      sql`${table.state} in ('running', 'stopping', 'exited', 'lost')`,
+    ),
+    providerIdentityValid: check(
+      "session_background_commands_provider_identity_check",
+      sql`(
+          ${table.provider} = 'managed'
+          and ${table.retainedProcessId} is not null
+          and ${table.controlWorkspaceId} is null
+          and ${table.enrollmentId} is null
+          and ${table.connectionInstanceId} is null
+          and ${table.opId} is null
+        ) or (
+          ${table.provider} = 'connected_machine'
+          and ${table.retainedProcessId} is null
+          and ${table.controlWorkspaceId} is not null
+          and ${table.enrollmentId} is not null
+          and ${table.connectionInstanceId} is not null
+          and octet_length(${table.connectionInstanceId}) between 1 and 128
+          and ${table.opId} is not null
+          and octet_length(${table.opId}) between 1 and 256
+        )`,
+    ),
+    lifecycleValid: check(
+      "session_background_commands_lifecycle_check",
+      sql`(
+          ${table.state} = 'running'
+          and ${table.cancelRequestedAt} is null
+          and ${table.cancelRequestedBy} is null
+          and ${table.exitCode} is null
+          and ${table.settlementReason} is null
+          and ${table.settledAt} is null
+        ) or (
+          ${table.state} = 'stopping'
+          and ${table.cancelRequestedAt} is not null
+          and ${table.cancelRequestedBy} is not null
+          and octet_length(btrim(${table.cancelRequestedBy})) between 1 and 1024
+          and ${table.exitCode} is null
+          and ${table.settlementReason} is null
+          and ${table.settledAt} is null
+        ) or (
+          ${table.state} = 'exited'
+          and ${table.settledAt} is not null
+          and octet_length(btrim(${table.settlementReason})) between 1 and 512
+        ) or (
+          ${table.state} = 'lost'
+          and ${table.exitCode} is null
+          and ${table.settledAt} is not null
+          and octet_length(btrim(${table.settlementReason})) between 1 and 512
+        )`,
+    ),
+    previewValid: check(
+      "session_background_commands_preview_check",
+      sql`octet_length(${table.commandPreview}) <= 2048`,
+    ),
+    reconcileValid: check(
+      "session_background_commands_reconcile_check",
+      sql`${table.reconcileAttempts} >= 0
+        and (
+          (${table.reconcileClaimId} is null and ${table.reconcileClaimedAt} is null)
+          or (${table.reconcileClaimId} is not null and ${table.reconcileClaimedAt} is not null)
+        )
+        and (
+          ${table.lastReconcileOutcome} is null
+          or octet_length(${table.lastReconcileOutcome}) between 1 and 64
+        )
+        and (
+          (
+            ${table.reconcileProofOutcome} is null
+            and ${table.reconcileProofExitCode} is null
+            and ${table.reconcileProofReason} is null
+            and ${table.reconcileProofObservedAt} is null
+          ) or (
+            ${table.reconcileProofOutcome} = 'exited'
+            and ${table.reconcileProofExitCode} is not null
+            and octet_length(btrim(${table.reconcileProofReason})) between 1 and 512
+            and ${table.reconcileProofObservedAt} is not null
+          ) or (
+            ${table.reconcileProofOutcome} = 'lost'
+            and ${table.reconcileProofExitCode} is null
+            and octet_length(btrim(${table.reconcileProofReason})) between 1 and 512
+            and ${table.reconcileProofObservedAt} is not null
+          )
         )`,
     ),
   }),

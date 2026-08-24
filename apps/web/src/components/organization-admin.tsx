@@ -1,5 +1,9 @@
 import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
 import {
+  getOrganizationPrivateSessionSettings,
+  updateOrganizationPrivateSessionSettings,
+} from "@opengeni/sdk/organization-private-session-settings";
+import {
   Building2Icon,
   CheckIcon,
   ClockIcon,
@@ -45,6 +49,7 @@ import type {
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
+  OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
 } from "@/types";
 
@@ -63,6 +68,179 @@ type PendingOrganizationRename = {
   expectedUpdatedAt: string;
   operationId: string;
 };
+
+export function OrganizationPrivateSessionsSection(props: {
+  client: OpenGeniCoreClient;
+  identity: OrganizationAdminIdentity;
+  actorRole: OrganizationMembershipRole | null;
+  managedSession: boolean;
+}) {
+  const identityKey = organizationAdminIdentityKey(props.identity);
+  const identityRef = useRef<OrganizationAdminIdentity | null>(props.identity);
+  identityRef.current = props.identity;
+  const sequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
+  const activeRef = useRef(new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>());
+  const [state, setState] = useState<OwnedState<OrganizationPrivateSessionSettings | null>>({
+    ownerKey: "",
+    value: null,
+    loading: false,
+    error: null,
+  });
+  const [busy, setBusy] = useState(false);
+  const [busyOwnerKey, setBusyOwnerKey] = useState("");
+  const canAdminister = props.actorRole === "owner" || props.actorRole === "admin";
+
+  const claim = useCallback(
+    (lane: OrganizationAdminOperationLane) => {
+      const slot = organizationAdminOperationSlot("private-sessions", lane);
+      const operation = beginOrganizationAdminOperation({
+        identity: props.identity,
+        resource: "private-sessions",
+        lane,
+        previousSequence: sequenceRef.current.get(slot) ?? 0,
+      });
+      sequenceRef.current.set(slot, operation.sequence);
+      activeRef.current.set(slot, operation);
+      return operation;
+    },
+    [props.identity],
+  );
+  const owns = useCallback(
+    (operation: OrganizationAdminOperation) =>
+      ownsOrganizationAdminOperation({
+        currentIdentity: identityRef.current,
+        currentOperation:
+          activeRef.current.get(
+            organizationAdminOperationSlot(operation.resource, operation.lane),
+          ) ?? null,
+        accepted: operation,
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    const active = activeRef.current;
+    identityRef.current = props.identity;
+    return () => {
+      identityRef.current = null;
+      active.clear();
+    };
+  }, [props.identity]);
+
+  const load = useCallback(async () => {
+    if (!props.managedSession || !canAdminister || !props.identity.organizationId) {
+      setState({ ownerKey: identityKey, value: null, loading: false, error: null });
+      return;
+    }
+    const operation = claim("read");
+    setState({ ownerKey: identityKey, value: null, loading: true, error: null });
+    try {
+      const value = await getOrganizationPrivateSessionSettings(
+        props.client,
+        props.identity.organizationId,
+      );
+      if (!owns(operation)) return;
+      setState({ ownerKey: identityKey, value, loading: false, error: null });
+    } catch (error) {
+      if (!owns(operation)) return;
+      setState({
+        ownerKey: identityKey,
+        value: null,
+        loading: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }, [canAdminister, claim, identityKey, owns, props.client, props.identity, props.managedSession]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const visible = state.ownerKey === identityKey ? state : { ...state, value: null, loading: true };
+  const settings = visible.value;
+  const visibleBusy = busyOwnerKey === identityKey && busy;
+
+  async function setEnabled(enabled: boolean) {
+    if (!settings || visibleBusy) return;
+    const operation = claim("mutation");
+    setBusyOwnerKey(identityKey);
+    setBusy(true);
+    try {
+      const value = await updateOrganizationPrivateSessionSettings(
+        props.client,
+        props.identity.organizationId,
+        {
+          enabled,
+          expectedVersion: settings.version,
+          operationId: crypto.randomUUID(),
+        },
+      );
+      if (!owns(operation)) return;
+      setState({ ownerKey: identityKey, value, loading: false, error: null });
+      toast.success(enabled ? "Only me chats enabled" : "Only me chats disabled");
+    } catch (error) {
+      if (!owns(operation)) return;
+      if (isOrganizationConflict(error)) await load();
+      toast.error("Couldn't update Only me chats", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      if (owns(operation)) setBusy(false);
+    }
+  }
+
+  if (!props.managedSession || !canAdminister) return null;
+  return (
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="flex items-center gap-1.5 text-sm font-medium">
+            <ShieldCheckIcon className="size-3.5 text-brand" />
+            Only me chats
+          </h2>
+          <p className="mt-1 max-w-2xl text-xs text-fg-muted">
+            Let members with permission to start chats in a shared workspace create a session that
+            only they can open. This setting does not affect Personal workspaces.
+          </p>
+        </div>
+        {settings ? (
+          <Button
+            type="button"
+            variant={settings.enabled ? "secondary" : "default"}
+            size="sm"
+            disabled={visibleBusy || (!settings.available && !settings.enabled)}
+            onClick={() => void setEnabled(!settings.enabled)}
+          >
+            {visibleBusy ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+            {settings.enabled ? "Disable" : "Enable"}
+          </Button>
+        ) : null}
+      </div>
+      {visible.error ? (
+        <LoadErrorState
+          title="Couldn't load Only me chat settings"
+          error={visible.error}
+          onRetry={() => void load()}
+        />
+      ) : visible.loading || !settings ? (
+        <p role="status" className="flex items-center gap-2 text-xs text-fg-muted">
+          <Loader2Icon className="size-3.5 animate-spin" /> Loading Only me chat settings…
+        </p>
+      ) : !settings.available ? (
+        <Notice tone="muted" title="Not available yet">
+          This deployment has not completed the private-session readiness activation for this
+          organization.
+        </Notice>
+      ) : (
+        <p className="text-xs text-fg-subtle">
+          {settings.enabled
+            ? "Members who have permission to start chats in a workspace can choose Only me."
+            : "Organization workspaces currently create workspace-visible chats only."}
+        </p>
+      )}
+    </section>
+  );
+}
 
 export function OrganizationOverviewSection(props: {
   client: OpenGeniCoreClient;

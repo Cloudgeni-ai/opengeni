@@ -820,7 +820,7 @@ export type SlackInstallationBinding = {
   slackTeamName: string;
   botId: string;
   botUserId: string;
-  botDisplayName: "OpenGeni";
+  botDisplayName: "OpenGeni" | "OpenGeni Staging";
   state: SlackInstallationBindingState;
   quarantineReason: string | null;
   version: number;
@@ -1218,11 +1218,41 @@ export type ForkSessionResponse = {
   replay: boolean;
 };
 
+export type SessionBackgroundCommandActivity = {
+  state: "running" | "stopping";
+  count: number;
+};
+
+export type SessionBackgroundCommand = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  provider: "managed" | "connected_machine";
+  state: "running" | "stopping" | "exited" | "lost";
+  commandPreview: string;
+  cancelRequestedAt: string | null;
+  exitCode: number | null;
+  settlementReason: string | null;
+  startedAt: string;
+  settledAt: string | null;
+  updatedAt: string;
+};
+
+export type SessionBackgroundCommandListResponse = {
+  commands: SessionBackgroundCommand[];
+};
+
+export type CancelSessionBackgroundCommandResult = {
+  command: SessionBackgroundCommand;
+  accepted: boolean;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
   accountId: string;
   status: SessionStatus;
+  backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1319,10 +1349,20 @@ export type Session = {
         failedDescendants: number;
         unreadDescendants?: number | undefined;
         activelyWorkingDescendants?: number | undefined;
+        /**
+         * Earliest moment one of the counted `attentionDescendants` entered
+         * `requires_action`; null when none is waiting, absent on older servers.
+         */
+        attentionSince?: string | null | undefined;
         /** Counts are lower bounds rather than exact totals when true. */
         truncated: boolean;
       }
     | undefined;
+  /**
+   * When this session's own open turn entered `requires_action`. Populated by
+   * list and lineage reads for `requires_action` sessions; null otherwise.
+   */
+  requiresActionSince?: string | null | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -1629,6 +1669,8 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "session.command.backgrounded",
+  "session.command.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -2734,6 +2776,7 @@ export type FirstPartyMcpToolName =
   | "remember"
   | "remember_confirm"
   | "company_profile_propose"
+  | "company_profile_confirm"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -2754,6 +2797,7 @@ export type FirstPartyMcpToolName =
   | "session_pause"
   | "session_resume"
   | "session_steer"
+  | "session_human_input_respond"
   | "set_other_session_title"
   | "interaction_discover"
   | "browser_open"
@@ -3680,9 +3724,22 @@ export type OrganizationAdministrationOverview = {
   organization: OrganizationSummary;
   workspaces: OrganizationWorkspaceAccess[];
 };
+export type OrganizationPrivateSessionSettings = {
+  organizationId: string;
+  enabled: boolean;
+  available: boolean;
+  version: number;
+  updatedAt: string;
+  changed?: boolean;
+};
 export type UpdateOrganizationNameRequest = {
   name: string;
   expectedUpdatedAt: string;
+  operationId: string;
+};
+export type UpdateOrganizationPrivateSessionSettingsRequest = {
+  enabled: boolean;
+  expectedVersion: number;
   operationId: string;
 };
 export type OrganizationRetentionPolicy = {
@@ -4009,6 +4066,7 @@ export type SessionGoalContinuationReason =
   | "session_cancelled"
   | "system_work_pending"
   | "held_for_input"
+  | "backoff_pending"
   | "missing_obligation";
 
 export type SessionGoalContinuation = {
@@ -4018,6 +4076,8 @@ export type SessionGoalContinuation = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
+  /** Agent-stated reason for a `held_for_input` hold; null otherwise. */
+  holdReason?: string | null | undefined;
 };
 
 export type SessionGoal = {
@@ -4109,6 +4169,7 @@ export type EffectiveSessionControl = {
     interruptionPendingCount: number;
     quiescencePendingCount: number;
   } | null;
+  backgroundCommandSettlement?: { state: "stopping"; commandCount: number } | null | undefined;
 };
 
 export type SessionCommandReceipt = {
@@ -4205,7 +4266,12 @@ export type SessionSystemUpdateKind =
   | "agent_message"
   | "agent_steer_instruction"
   | "child_terminal_result"
-  | "media_generation_result";
+  | "media_generation_result"
+  | "child_requires_action"
+  | "child_requires_action_resolved"
+  | "child_paused"
+  | "child_waiting_capacity"
+  | "child_progress";
 
 export type SessionSystemUpdateState =
   | "pending"

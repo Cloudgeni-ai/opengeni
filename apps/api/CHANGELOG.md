@@ -1,5 +1,107 @@
 # @opengeni/api-router
 
+## 2.1.0
+
+### Minor Changes
+
+- 4be2055: The first-party `opengeni` MCP server gains `session_human_input_respond` (`sessions:control`, `session.human_input.write`): a live attempt answers or skips another session's structured human-input request, recorded as `agent_attempt:<attemptId>`, and signals that session's workflow exactly like the REST route. `session_wait` reports `ownPendingImmediateUpdates` and `ownPendingDeferredUpdateKinds`; only immediate-class own input ends the wait. The API and both workers install `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` into `@opengeni/db` at boot. The worker delivers a child's `child_requires_action` outbox row to the parent right after the `requires_action` settlement (generalized `deliverChildLifecycleOutboxToParent`; the reaper covers crashes) and the goal-continuation prompt explains every child notice kind, offering `opengeni__session_human_input_respond` only when it is in the session's effective first-party selection.
+- de3f376: Bound and shape the durable text an agent authors on a user's behalf. The budget
+  follows the destination, on every agent surface that reaches it. A mandatory
+  workspace rule is composed verbatim into the prompt of every session it applies
+  to, so `remember`, `instruction_policy_propose`, and `task_note_promote_instruction_policy`
+  are all capped at 600 characters; the preference destination is capped at 1,200
+  across its three surfaces, because only its short descriptor is composed and the
+  content is retrieved on demand. Task-note promotion is checked in the database
+  layer, where the content is the note rather than a request field, and is rejected
+  rather than truncated before any evidence, claim, or proposal row is written.
+  `company_profile_propose`, the largest always-on surface, is capped for agents at
+  400 characters per scalar, 200 per list entry, and 4,096 UTF-8 bytes total. The
+  Knowledge lane keeps its 4,000-character retrieval-evidence ceiling, and every
+  human editor limit is unchanged so nothing a person already typed becomes
+  invalid. Tool descriptions now state the prompt cost and the authoring shape, and
+  the `remember` confirmation card names the character count and destination so a
+  human can judge the cost before saving. Existing stored revisions are never
+  rewritten.
+- e6ffdc7: The agent-facing `goal_set` MCP tool no longer accepts `maxAutoContinuations` (the ceiling stays on `CreateSessionRequest.goal` and scheduled tasks), and the operator PATCH resume emits `goal.resumed{reason:"api"}`. The worker passes the configured idle-backoff policy to the goal materializer and treats a `deferred` result like `held`: the workflow closes and the delayed wake-outbox row (or any new input) restarts it, with no Temporal timer.
+- 0b3b8df: Add an explicit organization-owner-confirmed agent path for company-profile and
+  strategic-goal administration. The two-step MCP flow stages an immutable inactive
+  full-profile proposal, binds activation to the initiating human's exact
+  structured confirmation, revalidates current organization authority and profile
+  CAS in PostgreSQL under the canonical workspace/session lock order, and remains
+  independent of workspace learning mode. The manual `account:admin` route keeps
+  its admission contract, and the earlier proposal-only `company_profile_propose`
+  tool (`durable_learning` provenance) is retired in favor of this path.
+- bbd19e0: Add an owner/admin organization setting that enables Only-me chats in shared
+  workspaces for organizations holding the session-tenancy readiness receipt
+  (`GET`/`PATCH /v1/organizations/:organizationId/private-session-settings`,
+  `@opengeni/sdk/organization-private-session-settings`, and the organization
+  settings page). Already activated organizations are backfilled enabled.
+- 8e2361b: Slack bot message ergonomics. The acknowledgement now carries exactly one **Open in OpenGeni** link plus the **Status**/**Stop** buttons and drops the how-to prose the buttons already say; the private-handoff and human-DM variants keep their distinct privacy sentence, and the reaction-summon acknowledgement is unchanged. That prose appears once per Slack identity per installation, inside the same acknowledgement message. The decision is resolved and frozen through `resolveSlackInteractionFirstTaskHint` before the provider post, so an acknowledgement repaired after a crash, a lost response, or a replica race re-renders byte-identically for the digest-bound post ledger; a resolution failure raises into the retryable inbox path instead of binding that ledger to a hint-less message. A control click on the acknowledgement carries the hint forward, so pressing **Status** cannot destroy the only copy an identity is ever shown, while later control cards carry none.
+
+  Completed results no longer append "Reply in this thread to continue." or **Make recurring**, which moves to the **Status** card for the requester who still holds `sessions:read` plus `scheduled_tasks:manage` (same schedules deep-link contract, now omitted rather than thrown when no absolute web base URL is configured). The configured slash command gains the single argument `info`: an ephemeral, workspace-aware Block Kit card that creates no session, never touches the durable inbox, and re-proves the exact Slack identity link plus the live workspace grant before echoing any workspace-identifying text (unlinked identities get the ordinary connect view, granted-but-revoked identities get request-access). Each of its lines is gated on the grant that authorizes it: `sessions:control` for continue/stop, `sessions:create` for starting, `scheduled_tasks:manage` for recurrence. Reply `stop`, the three-progress cap, human-input/approval cards, blocker/failure posts, requester mention rules, disabled unfurling, the post-operation ledger, and outcome-unknown reconciliation are unchanged.
+
+### Patch Changes
+
+- 1fc235b: Omit a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim) from `sessions_list` `includeLastMessage` previews and the MCP `session_events` monitoring read, so orchestrators do not mistake work the model never received for processed conversation. `queuedPromptCount` still reports waiting work, the exact stored row appears at its original sequence once the turn is claimed, and REST event pages, SSE, and forensic reads are unchanged. Rolling migration 0322 adds the partial index `session_turns_unclaimed_prompt_trigger_idx` (`workspace_id, session_id, trigger_event_id` where `started_at IS NULL`) that serves the unclaimed-turn probe.
+- 26042f9: Prefer OAuth Dynamic Client Registration whenever an MCP authorization server advertises both DCR and Client ID Metadata Documents. This avoids provider authorization failures caused by treating the metadata-document URL as a universally accepted client ID while retaining explicit provider-profile overrides for either registration mechanism.
+- 72f8fc6: The first-party `github_repositories_list` MCP tool now attaches `githubInstallationId`/`githubRepositoryId` to every allowlisted repository resource, public or private, so sessions and scheduled tasks built from it receive a scoped installation token instead of an anonymous read-only clone.
+- acd38d1: Retire Browser and Desktop resources when their source task leaves the Connected Machine that owns their controller, stop retrying the terminal placement conflict, and let Desktop create one replacement on the task's current placement.
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [1fc235b]
+- Updated dependencies [de3f376]
+- Updated dependencies [c5c7e5a]
+- Updated dependencies [a9cd9e7]
+- Updated dependencies [72f8fc6]
+- Updated dependencies [72f8fc6]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [5e9795c]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [3398c2f]
+- Updated dependencies [acd38d1]
+- Updated dependencies [e91d89e]
+- Updated dependencies [8e2361b]
+- Updated dependencies [5d664d8]
+- Updated dependencies [45bffc3]
+  - @opengeni/config@0.19.0
+  - @opengeni/contracts@2.2.0
+  - @opengeni/core@2.1.0
+  - @opengeni/db@3.1.0
+  - @opengeni/runtime@1.3.0
+  - @opengeni/github@0.5.2
+  - @opengeni/documents@0.6.9
+  - @opengeni/storage@0.2.105
+  - @opengeni/artifact-tool@0.3.4
+  - @opengeni/codemode@0.4.12
+  - @opengeni/events@0.3.123
+  - @opengeni/observability@0.8.3
+
+## 2.0.1
+
+### Patch Changes
+
+- b2dd2f7: Bound the remaining request-scoped workspace control-row mutations and make the lock budget a first-class setting: `updateWorkspaceSettings`, `deleteSessionTreeIfQuiescent`, queue move/edit/delete, composer draft save, and the MCP agent message accept an optional `controlLockTimeoutMs` that API routes and core commands pass (lifecycle callers keep the unbounded wait), so a busy workspace yields the same typed retryable 503 `WORKSPACE_CONTROL_BUSY`. `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` is now parsed and validated once at boot by `@opengeni/config` (`workspaceControlLockTimeoutMs`, positive integer ms, default 20000), installed into `@opengeni/db` by `createApp` through `configureWorkspaceControlRequestLockTimeoutMs`, and rendered by the deployment runtime-env generator as an optional passthrough.
+- ab81e47: Allow the managed staging Slack app and bot to use the visibly distinct `OpenGeni Staging` identity. The manifest, runtime configuration, installation verification, durable binding contract, SDK, web projection, and deployment artifacts now preserve one closed environment-qualified display-name setting while production continues to default to `OpenGeni`.
+- Updated dependencies [b2dd2f7]
+- Updated dependencies [ab81e47]
+  - @opengeni/db@3.0.1
+  - @opengeni/core@2.0.1
+  - @opengeni/config@0.18.1
+  - @opengeni/contracts@2.1.1
+  - @opengeni/documents@0.6.8
+  - @opengeni/events@0.3.122
+  - @opengeni/github@0.5.1
+  - @opengeni/runtime@1.2.1
+  - @opengeni/storage@0.2.104
+  - @opengeni/artifact-tool@0.3.3
+  - @opengeni/codemode@0.4.11
+  - @opengeni/observability@0.8.2
+
 ## 2.0.0
 
 ### Major Changes

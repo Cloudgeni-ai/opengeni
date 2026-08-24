@@ -258,8 +258,11 @@ export function buildResources(
       ref: repo.ref,
       mountPath,
       ...(repo.provider ? { provider: repo.provider } : {}),
-      ...(repo.private && repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
-      ...(repo.private && repo.installationId ? { githubInstallationId: repo.installationId } : {}),
+      // Every catalog repository is in the workspace's GitHub App allowlist,
+      // public or private, so every selection carries the stable ids that
+      // mint the scoped installation token. Manual URLs stay bare.
+      ...(repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
+      ...(repo.installationId ? { githubInstallationId: repo.installationId } : {}),
     };
   });
 }
@@ -298,9 +301,10 @@ export function gitHubRepositoryResource(
     ref: ref.trim() || repo.defaultBranch,
     provider: "github",
     mountPath: defaultRepositoryMountPath(uri, "github"),
-    ...(repo.private
-      ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId }
-      : {}),
+    // Bound is bound: a public repository in the allowlist receives the same
+    // scoped installation token as a private one, so it carries the same ids.
+    githubRepositoryId: repo.id,
+    githubInstallationId: repo.installationId,
   };
 }
 
@@ -310,13 +314,16 @@ export function isRepositoryResourceForGitHubRepo(
 ): boolean {
   const hasGitHubIdentity =
     resource.githubRepositoryId !== undefined || resource.githubInstallationId !== undefined;
-  if (hasGitHubIdentity || repo.private) {
+  if (hasGitHubIdentity) {
     return (
-      repo.private &&
       resource.githubRepositoryId === repo.id &&
       resource.githubInstallationId === repo.installationId
     );
   }
+  // A bare resource (manual URL or a session created before bound public
+  // repositories carried ids) still matches a public catalog entry by URI.
+  // Private repositories are only ever selected by identity.
+  if (repo.private) return false;
   return sameRepositoryUri(resource, gitHubRepositoryResource(repo, repo.defaultBranch).uri);
 }
 

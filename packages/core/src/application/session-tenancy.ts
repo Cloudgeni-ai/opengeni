@@ -10,9 +10,12 @@ import {
 } from "@opengeni/contracts";
 import {
   forkSessionContent,
+  getPrivateSessionCreatePolicy,
   getSessionEventForSubject,
   isRetryableDatabaseTransportFailure,
+  nestedPostgresSqlState,
   sessionTenancyProductActivated,
+  SessionTenancyAccessError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
   type Database,
@@ -70,7 +73,28 @@ export async function getManagedHumanSessionCreateCapabilities(
     }
     throw error;
   }
-  const activated = await sessionTenancyProductActivated(deps.db, workspaceId);
+  // Mirror the database create fence exactly: a managed human's own Personal
+  // workspace needs only the operator readiness receipt, while a shared
+  // organization workspace additionally needs the owner/admin product setting.
+  let activated = false;
+  try {
+    const policy = await getPrivateSessionCreatePolicy(deps.db, {
+      workspaceId,
+      actorSubjectId: authorization.grant.subjectId,
+    });
+    activated = policy.personalWorkspace ? policy.platformAvailable : policy.organizationEnabled;
+  } catch (error) {
+    // A canonical managed human without an active organization membership or
+    // stated workspace authority (legacy managed access) is simply not
+    // private-ready; the definer's 42501 is a capability answer here, not a
+    // failure. Every other error still propagates.
+    if (
+      !(error instanceof SessionTenancyAccessError) &&
+      nestedPostgresSqlState(error) !== "42501"
+    ) {
+      throw error;
+    }
+  }
   return SessionTenancyCreateCapabilities.parse({
     activated,
     canCreatePrivate: activated,
@@ -83,6 +107,10 @@ export async function requireManagedHumanPrivateSessionCreate(
   authorization: AccessGrantAuthorization,
   workspaceId: string,
 ): Promise<void> {
+  // Target-free readiness preflight only. The owner/admin organization setting
+  // is enforced by the create transaction itself (under the organization
+  // fence, after keyed replay resolution), so a committed keyed success still
+  // replays after the setting is disabled while a fresh key fails closed.
   await requireSessionTenancyMutationGate(deps, authorization, workspaceId, ["sessions:create"]);
 }
 

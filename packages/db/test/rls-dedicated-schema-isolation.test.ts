@@ -294,6 +294,77 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
+  test("0323 pins every new definer routine to the dedicated schema", async () => {
+    if (!available) return;
+    const routines = await admin<
+      Array<{
+        name: string;
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+      }>
+    >`
+      select
+        procedure.proname as name,
+        procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname in (
+          'organization_private_sessions_enabled',
+          'get_private_session_create_policy',
+          'get_organization_private_session_settings',
+          'update_organization_private_session_settings',
+          'open_private_session_create_capability'
+        )
+      order by procedure.proname`;
+    expect([...routines]).toEqual([
+      {
+        name: "get_organization_private_session_settings",
+        securityDefiner: true,
+        appExecute: true,
+        publicExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "get_private_session_create_policy",
+        securityDefiner: true,
+        appExecute: true,
+        publicExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "open_private_session_create_capability",
+        securityDefiner: true,
+        appExecute: true,
+        publicExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "organization_private_sessions_enabled",
+        securityDefiner: true,
+        appExecute: false,
+        publicExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        name: "update_organization_private_session_settings",
+        securityDefiner: true,
+        appExecute: true,
+        publicExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
+  }, 180_000);
+
   test("runtime identity and every declared tenant table satisfy the exact FORCE-RLS posture", async () => {
     if (!available) return;
     const posture = await assertRuntimeDatabasePosture(db, {

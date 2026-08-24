@@ -133,6 +133,26 @@ describe("BrowserSession route discipline", () => {
     expect(source).toContain('operation === "browser.end" && expectedPlacementInstanceId');
   });
 
+  test("retires a stale Connected Machine placement instead of advertising a retryable 409", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const placement = source.slice(
+      source.indexOf("async function withBrowserPlacement"),
+      source.indexOf("async function withActiveBrowserController"),
+    );
+    const active = source.slice(
+      source.indexOf("async function withActiveBrowserController"),
+      source.indexOf("async function recoverActiveBrowserController"),
+    );
+    expect(placement).toContain("throwBrowserSourcePlacementChanged");
+    expect(active).toContain("terminalizeStaleConnectedInteractionPlacement");
+    expect(active.indexOf("terminalizeStaleConnectedInteractionPlacement")).toBeLessThan(
+      active.indexOf('sourcePlacementChangedApiError("browser_session")'),
+    );
+    expect(source).toContain('interactionFailureCode: "source_placement_changed"');
+    expect(source).toContain('interactionLifecycle: "lost"');
+    expect(source).toContain("retryable: false");
+  });
+
   test("admits every controller call through the durable generation fence", async () => {
     const source = await readFile(routeUrl, "utf8");
     expect(source).toContain("touchBrowserSessionController(deps.db");

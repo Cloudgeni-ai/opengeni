@@ -1419,7 +1419,7 @@ export type ConnectorActionToolCall = {
   serverId: string;
   toolName: string;
   arguments: unknown;
-  approvalMode?: "session_mcp";
+  approvalMode?: "session_mcp" | "connector_write";
 };
 
 export type ConnectorActionPolicyPreparation =
@@ -1446,13 +1446,18 @@ export type ConnectorActionExecutionAdmission =
 export type ConnectorActionPolicyHooks = {
   prepare: (call: ConnectorActionToolCall) => Promise<ConnectorActionPolicyPreparation>;
   begin: (call: ConnectorActionToolCall) => Promise<ConnectorActionExecutionAdmission>;
-  complete: (input: { requestId: string; outcome: "completed" | "uncertain" }) => Promise<void>;
+  complete: (input: {
+    requestId: string;
+    outcome: "completed" | "not_executed" | "uncertain";
+  }) => Promise<void>;
 };
 
 /** Exact private binding for one attempt-local model tool backed by a connector action. */
 export type AttemptConnectorActionBinding = {
   modelName: string;
   call: (approvalId: string, arguments_: unknown) => ConnectorActionToolCall;
+  /** Trusted in-process result classifier; remote connectors must not set this. */
+  resultOutcome?: (output: unknown) => "not_executed" | "uncertain" | null;
 };
 
 export type BuildAgentOptions = {
@@ -2688,22 +2693,39 @@ function installAttemptConnectorActionPolicy(
           if (!admission.allowed) {
             throw new Error(`Attempt connector action was not executed: ${admission.reason}`);
           }
-          if (!admission.managed) {
-            throw new Error("Attempt connector action has no explicit execution policy");
-          }
+          if (!admission.managed) return await originalInvoke(runContext, input, details);
           try {
             const output = await originalInvoke(runContext, input, details);
+            const returnedOutcome = binding.resultOutcome?.(output) ?? null;
+            if (returnedOutcome) {
+              await connectorActionPolicy.complete({
+                requestId: admission.requestId,
+                outcome: returnedOutcome,
+              });
+              throw new ConnectorActionReturnedFailure(returnedOutcome);
+            }
             await connectorActionPolicy.complete({
               requestId: admission.requestId,
               outcome: "completed",
             });
             return output;
-          } catch {
-            await connectorActionPolicy.complete({
-              requestId: admission.requestId,
-              outcome: "uncertain",
-            });
-            throw new Error("Attempt connector action failed after execution began");
+          } catch (error) {
+            const outcome =
+              error instanceof ConnectorActionReturnedFailure
+                ? error.outcome
+                : connectorActionOutcome(error);
+            if (!(error instanceof ConnectorActionReturnedFailure)) {
+              await connectorActionPolicy.complete({
+                requestId: admission.requestId,
+                outcome,
+              });
+            }
+            throw new Error(
+              outcome === "not_executed"
+                ? "Attempt connector action was not executed"
+                : "Attempt connector action outcome is uncertain; inspect provider state before retrying",
+              { cause: error },
+            );
           }
         },
       };
@@ -2717,6 +2739,24 @@ function installAttemptConnectorActionPolicy(
       return cloned;
     };
   }
+}
+
+class ConnectorActionReturnedFailure extends Error {
+  constructor(readonly outcome: "not_executed" | "uncertain") {
+    super(`Connector action returned ${outcome}`);
+  }
+}
+
+function connectorActionOutcome(error: unknown): "not_executed" | "uncertain" {
+  if (
+    error &&
+    typeof error === "object" &&
+    "connectorActionOutcome" in error &&
+    (error as { connectorActionOutcome?: unknown }).connectorActionOutcome === "not_executed"
+  ) {
+    return "not_executed";
+  }
+  return "uncertain";
 }
 
 /**
@@ -3747,6 +3787,12 @@ export async function prepareAgentTools(
       }),
     );
   }
+  const exposesDeferredPreparation = deferNonEager && deferredEntries.length > 0;
+  const closePublishedServers = async (): Promise<void> => {
+    await localToolServer?.close().catch(() => undefined);
+    await connectedEagerBestEffort?.close().catch(() => undefined);
+    await connectedEagerRequired?.close().catch(() => undefined);
+  };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
     try {
@@ -3807,11 +3853,15 @@ export async function prepareAgentTools(
         codexConnectorNamespaces,
       };
     } catch (error) {
-      await localToolServer?.close().catch(() => undefined);
+      // In deferred mode the eager and in-process servers have already been
+      // published to the Agent. The provisional PreparedAgentTools below owns
+      // them until turn finalization; a background preparation failure may
+      // clean up only resources acquired by that deferred preparation.
+      if (!exposesDeferredPreparation) {
+        await closePublishedServers();
+      }
       await connectedDeferredBestEffort?.close().catch(() => undefined);
       await connectedDeferredRequired?.close().catch(() => undefined);
-      await connectedEagerBestEffort?.close().catch(() => undefined);
-      await connectedEagerRequired?.close().catch(() => undefined);
       throw error;
     }
   };
@@ -3833,13 +3883,27 @@ export async function prepareAgentTools(
     },
   );
   void ready.catch(() => undefined);
-  await Promise.all(
-    [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
-      async (server) => {
-        if (server instanceof PrefixedMcpServer) await server.freezeTools();
-      },
-    ),
-  );
+  try {
+    await Promise.all(
+      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
+        async (server) => {
+          if (server instanceof PrefixedMcpServer) await server.freezeTools();
+        },
+      ),
+    );
+  } catch (error) {
+    // Publication did not complete, so no caller can own these resources.
+    // Join the bounded deferred preparation and let its complete owner close
+    // every server when available; if preparation itself failed, it already
+    // released deferred resources and this scope still owns eager/local ones.
+    const fullyPrepared = await ready.catch(() => null);
+    if (fullyPrepared) {
+      await fullyPrepared.close().catch(() => undefined);
+    } else {
+      await closePublishedServers();
+    }
+    throw error;
+  }
 
   const deferredServers = deferredEntries.map(
     (entry) =>
@@ -3863,7 +3927,17 @@ export async function prepareAgentTools(
     attemptToolEnvironment: null,
     resolvedMcpConnectionIds,
     close: async () => {
-      const prepared = await ready;
+      let prepared: PreparedAgentTools;
+      try {
+        prepared = await ready;
+      } catch (error) {
+        // completePreparation already released any deferred resources. The
+        // provisional owner must still release the eager and in-process
+        // servers that remained live so the Agent could observe the original
+        // preparation failure instead of a synthetic "server is closed" race.
+        await closePublishedServers();
+        throw error;
+      }
       await prepared.close();
     },
     codexConnectorNamespaces,

@@ -56,9 +56,8 @@ const settings = testSettings({
   sandboxBackend: "modal",
   sandboxOwnershipEnabled: true,
   sandboxSelfhostedEnabled: true,
-  // This fixture deliberately emulates the legacy request/reply runner; its
-  // subject responder has no op-stream connection. Keep that compatibility
-  // choice explicit now that production/test defaults are unbounded streaming.
+  // This fixture deliberately has no op-stream connection. Terminal exec must
+  // therefore fail before dispatch instead of downgrading to request/reply.
   agentOpStreamEnabled: false,
   sandboxSelfhostedExecTimeoutMs: 30_000,
   selfhostedRelayUrl: "wss://relay.example",
@@ -254,7 +253,7 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     expect(turnRow?.sandbox_backend).toBe("selfhosted");
   }, 60_000);
 
-  test("the first direct terminal command routes to a machine home without a phantom lease", async () => {
+  test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {
     if (!available) return;
     const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
     const session = await createSessionForRequest(
@@ -267,31 +266,26 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       },
     );
 
-    const result = await withChannelA(
-      { db, settings, bus },
-      {
-        accountId,
-        workspaceId,
-        session,
-        subjectId: "subject",
-      },
-      async ({ service, lease }) => {
-        expect(lease).toBeNull();
-        return await service.terminalExec({
-          command: "echo machine-home-ok",
-          cwd: "",
-          timeoutMs: 1_000,
-          emitStream: false,
-        });
-      },
-    );
-
-    expect(result).toMatchObject({
-      running: false,
-      exitCode: 0,
-      stdout: "machine-home-ok\n",
-      stderr: "",
-    });
+    await expect(
+      withChannelA(
+        { db, settings, bus },
+        {
+          accountId,
+          workspaceId,
+          session,
+          subjectId: "subject",
+        },
+        async ({ service, lease }) => {
+          expect(lease).toBeNull();
+          return await service.terminalExec({
+            command: "echo machine-home-ok",
+            cwd: "",
+            timeoutMs: 1_000,
+            emitStream: false,
+          });
+        },
+      ),
+    ).rejects.toThrow(/streaming command protocol required for exec/iu);
     const [leaseCount] = await admin<{ count: string }[]>`
       select count(*)::text as count
       from sandbox_leases

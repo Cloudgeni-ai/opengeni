@@ -1,5 +1,89 @@
 # @opengeni/core
 
+## 2.1.0
+
+### Minor Changes
+
+- 4be2055: `requireSessionAuthorization` denies `session.approval.write` to every agent attempt on every surface: tool approvals stay human-only, while structured human input (`session.human_input.write`) remains answerable by a live attempt. The React queue chrome and timeline label the new child lifecycle notice kinds (`child_requires_action`, `child_requires_action_resolved`, `child_paused`, `child_waiting_capacity`, `child_progress`) instead of dropping them.
+- de3f376: Bound and shape the durable text an agent authors on a user's behalf. The budget
+  follows the destination, on every agent surface that reaches it. A mandatory
+  workspace rule is composed verbatim into the prompt of every session it applies
+  to, so `remember`, `instruction_policy_propose`, and `task_note_promote_instruction_policy`
+  are all capped at 600 characters; the preference destination is capped at 1,200
+  across its three surfaces, because only its short descriptor is composed and the
+  content is retrieved on demand. Task-note promotion is checked in the database
+  layer, where the content is the note rather than a request field, and is rejected
+  rather than truncated before any evidence, claim, or proposal row is written.
+  `company_profile_propose`, the largest always-on surface, is capped for agents at
+  400 characters per scalar, 200 per list entry, and 4,096 UTF-8 bytes total. The
+  Knowledge lane keeps its 4,000-character retrieval-evidence ceiling, and every
+  human editor limit is unchanged so nothing a person already typed becomes
+  invalid. Tool descriptions now state the prompt cost and the authoring shape, and
+  the `remember` confirmation card names the character count and destination so a
+  human can judge the cost before saving. Existing stored revisions are never
+  rewritten.
+- 0b3b8df: Add an explicit organization-owner-confirmed agent path for company-profile and
+  strategic-goal administration. The two-step MCP flow stages an immutable inactive
+  full-profile proposal, binds activation to the initiating human's exact
+  structured confirmation, revalidates current organization authority and profile
+  CAS in PostgreSQL under the canonical workspace/session lock order, and remains
+  independent of workspace learning mode. The manual `account:admin` route keeps
+  its admission contract, and the earlier proposal-only `company_profile_propose`
+  tool (`durable_learning` provenance) is retired in favor of this path.
+- bbd19e0: Add an owner/admin organization setting that enables Only-me chats in shared
+  workspaces for organizations holding the session-tenancy readiness receipt
+  (`GET`/`PATCH /v1/organizations/:organizationId/private-session-settings`,
+  `@opengeni/sdk/organization-private-session-settings`, and the organization
+  settings page). Already activated organizations are backfilled enabled.
+
+### Patch Changes
+
+- 72f8fc6: Add GitHub App repository-binding resolution for bare `https://github.com/<owner>/<repo>` resources: parse coordinates, list the workspace's auditable installation allowlists under RLS, and stamp `githubInstallationId`/`githubRepositoryId` only when exactly one bound allowlist holds the repository id reported through an injected provider lookup. Unbound, non-allowlisted, ambiguous, and unavailable outcomes leave the resource bare and are reported so callers can warn without failing.
+- 45bffc3: Return empty personal-resource authority pages before session-tenancy activation while keeping mutations and runtime use activation-gated. Allow managed humans to read their personal Rig catalog without granting Rig administration.
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [1fc235b]
+- Updated dependencies [de3f376]
+- Updated dependencies [c5c7e5a]
+- Updated dependencies [a9cd9e7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [5e9795c]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [3398c2f]
+- Updated dependencies [acd38d1]
+- Updated dependencies [e91d89e]
+- Updated dependencies [8e2361b]
+- Updated dependencies [5d664d8]
+- Updated dependencies [45bffc3]
+  - @opengeni/config@0.19.0
+  - @opengeni/contracts@2.2.0
+  - @opengeni/db@3.1.0
+  - @opengeni/runtime@1.3.0
+  - @opengeni/documents@0.6.9
+  - @opengeni/storage@0.2.105
+  - @opengeni/events@0.3.123
+  - @opengeni/observability@0.8.3
+
+## 2.0.1
+
+### Patch Changes
+
+- b2dd2f7: Bound the remaining request-scoped workspace control-row mutations and make the lock budget a first-class setting: `updateWorkspaceSettings`, `deleteSessionTreeIfQuiescent`, queue move/edit/delete, composer draft save, and the MCP agent message accept an optional `controlLockTimeoutMs` that API routes and core commands pass (lifecycle callers keep the unbounded wait), so a busy workspace yields the same typed retryable 503 `WORKSPACE_CONTROL_BUSY`. `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` is now parsed and validated once at boot by `@opengeni/config` (`workspaceControlLockTimeoutMs`, positive integer ms, default 20000), installed into `@opengeni/db` by `createApp` through `configureWorkspaceControlRequestLockTimeoutMs`, and rendered by the deployment runtime-env generator as an optional passthrough.
+- Updated dependencies [b2dd2f7]
+- Updated dependencies [ab81e47]
+  - @opengeni/db@3.0.1
+  - @opengeni/config@0.18.1
+  - @opengeni/contracts@2.1.1
+  - @opengeni/documents@0.6.8
+  - @opengeni/events@0.3.122
+  - @opengeni/runtime@1.2.1
+  - @opengeni/storage@0.2.104
+  - @opengeni/observability@0.8.2
+
 ## 2.0.0
 
 ### Major Changes

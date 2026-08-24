@@ -742,8 +742,13 @@ export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependen
    * in the same deployment owns them.
    */
   internalSchedules?: "role-default" | "none";
-  /** Set false only when the host exposes equivalent lifecycle endpoints itself. */
-  http?: false | { readinessTimeoutMs?: number };
+  /**
+   * Set false only when the host exposes equivalent lifecycle endpoints itself.
+   * A dedicated readiness database prevents ordinary activity-pool saturation
+   * from making an otherwise healthy Temporal worker fail Kubernetes readiness.
+   * The embedding host retains ownership of this handle.
+   */
+  http?: false | { readinessTimeoutMs?: number; readinessDb?: Database };
 };
 
 export type OpenGeniWorkerService = {
@@ -894,7 +899,10 @@ export async function createOpenGeniWorkerService(
         settings,
         observability,
         checks: {
-          db: dbReadyCheck(options.activityDependencies.db, options.databasePosture),
+          db: dbReadyCheck(
+            options.http?.readinessDb ?? options.activityDependencies.db,
+            options.databasePosture,
+          ),
           nats: natsReadyCheck(options.activityDependencies.bus),
           temporal: temporalReadyCheck(workerBundle.connection),
         },
@@ -1027,6 +1035,16 @@ export async function startWorker() {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
+  // Readiness must prove PostgreSQL independently of activity demand. Sharing
+  // the default application pool makes the probe wait behind live turns when
+  // all ten slots are occupied, even while PostgreSQL itself is healthy. Since
+  // Kubernetes readiness cannot stop Temporal polling, that false negative
+  // only wedges rollouts and service health; reserve one probe connection.
+  const readinessDbClient = createDb(settings.databaseUrl, {
+    ...(searchPath ? { searchPath } : {}),
+    rlsStrategy: settings.rlsStrategy,
+    max: 1,
+  });
   const databasePosture = {
     rlsStrategy: settings.rlsStrategy,
     expectedRole: settings.runtimeDatabaseRole,
@@ -1058,6 +1076,7 @@ export async function startWorker() {
       role,
       settings,
       databasePosture,
+      http: { readinessDb: readinessDbClient.db },
       activityDependencies: {
         observability,
         db: dbClient.db,
@@ -1065,7 +1084,7 @@ export async function startWorker() {
       },
     });
   } finally {
-    await Promise.allSettled([bus?.close(), dbClient.close()]);
+    await Promise.allSettled([bus?.close(), readinessDbClient.close(), dbClient.close()]);
   }
 }
 

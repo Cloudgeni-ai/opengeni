@@ -46,6 +46,24 @@ export type McpRequestReplayInfo = {
   operationId?: string;
 };
 
+export type McpTransportFailureCauseDiagnostic = Readonly<{
+  kind: "error" | "object" | "string" | "number" | "boolean" | "null" | "other";
+  name?: string;
+  message?: string;
+  code?: string | number;
+  status?: number;
+  statusCode?: number;
+  value?: string | number | boolean | null;
+}>;
+
+export type McpTransportRequestFailureDiagnostic = Readonly<{
+  httpMethod: string;
+  rpcMethod?: string;
+  /** The thrown source is first, followed by its successive `cause` values. */
+  causeChain: readonly McpTransportFailureCauseDiagnostic[];
+  causeChainComplete: boolean;
+}>;
+
 type ClassifiedMcpJsonRpcRequest = {
   valid: boolean;
   method?: string;
@@ -55,6 +73,10 @@ type ClassifiedMcpJsonRpcRequest = {
 };
 
 const MCP_REPLAY_SAFE_METHOD_SET = new Set<string>(MCP_REPLAY_SAFE_METHODS);
+const MCP_TRANSPORT_FAILURE_CAUSE_MAX_NODES = 8;
+const MCP_TRANSPORT_FAILURE_LOOKUP_MAX_NODES = 32;
+const MCP_TRANSPORT_FAILURE_NESTED_KEYS = ["cause", "error", "response", "data"] as const;
+const mcpTransportRequestFailures = new WeakMap<object, McpTransportRequestFailureDiagnostic>();
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -170,6 +192,177 @@ export async function mcpRequestReplayInfo(
     ...(request.toolName ? { toolName: request.toolName } : {}),
     ...(request.operationId ? { operationId: request.operationId } : {}),
   };
+}
+
+function mcpTransportHttpMethod(input: string | URL | Request, init?: RequestInit): string {
+  try {
+    const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+    return method.length > 0 ? method.toUpperCase() : "GET";
+  } catch {
+    return "GET";
+  }
+}
+
+async function mcpTransportRpcMethod(
+  input: string | URL | Request,
+  init: RequestInit | undefined,
+  httpMethod: string,
+): Promise<string | undefined> {
+  if (httpMethod !== "POST") return undefined;
+  try {
+    return (await mcpRequestReplayInfo(input, init)).method;
+  } catch {
+    // Request diagnostics must never preempt or replace the transport call.
+    return undefined;
+  }
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function mcpTransportFailureCauseDiagnostic(value: unknown): {
+  diagnostic: McpTransportFailureCauseDiagnostic;
+  complete: boolean;
+} {
+  if (value === null) {
+    return { diagnostic: Object.freeze({ kind: "null", value: null }), complete: true };
+  }
+  if (typeof value === "string") {
+    return { diagnostic: Object.freeze({ kind: "string", value }), complete: true };
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return { diagnostic: Object.freeze({ kind: "number", value }), complete: true };
+  }
+  if (typeof value === "boolean") {
+    return { diagnostic: Object.freeze({ kind: "boolean", value }), complete: true };
+  }
+  if (!value || typeof value !== "object") {
+    return { diagnostic: Object.freeze({ kind: "other" }), complete: false };
+  }
+
+  const diagnostic: {
+    kind: "error" | "object";
+    name?: string;
+    message?: string;
+    code?: string | number;
+    status?: number;
+    statusCode?: number;
+  } = { kind: "object" };
+  try {
+    const record = value as Record<string, unknown>;
+    diagnostic.kind = value instanceof Error ? "error" : "object";
+    const name = record.name;
+    const message = record.message;
+    const code = record.code;
+    const rawStatus = record.status;
+    const rawStatusCode = record.statusCode;
+    if (typeof name === "string") diagnostic.name = name;
+    if (typeof message === "string") diagnostic.message = message;
+    if (typeof code === "string" || finiteNumber(code) !== undefined) {
+      diagnostic.code = code as string | number;
+    }
+    const status = finiteNumber(rawStatus);
+    const statusCode = finiteNumber(rawStatusCode);
+    if (status !== undefined) diagnostic.status = status;
+    if (statusCode !== undefined) diagnostic.statusCode = statusCode;
+    return { diagnostic: Object.freeze(diagnostic), complete: true };
+  } catch {
+    // The source error remains authoritative even when a hostile getter keeps
+    // one optional diagnostic field from being inspected.
+    return { diagnostic: Object.freeze(diagnostic), complete: false };
+  }
+}
+
+function snapshotMcpTransportFailureCauseChain(error: unknown): {
+  causeChain: readonly McpTransportFailureCauseDiagnostic[];
+  causeChainComplete: boolean;
+} {
+  const causeChain: McpTransportFailureCauseDiagnostic[] = [];
+  const seen = new WeakSet<object>();
+  let current: unknown = error;
+  let causeChainComplete = true;
+
+  for (let index = 0; index < MCP_TRANSPORT_FAILURE_CAUSE_MAX_NODES; index += 1) {
+    if (current && typeof current === "object" && seen.has(current)) {
+      causeChainComplete = false;
+      break;
+    }
+    const snapshot = mcpTransportFailureCauseDiagnostic(current);
+    causeChain.push(snapshot.diagnostic);
+    if (!snapshot.complete) causeChainComplete = false;
+    if (!current || typeof current !== "object") break;
+    seen.add(current);
+    try {
+      if (!("cause" in current)) break;
+      const cause = (current as Record<string, unknown>).cause;
+      if (cause === undefined) break;
+      current = cause;
+    } catch {
+      causeChainComplete = false;
+      break;
+    }
+    if (index === MCP_TRANSPORT_FAILURE_CAUSE_MAX_NODES - 1) {
+      causeChainComplete = false;
+    }
+  }
+
+  return {
+    causeChain: Object.freeze(causeChain),
+    causeChainComplete,
+  };
+}
+
+function recordMcpTransportRequestFailure(
+  error: unknown,
+  request: { httpMethod: string; rpcMethod?: string },
+): void {
+  if (!error || typeof error !== "object") return;
+  try {
+    mcpTransportRequestFailures.set(
+      error,
+      Object.freeze({
+        httpMethod: request.httpMethod,
+        ...(request.rpcMethod ? { rpcMethod: request.rpcMethod } : {}),
+        ...snapshotMcpTransportFailureCauseChain(error),
+      }),
+    );
+  } catch {
+    // Diagnostics are out-of-band and must never replace the exact failure.
+  }
+}
+
+/**
+ * Recover the request identity captured at the MCP transport boundary. SDK
+ * layers may retain the source under a structural wrapper, so lookup follows a
+ * bounded error graph without mutating or reclassifying any Error object.
+ */
+export function mcpTransportRequestFailureDiagnostic(
+  error: unknown,
+): McpTransportRequestFailureDiagnostic | null {
+  const pending: unknown[] = [error];
+  const seen = new WeakSet<object>();
+  let inspected = 0;
+
+  while (pending.length > 0 && inspected < MCP_TRANSPORT_FAILURE_LOOKUP_MAX_NODES) {
+    const current = pending.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    inspected += 1;
+    const diagnostic = mcpTransportRequestFailures.get(current);
+    if (diagnostic) return diagnostic;
+    try {
+      const record = current as Record<string, unknown>;
+      for (const key of MCP_TRANSPORT_FAILURE_NESTED_KEYS) {
+        const nested = record[key];
+        if (nested && typeof nested === "object") pending.push(nested);
+      }
+      if (Array.isArray(record.errors)) pending.push(...record.errors.slice(0, 8));
+    } catch {
+      // A hostile wrapper cannot erase diagnostics attached to another node.
+    }
+  }
+  return null;
 }
 
 export function mcpJsonRpcErrorPayloadForRequest(
@@ -383,22 +576,32 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
   } = {},
 ): (input: TInput, init?: RequestInit) => Promise<Response> {
   return async (input: TInput, init?: RequestInit) => {
+    const httpMethod = mcpTransportHttpMethod(input, init);
+    const rpcMethod = await mcpTransportRpcMethod(input, init, httpMethod);
     const destinationOptions = {
       ...(options.dnsLookup ? { dnsLookup: options.dnsLookup } : {}),
       label: "MCP endpoint",
       requireHttpsOutsideLocalTest: options.requireHttpsOutsideLocalTest ?? true,
     };
     let response: Response;
-    if (options.pinResolvedDestination === false) {
-      await resolvePinnedDestination(input instanceof Request ? input.url : input, settings, {
-        ...destinationOptions,
+    try {
+      if (options.pinResolvedDestination === false) {
+        await resolvePinnedDestination(input instanceof Request ? input.url : input, settings, {
+          ...destinationOptions,
+        });
+        response = await fetchImpl(input, { ...init, redirect: "manual" });
+      } else {
+        response = await pinnedFetch(input, init, settings, {
+          fetchImpl: fetchImpl as FetchLike,
+          ...destinationOptions,
+        });
+      }
+    } catch (error) {
+      recordMcpTransportRequestFailure(error, {
+        httpMethod,
+        ...(rpcMethod ? { rpcMethod } : {}),
       });
-      response = await fetchImpl(input, { ...init, redirect: "manual" });
-    } else {
-      response = await pinnedFetch(input, init, settings, {
-        fetchImpl: fetchImpl as FetchLike,
-        ...destinationOptions,
-      });
+      throw error;
     }
     return boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES);
   };

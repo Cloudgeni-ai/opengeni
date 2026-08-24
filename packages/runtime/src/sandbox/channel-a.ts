@@ -263,8 +263,9 @@ export type ChannelAEmitter = (
 
 export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
-  // The workspace-relative root the box maps "" to (the SDK normalizes against
-  // its own workspaceRoot, so "" is the workspace root here).
+  // Canonical filesystem root advertised by the selected target. Relative paths
+  // resolve beneath it; already-canonical absolute paths stay byte-for-byte paths
+  // after validation that they remain inside this authority.
   workspaceRoot?: string;
   // The lease epoch the box was resumed under (paired with `revision` for cache
   // invalidation — H3). 0 when ownership is off / no lease.
@@ -393,7 +394,8 @@ export class SandboxChannelAService {
 
   constructor(opts: SandboxChannelAServiceOptions) {
     this.session = opts.session;
-    this.workspaceRoot = opts.workspaceRoot ?? "";
+    const workspaceRoot = opts.workspaceRoot ?? "";
+    this.workspaceRoot = workspaceRoot === "/" ? "/" : workspaceRoot.replace(/\/+$/, "");
     this.leaseEpoch = opts.leaseEpoch ?? 0;
     this.revision = opts.revision ?? 0;
     this.emit = opts.emit;
@@ -508,7 +510,7 @@ export class SandboxChannelAService {
     req: FsListRequest,
     pruneDirectoryNames: readonly string[],
   ): Promise<FsListResponse> {
-    const root = assertSafeRelPathOrRoot(req.path);
+    const root = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
     const pruneNames = [...new Set(pruneDirectoryNames)].map(assertSafePruneDirectoryName);
     if (pruneNames.length === 0 && this.session.listDir && Math.max(req.depth, 1) === 1) {
       try {
@@ -627,7 +629,7 @@ export class SandboxChannelAService {
       if (parts.length < 5) continue;
       const [typeChar, sizeStr, mtimeStr, modeStr, ...pathParts] = parts;
       const rawPath = pathParts.join("\t");
-      const relPath = stripDotSlash(rawPath, root);
+      const relPath = stripDotSlash(rawPath, root, this.workspaceRoot);
       const node: FsTreeNode = {
         name: basename(relPath),
         path: relPath,
@@ -654,7 +656,7 @@ export class SandboxChannelAService {
   }
 
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
-    const path = assertSafeRelPath(req.path);
+    const path = assertSafeRelPath(req.path, this.workspaceRoot);
     if (!this.session.readFile) {
       // No native readFile: open the file once, prove that exact descriptor is
       // rooted beneath the workspace, then base64 it through exec.
@@ -841,7 +843,7 @@ export class SandboxChannelAService {
   }
 
   async fsWrite(req: FsWriteRequest): Promise<FsWriteResponse> {
-    const path = assertSafeRelPath(req.path);
+    const path = assertSafeRelPath(req.path, this.workspaceRoot);
     const abs = this.joinRoot(path);
     const bytes =
       req.encoding === "base64"
@@ -1319,7 +1321,7 @@ export class SandboxChannelAService {
   }
 
   async fsDelete(req: FsDeleteRequest): Promise<FsDeleteResponse> {
-    const path = assertSafeRelPath(req.path);
+    const path = assertSafeRelPath(req.path, this.workspaceRoot);
     const abs = this.joinRoot(path);
     await this.assertConfinedMutationParent(path, {
       allowMissingParents: false,
@@ -1338,8 +1340,8 @@ export class SandboxChannelAService {
   }
 
   async fsMove(req: FsMoveRequest): Promise<FsMoveResponse> {
-    const path = assertSafeRelPath(req.path);
-    const newPath = assertSafeRelPath(req.newPath);
+    const path = assertSafeRelPath(req.path, this.workspaceRoot);
+    const newPath = assertSafeRelPath(req.newPath, this.workspaceRoot);
     const abs = this.joinRoot(path);
     const newAbs = this.joinRoot(newPath);
 
@@ -1391,7 +1393,7 @@ export class SandboxChannelAService {
   }
 
   async fsMkdir(req: FsMkdirRequest): Promise<FsMkdirResponse> {
-    const path = assertSafeRelPath(req.path);
+    const path = assertSafeRelPath(req.path, this.workspaceRoot);
     const abs = this.joinRoot(path);
     await this.assertConfinedMutationParent(path, {
       allowMissingParents: req.recursive,
@@ -1693,7 +1695,7 @@ export class SandboxChannelAService {
   }
 
   async gitStatus(req: GitStatusRequest): Promise<GitStatusResponse> {
-    const repo = assertSafeRelPathOrRoot(req.path);
+    const repo = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
     const status = await this.readConfinedCommandBytes(
       repo,
       `if [ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then printf '${GIT_STATUS_REPO_FRAME}\\0'; git status --porcelain=v2 --branch -z; else printf '${GIT_STATUS_REPO_FRAME}not-repo\\0'; fi`,
@@ -1731,7 +1733,7 @@ export class SandboxChannelAService {
   }
 
   async gitDiff(req: GitDiffRequest): Promise<GitDiffResponse> {
-    const repo = assertSafeRelPathOrRoot(req.path);
+    const repo = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
     const ctx = req.contextLines;
     // Selector precedence: refs > staged > worktree.
     let range = "";
@@ -2011,7 +2013,7 @@ export class SandboxChannelAService {
   }
 
   async gitLog(req: GitLogRequest): Promise<GitLogResponse> {
-    const repo = assertSafeRelPathOrRoot(req.path);
+    const repo = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
     const fmt = `%H${US}%h${US}%P${US}%an${US}%ae${US}%at${US}%cn${US}%ce${US}%ct${US}%s${US}%b${RS}`;
     const pathspec = req.pathspec.length ? ` -- ${req.pathspec.map(shellQuote).join(" ")}` : "";
     const { stdout, exitCode } = await this.runInConfinedDirectory(repo, {
@@ -2043,7 +2045,7 @@ export class SandboxChannelAService {
   }
 
   async gitShow(req: GitShowRequest): Promise<GitShowResponse> {
-    const repo = assertSafeRelPathOrRoot(req.path);
+    const repo = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
     if (req.filePath) {
       // Raw blob mode: ref:filePath -> bytes.
       const { stdout, exitCode } = await this.runInConfinedDirectory(repo, {
@@ -2368,8 +2370,10 @@ export class SandboxChannelAService {
   }
 
   private joinRoot(rel: string): string {
+    if (rel.startsWith("/")) return rel;
     if (!this.workspaceRoot) return rel === "" ? "." : rel;
-    return rel === "" ? this.workspaceRoot : `${this.workspaceRoot}/${rel}`;
+    if (rel === "") return this.workspaceRoot;
+    return this.workspaceRoot === "/" ? `/${rel}` : `${this.workspaceRoot}/${rel}`;
   }
 
   private async fsListFromNativeListDir(req: FsListRequest): Promise<FsListResponse> {
@@ -2379,7 +2383,7 @@ export class SandboxChannelAService {
         "Workspace files are temporarily unavailable. Retry the file list.",
       );
     }
-    const root = assertSafeRelPathOrRoot(req.path);
+    const root = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
     const listed = await listDir({
       path: this.joinRoot(root),
       ...(this.runAs ? { runAs: this.runAs } : {}),
@@ -2387,7 +2391,7 @@ export class SandboxChannelAService {
     const children: FsTreeNode[] = [];
     let truncated = false;
     for (const entry of listed) {
-      const relPath = stripDotSlash(entry.path, root);
+      const relPath = stripDotSlash(entry.path, root, this.workspaceRoot);
       const name = entry.name || basename(relPath);
       if (!req.includeHidden && name.startsWith(".")) continue;
       if (children.length >= req.maxEntries) {
@@ -2434,7 +2438,7 @@ export class SandboxChannelAService {
     sessionId?: number;
     wallTimeSeconds: number;
   }> {
-    const safe = assertSafeRelPathOrRoot(rel);
+    const safe = assertSafeRelPathOrRoot(rel, this.workspaceRoot);
     const root = this.workspaceRoot || ".";
     const abs = this.joinRoot(safe);
     const rejectLink = safe
@@ -2511,7 +2515,7 @@ export class SandboxChannelAService {
   }
 
   private repoWorkdir(rel: string): string | undefined {
-    const safe = assertSafeRelPathOrRoot(rel);
+    const safe = assertSafeRelPathOrRoot(rel, this.workspaceRoot);
     const joined = this.joinRoot(safe);
     return joined === "." ? this.workspaceRoot || undefined : joined;
   }
@@ -2649,19 +2653,34 @@ function normalizeRelPath(p: string): string {
   return trimmed;
 }
 
-function assertSafeRelPathOrRoot(p: string): string {
-  const norm = normalizeRelPath(p);
-  if (p.startsWith("/")) throw new ChannelAValidationError(`absolute paths are not allowed: ${p}`);
-  if (norm.split("/").some((seg) => seg === "..")) {
-    throw new ChannelAValidationError(`path traversal is not allowed: ${p}`);
-  }
-  return norm;
+function normalizeAbsolutePath(p: string): string {
+  return p === "/" ? p : p.replace(/\/+$/, "");
 }
 
-// Reject path traversal / absolute paths (case 4); the box normalizes against
-// the workspace root, so a leading slash or `..` is a 400.
-export function assertSafeRelPath(p: string): string {
-  const norm = assertSafeRelPathOrRoot(p);
+function pathIsWithinRoot(path: string, root: string): boolean {
+  return root === "/" ? path.startsWith("/") : path === root || path.startsWith(`${root}/`);
+}
+
+function assertSafeRelPathOrRoot(p: string, workspaceRoot = ""): string {
+  const segments = p.split("/");
+  if (segments.some((segment) => segment === "..")) {
+    throw new ChannelAValidationError(`path traversal is not allowed: ${p}`);
+  }
+  if (!p.startsWith("/")) return normalizeRelPath(p);
+
+  const root = workspaceRoot.startsWith("/") ? normalizeAbsolutePath(workspaceRoot) : "";
+  const path = normalizeAbsolutePath(p);
+  if (!root || !pathIsWithinRoot(path, root)) {
+    throw new ChannelAValidationError(`absolute path is outside the workspace root: ${p}`);
+  }
+  return path;
+}
+
+// Relative paths remain supported for compatibility. An absolute path is valid
+// only when the service has an absolute workspace root and the path stays under
+// that root; the exact path is then forwarded to the selected target unchanged.
+export function assertSafeRelPath(p: string, workspaceRoot = ""): string {
+  const norm = assertSafeRelPathOrRoot(p, workspaceRoot);
   if (norm === "") throw new ChannelAValidationError("path is required");
   return norm;
 }
@@ -2856,13 +2875,55 @@ function dirnameAbs(p: string): string {
 
 function dirnameRel(p: string, root: string): string {
   const idx = p.lastIndexOf("/");
-  if (idx < 0) return root;
+  if (idx <= 0) return root;
   return p.slice(0, idx);
 }
 
-function stripDotSlash(rawPath: string, root: string): string {
+function joinPathRoot(root: string, path: string): string {
+  if (!path) return root;
+  return root === "/" ? `/${path}` : `${root}/${path}`;
+}
+
+function stripDotSlash(rawPath: string, root: string, workspaceRoot = ""): string {
   let p = rawPath.startsWith("./") ? rawPath.slice(2) : rawPath;
-  p = p.replace(/^\/+/, "");
+  if (p.startsWith("/")) {
+    const absolute = normalizeAbsolutePath(p);
+    if (root.startsWith("/")) {
+      if (!pathIsWithinRoot(absolute, normalizeAbsolutePath(root))) {
+        throw new ChannelAValidationError(`listed path is outside the requested root: ${p}`);
+      }
+      return absolute;
+    }
+    const canonicalWorkspaceRoot = workspaceRoot.startsWith("/")
+      ? normalizeAbsolutePath(workspaceRoot)
+      : "";
+    if (!canonicalWorkspaceRoot || !pathIsWithinRoot(absolute, canonicalWorkspaceRoot)) {
+      throw new ChannelAValidationError(`listed path is outside the workspace root: ${p}`);
+    }
+    p =
+      absolute === canonicalWorkspaceRoot
+        ? ""
+        : canonicalWorkspaceRoot === "/"
+          ? absolute.slice(1)
+          : absolute.slice(canonicalWorkspaceRoot.length + 1);
+  }
+
+  if (root.startsWith("/")) {
+    const canonicalWorkspaceRoot = workspaceRoot.startsWith("/")
+      ? normalizeAbsolutePath(workspaceRoot)
+      : root;
+    const rootRelative =
+      canonicalWorkspaceRoot === "/"
+        ? root.slice(1)
+        : root === canonicalWorkspaceRoot
+          ? ""
+          : root.slice(canonicalWorkspaceRoot.length + 1);
+    if (rootRelative && (p === rootRelative || p.startsWith(`${rootRelative}/`))) {
+      return joinPathRoot(canonicalWorkspaceRoot, p);
+    }
+    return joinPathRoot(root, p);
+  }
+
   // find run with workdir=root and findRoot="." gives paths relative to root,
   // but if root is non-empty the relPath should still be workspace-relative.
   if (root && !p.startsWith(`${root}/`) && p !== root) {

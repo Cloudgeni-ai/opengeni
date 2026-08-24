@@ -135,7 +135,12 @@ export type {
 } from "./hooks/use-last-started-turn-policy";
 export { QueueSurface } from "./components/queue-surface";
 export type { QueueSurfaceProps } from "./components/queue-surface";
-export { SessionChrome, sessionChromeGoalPillState } from "./components/session-chrome";
+export {
+  SessionChrome,
+  sessionChromeGoalPillExplanation,
+  sessionChromeGoalPillLabel,
+  sessionChromeGoalPillState,
+} from "./components/session-chrome";
 export type {
   SessionChromeAgentsSignal,
   SessionChromeProps,
@@ -169,6 +174,11 @@ export type {
   UseWorkspaceSessionsOptions,
   UseWorkspaceSessionsResult,
 } from "./hooks/use-workspace-sessions";
+export { useSessionBackgroundCommands } from "./hooks/use-session-background-commands";
+export type {
+  UseSessionBackgroundCommandsOptions,
+  UseSessionBackgroundCommandsResult,
+} from "./hooks/use-session-background-commands";
 export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-lineage";
 export type {
   UseSessionLineageOptions,

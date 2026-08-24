@@ -154,6 +154,52 @@ confidence, and the receipt is one of:
   through the built-in tool, then calls `remember_confirm` with the proposal id,
   the decision receipt id, and the returned `requestId`.
 
+### Budgets and authoring style
+
+Durable text an agent authors is prompt cost, so each lane carries an explicit,
+enforced budget from
+[`packages/contracts/src/agent-authored-durable-text.ts`](../packages/contracts/src/agent-authored-durable-text.ts):
+
+| Lane | Where it lands | Agent budget |
+| --- | --- | --- |
+| `instruction_policy` | composed verbatim into the prompt of every session it applies to (every session for a global charter or policy, every session bound to the role for a role policy; at most three entries compose at once) | 600 characters |
+| `preference` | short title and description composed into every session prompt; content retrieved on demand | 1,200 characters |
+| `knowledge` | retrieval evidence, never in the always-composed prefix | 4,000 characters (`REMEMBER_CONTENT_MAX_CHARS`) |
+
+The preference budget exists for a different reason than the rule budget, and the
+obvious wording is wrong: shortening a preference's content does not shrink any
+prompt, because only its descriptor pair is composed. Its length is retrieval
+cost, which is why it gets more room than a rule rather than less.
+
+The same bounds apply to the other agent-only surfaces that reach the same
+destinations: `instruction_policy_propose`, `preference_propose`, and the two
+task-note promotions. Promotion is bounded in the database layer
+(`packages/db/src/company-brain-governed-writes.ts`) rather than in the request
+contract, because there the content is the note rather than a request field; a
+note is bounded only by `TASK_NOTE_TEXT_MAX_BYTES` and promotion materializes
+into exactly the same destination as a direct proposal, so without that check a
+long note would be a way around the cap. The human editor limits
+(`WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS`,
+`PREFERENCE_REGISTRY_CONTENT_MAX_CHARS`) are unchanged, and stored revisions are
+never rewritten. An over-budget write is refused, never truncated, before any
+durable row is written, with an actionable message naming the actual length, the
+limit, and the shape to use instead: one imperative rule in 1-3 sentences, no
+numbered procedure, no examples, no rationale essay, several small entries rather
+than one long one, and procedure kept in a Document or Skill that the rule
+references. The note bytes themselves stay exact evidence, and a convergent
+replay of an already-accepted promotion is not re-checked.
+
+The confirmation card names that cost before a human agrees to it. The question
+`label` carries the character count and where the text lands, as a heading rather
+than a sentence ("Remember (612 chars, in every session prompt)", or "in every
+prompt for this role" for a role-scoped rule). `HumanInputForm` renders a single
+question's `label` as the card heading and its `prompt` as the sub-text, so the
+label has to stay title-shaped or it demotes the question the human is answering.
+It is deliberately `label` and not `helpText`: migrations 0272 / 0274 / 0284 /
+0293 / 0316 byte-verify the reconstructed `prompt`, `helpText`, and `options`
+against the exact Task-note text before authorizing an activation, and `label` is
+the one field of the canonical question those capabilities do not constrain.
+
 `remember_confirm` invokes migration 0272's
 `activate_human_confirmed_learning_decision`. That SECURITY DEFINER capability
 requires the exact initiating human's `session_human_input_requests` row: same

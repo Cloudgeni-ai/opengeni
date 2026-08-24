@@ -142,7 +142,7 @@ export function buildSlackAppHomeAccessBlocks(input: {
       block_id: "opengeni_home_access",
       text: {
         type: "mrkdwn",
-        text: `*${escapeMrkdwn(input.title)}*\n${escapeMrkdwn(input.message)}`,
+        text: `*${escapeSlackMrkdwn(input.title)}*\n${escapeSlackMrkdwn(input.message)}`,
       },
     },
   ];
@@ -276,7 +276,7 @@ function relativeUpdatedAt(value: string, nowMs: number): string {
   return `updated ${Math.floor(elapsedHours / 24)}d ago`;
 }
 
-function escapeMrkdwn(value: string): string {
+export function escapeSlackMrkdwn(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 

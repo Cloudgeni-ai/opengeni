@@ -186,6 +186,14 @@ export const WORKSPACE_CONTROL_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS",
 ];
 
+/** Child lifecycle notices rollout flag (API + both workers). Default off in
+ * @opengeni/config; a valueEnv passthrough emitted only when set. Enable only
+ * once the whole fleet runs an image that understands the new
+ * `session_system_updates` kinds (an old worker throws on an unknown kind). */
+export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
+];
+
 /** Optional remote-browser authorities and launch policy. These remain API
  * runtime secrets/settings; browserd receives only a per-session private
  * transport envelope over its placement-local control channel. */
@@ -1466,6 +1474,7 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_GITHUB_APP_ID",
       "OPENGENI_GITHUB_CLIENT_ID",
       "OPENGENI_GITHUB_CLIENT_SECRET",
+      "OPENGENI_GITHUB_REST_MCP_ENABLED",
       "OPENGENI_GITHUB_APP_SLUG",
       "OPENGENI_GITHUB_APP_PRIVATE_KEY",
       "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
@@ -2194,6 +2203,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_SLACK_CLIENT_ID", env.OPENGENI_SLACK_CLIENT_ID),
     valueEnv("OPENGENI_SLACK_CLIENT_SECRET", env.OPENGENI_SLACK_CLIENT_SECRET),
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
+    valueEnv("OPENGENI_SLACK_BOT_DISPLAY_NAME", env.OPENGENI_SLACK_BOT_DISPLAY_NAME),
     valueEnv("OPENGENI_SLACK_COMMAND", env.OPENGENI_SLACK_COMMAND),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" ||
@@ -2233,6 +2243,7 @@ function runtimeEnvValues(
           requiredEnv("OPENGENI_GITHUB_CLIENT_SECRET", env.OPENGENI_GITHUB_CLIENT_SECRET),
           requiredEnv("OPENGENI_GITHUB_APP_SLUG", env.OPENGENI_GITHUB_APP_SLUG),
           requiredEnv("OPENGENI_GITHUB_APP_PRIVATE_KEY", env.OPENGENI_GITHUB_APP_PRIVATE_KEY),
+          valueEnv("OPENGENI_GITHUB_REST_MCP_ENABLED", env.OPENGENI_GITHUB_REST_MCP_ENABLED),
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
             env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED,
@@ -2481,6 +2492,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of WORKSPACE_CONTROL_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV) {

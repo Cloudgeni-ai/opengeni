@@ -463,9 +463,60 @@ describe("attached browser endpoint registry", () => {
       "extension-1",
       computer.computerSessionId,
     );
+    const pendingOperationId = crypto.randomUUID();
+    const pending = await prepareBrowserSessionCreate(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      operationId: pendingOperationId,
+      associatedSessionId: scope.sessionId,
+      actorSubjectId: scope.subjectId,
+      name: "Pending attached Chrome",
+      initialUrl: null,
+      placement: { kind: "attached_device", deviceId },
+      driverId: "opengeni.attached-chrome.v1",
+      engine: "chrome",
+      headless: false,
+      identityId: null,
+      baseRevisionId: null,
+      linkedComputerSessionId: null,
+      capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
+    });
+    await dispatchBrowserSessionOperation(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      operationId: pendingOperationId,
+      browserSessionId: pending.session.id,
+      controllerGeneration: crypto.randomUUID(),
+    });
 
     const rotated = await announceDevice(scope, deviceId, "extension-2", 2);
     expect(rotated).toMatchObject({ accepted: true, changed: true });
+
+    expect(
+      await prepareBrowserSessionCreate(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        operationId: pendingOperationId,
+        associatedSessionId: scope.sessionId,
+        actorSubjectId: scope.subjectId,
+        name: "Pending attached Chrome",
+        initialUrl: null,
+        placement: { kind: "attached_device", deviceId },
+        driverId: "opengeni.attached-chrome.v1",
+        engine: "chrome",
+        headless: false,
+        identityId: null,
+        baseRevisionId: null,
+        linkedComputerSessionId: null,
+        capabilities: ATTACHED_BROWSER_SESSION_CAPABILITIES,
+      }),
+    ).toMatchObject({
+      operation: {
+        state: "outcome_unknown",
+        replayed: true,
+        error: { code: "outcome_unknown", retryable: false },
+      },
+    });
 
     const lostBrowser = await getBrowserSession(client.db, {
       accountId: scope.accountId,

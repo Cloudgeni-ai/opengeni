@@ -1,5 +1,32 @@
 # @opengeni/github
 
+## 0.5.2
+
+### Patch Changes
+
+- 72f8fc6: Add `createGitHubAppInstallationRepositoryLookup` / `getGitHubAppInstallationRepository`: resolve one `owner/name` repository through an exact App installation with a server-side, metadata-read-only installation token (memoized per installation for the lookup's lifetime, bounded by a 10 s lookup timeout) and return GitHub's stable repository identity, or null when the installation cannot see it. The internal installation-token mint now accepts an optional `permissions` narrowing.
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [de3f376]
+- Updated dependencies [a9cd9e7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [e91d89e]
+- Updated dependencies [5d664d8]
+  - @opengeni/config@0.19.0
+  - @opengeni/contracts@2.2.0
+
+## 0.5.1
+
+### Patch Changes
+
+- Updated dependencies [b2dd2f7]
+- Updated dependencies [ab81e47]
+  - @opengeni/config@0.18.1
+  - @opengeni/contracts@2.1.1
+
 ## 0.5.0
 
 ### Minor Changes

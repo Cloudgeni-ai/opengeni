@@ -251,7 +251,8 @@ export class CodemodeAttemptDispatcher {
       const knownPreExecution =
         error instanceof AttemptToolApprovalRequiredError ||
         error instanceof AttemptToolCatalogStaleError ||
-        error instanceof AttemptToolNotFoundError;
+        error instanceof AttemptToolNotFoundError ||
+        connectorActionWasNotExecuted(error);
       await this.settleWithOutput(operation, claimId, {
         state: knownPreExecution ? "failed" : "outcome_unknown",
         errorCode: errorCode(error, signal),
@@ -310,12 +311,22 @@ export class CodemodeAttemptDispatcher {
   }
 }
 
+function connectorActionWasNotExecuted(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === "object" &&
+    "connectorActionOutcome" in error &&
+    (error as { connectorActionOutcome?: unknown }).connectorActionOutcome === "not_executed",
+  );
+}
+
 function combinedSignal(primary: AbortSignal, secondary?: AbortSignal): AbortSignal {
   return secondary ? AbortSignal.any([primary, secondary]) : primary;
 }
 
 function errorCode(error: unknown, signal: AbortSignal): string {
   if (signal.aborted) return "attempt_cancelled_during_execution";
+  if (connectorActionWasNotExecuted(error)) return "connector_action_not_executed";
   if (typeof error === "object" && error !== null && "code" in error) {
     const code = (error as { code?: unknown }).code;
     if (typeof code === "string" && /^[a-z0-9_]{1,128}$/u.test(code)) return code;

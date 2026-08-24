@@ -2093,9 +2093,8 @@ fn cache_snapshot_complete(items: &[CacheItem]) -> bool {
     items.iter().all(|item| {
         item.children >= 0
             && usize::try_from(item.children).is_ok_and(|expected| {
-                object_key(&item.object).ok().is_some_and(|key| {
-                    observed_children.get(&key).copied().unwrap_or(0) == expected
-                })
+                object_key(&item.object)
+                    .is_ok_and(|key| observed_children.get(&key).copied().unwrap_or(0) == expected)
             })
     })
 }
@@ -2589,7 +2588,6 @@ fn ambiguous(context: &str, error: impl std::fmt::Display) -> NativeAdapterError
 #[cfg(test)]
 mod live_tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::time::{Duration, Instant};
 
     use tokio::io::{AsyncBufReadExt as _, BufReader};

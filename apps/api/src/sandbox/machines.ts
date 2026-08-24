@@ -1,10 +1,10 @@
 // apps/api/src/sandbox/machines.ts — the M10 Machines-DASHBOARD service (design
 // §10.7). Builds the `MachinesResponse` the dashboard renders: the workspace's
 // enrolled selfhosted machines, each enriched with
-//   * STATE — the M3 liveness (online/reconnecting/offline) overlaid with the
-//     enrollment-derived consent/display reasons (consent_required /
-//     display_unavailable) — a real ControlRpc ping (the subject IS the registry),
-//     reusing the M7 fleet probe;
+//   * STATE — heartbeat + goodbye liveness (online/offline) overlaid with the
+//     enrollment-derived display reason (display_unavailable). This list does
+//     not ControlRpc-ping; attach, capability negotiation, and fleet tools
+//     still probe when they need a live responder.
 //   * METRICS — the latest machine_metrics_latest row (or null before a first
 //     heartbeat), projected to the contract's MetricSample;
 //   * sharedSessionCount — the lease refcount (how many sessions share this one
@@ -31,24 +31,13 @@ import {
   type EnrollmentRecord,
   type MachineMetricsRow,
 } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
 import { MachineView, MetricSample, type MachinesResponse } from "@opengeni/contracts";
-import {
-  NatsControlRpc,
-  selfhostedLiveness,
-  SelfhostedSession,
-  type ControlRpc,
-  type NatsRequestConnection,
-} from "@opengeni/runtime/sandbox";
-import { relayConfigFromSettings } from "@opengeni/core";
+import { selfhostedHeartbeatLiveness } from "@opengeni/runtime/sandbox";
 
 export type MachinesServices = {
   db: Database;
   settings: Settings;
-  bus?: EventBus;
 };
-
-const PROBE_TIMEOUT_MS = 5_000;
 
 const ACTIVE_UPDATE_STATUSES = new Set([
   "requested",
@@ -154,15 +143,6 @@ function connectionAuthorityFor(
   };
 }
 
-function controlRpc(bus: EventBus | undefined): ControlRpc {
-  return new NatsControlRpc(async (): Promise<NatsRequestConnection | null> => {
-    if (!bus) {
-      return null;
-    }
-    return bus.getRequestConnection();
-  });
-}
-
 /**
  * Project a stored `machine_metrics_latest` row to the contract `MetricSample`.
  * The DB carries `gpuUtilPercent` + `gpuMemUsedBytes`/`gpuMemTotalBytes`; the wire
@@ -188,38 +168,8 @@ export function metricRowToSample(row: MachineMetricsRow): MetricSample {
   });
 }
 
-/** Probe an enrolled machine's liveness — a real ControlRpc ping mapped through
- *  `selfhostedLiveness` (the enrollment status/consent/display + lastSeenAt
- *  disambiguate a probe-miss into reconnecting vs offline). Mirrors the M7 fleet
- *  probe. A non-active enrollment is offline without a probe. */
-async function probeEnrollment(
-  services: MachinesServices,
-  workspaceId: string,
-  enrollment: EnrollmentRecord,
-  liveConnection: EnrollmentRecord | null,
-): Promise<{
-  state: "online" | "reconnecting" | "offline";
-  consented: boolean;
-  hasDisplay: boolean;
-}> {
-  const { settings, bus } = services;
-  let probeResponded = false;
-  if (liveConnection?.connectionInstanceId) {
-    const session = new SelfhostedSession({
-      workspaceId,
-      agentId: enrollment.id,
-      connectionInstanceId: liveConnection.connectionInstanceId,
-      controlRpc: controlRpc(bus),
-      relay: relayConfigFromSettings(settings),
-      timeoutMs: PROBE_TIMEOUT_MS,
-    });
-    try {
-      probeResponded = await session.ping();
-    } catch {
-      probeResponded = false;
-    }
-  }
-  const derived = selfhostedLiveness({
+function enrollmentLiveness(enrollment: EnrollmentRecord) {
+  return selfhostedHeartbeatLiveness({
     enrollment: {
       status: enrollment.status,
       exposure: enrollment.exposure,
@@ -229,20 +179,15 @@ async function probeEnrollment(
       wentOfflineAt: enrollment.wentOfflineAt,
       wentOfflineReason: enrollment.wentOfflineReason,
     },
-    probeResponded,
   });
-  return {
-    state: derived.state,
-    consented: derived.consented,
-    hasDisplay: derived.hasDisplay,
-  };
 }
 
 /**
  * Resolve the dashboard STATE of a machine. State reflects REACHABILITY + the
  * VIEW plane only: an online machine with no display → `display_unavailable` (no
  * desktop stream, but compute — exec/fs/git/terminal — still works); otherwise
- * the liveness state (online/reconnecting/offline). It deliberately does NOT fold
+ * the liveness state (online/offline; list heartbeat never yields reconnecting).
+ * It deliberately does NOT fold
  * in screen-control consent: a displayed machine can be VIEWED (read-only) and
  * used for compute regardless of `allowScreenControl` — only INPUT (ComputerUse /
  * an interactive stream) needs that consent, which is a per-capability concern
@@ -335,7 +280,7 @@ export async function listMachines(
   }
 
   // The workspace's enrolled selfhosted machines. One bulk metrics read joined
-  // onto the machines (no N+1). Each machine is probed for liveness.
+  // onto the machines (no N+1). Liveness is the durable heartbeat cursor.
   const [legacySandboxes, enrollments] = await Promise.all([
     listSandboxes(db, workspaceId),
     listEnrollments(
@@ -408,13 +353,8 @@ export async function listMachines(
             ),
         readLease(db, enrollment.workspaceId, sandbox.id),
       ]);
-      const probe = await probeEnrollment(
-        services,
-        enrollment.workspaceId,
-        enrollment,
-        liveConnection,
-      );
-      const state = machineStateFor(probe.state, probe.hasDisplay);
+      const liveness = enrollmentLiveness(enrollment);
+      const state = machineStateFor(liveness.state, liveness.hasDisplay);
 
       // sharedSessionCount = the lease refcount for this machine's group. The
       // selfhosted sandbox id IS the lease group key (maxSandboxes:1, N sessions

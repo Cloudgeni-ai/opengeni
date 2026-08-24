@@ -9,7 +9,7 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { createRememberRouter } from "../src/domain/remember";
+import { createRememberRouter, rememberConfirmationLabel } from "../src/domain/remember";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
@@ -138,7 +138,12 @@ async function answeredRememberInput(
           id: questionId,
           kind: "single_select",
           prompt: "Save this as a mandatory workspace rule for everyone in this workspace?",
-          label: "Remember",
+          // The exact label production produces, so this proves the real
+          // card text still satisfies the human-confirmed capability.
+          label: rememberConfirmationLabel({
+            lane: "instruction_policy",
+            contentChars: Array.from(content).length,
+          }),
           helpText: content,
           options: [
             { id: "save", label: "Save" },

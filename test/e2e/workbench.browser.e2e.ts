@@ -854,6 +854,76 @@ describe("workbench browser acceptance", () => {
     await context.close();
   });
 
+  test("markdown sandbox links open the exact file, reveal its tree path, and apply only explicit lines", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    try {
+      const page = await context.newPage();
+      const problems: string[] = [];
+      const publicationRequests: string[] = [];
+      page.on("console", (message) => {
+        if (message.type() === "warning" || message.type() === "error") {
+          problems.push(`console:${message.text()}`);
+        }
+      });
+      page.on("pageerror", (error) => problems.push(`page:${String(error)}`));
+      page.on("requestfailed", (request) => problems.push(`request:${request.url()}`));
+      page.on("request", (request) => {
+        if (request.url().includes("/artifacts/publish")) publicationRequests.push(request.url());
+      });
+      await page.goto(dockUrl(baseUrl, "warm-live", "dark", "changes"), {
+        waitUntil: "networkidle",
+      });
+      const initialUrl = page.url();
+
+      await page.getByTitle("Open /workspace/apps/api/src/server.ts", { exact: true }).click();
+      expect(page.url()).toBe(initialUrl);
+      await expectEventually(async () =>
+        (await page.getByRole("tab", { name: "Files" }).getAttribute("aria-selected")) === "true"
+          ? 1
+          : 0,
+      );
+      const activeFiles = page.locator('[role="tabpanel"]:not([hidden])');
+      await expectEventually(async () =>
+        activeFiles
+          .locator("[data-opengeni-selected-file]")
+          .getByText("apps/api/src/server.ts")
+          .count(),
+      );
+      for (const directory of ["apps", "api", "src"]) {
+        await expectEventually(async () =>
+          (await activeFiles
+            .getByRole("treeitem", { name: directory, exact: true })
+            .getAttribute("aria-expanded")) === "true"
+            ? 1
+            : 0,
+        );
+      }
+      const treeBounds = await activeFiles.locator("[data-opengeni-file-tree]").boundingBox();
+      const selectedRowBounds = await activeFiles
+        .locator('[role="treeitem"][aria-selected="true"]')
+        .boundingBox();
+      expect(treeBounds).not.toBeNull();
+      expect(selectedRowBounds).not.toBeNull();
+      expect(selectedRowBounds!.y).toBeGreaterThanOrEqual(treeBounds!.y - 1);
+      expect(selectedRowBounds!.y + selectedRowBounds!.height).toBeLessThanOrEqual(
+        treeBounds!.y + treeBounds!.height + 1,
+      );
+      expect(await activeFiles.locator("[data-opengeni-focus-line]").count()).toBe(0);
+
+      await page
+        .getByTitle("Open /workspace/apps/api/src/server.ts at line 2", { exact: true })
+        .click();
+      await expectEventually(async () =>
+        activeFiles.locator('[data-opengeni-focus-line][data-opengeni-file-line="2"]').count(),
+      );
+      expect(page.url()).toBe(initialUrl);
+      expect(publicationRequests).toEqual([]);
+      expect(problems).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 25_000);
+
   test("file deletion uses an accessible non-blocking dialog on mobile", async () => {
     const context = await browser.newContext({
       viewport: { width: 320, height: 720 },

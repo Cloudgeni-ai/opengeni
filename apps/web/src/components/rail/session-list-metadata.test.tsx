@@ -35,3 +35,33 @@ describe("RailTrailingMetadata", () => {
     expect(renderToStaticMarkup(<RailTrailingMetadata summary={neutral} />)).toBe("");
   });
 });
+
+describe("RailTrailingMetadata waiting duration", () => {
+  test("shows how long a needs-you row has waited next to the marker", () => {
+    const tenHoursAgo = new Date(Date.now() - 10 * 3_600_000).toISOString();
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata
+        summary={{
+          kind: "needs_attention",
+          count: 2,
+          total: 3,
+          label: "2 need you · 10h",
+          attentionSince: tenHoursAgo,
+        }}
+        relativeTime="3h"
+      />,
+    );
+    expect(markup).toContain("data-session-row-waiting");
+    expect(markup).toContain(">10h</span>");
+    expect(markup).toContain('title="2 need you · 10h"');
+  });
+
+  test("renders no waiting duration without a server timestamp", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata
+        summary={{ kind: "needs_attention", count: 1, total: 1, label: "1 needs you" }}
+      />,
+    );
+    expect(markup).not.toContain("data-session-row-waiting");
+  });
+});

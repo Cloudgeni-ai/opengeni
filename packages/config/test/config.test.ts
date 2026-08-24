@@ -6,6 +6,8 @@ import {
   SandboxBackend,
 } from "@opengeni/contracts";
 import {
+  DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
+  DEFAULT_GOAL_IDLE_BACKOFF_MS,
   collectGitIdentityEnvironment,
   configuredEntitlements,
   collectSandboxEnvironment,
@@ -61,12 +63,67 @@ describe(".env.example", () => {
   });
 });
 
+describe("goal continuation pacing settings", () => {
+  test("defaults to the input-aware idle backoff schedule and cap", () => {
+    const settings = withEnv({}, () => getSettings());
+    expect(settings.goalIdleBackoffMs).toEqual([...DEFAULT_GOAL_IDLE_BACKOFF_MS]);
+    expect(settings.goalIdleBackoffMaxMs).toBe(DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS);
+    expect(settings.goalMaxAutoContinuations).toBeUndefined();
+  });
+
+  test("parses a comma-separated schedule and an explicit ceiling", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_GOAL_IDLE_BACKOFF_MS: " 0, 5000 ,60000",
+        OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS: "60000",
+      },
+      () => getSettings(),
+    );
+    expect(settings.goalIdleBackoffMs).toEqual([0, 5_000, 60_000]);
+    expect(settings.goalIdleBackoffMaxMs).toBe(60_000);
+  });
+
+  test("rejects malformed schedules and entries above the ceiling at boot", () => {
+    expect(() =>
+      withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MS: "3000,abc" }, () => getSettings()),
+    ).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MS: "3000,-1" }, () => getSettings()),
+    ).toThrow();
+    expect(() => withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MS: "1.5" }, () => getSettings())).toThrow();
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_GOAL_IDLE_BACKOFF_MS: "3000,900000",
+          OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS: "600000",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed/);
+    expect(() =>
+      withEnv({ OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS: "0" }, () => getSettings()),
+    ).toThrow();
+  });
+});
+
 describe("browser analytics configuration", () => {
   test("is disabled and consent-gated by default", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.analyticsEnabled).toBe(false);
     expect(settings.analyticsConsentRequired).toBe(true);
     expect(settings.analyticsReoClientId).toBeUndefined();
+  });
+
+  test("child lifecycle notices default off and parse the rollout flag", () => {
+    expect(getSettings().childLifecycleNoticesEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true" }, () => getSettings())
+        .childLifecycleNoticesEnabled,
+    ).toBe(true);
+    expect(
+      withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "false" }, () => getSettings())
+        .childLifecycleNoticesEnabled,
+    ).toBe(false);
   });
 
   test("parses public provider identifiers without treating them as credentials", () => {
@@ -348,14 +405,17 @@ describe("personal GitHub OAuth settings", () => {
     OPENGENI_INTEGRATIONS_ENABLED: "true",
     OPENGENI_INTEGRATIONS_STATE_SECRET: "oauth-state-secret",
     OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+    OPENGENI_GITHUB_REST_MCP_ENABLED: "true",
     OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
     OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "personal-client-staging",
     OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "personal-client-secret",
   };
 
   test("is disabled by default and loads a separate managed client when enabled", () => {
+    expect(withEnv({}, () => getSettings()).githubRestMcpEnabled).toBe(false);
     expect(withEnv({}, () => getSettings()).githubPersonalOauthEnabled).toBe(false);
     expect(withEnv(enabled, () => getSettings())).toMatchObject({
+      githubRestMcpEnabled: true,
       githubPersonalOauthEnabled: true,
       githubPersonalOauthClientId: "personal-client-staging",
       githubPersonalOauthClientSecret: "personal-client-secret",
@@ -419,6 +479,7 @@ describe("OpenGeni Slack interaction settings", () => {
     OPENGENI_INTEGRATIONS_STATE_SECRET: "state-secret",
     OPENGENI_SLACK_CLIENT_ID: "slack-client-id",
     OPENGENI_SLACK_CLIENT_SECRET: "slack-client-secret",
+    OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Staging",
     OPENGENI_SLACK_COMMAND: "/opengeni-staging",
   };
 
@@ -427,6 +488,7 @@ describe("OpenGeni Slack interaction settings", () => {
     expect(settings.slackClientId).toBe("slack-client-id");
     expect(settings.slackClientSecret).toBe("slack-client-secret");
     expect(settings.slackSigningSecret).toBeUndefined();
+    expect(settings.slackBotDisplayName).toBe("OpenGeni Staging");
     expect(settings.slackCommand).toBe("/opengeni-staging");
   });
 
@@ -439,7 +501,11 @@ describe("OpenGeni Slack interaction settings", () => {
   });
 
   test("defaults and validates the signed Slack slash command", () => {
+    expect(withEnv({}, () => getSettings()).slackBotDisplayName).toBe("OpenGeni");
     expect(withEnv({}, () => getSettings()).slackCommand).toBe("/opengeni");
+    expect(() =>
+      withEnv({ OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Preview" }, () => getSettings()),
+    ).toThrow();
     expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/OpenGeni" }, () => getSettings())).toThrow();
   });
 });

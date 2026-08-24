@@ -269,6 +269,26 @@ forensics and density profiling therefore run only in a bounded non-serving
 execution class and never in API or turn-worker serving pods. See
 [`deployment.md`](deployment.md) for the reproducible density harness.
 
+Compact agent discovery keeps that queue boundary intact. `queuedPromptCount`
+reports waiting human/API work, while `sessions_list` `includeLastMessage` and
+the MCP `session_events` monitoring read omit a human/API `user.message` whose
+accepted turn was never claimed, so an orchestrator cannot mistake a waiting or
+pre-claim-terminal prompt (deleted, edited, cancelled) for processed
+conversation. The predicate is `session_turns.started_at IS NULL`: every claim
+path stamps `started_at` in the transaction that moves the turn to `running`
+and nothing clears it, so it cannot drift with the status vocabulary. Once the
+turn is claimed the exact stored row appears at its original sequence. Two
+consequences follow: an admission-rejected human/API turn (never claimed,
+settled `failed`) keeps its prompt hidden from agent monitoring while its
+`turn.failed` stays visible, and a turn that the removed worker-death
+preemption requeue (`requeuePreemptedTurn`, Jun 12 - Jul 14 2026) reset to
+`started_at IS NULL` and that was cancelled before any re-claim stays hidden
+there too. The probe is served by the partial index
+`session_turns_unclaimed_prompt_trigger_idx` (migration 0322). The
+filter is agent-monitoring only: REST event pages (which the browser composer
+uses to reconcile an outcome-unknown Send by `clientEventId`), SSE, and forensic
+reads stay byte-identical, and stored events are never rewritten.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
@@ -370,10 +390,13 @@ recovery-safe. That narrow exception does not apply to external MCP servers,
 tool invocation, explicit non-404 client responses, or typed
 protocol/programming failures. The retry classifier records typed out-of-band
 category metadata without rewriting the exact source diagnostic retained by
-OpenGeni. Only genuinely public SDK/console diagnostics receive a fixed
-structural projection; raw transport messages, URLs, and response bodies remain
-exact on internal data paths. Other HTTP client failures and unknown provider
-codes remain authoritative and terminal. Hitting an explicitly configured
+OpenGeni. A failed MCP request records its HTTP method, parsed JSON-RPC method
+when available, and a bounded exact source/cause chain in the durable recovery
+detail before SDK layers can flatten the transport error. Only genuinely public
+SDK/console diagnostics receive a fixed structural projection; raw transport
+messages, URLs, and response bodies remain exact on internal data paths. Other
+HTTP client failures and unknown provider codes remain authoritative and
+terminal. Hitting an explicitly configured
 model-call cap and budget/credit exhaustion ends the current turn gracefully;
 an active goal may create a later continuation, while an otherwise idle session
 waits for the next user message. For an MCP timeout that escapes after a
@@ -760,14 +783,33 @@ parked indefinitely. When the selected root is a child, the same transaction
 also enqueues one deduplicated `child_terminal_result` with status `cancelled`
 for its surviving parent and copies the causal parent-turn delegation snapshot;
 cancelled descendants do not notify parents inside the same terminal subtree.
+Terminal results are not the only child lifecycle notice. Behind
+`OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED`, the child's own lifecycle
+transactions also enqueue one dedupe-keyed outbox row for the parent when the
+child freezes in `requires_action` (`child_requires_action`, immediate wake
+class, bounded question previews and approval ids), when such a request is
+answered, skipped, expired, decided, or cancelled
+(`child_requires_action_resolved`), when a human/API/agent pauses the child
+directly (`child_paused`), when a capacity waiter is armed
+(`child_waiting_capacity`), and when the child records goal progress
+(`child_progress`); the latter four are `deferred` (pending row + event, no wake,
+delivered with the next claim). Each producer takes the child-lifecycle lock
+prefix (the parent session row is locked with the child) and the worker delivers
+the row right after the producing commit; the reaper covers crashes. See
+[`durable-agent-inputs.md`](durable-agent-inputs.md).
+
 Every child terminal result remains a durable pending machine input even when it
 arrives late. It may autonomously wake an idle parent only while the parent has
-an active goal, which is the durable obligation to keep working. A no-goal
-parent whose ordinary turn completed, a paused or completed goal, and an
-already-failed parent are settled authority: the result stays pending for a
-later human/new-goal turn and cannot manufacture a new inference or rewrite the
-settled public status by itself. A result arriving while the parent turn is live
-remains available to that turn's ordinary loop.
+an active goal, which is the durable obligation to keep working. A goal paused
+only by its continuation ceiling (`max_auto_continuations`) counts: that pause
+is pacing, not intent, so the arriving result resumes the goal in the same
+commit (`goal.resumed`, `reason: "external_input"`) and then wakes the parent. A
+no-goal parent whose ordinary turn completed, a goal paused by the user, API,
+agent, limits, or no-progress policy, a completed goal, and an already-failed
+parent are settled authority: the result stays pending for a later human/new-goal
+turn and cannot manufacture a new inference or rewrite the settled public status
+by itself. A result arriving while the parent turn is live remains available to
+that turn's ordinary loop.
 Only physical attempt quiescence can clear the stopping projection.
 When paused control remains authoritative after that receipt is durable, the
 session parks as `idle` while retaining the same `recovering` logical turn and
@@ -1007,18 +1049,34 @@ before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
 authority remain capture blockers until settled.
 
-A yielded process promotes its parent admission to retained state and creates
-the non-TTL process holder in the same transaction before any caller receives a
-live locator. The exact parent admission, process UUID, provider locator, lease
-epoch, provider instance, and route remain pinned across active-pointer movement.
+A yielded managed process promotes its parent admission to retained state and
+creates the non-TTL process holder in the same transaction before any caller
+receives a live locator. The holder keeps the exact temporary sandbox alive after
+the turn ends. A yielded Connected Machine exec instead creates a session-owned
+background-command row before returning; that row freezes the physical control
+workspace, enrollment, connection instance, and op ID. The exact parent
+admission/process UUID/provider locator or Connected Machine locator remains
+pinned across active-pointer movement.
+Both provider paths serialize adoption with Steer, Pause, terminal Cancel, and
+session-tree deletion through the canonical workspace-control, workspace,
+session, turn, and exact-attempt fence. Managed promotion and command insertion
+are one transaction. For Connected Machines, the op-stream yield path takes
+exact failure-cancellation authority before the adoption transaction begins;
+if the fence rejects, that path exact-cancels the frozen op, while a committed
+row transfers cancellation to session control and reconciliation. This closes
+the post-commit/pre-unwind window in which attempt cancellation could otherwise
+send `OpCancel` after durable adoption.
 Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
 cancellation, helper exec, and drain polling are process control: they may prove
 exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
 settles the parent and process holder and closes any matching PTY; duplicate
 identical proof is idempotent, while missing/conflicting proof keeps the fence
-closed. Normal turn finalization invokes this same physical drain for every
-registered yielded shell before workspace capture, independently of whether a
-Pause/Steer quiescence receipt is required. Connected Machines and other
+closed. Normal turn finalization drains only attempt-owned yielded shells before
+workspace capture. Once a command's durable session adoption commits, normal
+completion and Steer detach from it instead of cancelling it. Session/workspace
+Pause and terminal Cancel atomically transition adopted commands to `stopping`;
+provider-specific reconciliation then proves exact exit/loss before settlement.
+Resume never revives a stopping command. Connected Machines and other
 non-persistable routes do not dirty the provisioned cloud-home generation.
 
 If an owner finalizer or worker dies before reaching that settlement, the sole
@@ -1039,6 +1097,25 @@ idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
 metrics; dashboard/PromQL integration is coordinated separately.
+
+Connected Machine background commands use the same proof-before-settlement
+discipline without borrowing managed lease identity. The global maintenance pass
+claims oldest-due rows with `SKIP LOCKED`, sends `OpQuery` for `running` or
+idempotent `OpCancel` for `stopping` to the immutable launch subject with epoch
+zero, and checkpoints the typed terminal provider observation before changing
+the lifecycle row. Running, offline, timed-out, malformed, and successor-only
+states remain active/deferred; connection retirement or elapsed time is not
+physical proof and cannot license replay or rebinding.
+
+Teardown preserves that authority. Session-tree deletion locks and refuses any
+`running` or `stopping` command before cascading session-owned rows. Workspace
+deletion takes a separate transaction-scoped background-command advisory prefix
+before parent rows; adoption takes the matching shared prefix for both the
+owning workspace and a distinct physical control workspace. Active target or
+origin references return a typed blocker. Settled cross-workspace origin history
+is pruned only at the final successful source-workspace deletion boundary, in
+the same transaction as the cascade; a deletion attempt blocked later by leases
+or other durable owners leaves that history intact.
 
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when
@@ -1206,6 +1283,10 @@ original attempt for audit. Receipt/result, goal version, session-sequenced
 event, and mutation commit atomically. A lost response can therefore be
 reconciled from a recovered attempt without double-applying the update, and an
 old replay returns its stored result rather than overwriting newer goal truth.
+Consecutive continuations that consumed no external input are paced by a
+delayed workflow-wake row (`goal_idle_backoff`), never by a Temporal timer or a
+cap; any new input pulls that wake to now, and the claim that binds a goal turn
+to a batch carrying other machine input restarts the no-input streak.
 Full detail in `docs/goals.md`; goals are bounded by budget/admission policy and
 explicit lifecycle control, not an inferred progress score.
 

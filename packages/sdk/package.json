@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -45,6 +45,10 @@
     "./pr-review": {
       "types": "./src/pr-review.ts",
       "default": "./src/pr-review.ts"
+    },
+    "./organization-private-session-settings": {
+      "types": "./src/organization-private-session-settings.ts",
+      "default": "./src/organization-private-session-settings.ts"
     },
     "./realtime": {
       "types": "./src/realtime.ts",

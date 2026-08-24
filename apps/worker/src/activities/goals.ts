@@ -128,6 +128,12 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       sessionId: input.sessionId,
       workflowId: input.workflowId,
       defaultMaxAutoContinuations: settings.goalMaxAutoContinuations ?? null,
+      // Pacing between consecutive no-input continuations (never a cap). The
+      // materializer re-arms a delayed outbox wake and returns `deferred`.
+      idleBackoff: {
+        scheduleMs: settings.goalIdleBackoffMs,
+        maxMs: settings.goalIdleBackoffMaxMs,
+      },
       // A model-policy block takes precedence: it is deterministic (a budget
       // pause can clear on its own; a policy pause needs a model/policy change)
       // and rides the same visible-pause channel.
@@ -143,13 +149,18 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
       // session's effective first-party selection (the same source the worker
       // signs into the delegated token and the API uses to register tools), so
       // a pre-existing narrowed selection is never told to call a missing tool.
-      prompt: (goal, autoContinuation, cap) =>
-        goalContinuationPrompt(goal, autoContinuation, cap, {
-          goalWaitAvailable: allowedFirstPartyMcpToolsForSession(
-            settings,
-            session.firstPartyMcpTools,
-          ).includes("goal_wait"),
-        }),
+      prompt: (goal, autoContinuation, cap) => {
+        const effectiveFirstPartyTools = allowedFirstPartyMcpToolsForSession(
+          settings,
+          session.firstPartyMcpTools,
+        );
+        return goalContinuationPrompt(goal, autoContinuation, cap, {
+          goalWaitAvailable: effectiveFirstPartyTools.includes("goal_wait"),
+          humanInputRespondAvailable: effectiveFirstPartyTools.includes(
+            "session_human_input_respond",
+          ),
+        });
+      },
     });
     if (decision.events.length > 0) {
       await bus.publish(input.workspaceId, input.sessionId, decision.events);
@@ -167,7 +178,7 @@ export function goalContinuationPrompt(
   _goal: SessionGoal,
   _autoContinuation: number,
   _cap: number | null,
-  options: { goalWaitAvailable?: boolean } = {},
+  options: { goalWaitAvailable?: boolean; humanInputRespondAvailable?: boolean } = {},
 ): string {
   const waitingGuidance = options.goalWaitAvailable
     ? [
@@ -178,6 +189,16 @@ export function goalContinuationPrompt(
         "",
       ]
     : [];
+  const childNoticeGuidance = [
+    "Child lifecycle notices:",
+    "- A `child_requires_action` update means a worker you spawned is blocked on a question or a tool approval and will not progress until it is answered. " +
+      (options.humanInputRespondAvailable
+        ? "If you know the answer to its question, answer it with opengeni__session_human_input_respond (pass the worker's sessionId, the requestId from the notice, and a response). "
+        : "") +
+      "Tool approvals can only be decided by a human. If you cannot resolve the blocker yourself, report the exact blocker (worker session id, the question) to the user and wait or pause instead of retrying the worker.",
+    "- `child_requires_action_resolved`, `child_paused`, `child_waiting_capacity`, and `child_progress` updates are informational: a resolved notice means the worker is moving again; a paused worker needs a human or you to resume it; a capacity wait resumes by itself; a progress note needs no action.",
+    "",
+  ];
   return [
     "Continue working toward the active session goal.",
     "",
@@ -208,6 +229,7 @@ export function goalContinuationPrompt(
     "Do not rely on intent, partial progress, memory of earlier work, or a plausible final answer as proof of completion. Call opengeni__goal_complete with concrete evidence only when the full objective is actually achieved and no required work remains.",
     "",
     ...waitingGuidance,
+    ...childNoticeGuidance,
     "Blocked audit:",
     "- Do not call opengeni__goal_pause the first time a blocker appears.",
     "- Pause only when the same blocking condition has repeated for at least three consecutive goal turns and meaningful progress is impossible without user input or an external-state change.",

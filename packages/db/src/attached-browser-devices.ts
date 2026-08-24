@@ -386,7 +386,7 @@ async function terminalizeStaleAttachedDeviceSessions(
       .update(schema.interactionOperations)
       .set({
         state: "outcome_unknown",
-        errorCode: CONTROLLER_TRANSITION_EXPIRED,
+        errorCode: "outcome_unknown",
         errorMessage: "Attached Chrome connection generation changed",
         errorRetryable: false,
         errorDetails: { reason: "connection_generation_changed" },

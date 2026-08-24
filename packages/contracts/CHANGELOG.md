@@ -1,5 +1,53 @@
 # @opengeni/contracts
 
+## 2.2.0
+
+### Minor Changes
+
+- 4be2055: Child lifecycle notices. `SessionSystemUpdateKind` gains `child_requires_action`, `child_requires_action_resolved`, `child_paused`, `child_waiting_capacity`, and `child_progress` with typed, bounded payload schemas (no subject ids, credentials, or raw tool arguments), plus `SESSION_SYSTEM_UPDATE_WAKE_CLASS` (`immediate` for every pre-existing kind and `child_requires_action`; `deferred` for the other four) and `CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS`. The first-party tool catalog gains `session_human_input_respond` (default selection, not goal-required). The SDK mirrors the new kinds and tool name.
+- de3f376: Bound and shape the durable text an agent authors on a user's behalf. The budget
+  follows the destination, on every agent surface that reaches it. A mandatory
+  workspace rule is composed verbatim into the prompt of every session it applies
+  to, so `remember`, `instruction_policy_propose`, and `task_note_promote_instruction_policy`
+  are all capped at 600 characters; the preference destination is capped at 1,200
+  across its three surfaces, because only its short descriptor is composed and the
+  content is retrieved on demand. Task-note promotion is checked in the database
+  layer, where the content is the note rather than a request field, and is rejected
+  rather than truncated before any evidence, claim, or proposal row is written.
+  `company_profile_propose`, the largest always-on surface, is capped for agents at
+  400 characters per scalar, 200 per list entry, and 4,096 UTF-8 bytes total. The
+  Knowledge lane keeps its 4,000-character retrieval-evidence ceiling, and every
+  human editor limit is unchanged so nothing a person already typed becomes
+  invalid. Tool descriptions now state the prompt cost and the authoring shape, and
+  the `remember` confirmation card names the character count and destination so a
+  human can judge the cost before saving. Existing stored revisions are never
+  rewritten.
+- e6ffdc7: Add the `backoff_pending` goal continuation reason (idle pacing between consecutive no-input continuations, `nextAttemptAt` at the pacing deadline) and the `SessionGoalResumedReason` / `SessionGoalResumedEventPayload` contracts for `goal.resumed` (`api` for the operator PATCH, `external_input` for the system resume of a `max_auto_continuations` pause). The React goal pill treats `backoff_pending` as ordinary scheduled work.
+- 0b3b8df: Add an explicit organization-owner-confirmed agent path for company-profile and
+  strategic-goal administration. The two-step MCP flow stages an immutable inactive
+  full-profile proposal, binds activation to the initiating human's exact
+  structured confirmation, revalidates current organization authority and profile
+  CAS in PostgreSQL under the canonical workspace/session lock order, and remains
+  independent of workspace learning mode. The manual `account:admin` route keeps
+  its admission contract, and the earlier proposal-only `company_profile_propose`
+  tool (`durable_learning` provenance) is retired in favor of this path.
+- bbd19e0: Add an owner/admin organization setting that enables Only-me chats in shared
+  workspaces for organizations holding the session-tenancy readiness receipt
+  (`GET`/`PATCH /v1/organizations/:organizationId/private-session-settings`,
+  `@opengeni/sdk/organization-private-session-settings`, and the organization
+  settings page). Already activated organizations are backfilled enabled.
+- 5d664d8: Surface why a goal is not pursuing and how long children have waited for a human. `Session.treeStats` gains optional `attentionSince` (earliest `requires_action` entry among the counted attention descendants), `Session` gains optional `requiresActionSince` on list and lineage reads, and the goal continuation projection gains optional `holdReason` for a `held_for_input` hold. `SessionChrome`'s goal pill spells out the pause reason ("Paused · cap" / "budget" / "by you" / "agent"), explains an idle-backoff check time and an agent `goal_wait` hold, and exports `sessionChromeGoalPillLabel` / `sessionChromeGoalPillExplanation`.
+
+### Patch Changes
+
+- e91d89e: Open Markdown `sandbox:` file links in the current session's Files workbench, preserve exact decoded paths through the selected filesystem authority, reveal deep lazy-tree ancestors, and handle malformed references safely.
+
+## 2.1.1
+
+### Patch Changes
+
+- ab81e47: Allow the managed staging Slack app and bot to use the visibly distinct `OpenGeni Staging` identity. The manifest, runtime configuration, installation verification, durable binding contract, SDK, web projection, and deployment artifacts now preserve one closed environment-qualified display-name setting while production continues to default to `OpenGeni`.
+
 ## 2.1.0
 
 ### Minor Changes

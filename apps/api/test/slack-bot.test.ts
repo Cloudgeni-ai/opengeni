@@ -181,6 +181,9 @@ function fakeSlack(
   options: {
     scopes?: string[];
     displayName?: string;
+    realName?: string;
+    oauthAppId?: string;
+    installedAppId?: string;
     teamId?: string;
     botUserId?: string;
     botId?: string;
@@ -319,7 +322,11 @@ function fakeSlack(
           );
     }
     if (method === "oauth.v2.access") {
-      return Response.json({ ok: true, access_token: fixtureBotToken() });
+      return Response.json({
+        ok: true,
+        access_token: fixtureBotToken(),
+        app_id: options.oauthAppId ?? "A_OPEN_GENI",
+      });
     }
     if (method === "auth.test") {
       return Response.json(
@@ -342,7 +349,8 @@ function fakeSlack(
           deleted: false,
           profile: {
             display_name: options.displayName ?? "OpenGeni",
-            real_name: "OpenGeni",
+            real_name: options.realName ?? "OpenGeni",
+            api_app_id: options.installedAppId ?? "A_OPEN_GENI",
           },
         },
       });
@@ -811,7 +819,7 @@ describe("OpenGeni Slack bot credential verification", () => {
   test("exchanges the authorization code server-side with the configured callback", async () => {
     let requestUrl = "";
     let requestInit: RequestInit | undefined;
-    const token = await exchangeOpenGeniSlackAuthorizationCode(
+    const authorization = await exchangeOpenGeniSlackAuthorizationCode(
       {
         code: "authorization-code",
         clientId: "client-id",
@@ -821,11 +829,18 @@ describe("OpenGeni Slack bot credential verification", () => {
       (async (input, init) => {
         requestUrl = String(input);
         requestInit = init;
-        return Response.json({ ok: true, access_token: fixtureBotToken() });
+        return Response.json({
+          ok: true,
+          access_token: fixtureBotToken(),
+          app_id: "A_OPEN_GENI",
+        });
       }) as typeof globalThis.fetch,
     );
 
-    expect(token).toBe(fixtureBotToken());
+    expect(authorization).toEqual({
+      accessToken: fixtureBotToken(),
+      appId: "A_OPEN_GENI",
+    });
     expect(requestUrl).toBe("https://slack.com/api/oauth.v2.access");
     expect(requestInit?.method).toBe("POST");
     expect(requestInit?.redirect).toBe("error");
@@ -862,6 +877,10 @@ describe("OpenGeni Slack bot credential verification", () => {
           })) as typeof globalThis.fetch,
       ),
     ).rejects.toThrow();
+    await expect(
+      exchangeOpenGeniSlackAuthorizationCode(input, (async () =>
+        Response.json({ ok: true, access_token: fixtureBotToken() })) as typeof globalThis.fetch),
+    ).rejects.toThrow("did not return an app identity");
   });
 
   test("accepts only required plus canonical safe optional scopes", async () => {
@@ -885,6 +904,7 @@ describe("OpenGeni Slack bot credential verification", () => {
     const exact = fakeSlack({ scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES });
     const verified = await verifyOpenGeniSlackBotCredential(
       fixtureBotToken(),
+      { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
       exact.fetch,
       new Date("2026-01-02T03:04:05.000Z"),
     );
@@ -900,9 +920,18 @@ describe("OpenGeni Slack bot credential verification", () => {
     expect(exact.calls.map((call) => call.method)).toEqual(["auth.test", "users.info"]);
     expect(exact.calls.every((call) => call.query === "")).toBe(true);
 
+    const staging = await verifyOpenGeniSlackBotCredential(
+      fixtureBotToken(),
+      { appId: "A_OPEN_GENI", displayName: "OpenGeni Staging" },
+      fakeSlack({ displayName: "", realName: "OpenGeni" }).fetch,
+      new Date("2026-01-02T03:04:05.000Z"),
+    );
+    expect(staging.metadata.botDisplayName).toBe("OpenGeni Staging");
+
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
+        { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
         fakeSlack({
           scopes: OPENGENI_SLACK_BOT_REQUIRED_SCOPES.filter((scope) => scope !== "groups:history"),
         }).fetch,
@@ -921,6 +950,7 @@ describe("OpenGeni Slack bot credential verification", () => {
       await expect(
         verifyOpenGeniSlackBotCredential(
           fixtureBotToken(),
+          { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
           fakeSlack({ scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, unsafe] }).fetch,
         ),
       ).rejects.toThrow("do not satisfy");
@@ -928,6 +958,7 @@ describe("OpenGeni Slack bot credential verification", () => {
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
+        { appId: "A_OPEN_GENI", displayName: "OpenGeni" },
         fakeSlack({
           scopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES, "chat:write.public"],
         }).fetch,
@@ -936,9 +967,10 @@ describe("OpenGeni Slack bot credential verification", () => {
     await expect(
       verifyOpenGeniSlackBotCredential(
         fixtureBotToken(),
-        fakeSlack({ displayName: "Personal Slack user" }).fetch,
+        { appId: "A_DIFFERENT_APP", displayName: "OpenGeni" },
+        fakeSlack().fetch,
       ),
-    ).rejects.toThrow('display name must be exactly "OpenGeni"');
+    ).rejects.toThrow("does not belong to the authorized Slack app");
   });
 });
 
@@ -1494,7 +1526,7 @@ describe("OpenGeni Slack bot connection", () => {
     const workspace = await freshWorkspace();
     const cases = [
       {
-        slack: fakeSlack({ displayName: "Not OpenGeni" }),
+        slack: fakeSlack({ installedAppId: "A_DIFFERENT_APP" }),
         reason: "identity_mismatch",
       },
       {

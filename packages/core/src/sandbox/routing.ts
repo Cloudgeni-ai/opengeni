@@ -28,6 +28,7 @@ import {
   type Database,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
+import { settleSessionBackgroundCommandForRetainedProcess } from "@opengeni/db/session-background-commands";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
   isProviderSandboxGoneDuringRoutedOperation,
@@ -304,6 +305,10 @@ export function wrapChannelABoxWithRouting(
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
             providerBinding: boundAdmission.providerBinding ?? null,
+            backgroundCommand: {
+              commandId: retainedProcess.id,
+              command: op,
+            },
             owner: {
               kind: "direct",
               requestId: ids.directRequest.requestId,
@@ -427,6 +432,15 @@ export function wrapChannelABoxWithRouting(
           exitCode: proof.exitCode,
           reason: proof.reason,
           idleGraceMs: settings.sandboxIdleGraceMs,
+        });
+        await settleSessionBackgroundCommandForRetainedProcess(db, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: ids.sessionId,
+          retainedProcessId: process.id,
+          outcome: proof.outcome,
+          exitCode: proof.exitCode,
+          reason: proof.reason,
         });
       }
     : undefined;

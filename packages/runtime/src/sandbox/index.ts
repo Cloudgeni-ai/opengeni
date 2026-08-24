@@ -483,7 +483,8 @@ export type { SelfhostedConnectionBinding } from "./routing/backend-resolver";
 // The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
 // Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
 // the same bus connection as the control rpc) plus an `OpStreamJournal`
-// adapted onto Temporal; sessions without the injection keep the legacy exec.
+// adapted onto Temporal. Connected Machine exec requires this injection and
+// fails closed when it is absent or unsupported.
 export {
   NatsOpStreamTransport,
   OpStreamUnavailableError,
@@ -494,10 +495,13 @@ export {
   type OpStreamTransport,
 } from "./selfhosted/op-transport";
 export {
+  cancelSelfhostedOp,
   OP_STREAM_ACK_INTERVAL_MS,
   OP_STREAM_DEFAULT_WINDOW_BYTES,
   OP_STREAM_RECONNECT_HOLD_MS,
   OP_STREAM_SILENCE_TIMEOUT_MS,
+  querySelfhostedOp,
+  type ExactSelfhostedOpControlInput,
   type OpStreamExecOutcome,
   type OpStreamJournal,
 } from "./selfhosted/op-stream";
@@ -507,6 +511,7 @@ export { nextDurableOpId, runWithToolCallCorrelation, sanitizeOpIdToken } from "
 export {
   negotiateSelfhostedCapabilities,
   selfhostedLiveness,
+  selfhostedHeartbeatLiveness,
   SELFHOSTED_RECONNECT_WINDOW_MS,
   type SelfhostedNegotiationInput,
   type SelfhostedLivenessState,
@@ -517,6 +522,12 @@ export {
   type MockAgentResponderOptions,
   type MockExecHandler,
 } from "./selfhosted/testing";
+export {
+  createMockSelfhostedOpStream,
+  FakeOpRunner,
+  type FakeOpScript,
+  InMemoryOpStreamTransport,
+} from "./selfhosted/op-testing";
 
 // The hot-swap routing proxy (M7): ONE stable session-shaped object the SDK binds
 // to, which re-reads the per-session active pointer per op and dispatches to the

@@ -99,6 +99,20 @@ function lostAttachedComputer(
   };
 }
 
+function lostConnectedComputer(
+  id = COMPUTER_SESSION_ID,
+  associationSessionId = SESSION_ID,
+): ComputerSession {
+  return {
+    ...computerSession(id, associationSessionId),
+    lifecycle: "lost",
+    failureCode: "source_placement_changed",
+    placement: { kind: "connected_machine", sandboxId: ATTACHED_DEVICE_ID },
+    platform: "macos",
+    adapter: "opengeni.macos.v1",
+  };
+}
+
 function startingComputerSession(
   id = COMPUTER_SESSION_ID,
   associationSessionId = SESSION_ID,
@@ -638,6 +652,81 @@ describe("ComputerSession frame stream", () => {
 });
 
 describe("ComputerViewer", () => {
+  test("retires a stale Connected Machine Desktop, stops polling, and recreates once", async () => {
+    const stale = {
+      ...computerSession(),
+      placement: {
+        kind: "connected_machine" as const,
+        sandboxId: ATTACHED_DEVICE_ID,
+      },
+      platform: "macos" as const,
+      adapter: "opengeni.macos.v1",
+    };
+    const lost = lostConnectedComputer();
+    const replacement = startingComputerSession(PEER_COMPUTER_SESSION_ID);
+    let catalogCalls = 0;
+    let targetCalls = 0;
+    let createCalls = 0;
+    const client = fakeClient({
+      listComputerSessions: async () => ({
+        revision: ++catalogCalls,
+        sessions: catalogCalls === 1 ? [stale] : createCalls === 0 ? [lost] : [lost, replacement],
+      }),
+      getComputerSession: async (_workspaceId, computerSessionId) =>
+        computerSessionId === replacement.id ? replacement : stale,
+      listComputerTargets: async (_workspaceId, computerSessionId) => {
+        if (computerSessionId === replacement.id) {
+          return {
+            computerSessionId,
+            controllerGeneration: "controller-2",
+            targets: [],
+          };
+        }
+        targetCalls += 1;
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({
+            error: {
+              status: 409,
+              code: "conflict",
+              message: "This Desktop belonged to a previous task placement and was retired.",
+              retryable: false,
+              outcomeUnknown: false,
+              details: {
+                interactionResource: "computer_session",
+                interactionFailureCode: "source_placement_changed",
+                interactionLifecycle: "lost",
+              },
+            },
+          }),
+        );
+      },
+      createComputerSession: async () => {
+        createCalls += 1;
+        return mutation(replacement);
+      },
+    });
+
+    const rendered = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(120);
+    expect(catalogCalls).toBeGreaterThanOrEqual(2);
+    expect(targetCalls).toBe(1);
+    expect(createCalls).toBe(1);
+    await flush(900);
+    expect(targetCalls).toBe(1);
+    expect(createCalls).toBe(1);
+    await rendered.unmount();
+
+    const remounted = await renderComponent(
+      <ComputerViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(120);
+    expect(createCalls).toBe(1);
+    await remounted.unmount();
+  });
+
   test("restores the task's last selected Desktop session", async () => {
     const current = computerSession();
     const peer = computerSession(PEER_COMPUTER_SESSION_ID, PEER_SESSION_ID, "Peer Mac");

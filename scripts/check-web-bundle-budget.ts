@@ -92,6 +92,15 @@ const budgets = {
   // 588,276 gzip bytes on a direct session load. Advance only those four
   // aggregate envelopes to the next whole KiB; all per-file and unrelated
   // graph limits stay fixed.
+  // Heartbeat-backed machine liveness plus canonical filesystem-root links
+  // measure 2,134,519 raw / 593,854 gzip bytes on a direct session load. Move
+  // only the exceeded raw aggregate to its next whole-KiB envelope; compressed,
+  // file-count, initial, per-file, lazy-chunk, and CSS limits remain unchanged.
+  // Session-owned background-command list/cancel methods add 1,322 raw / 329
+  // gzip bytes to that shared SDK client. The exact Linux/x64 production graph
+  // measures 2,135,841 raw / 594,183 gzip bytes. Advance only those two direct-
+  // session aggregate envelopes to their next whole KiB; every initial,
+  // per-file, file-count, lazy-chunk, and CSS cap remains unchanged.
   initialRaw: 1485 * kib,
   // The managed personal-resource create/composer controls plus current main
   // measured 1,484,426 initial raw and 577,450 direct-session gzip bytes on
@@ -124,8 +133,26 @@ const budgets = {
   // immutable deployment revision, measures 2,122,755 raw bytes. Advance only
   // this aggregate to the next whole-KiB envelope; every compressed, file-count,
   // per-file, lazy-chunk, CSS, and initial-graph cap remains unchanged.
-  directSessionRaw: 2074 * kib,
-  directSessionGzip: 576 * kib,
+  // Surfacing goal pause/hold/backoff reasons in the session chrome and the
+  // "N need you · X h" waiting durations in the rail, priority feed, and
+  // agents panel adds the reason copy plus the waiting helpers to the shared
+  // session graph. The same macOS/arm64 production build measures current
+  // main at 2,123,006 raw / 588,924 gzip bytes and this change at 2,126,938
+  // raw / 591,668 gzip bytes. Advance only those two aggregate envelopes to
+  // the next whole KiB, with one extra KiB on gzip for the up-to-1.5-KiB
+  // Linux/x64 skew observed above; every initial, per-file, file-count,
+  // lazy-chunk, and CSS cap stays fixed.
+  // Child lifecycle notices add the five typed child notice payload schemas
+  // and wake classes to the shared contracts plus their queue-chrome and
+  // timeline labels. The same macOS/arm64 production build measures main at
+  // 2,126,938 raw / 591,668 gzip bytes (the measurement above) and this
+  // change at 2,129,504 raw / 592,296 gzip bytes. Advance only those two
+  // aggregate envelopes: raw to the next whole KiB above one KiB of headroom,
+  // gzip to the next whole KiB above 1.5 KiB of headroom for the Linux/x64
+  // skew; every initial, per-file, file-count, lazy-chunk, and CSS cap stays
+  // fixed.
+  directSessionRaw: 2086 * kib,
+  directSessionGzip: 581 * kib,
   directSessionFiles: 19,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

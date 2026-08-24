@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
-import { OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
+import { useState } from "react";
+import { Markdown, OpenGeniProvider, SandboxWorkspace, useSessionEvents } from "@opengeni/react";
 import { DOCK_SESSION_ID, DOCK_STATES, DockStateMockClient } from "./workbench-dock-states";
 import "./styles.css";
 
@@ -24,7 +25,13 @@ const client = new DockStateMockClient(state);
 
 /** A calm, neutral primary pane so the dock reads in a real session context
  *  without pulling in the scripted manager narrative. The dock is the subject. */
-function PrimaryPane({ stress }: { stress: boolean }) {
+function PrimaryPane({
+  stress,
+  onSandboxFile,
+}: {
+  stress: boolean;
+  onSandboxFile: (path: string, line?: number) => void;
+}) {
   const title = stress
     ? "Internationalisation, accessibility, observability, and deployment coordination"
     : "Security hardening";
@@ -55,6 +62,11 @@ function PrimaryPane({ stress }: { stress: boolean }) {
             monitoring + EBS optimization on the API instance.
           </p>
           <p>The full diff is in the Changes tab.</p>
+          <Markdown onSandboxFile={onSandboxFile}>
+            {
+              "[Open source](sandbox:/workspace/apps/api/src/server.ts) · [Open source at line 2](sandbox:/workspace/apps/api/src/server.ts:2)"
+            }
+          </Markdown>
         </div>
       </div>
       <div className="shrink-0 px-4 pb-4 pt-1">
@@ -68,6 +80,11 @@ function PrimaryPane({ stress }: { stress: boolean }) {
 
 function Harness() {
   const { events } = useSessionEvents(DOCK_SESSION_ID);
+  const [openFileRequest, setOpenFileRequest] = useState<{
+    path: string;
+    line: number | null;
+    requestId: number;
+  } | null>(null);
   const contentStress = stateKey === "content-stress";
   const leadingTabs = contentStress
     ? [
@@ -101,8 +118,20 @@ function Harness() {
             events={events}
             autoSaveId={`og.m7.${stateKey}`}
             defaultSize={52}
+            openFileRequest={openFileRequest}
             {...(tabParam ? { initialTab: tabParam } : {})}
-            primary={<PrimaryPane stress={contentStress} />}
+            primary={
+              <PrimaryPane
+                stress={contentStress}
+                onSandboxFile={(path, line) => {
+                  setOpenFileRequest((current) => ({
+                    path,
+                    line: line ?? null,
+                    requestId: (current?.requestId ?? 0) + 1,
+                  }));
+                }}
+              />
+            }
             {...(leadingTabs ? { leadingTabs } : {})}
             {...(trailingTabs ? { trailingTabs } : {})}
           />

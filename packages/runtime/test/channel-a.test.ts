@@ -35,6 +35,7 @@ import {
   ChannelANotFoundError,
   ChannelAConflictError,
   ChannelAUnavailableError,
+  createMockSelfhostedOpStream,
   MockAgentResponder,
   SelfhostedSession,
   parsePorcelainV2,
@@ -779,6 +780,59 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     expect(list.root.children?.map((node) => node.path)).toEqual([".git", "modal-class-proof.txt"]);
   });
 
+  test("fsList keeps provider-native entries in the canonical absolute namespace", async () => {
+    const requested: string[] = [];
+    const svc = new SandboxChannelAService({
+      workspaceRoot: "/workspace",
+      session: {
+        listDir: async ({ path }) => {
+          requested.push(path);
+          return [{ name: "app.ts", path: "deep/src/app.ts", type: "file" }];
+        },
+      },
+    });
+
+    const list = await svc.fsList({
+      path: "/workspace/deep/src",
+      depth: 1,
+      maxEntries: 10,
+      includeHidden: true,
+    });
+    expect(requested).toEqual(["/workspace/deep/src"]);
+    expect(list.root.path).toBe("/workspace/deep/src");
+    expect(list.root.children?.map((node) => node.path)).toEqual(["/workspace/deep/src/app.ts"]);
+  });
+
+  test("fsList keeps relative browsing relative when a provider echoes absolute paths", async () => {
+    const svc = new SandboxChannelAService({
+      workspaceRoot: "/workspace",
+      session: {
+        listDir: async () => [
+          { name: "src", path: "/workspace/src", type: "dir" },
+          { name: "README.md", path: "/workspace/README.md", type: "file" },
+        ],
+      },
+    });
+
+    const list = await svc.fsList({ path: "", depth: 1, maxEntries: 10, includeHidden: true });
+    expect(list.root.path).toBe("");
+    expect(list.root.children?.map((node) => node.path)).toEqual(["src", "README.md"]);
+
+    const machine = new SandboxChannelAService({
+      workspaceRoot: "/",
+      session: {
+        listDir: async () => [{ name: "Users", path: "/Users", type: "dir" }],
+      },
+    });
+    const machineList = await machine.fsList({
+      path: "",
+      depth: 1,
+      maxEntries: 10,
+      includeHidden: true,
+    });
+    expect(machineList.root.children?.map((node) => node.path)).toEqual(["Users"]);
+  });
+
   test("fsList accepts a trusted success record after provider prelude output", async () => {
     let calls = 0;
     const svc = new SandboxChannelAService({
@@ -886,6 +940,50 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
       svc.fsList({ path: "../escape", depth: 1, maxEntries: 10, includeHidden: true }),
     ).rejects.toThrow(/traversal/);
     await expect(svc.gitStatus({ path: "../escape" })).rejects.toThrow(/traversal/);
+  });
+
+  test("canonical absolute paths stay exact inside the configured workspace root", async () => {
+    const { session } = await makeBox();
+    const svc = new SandboxChannelAService({ session, workspaceRoot: "/workspace" });
+    await svc.fsWrite({
+      path: "/workspace/deep/src/app.ts",
+      encoding: "utf8",
+      content: "export const canonical = true;\n",
+      overwrite: true,
+      createParents: true,
+    });
+
+    const root = await svc.fsList({
+      path: "/workspace",
+      depth: 1,
+      maxEntries: 20,
+      includeHidden: true,
+    });
+    expect(root.root.path).toBe("/workspace");
+    expect(root.root.children?.find((entry) => entry.name === "deep")?.path).toBe(
+      "/workspace/deep",
+    );
+
+    const deep = await svc.fsList({
+      path: "/workspace/deep/src",
+      depth: 1,
+      maxEntries: 20,
+      includeHidden: true,
+    });
+    expect(deep.root.children?.find((entry) => entry.name === "app.ts")?.path).toBe(
+      "/workspace/deep/src/app.ts",
+    );
+
+    const read = await svc.fsRead({
+      path: "/workspace/deep/src/app.ts",
+      encoding: "utf8",
+      maxBytes: 1_024,
+    });
+    expect(read.path).toBe("/workspace/deep/src/app.ts");
+    expect(read.content).toBe("export const canonical = true;\n");
+    await expect(
+      svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 }),
+    ).rejects.toThrow(/outside the workspace root/);
   });
 
   test("reads an internal symlink but rejects an escaping symlink", async () => {
@@ -1324,10 +1422,18 @@ describe("Workspace file import (Connected Machine private staging)", () => {
         throw execStartFailure;
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: "11111111-1111-1111-1111-111111111111",
+      agentId: "agent-private-import",
+      connectionInstanceId: "connection-private-import",
+    });
     const session = new SelfhostedSession({
       workspaceId: "11111111-1111-1111-1111-111111111111",
       agentId: "agent-private-import",
-      controlRpc: mock,
+      connectionInstanceId: "connection-private-import",
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: { host: "relay.test", port: 443, tls: true },
       workingDir: "/home/u/project",
     });
@@ -1344,7 +1450,7 @@ describe("Workspace file import (Connected Machine private staging)", () => {
         sha256: "a".repeat(64),
         source: { url: privateUrl, expiresAt: "2030-01-02T03:04:05.000Z" },
       }),
-    ).rejects.toBe(execStartFailure);
+    ).rejects.toThrow(execStartFailure.message);
 
     const privateWrite = mock.requests
       .map(({ req }) => req.op)
@@ -1360,12 +1466,7 @@ describe("Workspace file import (Connected Machine private staging)", () => {
       ),
     ).toBeTrue();
     expect(
-      mock.requests
-        .filter(({ req }) => req.op?.$case === "exec")
-        .some(
-          ({ req }) =>
-            req.op?.$case === "exec" && req.op.exec.command.join(" ").includes(privateUrl),
-        ),
+      stream.runner.starts.some(({ exec }) => exec.command.join(" ").includes(privateUrl)),
     ).toBeFalse();
   });
 });
@@ -2502,6 +2603,7 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
   const RELAY = { host: "relay.test", port: 443, tls: true } as const;
   const WS = "11111111-1111-1111-1111-111111111111";
   const AGENT = "agent-abc";
+  const CONNECTION_INSTANCE = "connection-channel-a";
 
   test("selfhosted terminalExec preserves virtual '/workspace' so the machine cwd is workingDir", async () => {
     const seen: Array<{ command: string; cwd: string }> = [];
@@ -2518,10 +2620,18 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         };
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+    });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
-      controlRpc: mock,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: RELAY,
       workingDir: "/home/u/proj",
     });
@@ -2554,10 +2664,18 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         };
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+    });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
-      controlRpc: mock,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: RELAY,
       workingDir: "/home/u/proj",
     });
@@ -2575,14 +2693,14 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
     expect(seen).toEqual([{ command: "pwd && ls -la", cwd: "/home/u/proj/sub" }]);
   });
 
-  test("selfhosted ptyOpen preserves virtual cwd before the session maps it", async () => {
+  test("selfhosted ptyOpen preserves virtual cwd and remains non-interactive", async () => {
     let seenCwd: string | undefined;
     const mock = new MockAgentResponder({
       exec: (req) => {
         seenCwd = req.cwd;
         expect(req.command).toEqual(["/bin/bash"]);
         return {
-          exitCode: null,
+          exitCode: 0,
           stdout: new TextEncoder().encode("root@machine:/home/u/proj/sub# "),
           stderr: new Uint8Array(0),
           timedOut: false,
@@ -2590,10 +2708,18 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
         };
       },
     });
+    const stream = createMockSelfhostedOpStream({
+      responder: mock,
+      workspaceId: WS,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+    });
     const session = new SelfhostedSession({
       workspaceId: WS,
       agentId: AGENT,
-      controlRpc: mock,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      controlRpc: stream.controlRpc,
+      opStream: stream.opStream,
       relay: RELAY,
       workingDir: "/home/u/proj",
     });
@@ -2606,6 +2732,7 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
 
     expect(opened.response.ptyId).toBe("pty-selfhosted");
     expect(opened.response.supportsInput).toBe(false);
+    expect(opened.execSessionId).toBeNull();
     expect(seenCwd).toBe("/home/u/proj/sub");
   });
 

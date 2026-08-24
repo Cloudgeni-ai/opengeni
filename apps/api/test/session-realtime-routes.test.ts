@@ -75,8 +75,19 @@ beforeAll(async () => {
     documentIndexer: { indexDocument: noop },
     getDocumentServices: () => ({}) as never,
     codexFetch: async (input, init) => {
-      providerCalls += 1;
       const request = new Request(input, init);
+      if (request.url.endsWith("/wham/statsig/bootstrap")) {
+        return Response.json({
+          statsigPayload: JSON.stringify({
+            dynamic_configs: {
+              "3566525122": {
+                value: { architecture: "avas", model: "gpt-live-1-codex", version: "v3" },
+              },
+            },
+          }),
+        });
+      }
+      providerCalls += 1;
       if (request.url.endsWith("/v1/realtime/client-secrets")) {
         const body = (await request.json()) as { model?: string; expiresIn?: number };
         expect(request.headers.get("authorization")).toBe("Bearer gateway-test-key");

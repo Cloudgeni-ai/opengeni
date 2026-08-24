@@ -82,6 +82,12 @@ export function nestedSessionTenancyBlocker(error: unknown): SessionTenancyBlock
 
 export type SessionTenancyVisibility = "user_private" | "workspace_shared";
 
+export type PrivateSessionCreatePolicy = {
+  personalWorkspace: boolean;
+  platformAvailable: boolean;
+  organizationEnabled: boolean;
+};
+
 export type TransitionSessionVisibilityInput = {
   workspaceId: string;
   sessionId: string;
@@ -145,23 +151,67 @@ export async function sessionTenancyProductActivated(
   });
 }
 
+export async function getPrivateSessionCreatePolicy(
+  db: Database,
+  input: { workspaceId: string; actorSubjectId: string },
+): Promise<PrivateSessionCreatePolicy> {
+  const { accountId } = await rlsContextForWorkspace(db, input.workspaceId);
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.actorSubjectId,
+    async (scopedDb) => {
+      const rows = await rawRows<{
+        personalWorkspace: boolean;
+        platformAvailable: boolean;
+        organizationEnabled: boolean;
+      }>(
+        scopedDb,
+        sql`select
+          personal_workspace as "personalWorkspace",
+          platform_available as "platformAvailable",
+          organization_enabled as "organizationEnabled"
+        from get_private_session_create_policy(
+          ${accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.actorSubjectId}
+        )`,
+      );
+      const policy = rows[0];
+      if (!policy) throw new SessionTenancyAccessError();
+      return policy;
+    },
+  );
+}
+
 /** Open the exact transaction-local trigger capability used by atomic private create. */
 export async function openPrivateSessionCreateCapability(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string; actorSubjectId: string },
 ): Promise<{ capabilityId: string; ownerMembershipId: string }> {
-  const rows = await rawRows<{ capabilityId: string; ownerMembershipId: string }>(
-    db,
-    sql`select
-      capability_id as "capabilityId",
-      owner_membership_id as "ownerMembershipId"
-    from open_private_session_create_capability(
-      ${input.accountId}::uuid,
-      ${input.workspaceId}::uuid,
-      ${input.sessionId}::uuid,
-      ${input.actorSubjectId}
-    )`,
-  );
+  let rows: Array<{ capabilityId: string; ownerMembershipId: string }>;
+  try {
+    rows = await rawRows<{ capabilityId: string; ownerMembershipId: string }>(
+      db,
+      sql`select
+        capability_id as "capabilityId",
+        owner_membership_id as "ownerMembershipId"
+      from open_private_session_create_capability(
+        ${input.accountId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.sessionId}::uuid,
+        ${input.actorSubjectId}
+      )`,
+    );
+  } catch (error) {
+    // The definer raises 55000 only when the organization owner/admin setting
+    // does not permit a new private session in this shared workspace; every
+    // authority failure remains 42501 and propagates unchanged.
+    if (nestedPostgresSqlState(error) === "55000") {
+      throw new SessionTenancyNotActivatedError({ cause: error });
+    }
+    throw error;
+  }
   const capabilityId = rows[0]?.capabilityId;
   const ownerMembershipId = rows[0]?.ownerMembershipId;
   if (!capabilityId || !ownerMembershipId) {

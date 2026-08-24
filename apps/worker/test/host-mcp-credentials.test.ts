@@ -5,6 +5,96 @@ import { testSettings } from "@opengeni/testing";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 
 describe("connectionTokenResolverForTurn", () => {
+  test("admits only the reserved personal GitHub API lane for a frozen GitHub delegation", async () => {
+    let hostCalls = 0;
+    const turn = {
+      id: "turn-github",
+      executionGeneration: 3,
+      personalConnectionDelegations: [
+        {
+          serverId: "github:personal",
+          connectionType: "github_personal",
+          connectionId: "11111111-1111-4111-8111-111111111111",
+          ownerSubjectId: "host:user:9",
+          originWorkspaceId: "origin-workspace",
+          providerDomain: "github.com",
+          kind: "oauth2",
+          userDelegation: { grantId: "grant-1" },
+          personalGitHubRepositorySelection: {},
+        },
+      ],
+      initiator: { kind: "subject", subjectId: "host:user:9" },
+      initiatorContext: {},
+    } as SessionTurn;
+    const resolver = connectionTokenResolverForTurn({
+      db: {} as Database,
+      settings: testSettings(),
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      rootSessionId: "session-root",
+      attemptId: "attempt-1",
+      turn,
+      authorizeAcceptedUse: async (_db, authority) => ({
+        status: "authorized" as const,
+        originWorkspaceId: "origin-workspace",
+        connectionKind: "oauth2" as const,
+        attribution: {
+          organizationId: authority.accountId,
+          workspaceId: authority.workspaceId,
+          sessionId: authority.sessionId,
+          connectionId: "11111111-1111-4111-8111-111111111111",
+          connectionGeneration: 2,
+          scope: "user" as const,
+          ownerSubjectId: "host:user:9",
+          authorityId: "authority-1",
+          grantId: "grant-1",
+        },
+      }),
+      connectionCredentials: {
+        mcpCredentials: async (request) => {
+          hostCalls += 1;
+          return {
+            status: "ok",
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { Authorization: "Bearer host-owned" },
+            connectionId: "11111111-1111-4111-8111-111111111111",
+            providerDomain: "github.com",
+            provider: "github",
+          };
+        },
+      },
+    });
+    const exact = {
+      workspaceId: "workspace-1",
+      subjectId: "host:user:9",
+      serverId: "github:personal",
+      destinationUrl: "https://api.github.com/repos/Cloudgeni-ai/opengeni",
+      credentialTarget: "http_api" as const,
+      connectionRef: {
+        provider: "github",
+        providerDomain: "github.com",
+        connectionId: "11111111-1111-4111-8111-111111111111",
+        kind: "oauth2" as const,
+        subjectScope: "subject" as const,
+      },
+    };
+    expect(await resolver(exact)).toMatchObject({ status: "ok" });
+    await expect(
+      resolver({ ...exact, serverId: "attacker", connectionRef: exact.connectionRef }),
+    ).resolves.toMatchObject({ status: "auth_needed", reason: "personal_authority_unavailable" });
+    await expect(
+      resolver({ ...exact, destinationUrl: "https://github.com.attacker.invalid/token" }),
+    ).resolves.toMatchObject({ status: "auth_needed", reason: "personal_authority_unavailable" });
+    await expect(resolver({ ...exact, credentialTarget: "mcp" })).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "personal_authority_unavailable",
+    });
+    expect(hostCalls).toBe(1);
+  });
+
   test("prefers the host port and binds the model request to immutable turn authority", async () => {
     let received: McpCredentialsRequest | null = null;
     let authorizationCalls = 0;

@@ -46,6 +46,7 @@ import {
   releaseLeaseHolder,
   readLease,
   recordLeaseControllerDataPlaneUrl,
+  terminalizeStaleConnectedInteractionPlacement,
   touchComputerSessionController,
   type ComputerSessionControlRecord,
   type LeaseSnapshot,
@@ -94,6 +95,7 @@ import {
 } from "../controller-data-plane";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { ApiHttpError } from "../http/api-error";
 import { interactionControlApiError } from "../http/interaction-control-error";
 import {
   createInteractionFrameProxyAttachment,
@@ -942,8 +944,10 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
             resolved.kind !== "selfhosted" ||
             resolved.sandboxId !== expectedPlacement.sandboxId
           ) {
-            throw new ComputerSessionStateError(
-              "ComputerSession Connected Machine is not the active placement",
+            return await throwComputerSourcePlacementChanged(
+              grant,
+              sourceSession.id,
+              expectedPlacement.sandboxId,
             );
           }
           const placementInstanceId = resolved.providerInstanceId ?? expectedPlacement.sandboxId;
@@ -1150,6 +1154,17 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         computerSessionId,
       });
       await authorizeSourceSession(deps, grant, record.sourceSessionId, authorizationOperation);
+      let sourceSession: Session | null = null;
+      if (record.session.placement?.kind === "connected_machine") {
+        sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+        if (sourceSession.activeSandboxId !== record.session.placement.sandboxId) {
+          return await throwComputerSourcePlacementChanged(
+            grant,
+            record.sourceSessionId,
+            record.session.placement.sandboxId,
+          );
+        }
+      }
       if (record.session.lifecycle !== "active" || !record.session.controller) {
         throw new ComputerSessionStateError("ComputerSession is not active");
       }
@@ -1230,7 +1245,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         }
       }
 
-      const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+      sourceSession ??= await requireSourceSession(deps, workspaceId, record.sourceSessionId);
       return await withComputerPlacement(
         sourceSession,
         grant,
@@ -1248,6 +1263,25 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
     } catch (error) {
       throw computerRouteError(error);
     }
+  }
+
+  async function throwComputerSourcePlacementChanged(
+    grant: AccessGrant,
+    sourceSessionId: string,
+    connectedSandboxId: string,
+  ): Promise<never> {
+    const reconciliation = await terminalizeStaleConnectedInteractionPlacement(deps.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceSessionId,
+      connectedSandboxId,
+    });
+    if (reconciliation.sourcePlacementChanged) {
+      throw sourcePlacementChangedApiError("computer_session");
+    }
+    throw new ComputerSessionStateError(
+      "ComputerSession source placement changed during the request; retry",
+    );
   }
 
   async function ensureInteractionHolder(
@@ -1430,6 +1464,21 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       computerSessionId: requireUuidParam(context, "computerSessionId"),
     };
   }
+}
+
+function sourcePlacementChangedApiError(interactionResource: "computer_session"): ApiHttpError {
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message:
+      "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: {
+      interactionResource,
+      interactionFailureCode: "source_placement_changed",
+      interactionLifecycle: "lost",
+    },
+  });
 }
 
 function computerCreateInput(

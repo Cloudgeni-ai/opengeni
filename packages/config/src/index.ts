@@ -11,6 +11,7 @@ import {
   ReasoningEffort,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  OpenGeniSlackBotDisplayName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
   SEEDANCE_2_5_MODEL_ID,
@@ -82,6 +83,20 @@ const EnvBoolean = z.preprocess((value) => {
   }
   return value;
 }, z.boolean());
+
+/** Default pacing between consecutive no-input goal continuations. */
+export const DEFAULT_GOAL_IDLE_BACKOFF_MS: readonly number[] = [3_000, 30_000, 120_000, 300_000];
+export const DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS = 600_000;
+
+const EnvGoalIdleBackoffMs = z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const source = value.trim();
+  if (!source) return undefined;
+  return source.split(",").map((entry) => {
+    const trimmed = entry.trim();
+    return trimmed === "" ? Number.NaN : Number(trimmed);
+  });
+}, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
 
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
@@ -386,6 +401,7 @@ const SettingsSchema = z.object({
   slackClientId: z.string().optional(),
   slackClientSecret: z.string().optional(),
   slackSigningSecret: z.string().optional(),
+  slackBotDisplayName: OpenGeniSlackBotDisplayName.default("OpenGeni"),
   slackCommand: z
     .string()
     .trim()
@@ -446,6 +462,31 @@ const SettingsSchema = z.object({
   // by default (no cap); deployments may configure one, and it then acts as a
   // hard ceiling that per-goal overrides can only lower.
   goalMaxAutoContinuations: z.coerce.number().int().positive().optional(),
+  // Idle backoff between CONSECUTIVE no-input goal continuations. This is
+  // pacing, not a cap: the first continuation after a turn that consumed any
+  // external input is immediate, the n-th consecutive no-input continuation
+  // waits schedule[min(n - 1, last)] ms after the previous one finished, and
+  // any new input (machine input, human/API prompt, Steer) wakes the session
+  // immediately. The delay never exceeds goalIdleBackoffMaxMs.
+  goalIdleBackoffMs: EnvGoalIdleBackoffMs.default(DEFAULT_GOAL_IDLE_BACKOFF_MS),
+  goalIdleBackoffMaxMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS),
+  // Child lifecycle notices: a child session's requires_action freeze, its
+  // resolution, a direct Pause, a provider-capacity wait, and goal progress
+  // become typed `session_system_updates` rows for the parent (in addition to
+  // `child_terminal_result`). Rolling hazard: a pre-notice worker throws on an
+  // unknown update kind, so enable only once the whole fleet runs an image
+  // that understands the new kinds. Once the flag has produced rows, a
+  // pre-notice image must never restart while any new-kind row is still
+  // pending (session_system_updates or session_system_update_outbox); turning
+  // the flag back off stops production but does not drain already committed
+  // rows. Default off. The API and both workers install the validated value
+  // into @opengeni/db once at boot.
+  // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
+  childLifecycleNoticesEnabled: EnvBoolean.default(false),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -968,7 +1009,7 @@ const SettingsSchema = z.object({
   // runner must ALSO advertise Capabilities.op_stream. Streaming is the default
   // because it is the only transport that can keep a command alive without an
   // arbitrary request/reply wall while still supporting replay and cancellation.
-  // Older runners remain usable when an explicit positive exec timeout is set.
+  // Exec fails closed when the deployment or runner does not provide op-stream.
   // EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true).
   agentOpStreamEnabled: EnvBoolean.default(true),
@@ -1182,6 +1223,8 @@ const SettingsSchema = z.object({
   githubAppId: z.string().optional(),
   githubClientId: z.string().optional(),
   githubClientSecret: z.string().optional(),
+  /** Default-off rollout for the in-process GitHub repository API tool surface. */
+  githubRestMcpEnabled: EnvBoolean.default(false),
   githubPersonalOauthEnabled: EnvBoolean.default(false),
   githubPersonalOauthClientId: z.string().optional(),
   githubPersonalOauthClientSecret: z.string().optional(),
@@ -2261,6 +2304,7 @@ export function getSettings(): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     slackSigningSecret: optional("OPENGENI_SLACK_SIGNING_SECRET"),
+    slackBotDisplayName: optional("OPENGENI_SLACK_BOT_DISPLAY_NAME"),
     slackCommand: optional("OPENGENI_SLACK_COMMAND"),
     googleDriveClientId: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_ID"),
     googleDriveClientSecret: optional("OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET"),
@@ -2291,6 +2335,9 @@ export function getSettings(): Settings {
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
+    goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
+    goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
+    childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
@@ -2547,6 +2594,7 @@ export function getSettings(): Settings {
     githubAppId: optional("OPENGENI_GITHUB_APP_ID"),
     githubClientId: optional("OPENGENI_GITHUB_CLIENT_ID"),
     githubClientSecret: optional("OPENGENI_GITHUB_CLIENT_SECRET"),
+    githubRestMcpEnabled: optional("OPENGENI_GITHUB_REST_MCP_ENABLED"),
     githubPersonalOauthEnabled: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED"),
     githubPersonalOauthClientId: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID"),
     githubPersonalOauthClientSecret: optional("OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET"),
@@ -5171,6 +5219,11 @@ function isDigestPinnedModalDesktopImage(settings: Settings): boolean {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
+  if (settings.goalIdleBackoffMs.some((delayMs) => delayMs > settings.goalIdleBackoffMaxMs)) {
+    throw new Error(
+      `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
+    );
+  }
   const allowedFirstPartyMcpTools = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
   );

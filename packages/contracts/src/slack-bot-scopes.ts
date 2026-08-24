@@ -89,6 +89,7 @@ export const OPENGENI_MANAGED_PUBLIC_BASE_URL = "https://app.opengeni.ai" as con
 
 export type OpenGeniSlackBotManifestOptions = Readonly<{
   appName?: string;
+  botDisplayName?: string;
   slashCommand?: string;
   shortcutName?: string;
 }>;
@@ -134,6 +135,12 @@ export function buildOpenGeniSlackBotManifest(
 ) {
   const baseUrl = normalizedSlackManifestBaseUrl(publicBaseUrl);
   const appName = normalizedSlackManifestText(options.appName, "OpenGeni", "app name", 35);
+  const botDisplayName = normalizedSlackManifestText(
+    options.botDisplayName,
+    "OpenGeni",
+    "bot display name",
+    80,
+  );
   const slashCommand = normalizedSlackCommand(options.slashCommand);
   const shortcutName = normalizedSlackManifestText(
     options.shortcutName,
@@ -149,7 +156,7 @@ export function buildOpenGeniSlackBotManifest(
         messages_tab_enabled: true,
         messages_tab_read_only_enabled: false,
       },
-      bot_user: { display_name: "OpenGeni", always_online: false },
+      bot_user: { display_name: botDisplayName, always_online: false },
       slash_commands: [
         {
           command: slashCommand,

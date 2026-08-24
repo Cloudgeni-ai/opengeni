@@ -41,4 +41,24 @@ describe("goalContinuationPrompt", () => {
     expect(withoutWait).toContain("Blocked audit:");
     expect(withWait).not.toContain("Ship the fix");
   });
+
+  test("explains child lifecycle notices and offers the human-input answer tool only when selected", () => {
+    const goal = { text: "Ship the fix" } as Parameters<typeof goalContinuationPrompt>[0];
+    const withTool = goalContinuationPrompt(goal, 1, null, { humanInputRespondAvailable: true });
+    expect(withTool).toContain(
+      "`child_requires_action` update means a worker you spawned is blocked",
+    );
+    expect(withTool).toContain("opengeni__session_human_input_respond");
+    expect(withTool).toContain("Tool approvals can only be decided by a human");
+    expect(withTool).toContain("report the exact blocker");
+    expect(withTool).toContain("`child_requires_action_resolved`, `child_paused`");
+    const withoutTool = goalContinuationPrompt(goal, 1, null, {
+      humanInputRespondAvailable: false,
+    });
+    expect(withoutTool).not.toContain("session_human_input_respond");
+    expect(withoutTool).toContain(
+      "`child_requires_action` update means a worker you spawned is blocked",
+    );
+    expect(withoutTool).toContain("Tool approvals can only be decided by a human");
+  });
 });

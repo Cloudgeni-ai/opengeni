@@ -33,7 +33,12 @@ import type {
   SessionEventSemanticClass,
   SessionEventType,
 } from "@opengeni/contracts";
-import { SESSION_EVENT_SEMANTIC_CLASS_TYPES, compactSessionEventResult } from "@opengeni/contracts";
+import {
+  SESSION_EVENT_SEMANTIC_CLASS_TYPES,
+  SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  compactSessionEventResult,
+  type SessionSystemUpdateKind,
+} from "@opengeni/contracts";
 import { SESSION_EVENT_MCP_MAX_BYTES, capPayloadValue } from "./session-view";
 
 export const SESSION_WAIT_MAX_TARGETS = 16;
@@ -81,6 +86,16 @@ const SESSION_WAIT_EVENT_TYPE_SET: ReadonlySet<string> = new Set(SESSION_WAIT_EV
 /** The self-session event that announces a newly pending machine input. */
 export const SESSION_WAIT_OWN_PENDING_EVENT_TYPE =
   "system.update.pending" satisfies SessionEventType;
+
+/**
+ * Whether a pending own machine input of this kind ends the wait. Every
+ * pre-existing kind and `child_requires_action` are `immediate`; deferred
+ * child notices are reported but do not end the wait by themselves.
+ */
+export function ownPendingKindWakes(kind: string): boolean {
+  const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind];
+  return wakeClass === undefined || wakeClass === "immediate";
+}
 
 const SEMANTIC_CLASS_PRIORITY: readonly SessionEventSemanticClass[] = [
   "terminal",
@@ -132,6 +147,14 @@ export type SessionWaitResult = {
   changed: SessionWaitTargetResult[];
   ownPendingUpdates: number;
   ownPendingUpdateKinds: string[];
+  /**
+   * Pending own inputs whose kind wakes the session by itself (every
+   * pre-existing kind plus `child_requires_action`). Only these end the wait;
+   * `deferred` child notices (resolution, pause, capacity wait, progress) are
+   * reported but keep the wait on the targets.
+   */
+  ownPendingImmediateUpdates: number;
+  ownPendingDeferredUpdateKinds: string[];
   waitedMs: number;
   timedOut: boolean;
   aborted: boolean;
@@ -275,11 +298,16 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
     if (waited && read.changed.length > 0 && input.source.reauthorizeTargets) {
       await input.source.reauthorizeTargets(read.changed.map((target) => target.sessionId));
     }
+    const ownKinds = [...new Set(read.ownPendingUpdateKinds)].sort();
     return boundSessionWaitResult(
       {
         changed: read.changed,
         ownPendingUpdates: read.ownPendingUpdateKinds.length,
-        ownPendingUpdateKinds: [...new Set(read.ownPendingUpdateKinds)].sort(),
+        ownPendingUpdateKinds: ownKinds,
+        ownPendingImmediateUpdates: read.ownPendingUpdateKinds.filter((kind) =>
+          ownPendingKindWakes(kind),
+        ).length,
+        ownPendingDeferredUpdateKinds: ownKinds.filter((kind) => !ownPendingKindWakes(kind)),
         waitedMs: Math.max(0, now() - startedAt),
         timedOut: outcome.timedOut,
         aborted: outcome.aborted,
@@ -320,7 +348,10 @@ export async function waitForSessionChanges(input: SessionWaitInput): Promise<Se
       }
       wakePending = false;
       const read = await readAll();
-      if (read.changed.length > 0 || read.ownPendingUpdateKinds.length > 0) {
+      if (
+        read.changed.length > 0 ||
+        read.ownPendingUpdateKinds.some((kind) => ownPendingKindWakes(kind))
+      ) {
         return await finish(read, { timedOut: false, aborted: false });
       }
       const remainingMs = deadlineAt - now();

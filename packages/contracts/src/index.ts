@@ -872,6 +872,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "remember",
   "remember_confirm",
   "company_profile_propose",
+  "company_profile_confirm",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -892,6 +893,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_pause",
   "session_resume",
   "session_steer",
+  "session_human_input_respond",
   "set_other_session_title",
   "interaction_discover",
   "browser_open",
@@ -5493,9 +5495,39 @@ export const SessionGoalContinuationReason = z.enum([
   "session_cancelled",
   "system_work_pending",
   "held_for_input",
+  // Idle backoff: consecutive no-input continuations are paced, and the next
+  // evaluation is armed as a delayed workflow wake at `nextAttemptAt`.
+  "backoff_pending",
   "missing_obligation",
 ]);
 export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
+
+/**
+ * Why a paused goal became active again. `api` is the operator PATCH; the
+ * system resumes only a `max_auto_continuations` pause, and only because new
+ * external input arrived: a child result, scheduled occurrence, media result,
+ * Agent message, Agent Steer, or human/API Send/Steer. The cap is pacing,
+ * never user intent, so a `user_pause`/`api`/`agent`/`limits` pause is never
+ * auto-resumed.
+ */
+export const SessionGoalResumedReason = z.enum(["api", "external_input"]);
+export type SessionGoalResumedReason = z.infer<typeof SessionGoalResumedReason>;
+
+export const SessionGoalResumedEventPayload = z
+  .object({
+    goalId: z.string().uuid(),
+    actor: z.enum(["api", "system"]),
+    reason: SessionGoalResumedReason,
+    cause: z
+      .object({
+        kind: z.string().min(1),
+        updateId: z.string().uuid().optional(),
+        turnId: z.string().uuid().optional(),
+      })
+      .optional(),
+  })
+  .passthrough();
+export type SessionGoalResumedEventPayload = z.infer<typeof SessionGoalResumedEventPayload>;
 
 export const SessionGoalContinuation = z.object({
   state: SessionGoalContinuationState,
@@ -5504,6 +5536,12 @@ export const SessionGoalContinuation = z.object({
   observedRevision: z.number().int().nonnegative(),
   nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
   lastError: z.string().nullable(),
+  /**
+   * The agent's stated reason for a `held_for_input` hold (`goal_wait`), so a
+   * human can see why the goal is waiting and until when (`nextAttemptAt`).
+   * Null for every other state; omitted by older servers.
+   */
+  holdReason: z.string().nullable().optional(),
 });
 export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
 
@@ -6571,6 +6609,15 @@ export const EffectiveSessionControl = z.object({
       quiescencePendingCount: z.number().int().nonnegative(),
     })
     .nullable(),
+  /** Independent command-cancellation settlement. Session pause/turn state is
+   *  intentionally not overloaded with process lifecycle. */
+  backgroundCommandSettlement: z
+    .object({
+      state: z.literal("stopping"),
+      commandCount: z.number().int().positive(),
+    })
+    .nullable()
+    .optional(),
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
@@ -6963,8 +7010,179 @@ export const SessionSystemUpdateKind = z.enum([
   "agent_steer_instruction",
   "child_terminal_result",
   "media_generation_result",
+  "child_requires_action",
+  "child_requires_action_resolved",
+  "child_paused",
+  "child_waiting_capacity",
+  "child_progress",
 ]);
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
+
+/**
+ * How a newly pending machine input affects an idle receiving session.
+ * `immediate` registers a workflow wake in the same commit (the behaviour of
+ * every pre-existing kind) and ends a `goal_wait` hold at the next idle
+ * evaluation; `deferred` only inserts the durable pending row plus its
+ * `system.update.pending` event and is delivered coalesced with the next claim.
+ */
+export type SessionSystemUpdateWakeClass = "immediate" | "deferred";
+
+export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
+  SessionSystemUpdateKind,
+  SessionSystemUpdateWakeClass
+> = {
+  scheduled_occurrence: "immediate",
+  goal_continuation: "immediate",
+  agent_message: "immediate",
+  agent_steer_instruction: "immediate",
+  child_terminal_result: "immediate",
+  media_generation_result: "immediate",
+  child_requires_action: "immediate",
+  child_requires_action_resolved: "deferred",
+  child_paused: "deferred",
+  child_waiting_capacity: "deferred",
+  child_progress: "deferred",
+};
+
+/**
+ * Kinds a child session's lifecycle produces for its parent. Every one of them
+ * travels through `session_system_update_outbox`, and none of them may
+ * autonomously wake a parent whose goal is not active.
+ */
+export const CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS = [
+  "child_terminal_result",
+  "child_requires_action",
+  "child_requires_action_resolved",
+  "child_paused",
+  "child_waiting_capacity",
+  "child_progress",
+] as const satisfies readonly SessionSystemUpdateKind[];
+export type ChildLifecycleSystemUpdateKind = (typeof CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS)[number];
+
+const CHILD_LIFECYCLE_SYSTEM_UPDATE_KIND_SET: ReadonlySet<string> = new Set(
+  CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS,
+);
+
+export function isChildLifecycleSystemUpdateKind(
+  kind: string,
+): kind is ChildLifecycleSystemUpdateKind {
+  return CHILD_LIFECYCLE_SYSTEM_UPDATE_KIND_SET.has(kind);
+}
+
+/** A child_paused notice requested by a human/API is action-required; an agent pause is informational. */
+export function childPausedClassification(
+  actorKind: "human" | "api" | "agent",
+): "action_required" | "info" {
+  return actorKind === "agent" ? "info" : "action_required";
+}
+
+/** Whole child_requires_action payload bound (UTF-8 JSON bytes). */
+export const CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES = 8 * 1024;
+/** Bounded first-question preview inside a child_requires_action notice. */
+export const CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES = 512;
+export const CHILD_REQUIRES_ACTION_MAX_REQUESTS = 20;
+export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
+export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
+
+const boundedUtf8String = (maxBytes: number) =>
+  z.string().refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
+    message: `must be at most ${maxBytes} UTF-8 bytes`,
+  });
+
+export const ChildRequiresActionRequest = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("human_input"),
+    requestId: z.string().uuid(),
+    questionCount: z.number().int().nonnegative(),
+    firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
+    allowSkip: z.boolean(),
+    expiresAt: z.string().nullable(),
+  }),
+  z.object({
+    kind: z.literal("approval"),
+    approvalId: boundedUtf8String(256),
+    toolName: boundedUtf8String(128).nullable(),
+  }),
+]);
+export type ChildRequiresActionRequest = z.infer<typeof ChildRequiresActionRequest>;
+
+export const ChildRequiresActionPayload = z
+  .object({
+    type: z.literal("child_requires_action"),
+    childSessionId: z.string().uuid(),
+    childTurnId: z.string().uuid(),
+    childTurnGeneration: z.number().int().positive(),
+    requests: z.array(ChildRequiresActionRequest).max(CHILD_REQUIRES_ACTION_MAX_REQUESTS),
+    truncated: z.boolean(),
+  })
+  .passthrough();
+export type ChildRequiresActionPayload = z.infer<typeof ChildRequiresActionPayload>;
+
+export const ChildRequiresActionResolvedOutcome = z.enum([
+  "answered",
+  "skipped",
+  "expired",
+  "cancelled",
+  "approved",
+  "rejected",
+]);
+export type ChildRequiresActionResolvedOutcome = z.infer<typeof ChildRequiresActionResolvedOutcome>;
+
+export const ChildRequiresActionRespondedByKind = z.enum([
+  "human",
+  "api",
+  "agent_attempt",
+  "system",
+]);
+export type ChildRequiresActionRespondedByKind = z.infer<typeof ChildRequiresActionRespondedByKind>;
+
+export const ChildRequiresActionResolvedPayload = z
+  .object({
+    type: z.literal("child_requires_action_resolved"),
+    childSessionId: z.string().uuid(),
+    childTurnId: z.string().uuid(),
+    childTurnGeneration: z.number().int().positive(),
+    requestId: z.string().uuid().nullable(),
+    approvalId: boundedUtf8String(256).nullable(),
+    outcome: ChildRequiresActionResolvedOutcome,
+    respondedByKind: ChildRequiresActionRespondedByKind,
+  })
+  .passthrough();
+export type ChildRequiresActionResolvedPayload = z.infer<typeof ChildRequiresActionResolvedPayload>;
+
+export const ChildPausedPayload = z
+  .object({
+    type: z.literal("child_paused"),
+    childSessionId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    actorKind: z.enum(["human", "api", "agent"]),
+    reason: boundedUtf8String(CHILD_PAUSED_REASON_MAX_BYTES).nullable(),
+  })
+  .passthrough();
+export type ChildPausedPayload = z.infer<typeof ChildPausedPayload>;
+
+export const ChildWaitingCapacityPayload = z
+  .object({
+    type: z.literal("child_waiting_capacity"),
+    childSessionId: z.string().uuid(),
+    childTurnId: z.string().uuid(),
+    provider: z.enum(["codex", "xai"]),
+    nextCheckAt: z.string().nullable(),
+  })
+  .passthrough();
+export type ChildWaitingCapacityPayload = z.infer<typeof ChildWaitingCapacityPayload>;
+
+export const ChildProgressPayload = z
+  .object({
+    type: z.literal("child_progress"),
+    childSessionId: z.string().uuid(),
+    goalId: z.string().uuid(),
+    objectiveRevision: z.number().int().nonnegative(),
+    operationId: z.string().uuid(),
+    progressNote: boundedUtf8String(CHILD_PROGRESS_NOTE_MAX_BYTES),
+  })
+  .passthrough();
+export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
 
 export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
   z
@@ -7008,6 +7226,11 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
     })
     .passthrough(),
   MediaGenerationResult,
+  ChildRequiresActionPayload,
+  ChildRequiresActionResolvedPayload,
+  ChildPausedPayload,
+  ChildWaitingCapacityPayload,
+  ChildProgressPayload,
 ]);
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
 
@@ -8083,7 +8306,7 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
             slackTeamName: z.string().min(1).max(256),
             botUserId: z.string().min(1).max(64),
             botId: z.string().min(1).max(64),
-            botDisplayName: z.literal("OpenGeni"),
+            botDisplayName: z.enum(["OpenGeni", "OpenGeni Staging"]),
             verifiedAt: z.string().datetime({ offset: true }),
           })
           .passthrough(),
@@ -9536,6 +9759,8 @@ export const OPENGENI_PERSONAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp" as co
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
 export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
 export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
+export const OpenGeniSlackBotDisplayName = z.enum(["OpenGeni", "OpenGeni Staging"]);
+export type OpenGeniSlackBotDisplayName = z.infer<typeof OpenGeniSlackBotDisplayName>;
 export const OpenGeniSlackBotConnectionMetadata = z
   .object({
     credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
@@ -9544,7 +9769,7 @@ export const OpenGeniSlackBotConnectionMetadata = z
     slackTeamName: z.string().min(1).max(256),
     botUserId: z.string().min(1).max(64),
     botId: z.string().min(1).max(64),
-    botDisplayName: z.literal("OpenGeni"),
+    botDisplayName: OpenGeniSlackBotDisplayName,
     verifiedAt: z.string().datetime({ offset: true }),
   })
   .passthrough();
@@ -9725,7 +9950,7 @@ export const SlackInstallationBinding = z.object({
   slackTeamName: z.string().min(1).max(256),
   botId: z.string().min(1).max(64),
   botUserId: z.string().min(1).max(64),
-  botDisplayName: z.literal("OpenGeni"),
+  botDisplayName: OpenGeniSlackBotDisplayName,
   state: SlackInstallationBindingState,
   quarantineReason: z.string().min(1).nullable(),
   version: z.number().int().positive(),
@@ -10844,11 +11069,59 @@ export const UninstallPluginResult = z
   .strict();
 export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
+export const SessionBackgroundCommandState = z.enum(["running", "stopping", "exited", "lost"]);
+export type SessionBackgroundCommandState = z.infer<typeof SessionBackgroundCommandState>;
+
+export const SessionBackgroundCommandProvider = z.enum(["managed", "connected_machine"]);
+export type SessionBackgroundCommandProvider = z.infer<typeof SessionBackgroundCommandProvider>;
+
+export const SessionBackgroundCommandActivity = z
+  .object({
+    state: z.enum(["running", "stopping"]),
+    count: z.number().int().positive(),
+  })
+  .strict();
+export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
+
+export const SessionBackgroundCommand = z
+  .object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    provider: SessionBackgroundCommandProvider,
+    state: SessionBackgroundCommandState,
+    commandPreview: z.string().max(512),
+    cancelRequestedAt: z.string().nullable(),
+    exitCode: z.number().int().nullable(),
+    settlementReason: z.string().nullable(),
+    startedAt: z.string(),
+    settledAt: z.string().nullable(),
+    updatedAt: z.string(),
+  })
+  .strict();
+export type SessionBackgroundCommand = z.infer<typeof SessionBackgroundCommand>;
+
+export const SessionBackgroundCommandListResponse = z
+  .object({ commands: z.array(SessionBackgroundCommand).max(1000) })
+  .strict();
+export type SessionBackgroundCommandListResponse = z.infer<
+  typeof SessionBackgroundCommandListResponse
+>;
+
+export const CancelSessionBackgroundCommandResult = z
+  .object({ command: SessionBackgroundCommand, accepted: z.boolean() })
+  .strict();
+export type CancelSessionBackgroundCommandResult = z.infer<
+  typeof CancelSessionBackgroundCommandResult
+>;
+
 export const Session = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
   accountId: z.string().uuid(),
   status: SessionStatus,
+  /** Additive list projection. Detail reads may omit it. */
+  backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
@@ -10989,10 +11262,22 @@ export const Session = z.object({
       failedDescendants: z.number().int().nonnegative(),
       unreadDescendants: z.number().int().nonnegative().optional(),
       activelyWorkingDescendants: z.number().int().nonnegative().optional(),
+      /**
+       * Earliest moment one of the counted `attentionDescendants` entered
+       * `requires_action` (the oldest still-open `requires_action` turn among
+       * those descendants). Null when none is waiting; omitted by older servers.
+       */
+      attentionSince: z.string().nullable().optional(),
       /** Counts are lower bounds rather than exact totals when true. */
       truncated: z.boolean().default(false),
     })
     .optional(),
+  /**
+   * When this session's own open turn entered `requires_action`. Populated by
+   * list and lineage reads for sessions whose status is `requires_action`;
+   * null otherwise and omitted by older servers or detail reads.
+   */
+  requiresActionSince: z.string().nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -11156,6 +11441,8 @@ export const SessionEventType = z.enum([
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "session.command.backgrounded",
+  "session.command.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -11360,6 +11647,7 @@ export const SESSION_EVENT_RAW_DELTA_TYPES = [
 export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
+    "session.command.backgrounded",
     "session.requiresAction",
     "session.humanInput.requested",
     "user.pause",
@@ -11407,6 +11695,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "recording.available",
     "recording.failed",
     "terminal.pty.exited",
+    "session.command.finished",
   ],
   failure: [
     "session.event.envelope_omitted",
@@ -11733,7 +12022,9 @@ export type FsNodeType = z.infer<typeof FsNodeType>;
 // depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
 export interface FsTreeNode {
   name: string;
-  path: string; // workspace-relative POSIX, no leading slash
+  // Same namespace as the request: workspace-relative for relative requests,
+  // canonical target path for requests rooted at FileSystem.root.
+  path: string;
   type: z.infer<typeof FsNodeType>;
   sizeBytes: number | null; // null for dirs
   mtimeMs: number | null;
@@ -11755,7 +12046,9 @@ export const FsTreeNode: z.ZodType<FsTreeNode> = z.lazy(() =>
 ) as z.ZodType<FsTreeNode>;
 
 export const FsListRequest = z.object({
-  path: z.string().default(""), // "" = workspace root
+  // "" = workspace root; canonical absolute paths must stay within the
+  // selected target's advertised FileSystem.root.
+  path: z.string().default(""),
   depth: z.number().int().min(0).max(8).default(1),
   maxEntries: z.number().int().positive().max(20_000).default(2_000),
   includeHidden: z.boolean().default(true),
@@ -15219,3 +15512,4 @@ export * from "./task-notes";
 export * from "./canonical-human-identities";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
+export * from "./agent-authored-durable-text";

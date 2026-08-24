@@ -7,6 +7,12 @@ import {
   SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
+  SESSION_SYSTEM_UPDATE_WAKE_CLASS,
+  SessionSystemUpdateKind as SessionSystemUpdateKindSchema,
+  isChildLifecycleSystemUpdateKind,
+  type ChildLifecycleSystemUpdateKind,
+  type ChildRequiresActionResolvedOutcome,
+  type ChildRequiresActionRespondedByKind,
   ModelContextContributionSummaries,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OrganizationMember,
@@ -334,6 +340,10 @@ import {
   settleExpiredSessionRealtimeInTransaction,
 } from "./session-realtime";
 import {
+  insertConnectedMachineSessionBackgroundCommandInTransaction,
+  insertManagedSessionBackgroundCommandInTransaction,
+} from "./session-background-commands";
+import {
   isSessionRealtimeDelegationTurnMetadata,
   projectSessionRealtimeDelegationProgressInTransaction,
   projectSessionRealtimeDelegationTerminalInTransaction,
@@ -348,6 +358,26 @@ import {
   type SessionRealtimeContinuityEntry,
 } from "./session-realtime-context";
 import * as schema from "./schema";
+import {
+  boundedChildProgressNote,
+  buildChildRequiresActionPayload,
+  childLifecycleNoticesEnabled,
+  childProgressDedupeKey,
+  childProgressSummary,
+  childRequiresActionDedupeKey,
+  childRequiresActionResolvedDedupeKey,
+  childRequiresActionResolvedSummary,
+  childRequiresActionSummary,
+  childWaitingCapacityDedupeKey,
+  childWaitingCapacitySummary,
+} from "./child-lifecycle-notices";
+import {
+  autoResumeGoalPausedByCapInTransaction,
+  SESSION_GOAL_CAP_PAUSED_REASON,
+  SESSION_GOAL_CONTINUATION_EPOCH_RESET,
+  SESSION_GOAL_HOLD_CLEARED,
+  type SessionGoalAutoResumedByExternalInput,
+} from "./session-goal-pacing";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -371,6 +401,7 @@ import {
 } from "./memory-domain";
 
 export { sql as dbSql } from "drizzle-orm";
+export * from "./child-lifecycle-notices";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
@@ -379,6 +410,7 @@ export * from "./session-realtime-ledger";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
+export * from "./company-profile-agent-admin";
 export * from "./workspace-learning-policy";
 export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
@@ -1219,6 +1251,7 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "goals:manage",
   "enrollments:read",
   "enrollments:manage",
+  "rigs:use",
   "artifacts:read",
   "artifacts:publish",
 ];
@@ -2364,8 +2397,27 @@ export type DeleteWorkspaceIfQuiescentResult =
         | "only_workspace"
         | "active_sessions"
         | "active_video_generations"
+        | "active_background_commands"
         | "live_sandboxes";
     };
+
+async function lockBackgroundCommandWorkspaceLifecycle(
+  tx: Database,
+  workspaceIds: string[],
+  mode: "share" | "update",
+): Promise<void> {
+  for (const workspaceId of [...new Set(workspaceIds)].sort()) {
+    if (mode === "share") {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock_shared(hashtextextended(${`background-command-workspace:${workspaceId}`}, 0))`,
+      );
+    } else {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`background-command-workspace:${workspaceId}`}, 0))`,
+      );
+    }
+  }
+}
 
 /**
  * Atomically prove a workspace has no live runtime ownership and delete it.
@@ -2387,6 +2439,12 @@ export async function deleteWorkspaceIfQuiescent(
       async (scopedDb) =>
         await scopedDb.transaction(async (txRaw) => {
           const tx = txRaw as unknown as Database;
+          // Adoption takes the matching shared prefix before its canonical
+          // session/attempt or retained-process locks. Taking the exclusive
+          // prefix first prevents parent-FK deletion from deadlocking with an
+          // already-started cross-workspace adoption.
+          await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
+
           const [account] = await tx
             .select({ id: schema.managedAccounts.id })
             .from(schema.managedAccounts)
@@ -2463,6 +2521,16 @@ export async function deleteWorkspaceIfQuiescent(
             .for("update", { noWait: true });
           if (activeVideoGenerations.length > 0) {
             return { status: "active_video_generations" as const };
+          }
+
+          const [backgroundCommands] = await tx.execute<{ activeCount: number | string }>(sql`
+            select opengeni_private.prepare_workspace_background_command_deletion(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid
+            ) as "activeCount"
+          `);
+          if (Number(backgroundCommands?.activeCount ?? 0) > 0) {
+            return { status: "active_background_commands" as const };
           }
 
           const leases = await tx
@@ -2598,6 +2666,12 @@ export async function deleteWorkspaceIfQuiescent(
                       schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
                     attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
                   });
+          await tx.execute(sql`
+            select opengeni_private.prune_settled_cross_workspace_background_commands(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid
+            )
+          `);
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -9157,7 +9231,7 @@ export async function listSlackInstallationBindings(
         slackTeamName: binding.slackTeamName,
         botId: binding.botId,
         botUserId: binding.botUserId,
-        botDisplayName: "OpenGeni" as const,
+        botDisplayName: binding.botDisplayName as "OpenGeni" | "OpenGeni Staging",
         state: binding.state,
         quarantineReason: binding.quarantineReason,
         version: binding.version,
@@ -9177,6 +9251,11 @@ export type SlackBotUserLink = {
   slackUserId: string;
   subjectId: string;
   linkedBySubjectId: string;
+  /**
+   * The exact Slack interaction id that durably claimed this identity's
+   * one-time onboarding hint, or `null` when the hint has not been shown.
+   */
+  firstTaskHintInteractionId: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -9259,6 +9338,11 @@ export type SlackInteraction = {
   deliveryRetryAt: Date | null;
   deliveryLastErrorCode: string | null;
   ackSlackMessageTs: string | null;
+  /**
+   * Frozen once: whether this interaction's acknowledgement renders the
+   * one-time onboarding hint. `null` means the decision is unresolved.
+   */
+  firstTaskHint: boolean | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -9334,7 +9418,9 @@ export async function resolveSlackInstallationRoute(
 
 export async function saveSlackBotUserLink(
   db: Database,
-  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt">,
+  // The one-time onboarding hint claim is deliberately not writable here: a
+  // re-link of the same Slack identity keeps whatever was already shown.
+  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId">,
 ): Promise<SlackBotUserLink> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -9376,6 +9462,78 @@ export async function getSlackBotUserLink(
       )
       .limit(1);
     return row ? mapSlackBotUserLink(row) : null;
+  });
+}
+
+/**
+ * Resolve, exactly once, whether one Slack interaction's acknowledgement
+ * renders the one-time onboarding hint, and freeze that answer on the
+ * interaction row.
+ *
+ * `slack_bot_post_operations` binds one operation id to one request digest that
+ * covers the message text, so an acknowledgement re-rendered after a crash, a
+ * lost provider response, or a replica race must produce the same bytes or the
+ * ledger rejects it. Rendering therefore reads a frozen fact instead of asking
+ * a mutable question: the first call decides, every later call replays the
+ * stored decision, and unlinking plus relinking the Slack identity cannot flip
+ * an acknowledgement that was already rendered.
+ *
+ * The frozen decision and the per-identity claim commit in one transaction, so
+ * at most one interaction per Slack identity per installation is granted the
+ * hint. Failure raises instead of degrading to "no hint": a caller must never
+ * bind a post operation to text that depends on an unresolved answer.
+ */
+export async function resolveSlackInteractionFirstTaskHint(
+  db: Database,
+  input: {
+    workspaceId: string;
+    connectionId: string;
+    slackUserId: string;
+    interactionId: string;
+  },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // Interaction row first, then the identity link: one lock order for every
+    // concurrent resolver of the same interaction.
+    const [frozen] = await scopedDb
+      .select({ firstTaskHint: schema.slackInteractions.firstTaskHint })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.id, input.interactionId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!frozen) throw new Error("Slack first-task hint requires a durable interaction row");
+    if (frozen.firstTaskHint !== null) return frozen.firstTaskHint;
+
+    const claimed = await scopedDb
+      .update(schema.slackBotUserLinks)
+      .set({ firstTaskHintInteractionId: input.interactionId })
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, input.workspaceId),
+          eq(schema.slackBotUserLinks.connectionId, input.connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, input.slackUserId),
+          isNull(schema.slackBotUserLinks.firstTaskHintInteractionId),
+        ),
+      )
+      .returning({ id: schema.slackBotUserLinks.id });
+    const granted = claimed.length > 0;
+
+    await scopedDb
+      .update(schema.slackInteractions)
+      .set({ firstTaskHint: granted, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.id, input.interactionId),
+          isNull(schema.slackInteractions.firstTaskHint),
+        ),
+      );
+    return granted;
   });
 }
 
@@ -9740,6 +9898,8 @@ export async function getOrCreateSlackInteraction(
     | "deliveryRetryAt"
     | "deliveryLastErrorCode"
     | "ackSlackMessageTs"
+    // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
+    | "firstTaskHint"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -10676,6 +10836,7 @@ function mapSlackInteraction(
       "delivery_last_error_code",
     ),
     ackSlackMessageTs: slackRowNullableString(row, "ackSlackMessageTs", "ack_slack_message_ts"),
+    firstTaskHint: slackRowNullableBoolean(row, "firstTaskHint", "first_task_hint"),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
@@ -10747,6 +10908,16 @@ function slackRowBoolean(
   const value = slackRowValue(row, camelKey, snakeKey);
   if (typeof value !== "boolean") throw new Error(`Slack row malformed ${snakeKey}`);
   return value;
+}
+
+function slackRowNullableBoolean(
+  row: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): boolean | null {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (value === null || value === undefined) return null;
+  return slackRowBoolean(row, camelKey, snakeKey);
 }
 
 function slackRowNullableString(
@@ -20754,14 +20925,14 @@ export async function armCodexCapacityWait(
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        const locks = await lockSessionEventWriteRows(tx, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
+        // Child-lifecycle prefix: the parent session is locked with the child
+        // so the capacity-wait notice can be enqueued in this same commit.
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          attemptId: input.attemptId,
         });
-        const session = locks.sessions[0];
+        const session = locks.session;
         const turn = locks.turns[0];
         const attempt = locks.attempts[0];
         const effectiveControl = session
@@ -21027,6 +21198,12 @@ export async function armCodexCapacityWait(
         if (!waitingSession) {
           throw new Error("Codex capacity session changed during atomic arm");
         }
+        await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+          turnId: input.turnId,
+          waiterId: waiterRow.id,
+          provider: "codex",
+          nextCheckAt,
+        });
         if (input.leaseFence) {
           await tx.execute(sql`
             delete from codex_credential_leases
@@ -21984,14 +22161,14 @@ export async function armXaiCapacityWait(
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        const locks = await lockSessionEventWriteRows(tx, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
+        // Child-lifecycle prefix: the parent session is locked with the child
+        // so the capacity-wait notice can be enqueued in this same commit.
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          attemptId: input.attemptId,
         });
-        const session = locks.sessions[0];
+        const session = locks.session;
         const turn = locks.turns[0];
         const attempt = locks.attempts[0];
         const effectiveControl = session
@@ -22276,6 +22453,12 @@ export async function armXaiCapacityWait(
           )
           .returning({ id: schema.sessions.id });
         if (!waitingSession) throw new Error("xAI capacity session changed during atomic arm");
+        await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+          turnId: input.turnId,
+          waiterId: waiterRow.id,
+          provider: "xai",
+          nextCheckAt,
+        });
         if (input.leaseFence) {
           await tx
             .delete(schema.xaiCredentialLeases)
@@ -25198,7 +25381,7 @@ export type ConnectorActionInvocation = {
   toolName: string;
   arguments: unknown;
   /** Explicit per-session MCP approval, rather than a connector-policy decision. */
-  approvalMode?: "session_mcp";
+  approvalMode?: "session_mcp" | "connector_write";
 };
 
 export type PrepareConnectorActionApprovalResult =
@@ -25425,7 +25608,7 @@ function normalizedConnectorActionInvocation(
   toolName: string;
   policyActionSelector: string;
   arguments: unknown;
-  approvalMode: "connector" | "session_mcp";
+  approvalMode: "connector" | "session_mcp" | "connector_write";
 } {
   const approvalId = boundedConnectorActionText(
     invocation.approvalId,
@@ -25451,7 +25634,11 @@ function normalizedConnectorActionInvocation(
       )
     : null;
   const approvalMode = invocation.approvalMode ?? "connector";
-  if (approvalMode !== "connector" && approvalMode !== "session_mcp") {
+  if (
+    approvalMode !== "connector" &&
+    approvalMode !== "session_mcp" &&
+    approvalMode !== "connector_write"
+  ) {
     throw new Error("connector approval mode is unsupported");
   }
   if (approvalMode === "session_mcp" && !connectionId?.startsWith("session-mcp:")) {
@@ -25478,6 +25665,16 @@ function resolvedSessionMcpApproval(
     decision: "ask",
     actionName,
   };
+}
+
+function resolvedConnectorWriteApproval(
+  resolved: ResolvedConnectorActionPolicy,
+  approvalMode: "connector" | "connector_write",
+  actionName: string,
+): ResolvedConnectorActionPolicy {
+  return approvalMode === "connector_write" && !resolved.managed
+    ? resolvedSessionMcpApproval(actionName)
+    : resolved;
 }
 
 function durableConnectorActionInvocation(
@@ -25928,12 +26125,16 @@ export async function prepareConnectorActionApproval(
         const resolved =
           normalized.approvalMode === "session_mcp"
             ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-            : resolveConnectorActionPolicy(snapshot, {
-                connectionId: normalized.connectionId!,
-                serverId: normalized.serverId,
-                toolName: normalized.toolName,
-                actionName: normalized.policyActionSelector,
-              });
+            : resolvedConnectorWriteApproval(
+                resolveConnectorActionPolicy(snapshot, {
+                  connectionId: normalized.connectionId!,
+                  serverId: normalized.serverId,
+                  toolName: normalized.toolName,
+                  actionName: normalized.policyActionSelector,
+                }),
+                normalized.approvalMode,
+                normalized.policyActionSelector,
+              );
         if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
         const durable = durableConnectorActionInvocation(
           identity,
@@ -26012,12 +26213,16 @@ export async function beginConnectorActionExecution(
           const resolved =
             normalized.approvalMode === "session_mcp"
               ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-              : resolveConnectorActionPolicy(snapshot, {
-                  connectionId: normalized.connectionId!,
-                  serverId: normalized.serverId,
-                  toolName: normalized.toolName,
-                  actionName: normalized.policyActionSelector,
-                });
+              : resolvedConnectorWriteApproval(
+                  resolveConnectorActionPolicy(snapshot, {
+                    connectionId: normalized.connectionId!,
+                    serverId: normalized.serverId,
+                    toolName: normalized.toolName,
+                    actionName: normalized.policyActionSelector,
+                  }),
+                  normalized.approvalMode,
+                  normalized.policyActionSelector,
+                );
           if (!resolved.managed) return { allowed: true, managed: false } as const;
           const durable = durableConnectorActionInvocation(
             identity,
@@ -26676,11 +26881,14 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
-  if (createRequestedVisibility === "user_private" && input.parentSessionId) {
-    // A private child later proves the owner's live organization membership
-    // after locking the parent session/attempt. Serialize with organization
-    // suspend/offboard before taking any workspace or parent row lock, so the
-    // canonical membership -> session lifecycle cannot form a lock cycle.
+  if (createRequestedVisibility === "user_private") {
+    // Private creation later proves the owner's live organization membership
+    // and, for a fresh top-level organization session, reads the mutable
+    // owner/admin enablement setting. Serialize both checks with organization
+    // settings changes and suspend/offboard before taking any workspace or
+    // parent row lock, so the canonical membership -> session lifecycle cannot
+    // form a lock cycle. A committed keyed replay is still resolved below
+    // before the mutable enablement check opens a fresh-create capability.
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${input.accountId}`}, 0))`,
     );
@@ -27083,6 +27291,7 @@ export type DeleteSessionTreeIfQuiescentResult =
         | "not_root"
         | "active_sessions"
         | "active_video_generations"
+        | "active_background_commands"
         | "live_sandboxes"
         | "externally_referenced";
     };
@@ -27231,6 +27440,21 @@ export async function deleteSessionTreeIfQuiescent(
           }
           if (externalForks.length > 0 || sharedGroups.length > 0) {
             return { status: "externally_referenced" as const };
+          }
+
+          const activeBackgroundCommands = await tx
+            .select({ id: schema.sessionBackgroundCommands.id })
+            .from(schema.sessionBackgroundCommands)
+            .where(
+              and(
+                eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+                inArray(schema.sessionBackgroundCommands.sessionId, sessionIds),
+                inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"]),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (activeBackgroundCommands.length > 0) {
+            return { status: "active_background_commands" as const };
           }
 
           const leases = await tx
@@ -27949,6 +28173,7 @@ type SessionTreeStatsRow = {
   failedDescendants: number | string;
   unreadDescendants: number | string;
   activelyWorkingDescendants: number | string;
+  attentionSince: Date | string | null;
   truncated: boolean;
 };
 
@@ -27967,6 +28192,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   failedDescendants: 0,
   unreadDescendants: 0,
   activelyWorkingDescendants: 0,
+  attentionSince: null,
   truncated: false,
 };
 
@@ -28081,6 +28307,7 @@ export async function sessionTreeStatsForSessions(
         stats."failedDescendants",
         stats."unreadDescendants",
         stats."activelyWorkingDescendants",
+        stats."attentionSince",
         stats.truncated
       from ${schema.sessions} root
       join ${schema.workspaceInferenceControls} workspace_control
@@ -28224,6 +28451,20 @@ export async function sessionTreeStatsForSessions(
                   and personal.actively_working
               )
           )::int as "activelyWorkingDescendants",
+          -- Oldest still-open requires_action turn among the counted attention
+          -- descendants. The correlated lookup runs only for rows passing the
+          -- FILTER and walks session_turns_workspace_queue_idx
+          -- (workspace_id, session_id, status, position).
+          min((
+            select min(waiting_turn.updated_at)
+            from ${schema.sessionTurns} waiting_turn
+            where waiting_turn.workspace_id = ${workspaceId}
+              and waiting_turn.session_id = numbered.id
+              and waiting_turn.status = 'requires_action'
+          )) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'requires_action'
+          ) as "attentionSince",
           coalesce(bool_or(
             ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
             or (
@@ -28266,10 +28507,52 @@ export async function sessionTreeStatsForSessions(
         failedDescendants: Number(row.failedDescendants),
         unreadDescendants: Number(row.unreadDescendants),
         activelyWorkingDescendants: Number(row.activelyWorkingDescendants),
+        attentionSince: row.attentionSince ? new Date(row.attentionSince).toISOString() : null,
         truncated: row.truncated,
       },
     ]),
   );
+}
+
+/**
+ * When each given `requires_action` session's own open turn entered that
+ * state: the oldest still-open `requires_action` turn per session. Only the
+ * ids whose current status is `requires_action` should be passed; the lookup
+ * walks `session_turns_workspace_queue_idx` per session and returns no row
+ * for sessions with no such turn.
+ */
+export async function sessionRequiresActionSinceForSessions(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, string>> {
+  const uniqueIds = [...new Set(sessionIds)];
+  if (uniqueIds.length === 0) return new Map();
+  const rows = await rawRows<{ sessionId: string; since: Date | string }>(
+    db,
+    sql`
+      select
+        ${schema.sessionTurns.sessionId} as "sessionId",
+        min(${schema.sessionTurns.updatedAt}) as "since"
+      from ${schema.sessionTurns}
+      where ${schema.sessionTurns.workspaceId} = ${workspaceId}
+        and ${inArray(schema.sessionTurns.sessionId, uniqueIds)}
+        and ${schema.sessionTurns.status} = 'requires_action'
+      group by ${schema.sessionTurns.sessionId}
+    `,
+  );
+  return new Map(rows.map((row) => [row.sessionId, new Date(row.since).toISOString()]));
+}
+
+function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requiresActionSince">>(
+  session: T,
+  since: ReadonlyMap<string, string>,
+): T {
+  return {
+    ...session,
+    requiresActionSince:
+      session.status === "requires_action" ? (since.get(session.id) ?? null) : null,
+  };
 }
 
 function sessionFilters(
@@ -28882,6 +29165,13 @@ export async function listSessionsForSubject(
           [...rootRelatedIds],
           options.subjectId,
         );
+        const requiresActionSince = await sessionRequiresActionSinceForSessions(
+          tx,
+          workspaceId,
+          [...pinnedRows, ...pageRows]
+            .filter((row) => row.session.status === "requires_action")
+            .map((row) => row.session.id),
+        );
         const controls = await sessionControlProjections(tx, workspaceId, ids);
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
@@ -28889,18 +29179,21 @@ export async function listSessionsForSubject(
           const control = controls.get(row.session.id);
           if (!control) throw new Error(`Effective control missing for session ${row.session.id}`);
           return projectSessionForRelatedAccess(
-            {
-              ...mapSession(
-                row.session,
-                control,
-                mcpServers.get(row.session.id) ?? [],
-                mapSessionPin(row.pin),
-                mapSessionAttention(row.session, row.pin),
-                mapSessionArchive(row.pin),
-                { subjectId: options.subjectId, activated: tenancyActivated },
-              ),
-              treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
-            },
+            withRequiresActionSince(
+              {
+                ...mapSession(
+                  row.session,
+                  control,
+                  mcpServers.get(row.session.id) ?? [],
+                  mapSessionPin(row.pin),
+                  mapSessionAttention(row.session, row.pin),
+                  mapSessionArchive(row.pin),
+                  { subjectId: options.subjectId, activated: tenancyActivated },
+                ),
+                treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
+              },
+              requiresActionSince,
+            ),
             rootRelatedIds.has(row.session.id) ? "root" : "target",
           );
         };
@@ -29642,6 +29935,54 @@ async function readWorkspaceSessionActivityRevision(
 }
 
 /**
+ * Excludes a human/API `user.message` whose accepted turn was never claimed.
+ * Such a prompt was never model input: it is waiting work (represented by
+ * `queuedPromptCount`) or a queue row that reached a terminal state before any
+ * claim (deleted, edited, cancelled), so agent discovery and monitoring must
+ * not present it as conversation. The predicate is `session_turns.started_at
+ * IS NULL`: every claim path (`claimSessionWorkForAttempt` and the
+ * create-and-claim inserts for internal turns) stamps `started_at` in the same
+ * transaction that moves the turn to `running`, and nothing clears it, so it
+ * is exactly "a claim happened" and cannot drift with the status vocabulary.
+ * Once claimed the exact stored row is visible at its original sequence.
+ * Stored events are never rewritten; forensic, SSE, and REST reads never apply
+ * this filter.
+ *
+ * Two consequences are deliberate. An admission-rejected human/API turn
+ * (never claimed, settled `failed`) keeps its prompt hidden from agent
+ * monitoring while its `turn.failed` event stays visible. And a narrow
+ * historical window exists: turns requeued by the removed
+ * `requeuePreemptedTurn` path (Jun 12 - Jul 14 2026) had `started_at` cleared,
+ * so one of those rows that was cancelled before any re-claim is treated as
+ * never claimed and its prompt stays hidden from agent monitoring; forensic
+ * reads still return it. No current writer clears `started_at`.
+ *
+ * The probe is served by the partial index
+ * `session_turns_unclaimed_prompt_trigger_idx` (workspace_id, session_id,
+ * trigger_event_id) WHERE started_at IS NULL (migration 0322); without it the
+ * NOT EXISTS degrades to a hashed SubPlan over every session_turns row of the
+ * workspace per statement. The literal `workspaceId` bound is deliberate next
+ * to the correlated column: when the planner hashes the subplan it keeps the
+ * literal as the index condition, so the build reads only this workspace's
+ * unclaimed rows rather than the whole partial index.
+ */
+function excludeUnclaimedHumanPromptEventFilter(workspaceId: string): SQL {
+  return sql`(
+    ${schema.sessionEvents.type} <> 'user.message'
+    or not exists (
+      select 1
+      from ${schema.sessionTurns} unclaimed_prompt_turn
+      where unclaimed_prompt_turn.workspace_id = ${workspaceId}
+        and unclaimed_prompt_turn.workspace_id = ${schema.sessionEvents.workspaceId}
+        and unclaimed_prompt_turn.session_id = ${schema.sessionEvents.sessionId}
+        and unclaimed_prompt_turn.trigger_event_id = ${schema.sessionEvents.id}
+        and unclaimed_prompt_turn.source in ('user', 'api')
+        and unclaimed_prompt_turn.started_at is null
+    )
+  )`;
+}
+
+/**
  * Compact-by-construction discovery projection for the first-party
  * `sessions_list` MCP tool. It never selects instructions, resources, tools,
  * MCP metadata, repositories, settings, or full event/history bodies.
@@ -29914,6 +30255,7 @@ export async function listSessionDiscoverySummaries(
                 eq(schema.sessionEvents.workspaceId, workspaceId),
                 inArray(schema.sessionEvents.sessionId, ids),
                 inArray(schema.sessionEvents.type, ["user.message", "agent.message.completed"]),
+                excludeUnclaimedHumanPromptEventFilter(workspaceId),
               ),
             )
             .orderBy(schema.sessionEvents.sessionId, desc(schema.sessionEvents.sequence))
@@ -30268,11 +30610,22 @@ export async function getSessionLineage(
       rows.map((row) => row.id),
     );
     const controls = await sessionControlProjections(scopedDb, workspaceId, ids);
+    const requiresActionSince = await sessionRequiresActionSinceForSessions(
+      scopedDb,
+      workspaceId,
+      rows.filter((row) => row.status === "requires_action").map((row) => row.id),
+    );
     const sessionsById = new Map(
       rows.map((row) => {
         const control = controls.get(row.id);
         if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-        return [row.id, mapSession(row, control, grouped.get(row.id) ?? [])] as const;
+        return [
+          row.id,
+          withRequiresActionSince(
+            mapSession(row, control, grouped.get(row.id) ?? []),
+            requiresActionSince,
+          ),
+        ] as const;
       }),
     );
 
@@ -30350,6 +30703,15 @@ export type ListSessionEventsOptions = {
   includeClasses?: readonly SessionEventSemanticClass[];
   excludeClasses?: readonly SessionEventSemanticClass[];
   defaultExcludeTypes?: readonly SessionEventType[];
+  /**
+   * Agent-monitoring conversation boundary: omit a human/API `user.message`
+   * whose accepted turn was never claimed (`session_turns.started_at IS NULL`),
+   * whether it is still queued or reached a terminal state before any claim.
+   * The row appears at its own sequence once the turn is claimed. Forensic,
+   * SSE, and REST readers leave this unset so the retained event log stays
+   * exact.
+   */
+  excludeUnclaimedHumanPrompts?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
@@ -30451,6 +30813,9 @@ export async function listSessionEventPage(
         eq(schema.sessionEvents.sessionId, sessionId),
         gt(schema.sessionEvents.sequence, after),
       ];
+      if (options.excludeUnclaimedHumanPrompts) {
+        filters.push(excludeUnclaimedHumanPromptEventFilter(workspaceId));
+      }
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
         // null. They remain eligible; explicitly stale/duplicate rows and rows
@@ -31463,6 +31828,8 @@ export async function acceptSessionHumanInputResponse(
     requestId: string;
     response: unknown;
     respondedBy: string;
+    /** Bounded responder kind for the parent's resolution notice; derived from `respondedBy` when omitted. */
+    respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
     expireOnly?: boolean;
   },
@@ -31472,12 +31839,19 @@ export async function acceptSessionHumanInputResponse(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // The parent (when notices are enabled) joins the same UUID-ordered
+        // session lock so the resolution notice can be enqueued for it here.
+        const sessionIds = await sessionIdsWithParentTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
           controlLock: "none",
-          sessionIds: [input.sessionId],
+          sessionIds,
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
         if (!session) return { action: "not_found" } as const;
         const [request] = await tx
           .select()
@@ -31643,6 +32017,21 @@ export async function acceptSessionHumanInputResponse(
           )
           .returning();
         if (!event) throw new Error("Failed to append human-input response");
+        await enqueueChildRequiresActionResolvedOutboxTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          session,
+          {
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            requestId: request.id,
+            approvalId: null,
+            outcome: response.outcome,
+            respondedByKind: expired
+              ? "system"
+              : childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind),
+          },
+        );
         await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
           accountId: session.accountId,
           workspaceId: input.workspaceId,
@@ -31862,6 +32251,69 @@ async function lockTurnAttemptWriteFenceTx(
     return { allowed: false, reason: "turn_terminal", ...base };
   }
   return { allowed: true, workspace, session, turn, attempt };
+}
+
+export class SessionBackgroundCommandAdoptionFencedError extends Error {
+  readonly name = "SessionBackgroundCommandAdoptionFencedError";
+
+  constructor(public readonly reason: TurnAttemptFenceRejectReason) {
+    super(`Background command adoption rejected by turn-attempt fence (${reason})`);
+  }
+}
+
+/** Transfer one exact Connected Machine operation from a live turn attempt to
+ * its session. The canonical write fence gives adoption a total order with
+ * Steer, session/workspace Pause, terminal Cancel, and quiescent tree deletion:
+ * an earlier adoption is visible to later control, while earlier control makes
+ * this stale attempt fail before a session-owned row can appear. */
+export async function adoptConnectedMachineSessionBackgroundCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+    commandId: string;
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+    command: string;
+  },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        // A Connected Machine locator may retain both the owning workspace and
+        // a distinct physical origin workspace. Lock both prefixes in stable
+        // order before the canonical attempt fence so deletion of either side
+        // cannot cross or deadlock the adoption transaction.
+        await lockBackgroundCommandWorkspaceLifecycle(
+          tx,
+          [input.workspaceId, input.controlWorkspaceId],
+          "share",
+        );
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) {
+          throw new SessionBackgroundCommandAdoptionFencedError(fence.reason);
+        }
+        if (fence.session.accountId !== input.accountId) {
+          throw new SessionBackgroundCommandAdoptionFencedError("attempt_changed");
+        }
+        return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, input);
+      }),
+  );
 }
 
 export type InstallOrReadTurnExecutionPolicyForAttemptResult =
@@ -41853,6 +42305,10 @@ export async function retainWorkspaceMutationProcess(
       key: string;
       binding: ModalCheckpointProviderBinding;
     } | null;
+    backgroundCommand?: {
+      commandId: string;
+      command: string;
+    };
     owner:
       | {
           kind: "turn";
@@ -41884,6 +42340,12 @@ export async function retainWorkspaceMutationProcess(
     throw new SandboxWorkspaceMutationFencedError(
       "process_fenced",
       "Retained provider session id must be a positive safe integer",
+    );
+  }
+  if (input.backgroundCommand && input.backgroundCommand.commandId !== input.processId) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Managed background command id must equal its exact retained process id",
     );
   }
   const operation = normalizeWorkspaceMutationOperation(input.operation);
@@ -41943,6 +42405,9 @@ export async function retainWorkspaceMutationProcess(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        if (input.backgroundCommand) {
+          await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "share");
+        }
         // Use the same ownership prefix as mutation admission and settlement.
         // A stale authority still cannot strand a provider process: remember
         // the fence, durably promote the exact process, then reject its output
@@ -42146,6 +42611,33 @@ export async function retainWorkspaceMutationProcess(
           throw new Error("Retained process promotion lost its locked authority");
         }
         const identity = await verifyResolvedAdmissionAuthority(tx, authority, admission);
+        if (identity.failure !== null) {
+          return { process: mapRetainedProcess(process!), failure: identity };
+        }
+        if (input.backgroundCommand) {
+          if (authorityInput.kind === "direct") {
+            const effectiveControl = await evaluateSessionControl(
+              tx,
+              input.workspaceId,
+              input.sessionId,
+              { lock: "none" },
+            );
+            if (effectiveControl.state !== "active") {
+              return {
+                process: mapRetainedProcess(process!),
+                failure: {
+                  failure: "attempt_fenced" as const,
+                  detail: "Managed background command adoption was preceded by Pause or Cancel",
+                },
+              };
+            }
+          }
+          await insertManagedSessionBackgroundCommandInTransaction(tx, {
+            ...input,
+            retainedProcessId: input.processId,
+            ...input.backgroundCommand,
+          });
+        }
         return { process: mapRetainedProcess(process!), failure: identity };
       }),
   );
@@ -42182,7 +42674,8 @@ export async function getRetainedProcess(
 }
 
 /** Claim a bounded, oldest-due batch of active retained processes whose exact
- * owner attempt is closed (or whose direct request already returned). Claim
+ * owner attempt is closed, whose direct request returned, or whose lifecycle
+ * was explicitly transferred to a session background command. Claim
  * expiry only recovers coordination after worker death; it is never provider
  * exit proof. Rows that settle between the global claim and scoped read are
  * deliberately omitted. */
@@ -47548,8 +48041,8 @@ export async function setEnrollmentDisplayState(
 // Live op-stream cursor: the agent's connect Hello advertises whether it supports
 // the streaming exec transport. This is deliberately persisted separately from the
 // server rollout flag so routing can require BOTH server enablement and the live
-// runner capability; agents predating the op-stream engine remain false and keep
-// using legacy request/reply exec.
+// runner capability; agents predating the op-stream engine remain false, so exec
+// fails closed until they advertise the required transport.
 //
 // CHANGE-GUARDED at the SQL layer: the write fires only when `op_stream` differs
 // from what the row already holds, so a steady-state Hello updates zero rows and
@@ -49876,11 +50369,14 @@ export type SessionGoalContinuationProjection = {
     | "session_cancelled"
     | "system_work_pending"
     | "held_for_input"
+    | "backoff_pending"
     | "missing_obligation";
   wakeRevision: number;
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
+  /** The agent's stated `goal_wait` reason while `held_for_input`; null otherwise. */
+  holdReason: string | null;
 };
 
 /**
@@ -49989,6 +50485,7 @@ export async function getSessionGoalWithContinuation(
         .select({
           wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
           deliveredRevision: schema.sessionWorkflowWakeOutbox.deliveredRevision,
+          reason: schema.sessionWorkflowWakeOutbox.reason,
           nextAttemptAt: schema.sessionWorkflowWakeOutbox.nextAttemptAt,
           lastError: schema.sessionWorkflowWakeOutbox.lastError,
         })
@@ -50006,6 +50503,8 @@ export async function getSessionGoalWithContinuation(
       // is the same notion the materializer applies under lock.
       let currentHoldUntil: Date | null = null;
       if (goal.continuationHoldTurnId && goal.continuationHoldUntil) {
+        // Newest finished truth by finish time (a human turn queued after
+        // internal turns has a low position but finishes later).
         const [latestFinishedTurn] = await tx
           .select({ id: schema.sessionTurns.id })
           .from(schema.sessionTurns)
@@ -50016,7 +50515,11 @@ export async function getSessionGoalWithContinuation(
               sql`${schema.sessionTurns.finishedAt} is not null`,
             ),
           )
-          .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+          .orderBy(
+            desc(schema.sessionTurns.finishedAt),
+            desc(schema.sessionTurns.position),
+            desc(schema.sessionTurns.createdAt),
+          )
           .limit(1);
         if (
           latestFinishedTurn?.id === goal.continuationHoldTurnId &&
@@ -50040,6 +50543,7 @@ export async function getSessionGoalWithContinuation(
         // revision. A late duplicate failure must not make already-accepted
         // Temporal work look blocked or broken.
         lastError: pendingWorkflowWake?.lastError ?? null,
+        holdReason: null,
       };
       let continuation: SessionGoalContinuationProjection;
       if (goal.status !== "active") {
@@ -50104,6 +50608,20 @@ export async function getSessionGoalWithContinuation(
           reason: "held_for_input",
           ...base,
           nextAttemptAt: currentHoldUntil.toISOString(),
+          holdReason: goal.continuationHoldReason ?? null,
+        };
+      } else if (
+        goal.continuationWakeRevision > goal.continuationObservedRevision &&
+        pendingWorkflowWake?.reason === GOAL_IDLE_BACKOFF_WAKE_REASON
+      ) {
+        // Consecutive no-input continuations are paced: the obligation stays
+        // armed (wake > observed) and the delayed workflow wake fires at
+        // `nextAttemptAt`. Any new input pulls that wake to now.
+        continuation = {
+          state: "scheduled",
+          reason: "backoff_pending",
+          ...base,
+          nextAttemptAt: pendingWorkflowWake.nextAttemptAt.toISOString(),
         };
       } else if (goal.continuationWakeRevision > goal.continuationObservedRevision) {
         continuation = { state: "scheduled", reason: "wake_pending", ...base };
@@ -51452,13 +51970,6 @@ export async function updateSessionGoalWithEvent(
  * goal head mutation (status transition, applied semantic revision, replace) so
  * newer truth never sits behind an older wait.
  */
-const SESSION_GOAL_HOLD_CLEARED = {
-  continuationHoldTurnId: null,
-  continuationHoldUntil: null,
-  continuationHoldReason: null,
-  continuationHoldSetAt: null,
-} as const;
-
 export const SESSION_GOAL_HOLD_MIN_SECONDS = 30;
 export const SESSION_GOAL_HOLD_MAX_SECONDS = 7 * 24 * 60 * 60;
 
@@ -51674,12 +52185,10 @@ export async function recordSessionGoalProgressWithEvent(
   );
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
     withSessionActivitySavepoint(scopedDb, async (tx) => {
-      const locks = await lockSessionEventWriteRows(tx, {
-        workspaceId,
-        controlLock: "share",
-        sessionIds: [sessionId],
-      });
-      const session = locks.sessions[0];
+      // Child-lifecycle prefix: the parent session is locked with the child so
+      // the child_progress notice can be enqueued in this same commit.
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(tx, workspaceId, { sessionId });
+      const session = locks.session;
       if (!locks.control || !locks.workspace || !session) {
         throw new Error(`Session not found: ${sessionId}`);
       }
@@ -51765,6 +52274,12 @@ export async function recordSessionGoalProgressWithEvent(
         .update(schema.sessions)
         .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
         .where(eq(schema.sessions.id, sessionId));
+      await enqueueChildProgressOutboxTx(tx, workspaceId, session, {
+        goalId: goal.id,
+        objectiveRevision: goal.objectiveRevision,
+        operationId: reserved.receipt.id,
+        progressNote: input.progressNote,
+      });
       await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
         result: { goal, eventId: event.id },
       });
@@ -51918,12 +52433,9 @@ export async function setSessionGoalStatus(
           ? {
               rationale: null,
               pausedReason: null,
-              autoContinuations: 0,
-              noProgressStreak: 0,
               // A re-armed goal starts a fresh continuation epoch; stale pointers to
               // a pre-pause continuation turn must not affect later lineage.
-              lastContinuationTurnId: null,
-              versionAtLastContinuation: null,
+              ...SESSION_GOAL_CONTINUATION_EPOCH_RESET,
               continuationWakeRevision: existing.continuationWakeRevision + 1,
             }
           : {}),
@@ -51960,6 +52472,9 @@ export type SetSessionGoalStatusEvent =
       reason: string;
       rationale?: string;
     }
+  // The operator PATCH resume. A system resume of a `max_auto_continuations`
+  // pause is a separate path (`autoResumeGoalPausedByCapInTransaction`) that
+  // commits with the external input that caused it.
   | { type: "goal.resumed"; actor: "api" };
 
 /** Status mutation and its timeline fact share the same session-first commit. */
@@ -52031,6 +52546,7 @@ export async function setSessionGoalStatusWithEvent(
                 objectiveRevision: result.goal.objectiveRevision,
                 mutationPolicy: result.goal.mutationPolicy,
                 actor: input.event.actor,
+                reason: "api",
               };
       const now = new Date();
       const [event] = await tx
@@ -52137,7 +52653,11 @@ async function latestFinishedTurnHasFailureCodeTx(
         sql`${schema.sessionTurns.finishedAt} is not null`,
       ),
     )
-    .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+    .orderBy(
+      desc(schema.sessionTurns.finishedAt),
+      desc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.createdAt),
+    )
     .limit(1);
   return latestFinished
     ? await turnHasFailureCodeTx(tx, workspaceId, sessionId, latestFinished.id, code)
@@ -52228,6 +52748,10 @@ export async function evaluateGoalContinuation(
             ? ({ decision: "queue" } as const)
             : ({ decision: "none" } as const);
         }
+        // Newest finished truth by finish time. Queue position alone is not
+        // enough: a human prompt queued after internal turns takes a low
+        // normalized position, yet it is the newer external input that must
+        // restart the no-input streak.
         const [latestFinished] = await tx
           .select({ id: schema.sessionTurns.id })
           .from(schema.sessionTurns)
@@ -52238,7 +52762,11 @@ export async function evaluateGoalContinuation(
               sql`${schema.sessionTurns.finishedAt} is not null`,
             ),
           )
-          .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+          .orderBy(
+            desc(schema.sessionTurns.finishedAt),
+            desc(schema.sessionTurns.position),
+            desc(schema.sessionTurns.createdAt),
+          )
           .limit(1);
         const contextCompactionFailure = latestFinished
           ? await turnHasFailureCodeTx(
@@ -52258,6 +52786,11 @@ export async function evaluateGoalContinuation(
         if (contextCompactionFailure) {
           return { decision: "none" } as const;
         }
+        // `autoContinuations` counts only CONSECUTIVE synthesized continuations
+        // that consumed no external input. The claim transaction already resets
+        // it when a goal-owned turn's batch coalesced any other machine input,
+        // and a Steer supersession resets it too; this branch covers a
+        // human/API/scheduled turn that finished after the last continuation.
         let autoContinuations = row.autoContinuations;
         // A 429-failover continuation (the last continuation turn carried the `rotated`
         // marker) is a multi-account rotate, not another unit of goal work. It must not burn
@@ -52266,8 +52799,8 @@ export async function evaluateGoalContinuation(
         if (row.lastContinuationTurnId) {
           const lastFinished = latestFinished;
           if (lastFinished && lastFinished.id !== row.lastContinuationTurnId) {
-            // A user/scheduled turn ran since the last continuation: human
-            // re-engagement re-arms the auto-continuation budget.
+            // A user/scheduled turn ran since the last continuation: that
+            // external input starts a fresh no-input streak.
             autoContinuations = 0;
           } else if (lastFinished) {
             const [{ rotatedFailures } = { rotatedFailures: 0 }] = await tx
@@ -52287,7 +52820,10 @@ export async function evaluateGoalContinuation(
           }
         }
         // No configured default means uncapped. When a default is configured it
-        // is a hard ceiling; per-goal overrides can only lower it.
+        // is a hard ceiling; per-goal overrides can only lower it. The ceiling
+        // bounds consecutive no-input continuations only: any later external
+        // input (machine input, human/API prompt, Steer) resumes this pause
+        // automatically through `autoResumeGoalPausedByCapInTransaction`.
         const capCandidates = [row.maxAutoContinuations, input.defaultMaxAutoContinuations].filter(
           (value): value is number => typeof value === "number",
         );
@@ -52297,7 +52833,7 @@ export async function evaluateGoalContinuation(
             .update(schema.sessionGoals)
             .set({
               status: "paused",
-              pausedReason: "max_auto_continuations",
+              pausedReason: SESSION_GOAL_CAP_PAUSED_REASON,
               autoContinuations,
               noProgressStreak: 0,
               version: row.version + 1,
@@ -52356,12 +52892,30 @@ export async function evaluateGoalContinuation(
   );
 }
 
+export const GOAL_IDLE_BACKOFF_WAKE_REASON = "goal_idle_backoff";
+
+/**
+ * Pacing between consecutive no-input goal continuations. `scheduleMs[n - 1]`
+ * (last entry repeats) is the delay before the n-th consecutive continuation,
+ * measured from when the previous continuation turn finished; `maxMs` bounds
+ * every delay. Omitted/null means no backoff (the legacy immediate behavior).
+ */
+export type GoalIdleBackoffPolicy = {
+  scheduleMs: readonly number[];
+  maxMs: number;
+};
+
 export type MaterializeGoalContinuationResult =
   | { action: "none" | "queue"; events: [] }
   // An agent-declared `goal_wait` hold is current: no continuation was
   // materialized, the wake/observed ledger is untouched, and a delayed
   // workflow wake is armed at the hold deadline.
   | { action: "held"; events: []; holdTurnId: string; holdUntil: Date }
+  // Idle backoff: the previous continuation consumed no external input and
+  // finished less than its pacing delay ago. Nothing was materialized, the
+  // wake/observed ledger is untouched, and a delayed workflow wake is armed at
+  // `notBefore`; any new input pulls that wake to now.
+  | { action: "deferred"; events: []; notBefore: Date }
   | { action: "paused"; events: SessionEvent[] }
   | {
       action: "continue";
@@ -52390,6 +52944,7 @@ export async function materializeGoalContinuation(
     workflowId: string;
     defaultMaxAutoContinuations?: number | null;
     budgetBlocked?: string | null;
+    idleBackoff?: GoalIdleBackoffPolicy | null;
     policy: {
       model: string;
       reasoningEffort: ReasoningEffort;
@@ -52610,24 +53165,25 @@ export async function materializeGoalContinuation(
 
         // Pending machine input (a child result, agent message, schedule, ...)
         // is real model input that the next claim delivers. It wins over a
-        // synthesized continuation and over any agent-declared hold, and it
-        // closes the peek/materialize race because both serialize on the
-        // session lock. Mirror `peekSessionWork`: after a failed context
-        // compaction ordinary pending input is inert until newer truth, so do
-        // not spin the workflow on it here either.
-        const [pendingMachineInput] = await tx
-          .select({ id: schema.sessionSystemUpdates.id })
-          .from(schema.sessionSystemUpdates)
-          .where(
-            and(
-              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-              eq(schema.sessionSystemUpdates.state, "pending"),
-            ),
-          )
-          .limit(1);
+        // synthesized continuation, and it closes the peek/materialize race
+        // because both serialize on the session lock. Mirror `peekSessionWork`:
+        // after a failed context compaction ordinary pending input is inert
+        // until newer truth, so do not spin the workflow on it here either.
+        // Against a CURRENT agent-declared `goal_wait` hold only an
+        // `immediate`-class input wins; `deferred` child notices (resolution,
+        // pause, capacity wait, progress) leave the hold in place and are
+        // delivered when it ends or an immediate input arrives.
+        const pendingMachineInput = await pendingSystemUpdateWakeClassesTx(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+        );
+        const hold = await goalContinuationHoldStateTx(tx, input.workspaceId, input.sessionId, {
+          continuationHoldTurnId: goalRead.continuationHoldTurnId,
+          continuationHoldUntil: goalRead.continuationHoldUntil,
+        });
         if (
-          pendingMachineInput &&
+          (pendingMachineInput.immediate || (pendingMachineInput.deferred && !hold.current)) &&
           !(await latestFinishedTurnHasFailureCodeTx(
             tx,
             input.workspaceId,
@@ -52638,28 +53194,13 @@ export async function materializeGoalContinuation(
           return { action: "queue", events: [] } as const;
         }
 
+        // A hold whose deadline has just passed is due now: the evaluation
+        // that retires it skips the idle backoff once, so pacing never extends
+        // the agent's own stated deadline (the streak keeps counting after).
+        let holdDeadlinePassed = false;
         if (goalRead.continuationHoldTurnId && goalRead.continuationHoldUntil) {
-          const [latestFinishedTurn] = await tx
-            .select({ id: schema.sessionTurns.id })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                eq(schema.sessionTurns.sessionId, input.sessionId),
-                sql`${schema.sessionTurns.finishedAt} is not null`,
-              ),
-            )
-            .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
-            .limit(1);
           const holdUntil = goalRead.continuationHoldUntil;
-          // Compare against the transaction's database clock: the wake-outbox
-          // dispatcher fires on DB `now()`, so a worker clock ahead of or
-          // behind Postgres cannot re-hold past the deadline or re-wake early.
-          const dbNow = await transactionNow(tx);
-          if (
-            latestFinishedTurn?.id === goalRead.continuationHoldTurnId &&
-            holdUntil.getTime() > dbNow.getTime()
-          ) {
+          if (hold.current) {
             // The declaring turn is still the newest finished truth and its
             // deadline has not passed: leave the obligation armed (the wake
             // revision stays unconsumed so a crash cannot lose it) and make
@@ -52687,10 +53228,82 @@ export async function materializeGoalContinuation(
           // A newer turn finished after the hold was declared, or the deadline
           // passed: retire the hold in this same transaction and continue
           // exactly as before.
+          holdDeadlinePassed = hold.deadlinePassed;
           await tx
             .update(schema.sessionGoals)
             .set({ ...SESSION_GOAL_HOLD_CLEARED, updatedAt: new Date() })
             .where(eq(schema.sessionGoals.id, goalRead.id));
+        }
+
+        // Idle backoff between CONSECUTIVE no-input continuations. This is
+        // pacing, not a cap, and it is decided here, before the ledger/cap
+        // evaluation, so a deferred pass consumes nothing. The streak is
+        // `auto_continuations` (claim resets it whenever a goal turn's batch
+        // carried other machine input); the previous continuation's finish time
+        // is `session_turns.finished_at` of `last_continuation_turn_id`; the
+        // deadline lives only in the workflow-wake outbox. Pending machine
+        // input, a human prompt, or Steer never reaches this branch (they win
+        // above), and they pull the delayed outbox wake to now.
+        if (
+          input.idleBackoff &&
+          !holdDeadlinePassed &&
+          goalRead.autoContinuations >= 1 &&
+          goalRead.lastContinuationTurnId
+        ) {
+          const [latestFinishedTurn] = await tx
+            .select({
+              id: schema.sessionTurns.id,
+              source: schema.sessionTurns.source,
+              finishedAt: schema.sessionTurns.finishedAt,
+            })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                sql`${schema.sessionTurns.finishedAt} is not null`,
+              ),
+            )
+            // Newest finished truth by finish time (see evaluateGoalContinuation):
+            // a human turn queued after internal turns has a low position but
+            // is the newer input that ends the no-input streak.
+            .orderBy(
+              desc(schema.sessionTurns.finishedAt),
+              desc(schema.sessionTurns.position),
+              desc(schema.sessionTurns.createdAt),
+            )
+            .limit(1);
+          if (
+            latestFinishedTurn?.finishedAt &&
+            latestFinishedTurn.source === "goal" &&
+            latestFinishedTurn.id === goalRead.lastContinuationTurnId
+          ) {
+            const schedule = input.idleBackoff.scheduleMs;
+            const delayMs = Math.min(
+              schedule[Math.min(goalRead.autoContinuations - 1, schedule.length - 1)] ?? 0,
+              input.idleBackoff.maxMs,
+            );
+            const dueAt = new Date(latestFinishedTurn.finishedAt.getTime() + delayMs);
+            // Database clock, like the hold deadline: the wake-outbox
+            // dispatcher fires on DB `now()`.
+            const dbNow = await transactionNow(tx);
+            if (delayMs > 0 && dbNow.getTime() < dueAt.getTime()) {
+              // Re-arm on every idle evaluation for the same reason the hold
+              // does: an earlier immediate wake delivered in between advances
+              // the outbox's delivered revision and would otherwise drop the
+              // deadline row; an undelivered earlier wake coalesces with
+              // `least(next_attempt_at, notBefore)`.
+              await enqueueSessionWorkflowWakeInTransaction(tx, {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? input.workflowId,
+                reason: GOAL_IDLE_BACKOFF_WAKE_REASON,
+                notBefore: dueAt,
+              });
+              return { action: "deferred", events: [], notBefore: dueAt } as const;
+            }
+          }
         }
 
         let goalWakeRevision = goalRead.continuationWakeRevision;
@@ -54279,7 +54892,25 @@ export async function claimSessionWorkForAttempt(
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
+          const unrecognizedUpdateIds: string[] = [];
           for (const update of updates) {
+            // A kind or payload this image cannot parse is a bounded, visible
+            // condition, never an endless re-peek: mark that one row failed
+            // and record `unrecognized_kind` on the timeline; the rest of the
+            // batch is claimed normally.
+            if (
+              !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
+              !SessionSystemUpdatePayload.safeParse(
+                fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+              ).success
+            ) {
+              await tx
+                .update(schema.sessionSystemUpdates)
+                .set({ state: "failed" })
+                .where(eq(schema.sessionSystemUpdates.id, update.id));
+              unrecognizedUpdateIds.push(update.id);
+              continue;
+            }
             const scheduledAuthorityDenial = update.scheduledTaskRunId
               ? await validateScheduledTargetExecutionAtClaim(tx as unknown as Database, {
                   accountId,
@@ -54428,6 +55059,25 @@ export async function claimSessionWorkForAttempt(
                 occurredAt,
               });
             }
+            if (unrecognizedUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: unrecognizedUpdateIds,
+                  count: unrecognizedUpdateIds.length,
+                  reason: "unrecognized_kind",
+                },
+                occurredAt,
+              });
+            }
             return {
               count: 0,
               lastSequence: sequence,
@@ -54542,6 +55192,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: authorityRejectedUpdateIds,
                 count: authorityRejectedUpdateIds.length,
                 reason: "stale_execution_authority",
+              },
+              occurredAt,
+            });
+          }
+          if (unrecognizedUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: unrecognizedUpdateIds,
+                count: unrecognizedUpdateIds.length,
+                reason: "unrecognized_kind",
               },
               occurredAt,
             });
@@ -55899,9 +56568,22 @@ export async function claimSessionWorkForAttempt(
               withLosslessContentWriteVersion(delivered.events, "payload", "payloadCodecVersion"),
             );
           if (goalUpdate && typeof goalUpdate.payload.goalId === "string") {
+            // `auto_continuations` counts consecutive continuations that
+            // consumed NO external input. This claim binds the exact batch:
+            // when any other member (child result, agent message, schedule,
+            // Steer) rides along, this goal turn consumed input, so the streak
+            // and the idle backoff start over. A pure continuation keeps the
+            // count the evaluator incremented at materialization.
+            const consumedExternalInput = delivered.updates.some(
+              (update) => update.kind !== "goal_continuation",
+            );
             await tx
               .update(schema.sessionGoals)
-              .set({ lastContinuationTurnId: internalTurn.id, updatedAt: now })
+              .set({
+                lastContinuationTurnId: internalTurn.id,
+                ...(consumedExternalInput ? { autoContinuations: 0, noProgressStreak: 0 } : {}),
+                updatedAt: now,
+              })
               .where(
                 and(
                   eq(schema.sessionGoals.workspaceId, workspaceId),
@@ -56635,6 +57317,12 @@ export async function reconcileSessionAttemptQuiescence(
                         and process.session_id = attempt.session_id
                         and process.id = admission.actor_id
                         and process.owner_attempt_id = attempt.id
+                        and not exists (
+                          select 1
+                          from session_background_commands command
+                          where command.retained_process_id = process.id
+                            and command.state in ('running', 'stopping')
+                        )
                     )
                   )
                 )
@@ -56647,6 +57335,12 @@ export async function reconcileSessionAttemptQuiescence(
                 and process.session_id = attempt.session_id
                 and process.owner_attempt_id = attempt.id
                 and process.state = 'active'
+                and not exists (
+                  select 1
+                  from session_background_commands command
+                  where command.retained_process_id = process.id
+                    and command.state in ('running', 'stopping')
+                )
             )
           ) as writer_pending
         from session_turn_attempts attempt
@@ -57366,6 +58060,76 @@ async function queuedSteerHasUnquiescedPredecessor(
 }
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
+/**
+ * Which wake classes are represented among a session's pending machine inputs.
+ * `immediate` kinds make the session runnable even against a current
+ * `goal_wait` hold; `deferred` child notices only do so without one.
+ */
+async function pendingSystemUpdateWakeClassesTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ immediate: boolean; deferred: boolean }> {
+  const rows = await db
+    .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+    .from(schema.sessionSystemUpdates)
+    .where(
+      and(
+        eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+        eq(schema.sessionSystemUpdates.sessionId, sessionId),
+        eq(schema.sessionSystemUpdates.state, "pending"),
+      ),
+    );
+  let immediate = false;
+  let deferred = false;
+  for (const row of rows) {
+    const wakeClass =
+      SESSION_SYSTEM_UPDATE_WAKE_CLASS[row.kind as SessionSystemUpdateKind] ?? "immediate";
+    if (wakeClass === "deferred") deferred = true;
+    else immediate = true;
+  }
+  return { immediate, deferred };
+}
+
+/**
+ * Whether an agent-declared `goal_wait` hold is current: its declaring turn is
+ * still the newest finished turn (by finish time, the notion every evaluator
+ * shares) and its deadline is still ahead of the database clock (the clock the
+ * wake-outbox dispatcher fires on).
+ */
+async function goalContinuationHoldStateTx(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  goal: { continuationHoldTurnId: string | null; continuationHoldUntil: Date | null },
+): Promise<{ current: boolean; deadlinePassed: boolean }> {
+  if (!goal.continuationHoldTurnId || !goal.continuationHoldUntil) {
+    return { current: false, deadlinePassed: false };
+  }
+  const [latestFinishedTurn] = await db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        sql`${schema.sessionTurns.finishedAt} is not null`,
+      ),
+    )
+    .orderBy(
+      desc(schema.sessionTurns.finishedAt),
+      desc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.createdAt),
+    )
+    .limit(1);
+  const dbNow = await transactionNow(db);
+  const deadlinePassed = goal.continuationHoldUntil.getTime() <= dbNow.getTime();
+  return {
+    current: latestFinishedTurn?.id === goal.continuationHoldTurnId && !deadlinePassed,
+    deadlinePassed,
+  };
+}
+
 export async function peekSessionWork(
   db: Database,
   workspaceId: string,
@@ -57655,7 +58419,31 @@ export async function peekSessionWork(
         "context_compaction_failed",
       ))
     ) {
-      return { kind: "runnable" };
+      // Mirror the materializer: against a current agent-declared `goal_wait`
+      // hold only immediate-class pending input makes the session runnable;
+      // deferred child notices leave it idle (held) until the hold ends or an
+      // immediate input arrives.
+      const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
+      if (wakeClasses.immediate) return { kind: "runnable" };
+      const [goal] = await scopedDb
+        .select({
+          status: schema.sessionGoals.status,
+          continuationHoldTurnId: schema.sessionGoals.continuationHoldTurnId,
+          continuationHoldUntil: schema.sessionGoals.continuationHoldUntil,
+        })
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+      const hold =
+        goal?.status === "active"
+          ? await goalContinuationHoldStateTx(scopedDb, workspaceId, sessionId, goal)
+          : { current: false, deadlinePassed: false };
+      return hold.current ? { kind: "idle" } : { kind: "runnable" };
     }
     const [pendingAgentSteer] = await scopedDb
       .select({ id: schema.sessionSystemUpdates.id })
@@ -57919,7 +58707,7 @@ export async function failSessionWorkBeforeAttemptClaim(
           );
           sequence = closedTools.sequence;
           closedToolEvents = closedTools.events;
-          await tx
+          const cancelledHumanInputs = await tx
             .update(schema.sessionHumanInputRequests)
             .set({
               status: "cancelled",
@@ -57935,7 +58723,29 @@ export async function failSessionWorkBeforeAttemptClaim(
                 eq(schema.sessionHumanInputRequests.turnId, turn.id),
                 eq(schema.sessionHumanInputRequests.status, "pending"),
               ),
+            )
+            .returning({
+              id: schema.sessionHumanInputRequests.id,
+              turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
+            });
+          // The child's blocked boundary died with the turn: resolve each
+          // request for the parent (locked by the child-lifecycle prefix
+          // above) so its pending child_requires_action can be superseded.
+          for (const request of cancelledHumanInputs) {
+            await enqueueChildRequiresActionResolvedOutboxTx(
+              tx as unknown as Database,
+              workspaceId,
+              session,
+              {
+                turnId: turn.id,
+                turnGeneration: request.turnGeneration,
+                requestId: request.id,
+                approvalId: null,
+                outcome: "cancelled",
+                respondedByKind: "system",
+              },
             );
+          }
         }
         await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
           accountId: session.accountId,
@@ -58272,105 +59082,17 @@ export async function settleSessionIdleWithParentOutbox(
         } as const;
       }
       const dedupeKey = `child-completion:${session.id}:${episodeKey}`;
-      const personalConnectionDelegations = session.parentTurnId
-        ? personalConnectionDelegationsForSameSessionSuccessor(
-            await personalConnectionDelegationsForTurnInTransaction(
-              tx as unknown as Database,
-              workspaceId,
-              session.parentSessionId,
-              session.parentTurnId,
-            ),
-            session.parentSessionId,
-          )
-        : [];
-      const xaiProviderAccountAuthoritySnapshot = session.parentTurnId
-        ? await xaiProviderAccountAuthoritySnapshotForTurnInTransaction(
-            tx as unknown as Database,
-            workspaceId,
-            session.parentSessionId,
-            session.parentTurnId,
-          )
-        : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
-      const [parentTurn] = session.parentTurnId
-        ? await tx
-            .select({
-              initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-              initiatorKind: schema.sessionTurns.initiatorKind,
-              initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, workspaceId),
-                eq(schema.sessionTurns.sessionId, session.parentSessionId),
-                eq(schema.sessionTurns.id, session.parentTurnId),
-              ),
-            )
-            .limit(1)
-        : [];
-      const xaiAuthoritySubjectId =
-        xaiProviderAccountAuthoritySnapshot.scope === "user"
-          ? (parentTurn?.initiatingHumanSubjectId ??
-            (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
-          : null;
-      if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-        throw new Error("Child idle outbox lost its parent xAI authority subject");
-      }
-      const connectionAuthoritySubjectId =
-        parentTurn?.initiatingHumanSubjectId ??
-        (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-      if (
-        personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
-        !connectionAuthoritySubjectId
-      ) {
-        throw new Error("Child idle outbox lost its parent connection authority subject");
-      }
-      await tx
-        .insert(schema.sessionSystemUpdateOutbox)
-        .values(
-          withLosslessContentWriteVersion(
-            withLosslessContentWriteVersion(
-              {
-                accountId: session.accountId,
-                workspaceId,
-                sourceSessionId: session.id,
-                targetSessionId: session.parentSessionId,
-                dedupeKey,
-                kind: "child_terminal_result",
-                classification: "success",
-                sourceId: session.id,
-                summary: "Child session reached a terminal idle boundary.",
-                payload: {
-                  type: "child_terminal_result",
-                  childSessionId: session.id,
-                  status: "idle",
-                },
-                lineage: {
-                  childSessionId: session.id,
-                  parentSessionId: session.parentSessionId,
-                  ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-                  ...(connectionAuthoritySubjectId &&
-                  personalConnectionDelegations.some((delegation) => delegation.userDelegation)
-                    ? { connectionAuthoritySubjectId }
-                    : {}),
-                  ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
-                },
-                personalConnectionDelegations,
-                xaiProviderAccountAuthoritySnapshot,
-              },
-              "summary",
-              "summaryCodecVersion",
-            ),
-            "payload",
-            "payloadCodecVersion",
-          ),
-        )
-        .onConflictDoNothing({
-          target: [
-            schema.sessionSystemUpdateOutbox.workspaceId,
-            schema.sessionSystemUpdateOutbox.dedupeKey,
-          ],
-        });
+      await enqueueChildLifecycleNoticeOutboxTx(tx as unknown as Database, workspaceId, session, {
+        dedupeKey,
+        kind: "child_terminal_result",
+        classification: "success",
+        summary: "Child session reached a terminal idle boundary.",
+        payload: {
+          type: "child_terminal_result",
+          childSessionId: session.id,
+          status: "idle",
+        },
+      });
       return {
         action: "settled",
         changed: events.length > 0,
@@ -58971,16 +59693,43 @@ export async function applySessionTurnSettlement(
         : []),
     ...(input.compactionRequestFailure ? ["session.context.compaction.skipped"] : []),
     ...(input.turnStatus === "failed" ? ["child_terminal_result"] : []),
+    ...(input.turnStatus === "requires_action" ? ["child_requires_action"] : []),
   ];
   const persistence = {
     stage: "session_lifecycle_outbox.settle_turn",
     eventTypes,
     maxAttempts: 3,
   };
+  const terminalTurn = isTerminalSessionTurnStatus(input.turnStatus);
   return await retrySessionActivityRls(db, workspaceId, persistence, async (scopedDb) => {
+    // A terminal settlement cancels the turn's still-pending human-input rows.
+    // Their parent resolution notices need the parent locked with the child,
+    // so peek (unlocked) for such rows first; they are created only by this
+    // same turn's earlier requires_action settlement, which the session lock
+    // serialized before this attempt.
+    const terminalHumanInputNotices =
+      terminalTurn &&
+      input.turnStatus !== "failed" &&
+      childLifecycleNoticesEnabled() &&
+      (
+        await scopedDb
+          .select({ id: schema.sessionHumanInputRequests.id })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+            ),
+          )
+          .limit(1)
+      ).length > 0;
     return await scopedDb.transaction(async (tx) => {
       const locks =
-        input.turnStatus === "failed"
+        input.turnStatus === "failed" ||
+        input.turnStatus === "requires_action" ||
+        terminalHumanInputNotices
           ? await lockChildLifecycleOutboxWriteRowsTx(tx as unknown as Database, workspaceId, {
               sessionId: input.sessionId,
               turnId: input.turnId,
@@ -59178,6 +59927,16 @@ export async function applySessionTurnSettlement(
             originatingAttemptId: input.attemptId,
           });
         }
+        // The child is now blocked on a human. Tell its parent through the
+        // durable outbox (the worker delivers it): one row per exact
+        // (child, turn, generation), so a same-generation re-freeze after an
+        // activity retry dedupes and a later generation is a new notice.
+        await enqueueChildRequiresActionOutboxTx(tx as unknown as Database, workspaceId, session, {
+          turnId: input.turnId,
+          turnGeneration: turn.executionGeneration,
+          humanInputRequests,
+          pendingApprovals: input.runState.pendingApprovals,
+        });
       }
 
       let recordingEvent: AppendEventInput | null = null;
@@ -59377,8 +60136,27 @@ export async function applySessionTurnSettlement(
             .returning({
               id: schema.sessionHumanInputRequests.id,
               questions: schema.sessionHumanInputRequests.questions,
+              turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
             })
         : [];
+      for (const request of terminalHumanInputRows) {
+        // The child's blocked boundary is gone with the turn: its parent's
+        // still-pending child_requires_action notice is stale. Lock prefix:
+        // the terminal peek above already chose the child-lifecycle lock.
+        await enqueueChildRequiresActionResolvedOutboxTx(
+          tx as unknown as Database,
+          workspaceId,
+          session,
+          {
+            turnId: input.turnId,
+            turnGeneration: request.turnGeneration,
+            requestId: request.id,
+            approvalId: null,
+            outcome: "cancelled",
+            respondedByKind: "system",
+          },
+        );
+      }
       const terminalHumanInputEvents: AppendEventInput[] = terminalHumanInputRows.map(
         (request) => ({
           type: "user.humanInputResponse",
@@ -61291,16 +62069,27 @@ function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): str
   return null;
 }
 
-async function enqueueFailedChildOutboxTx(
+type ChildOutboxSession = Pick<
+  typeof schema.sessions.$inferSelect,
+  "id" | "accountId" | "parentSessionId" | "parentTurnId"
+>;
+
+/**
+ * The exact private authority a child lifecycle notice copies from its causal
+ * parent turn: same-session-successor personal connection delegations, the
+ * parent's xAI provider authority snapshot, and the bounded subject lineage the
+ * parent's claim later revalidates. Every child -> parent outbox producer uses
+ * this one resolution so the notice kinds cannot drift in authority.
+ */
+async function parentOutboxAuthorityTx(
   tx: Database,
   workspaceId: string,
-  session: Pick<
-    typeof schema.sessions.$inferSelect,
-    "id" | "accountId" | "parentSessionId" | "parentTurnId"
-  >,
-  input: { turnId: string | null; dedupeKey: string },
-): Promise<void> {
-  if (!session.parentSessionId) return;
+  session: ChildOutboxSession & { parentSessionId: string },
+): Promise<{
+  personalConnectionDelegations: McpPersonalConnectionDelegation[];
+  xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
+  lineage: Record<string, unknown>;
+}> {
   const personalConnectionDelegations = session.parentTurnId
     ? personalConnectionDelegationsForSameSessionSuccessor(
         await personalConnectionDelegationsForTurnInTransaction(
@@ -61343,18 +62132,69 @@ async function enqueueFailedChildOutboxTx(
         (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null))
       : null;
   if (xaiProviderAccountAuthoritySnapshot.scope === "user" && !xaiAuthoritySubjectId) {
-    throw new Error("Failed child outbox lost its parent xAI authority subject");
+    throw new Error("Child lifecycle outbox lost its parent xAI authority subject");
   }
   const connectionAuthoritySubjectId =
     parentTurn?.initiatingHumanSubjectId ??
     (parentTurn?.initiatorKind === "subject" ? parentTurn.initiatorSubjectId : null);
-  if (
-    personalConnectionDelegations.some((delegation) => delegation.userDelegation) &&
-    !connectionAuthoritySubjectId
-  ) {
-    throw new Error("Failed child outbox lost its parent connection authority subject");
+  const hasUserDelegation = personalConnectionDelegations.some(
+    (delegation) => delegation.userDelegation,
+  );
+  if (hasUserDelegation && !connectionAuthoritySubjectId) {
+    throw new Error("Child lifecycle outbox lost its parent connection authority subject");
   }
-  await tx
+  return {
+    personalConnectionDelegations,
+    xaiProviderAccountAuthoritySnapshot,
+    lineage: {
+      childSessionId: session.id,
+      parentSessionId: session.parentSessionId,
+      ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
+      ...(connectionAuthoritySubjectId && hasUserDelegation
+        ? { connectionAuthoritySubjectId }
+        : {}),
+      ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
+    },
+  };
+}
+
+type ChildLifecycleOutboxPayload = Extract<
+  SessionSystemUpdatePayload,
+  { type: ChildLifecycleSystemUpdateKind }
+>;
+
+type ChildLifecycleNoticeInput = {
+  [Kind in ChildLifecycleSystemUpdateKind]: {
+    kind: Kind;
+    payload: Extract<SessionSystemUpdatePayload, { type: Kind }>;
+  };
+}[ChildLifecycleSystemUpdateKind] & {
+  dedupeKey: string;
+  classification: SystemUpdateClassification;
+  summary: string;
+  lineage?: Record<string, unknown>;
+};
+
+/**
+ * The one child -> parent outbox writer. The caller must already hold the
+ * child-lifecycle lock prefix (control FOR SHARE -> workspace FOR KEY SHARE ->
+ * UUID-ordered child + parent sessions FOR NO KEY UPDATE -> exact turn/attempt)
+ * or, for the generic-prefix human-input/approval producers, the UUID-ordered
+ * child + parent session rows. The insert is dedupe-keyed and idempotent; a
+ * session without a parent produces nothing. Returns whether a row was added.
+ */
+async function enqueueChildLifecycleNoticeOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: ChildLifecycleNoticeInput,
+): Promise<boolean> {
+  if (!session.parentSessionId) return false;
+  const authority = await parentOutboxAuthorityTx(tx, workspaceId, {
+    ...session,
+    parentSessionId: session.parentSessionId,
+  });
+  const inserted = await tx
     .insert(schema.sessionSystemUpdateOutbox)
     .values(
       withLosslessContentWriteVersion(
@@ -61365,29 +62205,14 @@ async function enqueueFailedChildOutboxTx(
             sourceSessionId: session.id,
             targetSessionId: session.parentSessionId,
             dedupeKey: input.dedupeKey,
-            kind: "child_terminal_result",
-            classification: "failure",
+            kind: input.kind,
+            classification: input.classification,
             sourceId: session.id,
-            summary: "Child session failed; inspect the durable child timeline.",
-            payload: {
-              type: "child_terminal_result",
-              childSessionId: session.id,
-              status: "failed",
-              ...(input.turnId ? { turnId: input.turnId } : {}),
-            },
-            lineage: {
-              childSessionId: session.id,
-              parentSessionId: session.parentSessionId,
-              ...(session.parentTurnId ? { parentTurnId: session.parentTurnId } : {}),
-              ...(input.turnId ? { turnId: input.turnId } : {}),
-              ...(connectionAuthoritySubjectId &&
-              personalConnectionDelegations.some((delegation) => delegation.userDelegation)
-                ? { connectionAuthoritySubjectId }
-                : {}),
-              ...(xaiAuthoritySubjectId ? { xaiAuthoritySubjectId } : {}),
-            },
-            personalConnectionDelegations,
-            xaiProviderAccountAuthoritySnapshot,
+            summary: input.summary,
+            payload: input.payload,
+            lineage: { ...authority.lineage, ...(input.lineage ?? {}) },
+            personalConnectionDelegations: authority.personalConnectionDelegations,
+            xaiProviderAccountAuthoritySnapshot: authority.xaiProviderAccountAuthoritySnapshot,
           },
           "summary",
           "summaryCodecVersion",
@@ -61401,7 +62226,206 @@ async function enqueueFailedChildOutboxTx(
         schema.sessionSystemUpdateOutbox.workspaceId,
         schema.sessionSystemUpdateOutbox.dedupeKey,
       ],
-    });
+    })
+    .returning({ id: schema.sessionSystemUpdateOutbox.id });
+  return inserted.length > 0;
+}
+
+async function enqueueFailedChildOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: { turnId: string | null; dedupeKey: string },
+): Promise<void> {
+  if (!session.parentSessionId) return;
+  await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: input.dedupeKey,
+    kind: "child_terminal_result",
+    classification: "failure",
+    summary: "Child session failed; inspect the durable child timeline.",
+    payload: {
+      type: "child_terminal_result",
+      childSessionId: session.id,
+      status: "failed",
+      ...(input.turnId ? { turnId: input.turnId } : {}),
+    },
+    ...(input.turnId ? { lineage: { turnId: input.turnId } } : {}),
+  });
+}
+
+/**
+ * Child-lifecycle notice producers below. Every one of them is gated by the
+ * process-global rollout flag, takes the child-lifecycle lock prefix (the
+ * parent session row is locked with the child), and only inserts the durable
+ * outbox row; the worker delivers it to the parent.
+ */
+async function enqueueChildRequiresActionOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    turnId: string;
+    turnGeneration: number;
+    humanInputRequests: Parameters<typeof buildChildRequiresActionPayload>[0]["humanInputRequests"];
+    pendingApprovals: readonly unknown[];
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = buildChildRequiresActionPayload({
+    childSessionId: session.id,
+    childTurnId: input.turnId,
+    childTurnGeneration: input.turnGeneration,
+    humanInputRequests: input.humanInputRequests,
+    pendingApprovals: input.pendingApprovals,
+  });
+  if (payload.requests.length === 0 && !payload.truncated) return false;
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childRequiresActionDedupeKey({
+      childSessionId: session.id,
+      turnId: input.turnId,
+      turnGeneration: input.turnGeneration,
+    }),
+    kind: "child_requires_action",
+    classification: "action_required",
+    summary: childRequiresActionSummary(session.id, payload),
+    payload,
+    lineage: { turnId: input.turnId },
+  });
+}
+
+async function enqueueChildRequiresActionResolvedOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    turnId: string;
+    turnGeneration: number;
+    requestId: string | null;
+    approvalId: string | null;
+    outcome: ChildRequiresActionResolvedOutcome;
+    respondedByKind: ChildRequiresActionRespondedByKind;
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = {
+    type: "child_requires_action_resolved" as const,
+    childSessionId: session.id,
+    childTurnId: input.turnId,
+    childTurnGeneration: input.turnGeneration,
+    requestId: input.requestId,
+    approvalId: input.approvalId,
+    outcome: input.outcome,
+    respondedByKind: input.respondedByKind,
+  };
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childRequiresActionResolvedDedupeKey({
+      childSessionId: session.id,
+      turnId: input.turnId,
+      turnGeneration: input.turnGeneration,
+      requestId: input.requestId,
+      approvalId: input.approvalId,
+    }),
+    kind: "child_requires_action_resolved",
+    classification: "info",
+    summary: childRequiresActionResolvedSummary(session.id, payload),
+    payload,
+    lineage: { turnId: input.turnId },
+  });
+}
+
+/** Derive the bounded responder kind of a human-input/approval resolution. */
+export function childRequiresActionRespondedByKindFor(
+  respondedBy: string,
+  explicit?: ChildRequiresActionRespondedByKind,
+): ChildRequiresActionRespondedByKind {
+  if (explicit) return explicit;
+  if (respondedBy.startsWith("agent_attempt:")) return "agent_attempt";
+  if (respondedBy.startsWith("system:")) return "system";
+  return "human";
+}
+
+async function enqueueChildWaitingCapacityOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    turnId: string;
+    waiterId: string;
+    provider: "codex" | "xai";
+    nextCheckAt: Date | null;
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = {
+    type: "child_waiting_capacity" as const,
+    childSessionId: session.id,
+    childTurnId: input.turnId,
+    provider: input.provider,
+    nextCheckAt: input.nextCheckAt?.toISOString() ?? null,
+  };
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childWaitingCapacityDedupeKey({
+      childSessionId: session.id,
+      waiterId: input.waiterId,
+    }),
+    kind: "child_waiting_capacity",
+    classification: "info",
+    summary: childWaitingCapacitySummary(session.id, payload),
+    payload,
+    lineage: { turnId: input.turnId },
+  });
+}
+
+async function enqueueChildProgressOutboxTx(
+  tx: Database,
+  workspaceId: string,
+  session: ChildOutboxSession,
+  input: {
+    goalId: string;
+    objectiveRevision: number;
+    operationId: string;
+    progressNote: string;
+  },
+): Promise<boolean> {
+  if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
+  const payload = {
+    type: "child_progress" as const,
+    childSessionId: session.id,
+    goalId: input.goalId,
+    objectiveRevision: input.objectiveRevision,
+    operationId: input.operationId,
+    progressNote: boundedChildProgressNote(input.progressNote),
+  };
+  return await enqueueChildLifecycleNoticeOutboxTx(tx, workspaceId, session, {
+    dedupeKey: childProgressDedupeKey({
+      childSessionId: session.id,
+      receiptId: input.operationId,
+    }),
+    kind: "child_progress",
+    classification: "info",
+    summary: childProgressSummary(session.id, payload),
+    payload,
+  });
+}
+
+/**
+ * Read the child's parent id without locking, so a generic-prefix writer can
+ * include the parent in its one UUID-ordered session lock call. The helper that
+ * later inserts the outbox row re-reads the locked child row and refuses a
+ * changed parent, exactly like the child-lifecycle lock prefix does.
+ */
+async function sessionIdsWithParentTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string[]> {
+  if (!childLifecycleNoticesEnabled()) return [sessionId];
+  const [preview] = await tx
+    .select({ parentSessionId: schema.sessions.parentSessionId })
+    .from(schema.sessions)
+    .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+    .limit(1);
+  return preview?.parentSessionId ? [sessionId, preview.parentSessionId] : [sessionId];
 }
 
 async function enqueueFailedChildOutboxForTurnTx(
@@ -61439,18 +62463,27 @@ async function enqueueFailedChildOutboxWithoutTurnTx(
   });
 }
 
-type ChildTerminalResultPayload = Extract<
-  SessionSystemUpdatePayload,
-  { type: "child_terminal_result" }
->;
-
-function parseChildTerminalResultPayload(input: unknown): ChildTerminalResultPayload {
-  const payload = SessionSystemUpdatePayload.parse(input);
-  if (payload.type !== "child_terminal_result") {
-    throw new Error(`Child-terminal outbox contains ${payload.type} payload`);
+function parseChildLifecycleOutboxPayload(
+  input: unknown,
+  kind: string,
+): { kind: ChildLifecycleSystemUpdateKind; payload: ChildLifecycleOutboxPayload } {
+  if (!isChildLifecycleSystemUpdateKind(kind)) {
+    throw new Error(`System-update outbox contains retired kind ${kind}`);
   }
-  return payload;
+  const payload = SessionSystemUpdatePayload.parse(input);
+  if (payload.type !== kind) {
+    throw new Error(`Child-lifecycle outbox ${kind} contains ${payload.type} payload`);
+  }
+  return { kind, payload: payload as ChildLifecycleOutboxPayload };
 }
+
+/** The exact kind/payload pair of one child-lifecycle outbox row, correlated for typed re-insert. */
+export type SessionSystemUpdateOutboxKindPayload = {
+  [Kind in ChildLifecycleSystemUpdateKind]: {
+    kind: Kind;
+    payload: Extract<SessionSystemUpdatePayload, { type: Kind }>;
+  };
+}[ChildLifecycleSystemUpdateKind];
 
 export type SessionSystemUpdateOutboxDelivery = {
   id: string;
@@ -61460,15 +62493,25 @@ export type SessionSystemUpdateOutboxDelivery = {
   sourceSessionId: string;
   targetSessionId: string;
   dedupeKey: string;
-  kind: "child_terminal_result";
+  kind: ChildLifecycleSystemUpdateKind;
   classification: SystemUpdateClassification;
   sourceId: string;
   summary: string;
-  payload: ChildTerminalResultPayload;
+  payload: ChildLifecycleOutboxPayload;
   lineage: Record<string, unknown>;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
 };
+
+/** Narrow an outbox row back to its correlated typed kind/payload input variant. */
+export function sessionSystemUpdateOutboxKindPayload(
+  outbox: Pick<SessionSystemUpdateOutboxDelivery, "kind" | "payload">,
+): SessionSystemUpdateOutboxKindPayload {
+  if (outbox.payload.type !== outbox.kind) {
+    throw new Error(`Outbox ${outbox.kind} carries a ${outbox.payload.type} payload`);
+  }
+  return { kind: outbox.kind, payload: outbox.payload } as SessionSystemUpdateOutboxKindPayload;
+}
 
 function mapSystemUpdateOutboxRow(row: {
   id: string;
@@ -61488,9 +62531,10 @@ function mapSystemUpdateOutboxRow(row: {
   personal_connection_delegations: unknown;
   xai_provider_account_authority_snapshot: unknown;
 }): SessionSystemUpdateOutboxDelivery {
-  if (row.kind !== "child_terminal_result") {
-    throw new Error(`System-update outbox contains retired kind ${row.kind}`);
-  }
+  const typed = parseChildLifecycleOutboxPayload(
+    fromPostgresLosslessJson(row.payload, row.payload_codec_version),
+    row.kind,
+  );
   return {
     id: row.id,
     status: "pending",
@@ -61499,13 +62543,11 @@ function mapSystemUpdateOutboxRow(row: {
     sourceSessionId: row.source_session_id,
     targetSessionId: row.target_session_id,
     dedupeKey: row.dedupe_key,
-    kind: "child_terminal_result",
+    kind: typed.kind,
     classification: row.classification as SystemUpdateClassification,
     sourceId: row.source_id,
     summary: fromPostgresLosslessText(row.summary, row.summary_codec_version),
-    payload: parseChildTerminalResultPayload(
-      fromPostgresLosslessJson(row.payload, row.payload_codec_version),
-    ),
+    payload: typed.payload,
     lineage: row.lineage,
     personalConnectionDelegations: parsedPersonalConnectionDelegations(
       row.personal_connection_delegations,
@@ -61541,9 +62583,10 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         )
         .limit(1);
       if (!row) return null;
-      if (row.kind !== "child_terminal_result") {
-        throw new Error(`System-update outbox contains retired kind ${row.kind}`);
-      }
+      const typed = parseChildLifecycleOutboxPayload(
+        fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+        row.kind,
+      );
       return {
         id: row.id,
         status: row.status as "pending" | "delivered",
@@ -61552,13 +62595,11 @@ export async function getSessionSystemUpdateOutboxByDedupeKey(
         sourceSessionId: row.sourceSessionId,
         targetSessionId: row.targetSessionId,
         dedupeKey: row.dedupeKey,
-        kind: "child_terminal_result",
+        kind: typed.kind,
         classification: row.classification as SystemUpdateClassification,
         sourceId: row.sourceId,
         summary: fromPostgresLosslessText(row.summary, row.summaryCodecVersion),
-        payload: parseChildTerminalResultPayload(
-          fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
-        ),
+        payload: typed.payload,
         lineage: row.lineage,
         personalConnectionDelegations: parsedPersonalConnectionDelegations(
           row.personalConnectionDelegations,
@@ -61594,7 +62635,35 @@ export async function claimPendingSessionSystemUpdateOutbox(
     personal_connection_delegations: unknown;
     xai_provider_account_authority_snapshot: unknown;
   }>(db, sql`select * from opengeni_private.claim_session_system_update_outbox(${limit})`);
-  return rows.map(mapSystemUpdateOutboxRow);
+  // One unparseable row (for example a kind this image does not understand, or
+  // a payload that no longer matches its schema) must not poison the whole
+  // batch: dead-letter exactly that row with a bounded error and keep
+  // delivering the rest. The row stays inspectable as `failed` + `last_error`.
+  const deliveries: SessionSystemUpdateOutboxDelivery[] = [];
+  for (const row of rows) {
+    try {
+      deliveries.push(mapSystemUpdateOutboxRow(row));
+    } catch (error) {
+      const message = `unrecognized outbox row: ${error instanceof Error ? error.message : String(error)}`;
+      await withRlsContext(
+        db,
+        { accountId: row.account_id, workspaceId: row.workspace_id },
+        async (scopedDb) => {
+          await scopedDb
+            .update(schema.sessionSystemUpdateOutbox)
+            .set({ status: "failed", lastError: message.slice(0, 500), updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.sessionSystemUpdateOutbox.workspaceId, row.workspace_id),
+                eq(schema.sessionSystemUpdateOutbox.id, row.id),
+                eq(schema.sessionSystemUpdateOutbox.status, "pending"),
+              ),
+            );
+        },
+      );
+    }
+  }
+  return deliveries;
 }
 
 export type SessionWorkflowWake = {
@@ -62017,6 +63086,10 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     if (row.lineage.connectionAuthoritySubjectId !== input.lineage.connectionAuthoritySubjectId) {
       throw new Error("System-update outbox replay changed its connection authority subject");
     }
+    const typed = parseChildLifecycleOutboxPayload(
+      fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
+      row.kind,
+    );
     return {
       id: row.id,
       status: row.status as "pending" | "delivered",
@@ -62025,13 +63098,11 @@ export async function getOrCreateSessionSystemUpdateOutbox(
       sourceSessionId: row.sourceSessionId,
       targetSessionId: row.targetSessionId,
       dedupeKey: row.dedupeKey,
-      kind: "child_terminal_result",
+      kind: typed.kind,
       classification: row.classification as SystemUpdateClassification,
       sourceId: row.sourceId,
       summary: fromPostgresLosslessText(row.summary, row.summaryCodecVersion),
-      payload: parseChildTerminalResultPayload(
-        fromPostgresLosslessJson(row.payload, row.payloadCodecVersion),
-      ),
+      payload: typed.payload,
       lineage: row.lineage,
       personalConnectionDelegations: parsedPersonalConnectionDelegations(
         row.personalConnectionDelegations,
@@ -62315,37 +63386,134 @@ export async function addSessionSystemUpdateWithSourceMutation(
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
         await mutateSource(tx as unknown as Database, event.id, inserted.id);
+        // Producer-side supersession of this child's now-stale pending notices
+        // on the parent: a newer child_progress replaces an older one, and a
+        // resolution supersedes the child_requires_action of the same exact
+        // (child, turn, generation) because one accepted response advances that
+        // blocked boundary (a re-freeze is a new generation and a new notice).
+        const supersededUpdateIds = await supersedeStaleChildLifecycleNoticesInTransaction(
+          tx as unknown as Database,
+          { workspaceId: input.workspaceId, sessionId: input.sessionId, inserted },
+        );
+        const [supersededEvent] =
+          supersededUpdateIds.length > 0
+            ? await tx
+                .insert(schema.sessionEvents)
+                .values(
+                  withLosslessContentWriteVersion(
+                    {
+                      accountId: session.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      sequence: session.lastSequence + 2,
+                      type: "system.update.cancelled",
+                      payload: {
+                        updateIds: supersededUpdateIds,
+                        count: supersededUpdateIds.length,
+                        reason: childLifecycleSupersessionReason(input.kind),
+                        supersededByUpdateId: inserted.id,
+                      },
+                      occurredAt: now,
+                    },
+                    "payload",
+                    "payloadCodecVersion",
+                  ),
+                )
+                .returning()
+            : [];
+        if (supersededUpdateIds.length > 0 && !supersededEvent) {
+          throw new Error("Failed to append system-update supersession event");
+        }
+        const supersessionSequences = supersededEvent ? 1 : 0;
         const realtimeActive = await sessionRealtimeIsActiveInTransaction(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
         );
-        const [goalForChildResult] =
-          input.kind === "child_terminal_result"
-            ? await tx
-                .select({ status: schema.sessionGoals.status })
-                .from(schema.sessionGoals)
-                .where(
-                  and(
-                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
-                    eq(schema.sessionGoals.sessionId, input.sessionId),
-                  ),
-                )
-                .for("update")
-                .limit(1)
-            : [];
-        // Child completion remains durable model memory, but it is not new
-        // human intent. A completed/paused goal or an already-failed parent is
-        // settled authority and cannot be restarted solely by a late child.
-        // A live parent turn consumes the update in its ordinary loop. Once an
-        // ordinary no-goal turn has settled, its child result remains pending
-        // until new human intent arrives. Only an active goal is a durable
-        // obligation that may autonomously wake an idle parent.
-        const childResultMayWake =
-          input.kind !== "child_terminal_result" ||
-          (session.status !== "failed" && goalForChildResult?.status === "active");
+        // Wake class: only an `immediate` kind may register a workflow wake or
+        // resume a cap-paused goal in this commit; a `deferred` kind is a
+        // durable pending row that the next claim delivers coalesced.
+        const wakeClass = SESSION_SYSTEM_UPDATE_WAKE_CLASS[input.kind];
+        const childLifecycleKind = isChildLifecycleSystemUpdateKind(input.kind);
+        // Every immediate kind except the goal's own synthesized continuation
+        // is external input for the goal. A child notice may not revive an
+        // already-failed parent (settled authority); every other kind already
+        // wakes one. A deferred notice never resumes a goal by itself: a goal
+        // resumed without a workflow wake would strand its obligation.
+        const externalGoalInput =
+          wakeClass === "immediate" &&
+          input.kind !== "goal_continuation" &&
+          (!childLifecycleKind || session.status !== "failed");
+        let goalStatus: string | null = null;
+        let autoResumed: SessionGoalAutoResumedByExternalInput | null = null;
+        if (externalGoalInput) {
+          // Session row first, then the goal row FOR UPDATE: the goal tools'
+          // order. A `max_auto_continuations` pause is pacing, not intent, so
+          // this new input resumes it in the same commit as the input itself
+          // and the goal counts as active for the wake decision below. Any
+          // other pause reason is left alone.
+          autoResumed = await autoResumeGoalPausedByCapInTransaction(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            cause: { kind: input.kind, updateId: inserted.id },
+            now,
+          });
+          if (autoResumed) {
+            goalStatus = autoResumed.goal.status;
+          } else {
+            const [goal] = await tx
+              .select({ status: schema.sessionGoals.status })
+              .from(schema.sessionGoals)
+              .where(
+                and(
+                  eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                  eq(schema.sessionGoals.sessionId, input.sessionId),
+                ),
+              )
+              .for("update")
+              .limit(1);
+            goalStatus = goal?.status ?? null;
+          }
+        }
+        const [resumedEvent] = autoResumed
+          ? await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 2 + supersessionSequences,
+                    type: "goal.resumed",
+                    payload: autoResumed.payload,
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning()
+          : [];
+        if (autoResumed && !resumedEvent) {
+          throw new Error("Failed to append goal.resumed event");
+        }
+        const appendedSequences = (autoResumed ? 2 : 1) + supersessionSequences;
+        // A child notice (completion, blocked-on-input, pause, capacity wait,
+        // progress) remains durable model memory, but it is not new human
+        // intent. A completed goal, a goal paused by intent, or an
+        // already-failed parent is settled authority and cannot be restarted
+        // solely by a late child. A live parent turn consumes the update in its
+        // ordinary loop. Once an ordinary no-goal turn has settled, its child
+        // notice remains pending until new human intent arrives. Only an
+        // active goal (including one this input just resumed from its pacing
+        // ceiling) is a durable obligation that may autonomously wake an idle
+        // parent, and only an `immediate` kind wakes at all.
+        const childNoticeMayWake =
+          !childLifecycleKind || (session.status !== "failed" && goalStatus === "active");
         const shouldWake =
-          childResultMayWake &&
+          wakeClass === "immediate" &&
+          childNoticeMayWake &&
           !realtimeActive &&
           session.activeTurnId === null &&
           effectiveControl.state === "active";
@@ -62360,7 +63528,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
         await tx
           .update(schema.sessions)
           .set({
-            lastSequence: session.lastSequence + 1,
+            lastSequence: session.lastSequence + appendedSequences,
             ...(shouldWake ? { status: "queued" as const } : {}),
             updatedAt: now,
           })
@@ -62373,10 +63541,108 @@ export async function addSessionSystemUpdateWithSourceMutation(
           workflowWakeRevision: wake?.wakeRevision ?? null,
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,
-          events: event ? [mapEvent(event)] : [],
+          events: [
+            mapEvent(event),
+            ...(supersededEvent ? [mapEvent(supersededEvent)] : []),
+            ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
+          ],
         };
       }),
   );
+}
+
+/**
+ * Mark this child's now-stale pending notices on the parent `superseded` and
+ * return their ids. Rules (producer-side, under the parent session lock):
+ * a newer `child_progress` from the same child supersedes every older pending
+ * one; a `child_requires_action_resolved` supersedes the pending
+ * `child_requires_action` of the same exact (child, turn, generation), because
+ * one accepted response advances that blocked boundary and a later re-freeze
+ * is a new generation with a new notice. Any other kind supersedes nothing.
+ */
+async function supersedeStaleChildLifecycleNoticesInTransaction(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    inserted: Pick<
+      typeof schema.sessionSystemUpdates.$inferSelect,
+      "id" | "kind" | "sourceId" | "payload" | "payloadCodecVersion"
+    >;
+  },
+): Promise<string[]> {
+  if (input.inserted.kind === "child_progress") {
+    const rows = await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.kind, "child_progress"),
+          eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+          ne(schema.sessionSystemUpdates.id, input.inserted.id),
+        ),
+      )
+      .returning({ id: schema.sessionSystemUpdates.id });
+    return rows.map((row) => row.id).sort();
+  }
+  if (input.inserted.kind === "child_requires_action_resolved") {
+    const payload = SessionSystemUpdatePayload.parse(
+      fromPostgresLosslessJson(input.inserted.payload, input.inserted.payloadCodecVersion),
+    );
+    if (payload.type !== "child_requires_action_resolved") return [];
+    const rows = await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.kind, "child_requires_action"),
+          eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnId' = ${payload.childTurnId}`,
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnGeneration' = ${String(payload.childTurnGeneration)}`,
+        ),
+      )
+      .returning({ id: schema.sessionSystemUpdates.id });
+    return rows.map((row) => row.id).sort();
+  }
+  if (input.inserted.kind === "child_terminal_result") {
+    // The child reached a terminal boundary: its still-pending progress and
+    // capacity-wait notices describe a state that no longer exists. A pending
+    // child_requires_action is deliberately NOT superseded here: terminal
+    // delivery is unordered against notice creation (a stale idle result
+    // delivered late by the reaper may land after the child got a new prompt
+    // and froze again), and every terminal path already emits its own exact
+    // (child, turn, generation) resolution, which is the ordered supersession.
+    // (A pending resolution stays: it is already informational.)
+    const rows = await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          inArray(schema.sessionSystemUpdates.kind, ["child_progress", "child_waiting_capacity"]),
+          eq(schema.sessionSystemUpdates.sourceId, input.inserted.sourceId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+        ),
+      )
+      .returning({ id: schema.sessionSystemUpdates.id });
+    return rows.map((row) => row.id).sort();
+  }
+  return [];
+}
+
+function childLifecycleSupersessionReason(
+  kind: string,
+): "superseded_by_newer_progress" | "superseded_by_resolution" | "superseded_by_terminal" {
+  if (kind === "child_progress") return "superseded_by_newer_progress";
+  if (kind === "child_terminal_result") return "superseded_by_terminal";
+  return "superseded_by_resolution";
 }
 
 export async function listOutstandingSessionSystemUpdates(
@@ -62612,6 +63878,8 @@ export async function acceptSessionApprovalDecision(
     sessionId: string;
     subjectId: string;
     payload: Record<string, unknown>;
+    /** Bounded decider kind for the parent's resolution notice; `human` when omitted. */
+    respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
     interactionIntervention?: {
       interventionId: string;
@@ -62626,12 +63894,17 @@ export async function acceptSessionApprovalDecision(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const sessionIds = await sessionIdsWithParentTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
           controlLock: "none",
-          sessionIds: [input.sessionId],
+          sessionIds,
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         if (input.clientEventId) {
           const [existing] = await tx
@@ -62829,6 +64102,21 @@ export async function acceptSessionApprovalDecision(
         if (!event) throw new Error("Failed to append approval decision");
         const approvalDecision = input.payload.decision;
         if (approvalDecision === "approve" || approvalDecision === "reject") {
+          await enqueueChildRequiresActionResolvedOutboxTx(
+            tx as unknown as Database,
+            input.workspaceId,
+            session,
+            {
+              turnId: turn.id,
+              turnGeneration: turn.executionGeneration,
+              requestId: null,
+              approvalId,
+              outcome: approvalDecision === "approve" ? "approved" : "rejected",
+              respondedByKind: input.respondedByKind ?? "human",
+            },
+          );
+        }
+        if (approvalDecision === "approve" || approvalDecision === "reject") {
           const [connectorRequest] = await tx
             .update(schema.connectorActionRequests)
             .set({
@@ -62957,6 +64245,7 @@ export async function expireSessionInteractionIntervention(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     subjectId: "system:expired",
+    respondedByKind: "system",
     payload: {
       approvalId: intervention.originatingToolCallId,
       decision: "reject",
@@ -65045,6 +66334,7 @@ export * from "./browser-auth";
 export * from "./browser-downloads";
 export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
+export * from "./interaction-placement-loss";
 export * from "./canonical-human-identities";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";

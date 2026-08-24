@@ -26,6 +26,13 @@ interface ToolCallCorrelation {
   callId: string;
   /** The next sub-op ordinal within this tool invocation (mutable). */
   ordinal: number;
+  /** Called before the durable adoption transaction starts. From this point
+   * the op-stream yield path owns exact cancellation if adoption is rejected. */
+  onDurableOpOwnershipTransferStarted?: (opId: string) => void;
+  /** Called synchronously after durable session adoption commits. This lets
+   * observers distinguish a completed transfer from its earlier cancellation
+   * handoff; the turn fence has already relinquished cancellation authority. */
+  onDurableOpOwnershipTransferred?: (opId: string) => void;
 }
 
 const storage = new AsyncLocalStorage<ToolCallCorrelation>();
@@ -48,8 +55,27 @@ export function sanitizeOpIdToken(raw: string): string {
  * durable op id minted inside — however deep in the transport — is
  * `{callId}:{ordinal}` with ordinals starting at 0 per invocation.
  */
-export function runWithToolCallCorrelation<T>(callId: string, fn: () => T): T {
-  return storage.run({ callId: sanitizeOpIdToken(callId), ordinal: 0 }, fn);
+export function runWithToolCallCorrelation<T>(
+  callId: string,
+  fn: () => T,
+  options: {
+    onDurableOpOwnershipTransferStarted?: (opId: string) => void;
+    onDurableOpOwnershipTransferred?: (opId: string) => void;
+  } = {},
+): T {
+  return storage.run(
+    {
+      callId: sanitizeOpIdToken(callId),
+      ordinal: 0,
+      ...(options.onDurableOpOwnershipTransferStarted
+        ? { onDurableOpOwnershipTransferStarted: options.onDurableOpOwnershipTransferStarted }
+        : {}),
+      ...(options.onDurableOpOwnershipTransferred
+        ? { onDurableOpOwnershipTransferred: options.onDurableOpOwnershipTransferred }
+        : {}),
+    },
+    fn,
+  );
 }
 
 /**
@@ -67,4 +93,17 @@ export function nextDurableOpId(): string | null {
   const ordinal = context.ordinal;
   context.ordinal += 1;
   return `${context.callId}:${ordinal}`;
+}
+
+/** Relinquish attempt-level cancellation before durable adoption starts. The
+ * op-stream yield path exact-cancels the provider op if the transaction later
+ * rejects, so there is never a period with no cancellation owner. */
+export function notifyDurableOpOwnershipTransferStarted(opId: string): void {
+  storage.getStore()?.onDurableOpOwnershipTransferStarted?.(opId);
+}
+
+/** Report that one exact provider operation completed its transfer into
+ * durable session ownership. Failed adoption deliberately emits no signal. */
+export function notifyDurableOpOwnershipTransferred(opId: string): void {
+  storage.getStore()?.onDurableOpOwnershipTransferred?.(opId);
 }

@@ -50,6 +50,7 @@ export const CODEX_REALTIME_NEGOTIATION_TIMEOUT_MS = 20_000;
 // OpenGeni policy: rotate conservatively without asserting an upstream lifetime.
 const DEFAULT_CONNECTION_ROTATION_INTERVAL_MS = 15 * 60_000;
 const DEFAULT_RECONNECT_BACKOFF_MS = [250, 1_000, 2_000, 5_000] as const;
+const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 const OWNER_RECORD_VERSION = 1;
 const OWNER_DELEGATION_REPLAY_VERSION = 1;
 const OWNER_DELEGATION_REPLAY_MAX_CALLS = 4_096;
@@ -224,6 +225,7 @@ export type CreateCodexRealtimeControllerOptions = {
   createPeerConnection?: (() => RTCPeerConnection) | undefined;
   getUserMedia?: ((constraints: MediaStreamConstraints) => Promise<MediaStream>) | undefined;
   randomUUID?: (() => string) | undefined;
+  now?: (() => Date) | undefined;
   setInterval?: ((callback: () => void, delayMs: number) => unknown) | undefined;
   clearInterval?: ((handle: unknown) => void) | undefined;
   setTimeout?: ((callback: () => void, delayMs: number) => unknown) | undefined;
@@ -316,6 +318,7 @@ export function createCodexRealtimeController(
   );
   const model = options.model ?? "gpt-live-1-boulder-alpha";
   const randomUUID = options.randomUUID ?? defaultRandomUUID;
+  const now = options.now ?? (() => new Date());
   const scheduleInterval =
     options.setInterval ?? ((callback, delay) => globalThis.setInterval(callback, delay));
   const unscheduleInterval =
@@ -362,6 +365,7 @@ export function createCodexRealtimeController(
   let rotationTimer: unknown = null;
   let reconnectTimer: unknown = null;
   let negotiationTimer: unknown = null;
+  let lostOwnerExpiryTimer: unknown = null;
   let closed = false;
   let stopping = false;
   let generation = 0;
@@ -456,11 +460,13 @@ export function createCodexRealtimeController(
     if (rotationTimer !== null) unscheduleTimeout(rotationTimer);
     if (reconnectTimer !== null) unscheduleTimeout(reconnectTimer);
     if (negotiationTimer !== null) unscheduleTimeout(negotiationTimer);
+    if (lostOwnerExpiryTimer !== null) unscheduleTimeout(lostOwnerExpiryTimer);
     heartbeatTimer = null;
     syncTimer = null;
     rotationTimer = null;
     reconnectTimer = null;
     negotiationTimer = null;
+    lostOwnerExpiryTimer = null;
   };
 
   const stopNegotiationTimers = (): void => {
@@ -1255,6 +1261,12 @@ export function createCodexRealtimeController(
       if (!record || record.operationId !== lifecycle.operationId) {
         closeBrowserResources();
         owner = null;
+        const leaseExpiresAt = Date.parse(lifecycle.leaseExpiresAt);
+        const remainingLeaseMs = leaseExpiresAt - now().getTime();
+        if (Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= 0) {
+          transitionEnded("Realtime lease expired");
+          return;
+        }
         const message =
           "Realtime is active in another browser owner. It can resume after that owner stops or its lease expires.";
         publish({
@@ -1265,6 +1277,15 @@ export function createCodexRealtimeController(
           diagnostic: diagnostic("lost_owner", message, false),
           error: message,
         });
+        if (Number.isFinite(remainingLeaseMs) && remainingLeaseMs <= MAX_BROWSER_TIMEOUT_MS) {
+          const observedRealtimeId = lifecycle.realtimeId;
+          lostOwnerExpiryTimer = scheduleTimeout(() => {
+            lostOwnerExpiryTimer = null;
+            if (state.status === "lost_owner" && state.realtimeId === observedRealtimeId) {
+              transitionEnded("Realtime lease expired");
+            }
+          }, remainingLeaseMs);
+        }
         return;
       }
       if (connectionTask || state.status === "starting") return;

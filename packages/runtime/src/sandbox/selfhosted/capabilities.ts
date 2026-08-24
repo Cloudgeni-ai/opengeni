@@ -119,6 +119,31 @@ export function selfhostedLiveness(input: {
   return { state: "offline", consented, hasDisplay };
 }
 
+/**
+ * Dashboard/list liveness: heartbeat + goodbye only. Fresh `lastSeenAt` (inside
+ * the reconnect window) is online. There is no ControlRpc ping here — attach,
+ * capability negotiation, and fleet tools still probe when they must know
+ * whether a responder is answering now.
+ */
+export function selfhostedHeartbeatLiveness(input: {
+  enrollment: SelfhostedEnrollment | null;
+  now?: Date;
+}): SelfhostedLivenessState {
+  const { enrollment } = input;
+  if (!enrollment || enrollment.status !== "active") {
+    return { state: "offline", consented: false, hasDisplay: false };
+  }
+  const now = input.now ?? new Date();
+  const lastSeen = enrollment.lastSeenAt ? new Date(enrollment.lastSeenAt).getTime() : null;
+  const heartbeatFresh =
+    lastSeen !== null && now.getTime() - lastSeen <= SELFHOSTED_RECONNECT_WINDOW_MS;
+  return selfhostedLiveness({
+    enrollment,
+    probeResponded: heartbeatFresh,
+    now,
+  });
+}
+
 export interface SelfhostedNegotiationInput {
   sessionId: string;
   os?: SandboxOs;

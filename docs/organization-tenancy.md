@@ -56,6 +56,14 @@ pages for one exact resource kind, include the opaque resource/origin identity,
 and return only grants targeting the route workspace. Resource kind derives the
 only accepted action (`connection.use`, `document.read`, `variable_set.use`,
 `rig.use`, or `connected_machine.use`) and its exact product permission gate.
+For a canonical managed human with that permission, an organization without
+the version-1 activation receipt has exactly zero usable personal authorities,
+so discovery returns an empty page. Issue, revoke, and runtime use remain
+activation-gated; the empty discovery answer does not activate the product or
+weaken any mutation fence.
+The managed personal-workspace projection includes `rigs:use`, allowing its
+owner to discover and propose changes to personal Rigs without granting the
+administrative `rigs:manage` capability.
 
 Public issuance supports `session` and `always`. Session grants are authorized
 through the ordinary session authorization seam after all target-free
@@ -860,8 +868,33 @@ organization and is inserted with owner provenance, visibility, and the first
 event/turn in the existing create transaction. The web checks the capability
 before enabling Only me, explains `not_activated` instead of silently hiding
 the choice, and never sends a restored private draft while that preflight is
-pending or denied. A Personal workspace remains intrinsically owner-only and
-therefore creates through the ordinary workspace-default wire path.
+pending or denied.
+
+Migration 0323 separates operator readiness from product enablement for shared
+organization workspaces. The version-1 `session_tenancy_activations` row
+remains the drained, evidence-backed operator prerequisite for every private
+create. A distinct FORCE-RLS `organization_private_session_settings` row is the
+owner/admin product decision for shared organization workspaces on top of that
+receipt. Its managed-session `GET`/`PATCH
+/v1/organizations/:organizationId/private-session-settings` API is backed by
+subject-bound SECURITY DEFINER functions with active-membership owner/admin
+role checks, optimistic versioning, and idempotent operation receipts; it never
+consults the organization members endpoint. Existing organizations that were
+already operator-activated are backfilled enabled so the rolling migration does
+not remove a shipped capability. For later activations, an owner or
+administrator must enable Only-me chats before use; the setting cannot be
+enabled before the receipt exists. Enablement does not grant access: any active
+member may use it only in a workspace where their ordinary grant carries
+`sessions:create`, and the private-create transaction rechecks their exact
+organization membership plus workspace membership. The setting is enforced by
+`open_private_session_create_capability` under the organization advisory fence
+and after keyed replay resolution, so a committed keyed create still replays
+after the setting is disabled while a fresh create fails closed
+(`SESSION_TENANCY_NOT_ACTIVATED`). A managed human's own Personal workspace
+keeps the exact 0311 rule: the receipt alone admits an explicit Only-me create
+there, and the setting is not consulted. Personal-workspace creates are not
+forced private by the server; the web still sends the ordinary workspace-default
+wire path for a Personal workspace.
 
 **Mutation-active only after an explicit per-organization cutover.**
 `transition_session_visibility` and `fork_session_content` exist, are SECURITY
@@ -879,7 +912,8 @@ writer of `session.visibility.changed`; core fetches the returned durable event
 id and sequence and performs best-effort live publication without appending a
 second event or waking a workflow.
 
-Migration 0303 itself is rolling and activates no organization. The drained
+Migration 0303 itself is rolling and supplies platform readiness, not the
+owner/admin product preference. The drained
 `bun run db:activate-session-tenancy -- --organization-id <uuid> --activated-by <operator>`
 command verifies the canonical opt-in, required migrations, zero-valued tenancy
 parity gates plus exact drainable/bounded lanes, while retaining the inventory

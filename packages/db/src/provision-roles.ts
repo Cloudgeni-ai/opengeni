@@ -944,6 +944,30 @@ BEGIN
     END IF;
     IF to_regprocedure(
       format(
+        '%I.propose_company_profile_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,text,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.propose_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.confirm_company_profile_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,uuid,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.confirm_company_profile_for_attempt(uuid, uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
         '%I.workspace_learning_policy_apply_activation(uuid,text,uuid,uuid,uuid,uuid,bigint,text,text,text)',
         ${literal(schema)}
       )
@@ -1233,6 +1257,57 @@ BEGIN
         'REVOKE ALL ON FUNCTION %I.assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean) FROM %I',
         ${literal(schema)},
         ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.get_private_session_create_policy(uuid,uuid,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.get_private_session_create_policy(uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.get_private_session_create_policy(uuid, uuid, text) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.get_organization_private_session_settings(uuid,text)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.get_organization_private_session_settings(uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.get_organization_private_session_settings(uuid, text) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.update_organization_private_session_settings(uuid,text,boolean,bigint,uuid)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.update_organization_private_session_settings(uuid, text, boolean, bigint, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.update_organization_private_session_settings(uuid, text, boolean, bigint, uuid) TO %I',
+        ${literal(schema)}, ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format('%I.organization_private_sessions_enabled(uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.organization_private_sessions_enabled(uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.organization_private_sessions_enabled(uuid) FROM %I',
+        ${literal(schema)}, ${literal(role)}
       );
     END IF;
     IF to_regprocedure(

@@ -8,6 +8,7 @@ import type {
   ComputerTarget,
 } from "@opengeni/sdk/interaction";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isNonRetryableInteractionError } from "../lib/interaction-errors";
 import {
   type EmbeddedComputerInteractionClientOverride,
   useEmbeddedComputerInteraction,
@@ -55,6 +56,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
   );
   const visible =
     state.computerSessionId === computerSessionId ? state : emptyState(computerSessionId, enabled);
+  const refreshBlocked = isNonRetryableInteractionError(visible.error);
   const selectedTargetIdRef = useRef<string | null>(visible.selectedTargetId);
   selectedTargetIdRef.current = visible.selectedTargetId;
   const targetsRef = useRef<{
@@ -173,15 +175,15 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
   }, [computerSessionId, enabled, invalidateRefresh, refresh]);
 
   useEffect(() => {
-    if (!enabled || !pageLive || visible.mutating) return;
+    if (!enabled || !pageLive || visible.mutating || refreshBlocked) return;
     const timer = setInterval(() => {
       if (!requestRef.current.controller) void refresh();
     }, pollIntervalMs);
     return () => clearInterval(timer);
-  }, [enabled, pageLive, pollIntervalMs, refresh, visible.mutating]);
+  }, [enabled, pageLive, pollIntervalMs, refresh, refreshBlocked, visible.mutating]);
 
   useEffect(() => {
-    if (!enabled || !computerSessionId || !pageLive) return;
+    if (!enabled || !computerSessionId || !pageLive || refreshBlocked) return;
     let disposed = false;
     const timer = setInterval(() => {
       void client.heartbeatComputerSession(workspaceId, computerSessionId).catch(() => {
@@ -192,7 +194,7 @@ export function useComputerSession(options: UseComputerSessionOptions): UseCompu
       disposed = true;
       clearInterval(timer);
     };
-  }, [client, computerSessionId, enabled, pageLive, refresh, workspaceId]);
+  }, [client, computerSessionId, enabled, pageLive, refresh, refreshBlocked, workspaceId]);
 
   const runMutation = useCallback(
     async <T>(scopeComputerSessionId: string, operation: () => Promise<T>): Promise<T> => {

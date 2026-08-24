@@ -42,6 +42,7 @@ import {
   getSessionGoal,
   getSessionSystemUpdateOutboxByDedupeKey,
   getSessionTurn,
+  listSessionEventPage,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
   listSessionDiscoverySummaries,
@@ -798,6 +799,193 @@ describe("clean session control plane", () => {
       { kind: "scoped", rootSessionIds: [], sessionIds: [third.id] },
     );
     expect(exactOnlyPaths.get(third.id)).toBeUndefined();
+  });
+
+  test("discovery and monitoring omit a human prompt until its turn is claimed", async () => {
+    const { grant, session } = await fixture();
+    const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+    const first = await send(grant, session.id, "already-running orchestrator prompt");
+    const firstAttemptId = crypto.randomUUID();
+    const runningTurn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+      { attemptId: firstAttemptId },
+    );
+    expect(runningTurn?.id).toBe(first.turn.id);
+    await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      {
+        type: "turn.started",
+        turnId: runningTurn!.id,
+        turnGeneration: runningTurn!.executionGeneration,
+        payload: { triggerEventId: runningTurn!.triggerEventId },
+      },
+      { type: "agent.message.completed", payload: { text: "previous claimed response" } },
+    ]);
+    const queuedText = "delegate this newly queued issue";
+    const accepted = await send(grant, session.id, queuedText);
+    expect(accepted.turn).toMatchObject({ status: "queued", startedAt: null });
+    const deletedText = "private prompt deleted before any claim";
+    const deleted = await send(grant, session.id, deletedText);
+    await withWorkspaceSessionActivityRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        deleteSessionQueueItemInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: deleted.turn.id,
+          expectedTurnVersion: deleted.turn.version,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          reason: "never model input",
+        }),
+      ),
+    );
+    expect(await getSessionTurn(client.db, grant.workspaceId!, deleted.turn.id)).toMatchObject({
+      status: "cancelled",
+      startedAt: null,
+    });
+
+    const waiting = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(waiting.sessions.find((entry) => entry.id === session.id)).toMatchObject({
+      queuedPromptCount: 1,
+      latestMessage: { type: "agent.message.completed", preview: "previous claimed response" },
+    });
+
+    const monitoringTail = await listSessionEventPage(client.db, grant.workspaceId!, session.id, {
+      direction: "before",
+      limit: 50,
+      payloadMode: "summary",
+      excludeUnclaimedHumanPrompts: true,
+    });
+    expect(JSON.stringify(monitoringTail.events)).not.toContain(queuedText);
+    expect(JSON.stringify(monitoringTail.events)).not.toContain(deletedText);
+    const monitoringNewestPrompt = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        direction: "before",
+        limit: 1,
+        includeTypes: ["user.message"],
+        payloadMode: "summary",
+        excludeUnclaimedHumanPrompts: true,
+      },
+    );
+    expect(monitoringNewestPrompt.events.map((event) => event.payload)).toEqual([
+      expect.objectContaining({ text: "already-running orchestrator prompt" }),
+    ]);
+
+    // Without the agent-monitoring option (REST, SSE replay, forensic reads) the
+    // exact stored queue row stays visible at its own sequence.
+    const exactTail = await listSessionEventPage(client.db, grant.workspaceId!, session.id, {
+      direction: "before",
+      limit: 50,
+      payloadMode: "summary",
+    });
+    const queuedRow = exactTail.events.find((event) => event.id === accepted.acceptedEventId);
+    expect(queuedRow).toMatchObject({
+      type: "user.message",
+      payload: expect.objectContaining({ text: queuedText }),
+    });
+    expect(JSON.stringify(exactTail.events)).toContain(deletedText);
+    expect(exactTail.events.filter((event) => event.type === "user.message")).toHaveLength(
+      monitoringTail.events.filter((event) => event.type === "user.message").length + 2,
+    );
+    expect(
+      exactTail.events
+        .filter((event) => event.type !== "user.message")
+        .map((event) => [event.id, event.sequence]),
+    ).toEqual(
+      monitoringTail.events
+        .filter((event) => event.type !== "user.message")
+        .map((event) => [event.id, event.sequence]),
+    );
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: runningTurn!.id,
+      triggerEventId: runningTurn!.triggerEventId,
+      attemptId: firstAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "delegated current issue" } }],
+    });
+    const claimed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+    );
+    expect(claimed?.id).toBe(accepted.turn.id);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, claimed!.id)).toMatchObject({
+      status: "running",
+      startedAt: expect.any(String),
+    });
+
+    const claimedNewestPrompt = await listSessionEventPage(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      {
+        direction: "before",
+        limit: 1,
+        includeTypes: ["user.message"],
+        payloadMode: "summary",
+        excludeUnclaimedHumanPrompts: true,
+      },
+    );
+    expect(claimedNewestPrompt.events).toEqual([
+      expect.objectContaining({
+        id: accepted.acceptedEventId,
+        sequence: queuedRow!.sequence,
+        type: "user.message",
+        payload: expect.objectContaining({ text: queuedText }),
+      }),
+    ]);
+
+    // The deleted prompt was never claimed, so it stays hidden even though it is
+    // newer than the claimed prompt; the claimed prompt is the latest message.
+    const running = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(running.sessions.find((entry) => entry.id === session.id)).toMatchObject({
+      queuedPromptCount: 0,
+      latestMessage: { type: "user.message", preview: queuedText },
+    });
+    const claimedTail = await listSessionEventPage(client.db, grant.workspaceId!, session.id, {
+      direction: "before",
+      limit: 50,
+      payloadMode: "summary",
+      excludeUnclaimedHumanPrompts: true,
+    });
+    expect(JSON.stringify(claimedTail.events)).toContain(queuedText);
+    expect(JSON.stringify(claimedTail.events)).not.toContain(deletedText);
+
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: claimed!.id,
+      triggerEventId: claimed!.triggerEventId,
+      attemptId: claimed!.activeAttemptId!,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "delegated" } }],
+    });
+    const completed = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
+      limit: 10,
+      includeLastMessage: true,
+    });
+    expect(completed.sessions.find((entry) => entry.id === session.id)).toMatchObject({
+      queuedPromptCount: 0,
+      latestMessage: { type: "user.message", preview: queuedText },
+    });
   });
 
   test("session discovery preserves exact keysets and hands concurrent changes to the next scan", async () => {
@@ -6088,6 +6276,12 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, {
+        ...call("connector-write-default", "unmanaged_write"),
+        approvalMode: "connector_write",
+      }),
+    ).toMatchObject({ managed: true, decision: "ask" });
 
     const allowCall = call("connector-allow", "read");
     expect(await prepareConnectorActionApproval(client.db, firstIdentity, allowCall)).toMatchObject(

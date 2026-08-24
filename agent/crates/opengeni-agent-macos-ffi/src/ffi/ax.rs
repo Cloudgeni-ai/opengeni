@@ -764,12 +764,10 @@ pub(super) fn list_targets(shareable_windows: &[ShareableWindow]) -> Vec<MacTarg
             let is_main = focused
                 && window
                     .bool_attribute(kAXMainAttribute)
-                    .ok()
-                    .is_some_and(bool::from);
+                    .is_ok_and(bool::from);
             let minimized = window
                 .bool_attribute(kAXMinimizedAttribute)
-                .ok()
-                .is_some_and(bool::from);
+                .is_ok_and(bool::from);
             if fingerprint.title.as_deref().is_none_or(str::is_empty)
                 && matched.is_none()
                 && !is_main
@@ -1057,13 +1055,11 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     };
     let was_application_frontmost = application_element
         .bool_attribute(kAXFrontmostAttribute)
-        .ok()
-        .is_some_and(bool::from);
+        .is_ok_and(bool::from);
     let was_window_main = window.as_ref().is_none_or(|window| {
         window
             .bool_attribute(kAXMainAttribute)
-            .ok()
-            .is_some_and(bool::from)
+            .is_ok_and(bool::from)
     });
     // AXFrontmost below is the exact per-PID foreground primitive. AppKit's
     // activateWithOptions is bundle-oriented and can synchronously stall for a
@@ -1119,13 +1115,11 @@ pub(super) fn focus_target(target: &MacTargetInfo) -> Result<(), MacFfiError> {
     loop {
         let application_frontmost = application_element
             .bool_attribute(kAXFrontmostAttribute)
-            .ok()
-            .is_some_and(bool::from);
+            .is_ok_and(bool::from);
         let window_main = window.as_ref().is_none_or(|window| {
             window
                 .bool_attribute(kAXMainAttribute)
-                .ok()
-                .is_some_and(bool::from)
+                .is_ok_and(bool::from)
         });
         if application_frontmost && window_main {
             break;
@@ -1355,8 +1349,7 @@ pub(super) fn run_background_application(
         let first_window_exists = application_element.as_ref().is_some_and(|element| {
             element
                 .windows_bounded(1)
-                .ok()
-                .is_some_and(|(windows, _)| !windows.is_empty())
+                .is_ok_and(|(windows, _)| !windows.is_empty())
         });
         if first_window_exists && first_window_seen_at.is_none() {
             first_window_seen_at = Some(Instant::now());

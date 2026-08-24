@@ -854,10 +854,39 @@ export class DockStateMockClient extends MockOpenGeniClient {
     sessionId: string,
     request?: { path?: string },
   ): Promise<Awaited<ReturnType<MockOpenGeniClient["fsList"]>>> {
-    const root = this.state.tree;
-    if (!root) return super.fsList(workspaceId, sessionId, request);
     const path = request?.path ?? "";
-    if (path === "") return { root, revision: 1, truncated: false };
+    const fixture = this.state.tree;
+    if (!fixture) return super.fsList(workspaceId, sessionId, request);
+    const fileSystemRoot =
+      this.state.capabilities === "error" ? "" : this.state.capabilities.FileSystem.root;
+    const rooted = path.startsWith("/") && fileSystemRoot.startsWith("/");
+    const rootPath = rooted ? fileSystemRoot : "";
+    const qualify = (node: FsTreeNode): FsTreeNode => ({
+      ...node,
+      path:
+        node.path === ""
+          ? rootPath
+          : rootPath === "/"
+            ? `/${node.path}`
+            : rootPath
+              ? `${rootPath}/${node.path}`
+              : node.path,
+      ...(node.children ? { children: node.children.map(qualify) } : {}),
+    });
+    const root = qualify(fixture);
+    const shallow = (node: FsTreeNode): FsTreeNode => ({
+      ...node,
+      ...(node.children
+        ? {
+            children: node.children.map((child) =>
+              child.type === "dir" ? { ...child, children: [] } : child,
+            ),
+          }
+        : {}),
+    });
+    if (path === "" || path === rootPath) {
+      return { root: shallow(root), revision: 1, truncated: false };
+    }
     // Walk the fixture tree to the requested dir so lazy-expand serves children.
     const find = (node: FsTreeNode): FsTreeNode | null => {
       if (node.path === path) return node;
@@ -868,6 +897,10 @@ export class DockStateMockClient extends MockOpenGeniClient {
       return null;
     };
     const node = find(root);
-    return { root: node ?? { ...root, path, name: path }, revision: 1, truncated: false };
+    return {
+      root: shallow(node ?? { ...root, path, name: path }),
+      revision: 1,
+      truncated: false,
+    };
   }
 }

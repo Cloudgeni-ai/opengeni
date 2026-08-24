@@ -8314,7 +8314,21 @@ describe("API component integration", () => {
       nextBefore: number;
       nextAfter: null;
     }>(mcp, "session_events", { sessionId: created.id });
+    // The MCP monitoring read omits the human prompt while its turn is unclaimed;
+    // the exact row remains in forensic mode and in the REST events API.
     expect(timeline.events.map((event) => event.type)).toEqual([
+      "session.created",
+      "goal.set",
+      "session.status.changed",
+      "turn.queued",
+    ]);
+    expect(JSON.stringify(timeline.events)).not.toContain("take the staging deploy zero-to-one");
+    const forensicTimeline = await callMcpTool<{ events: Array<{ type: string }> }>(
+      mcp,
+      "session_events",
+      { sessionId: created.id, mode: "forensic", payloadMode: "full" },
+    );
+    expect(forensicTimeline.events.map((event) => event.type)).toEqual([
       "session.created",
       "goal.set",
       "user.message",

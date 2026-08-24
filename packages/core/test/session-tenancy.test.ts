@@ -48,7 +48,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session tenancy application service", () => {
-  test("reports private-create availability only to the exact managed human after activation", async () => {
+  test("reports private-create availability to members only after organization enablement", async () => {
     if (!shared || !client) return;
     const userId = `core-private-create-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;
@@ -70,6 +70,22 @@ describe("managed-human session tenancy application service", () => {
     } satisfies AccessGrantAuthorization;
 
     await expect(
+      getManagedHumanSessionCreateCapabilities(
+        { db: client.db },
+        {
+          ...canonical,
+          grant: {
+            ...grant,
+            permissions: grant.permissions.filter(
+              (permission) => permission !== "sessions:create" && permission !== "workspace:admin",
+            ),
+          },
+        },
+        grant.workspaceId,
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+
+    await expect(
       getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
     ).resolves.toEqual({
       activated: false,
@@ -84,7 +100,44 @@ describe("managed-human session tenancy application service", () => {
       )`;
     await expect(
       getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
-    ).resolves.toEqual({ activated: true, canCreatePrivate: true, reason: "available" });
+    ).resolves.toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "not_activated",
+    });
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${grant.accountId} and subject_id = ${subjectId}`;
+    if (!membership) throw new Error("organization membership missing");
+    await shared.admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, ${membership.id})`;
+    await shared.admin`
+      update organization_memberships set role = 'member' where id = ${membership.id}`;
+    await expect(
+      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+    ).resolves.toEqual({
+      activated: true,
+      canCreatePrivate: true,
+      reason: "available",
+    });
+    // A canonical managed human without an ACTIVE organization membership is a
+    // capability answer (not private-ready), never an unmapped database error.
+    await shared.admin`
+      update organization_memberships set status = 'suspended' where id = ${membership.id}`;
+    try {
+      await expect(
+        getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+      ).resolves.toEqual({
+        activated: false,
+        canCreatePrivate: false,
+        reason: "not_activated",
+      });
+    } finally {
+      await shared.admin`
+        update organization_memberships set status = 'active' where id = ${membership.id}`;
+    }
 
     await expect(
       getManagedHumanSessionCreateCapabilities(
@@ -97,6 +150,94 @@ describe("managed-human session tenancy application service", () => {
       canCreatePrivate: false,
       reason: "managed_session_required",
     });
+  }, 180_000);
+
+  test("returns empty personal-resource discovery before activation while mutations stay closed", async () => {
+    if (!shared || !client) return;
+    const userId = `core-personal-discovery-inactive-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Inactive personal-resource discovery",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no shared workspace grant");
+    const authorization = {
+      grant: {
+        ...grant,
+        permissions: [...new Set([...grant.permissions, "rigs:use", "sessions:create"])],
+      },
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    } satisfies AccessGrantAuthorization;
+    const deps = {
+      db: client.db,
+      sessionAuthorization: {
+        authorizeSession: async () => {
+          throw new Error("host authorization must not run before activation");
+        },
+        resolveListScope: async () => ({ kind: "all" as const }),
+      },
+    };
+
+    await expect(
+      listManagedHumanUserResourceAuthorities(
+        deps,
+        { ...authorization, canonicalManagedHumanSession: false },
+        grant.workspaceId,
+        { resourceKind: "rig", limit: 100 },
+      ),
+    ).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
+    await expect(
+      listManagedHumanUserResourceAuthorities(
+        deps,
+        {
+          ...authorization,
+          grant: {
+            ...authorization.grant,
+            permissions: authorization.grant.permissions.filter(
+              (permission) => permission !== "rigs:use" && permission !== "workspace:admin",
+            ),
+          },
+        },
+        grant.workspaceId,
+        { resourceKind: "rig", limit: 100 },
+      ),
+    ).rejects.toMatchObject({ status: 403 } satisfies Partial<HTTPException>);
+    await expect(
+      listManagedHumanUserResourceAuthorities(deps, authorization, grant.workspaceId, {
+        resourceKind: "rig",
+        limit: 100,
+      }),
+    ).resolves.toEqual({ authorities: [], nextCursor: null });
+    await expect(
+      issueManagedHumanUserResourceGrant(
+        deps,
+        authorization,
+        grant.workspaceId,
+        crypto.randomUUID(),
+        {
+          scope: "user",
+          resourceKind: "rig",
+          mode: "always",
+          context: "user_private",
+          workspaceSharedAcknowledged: false,
+        },
+      ),
+    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+    await expect(
+      revokeManagedHumanUserResourceGrant(
+        deps,
+        authorization,
+        grant.workspaceId,
+        crypto.randomUUID(),
+      ),
+    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
   }, 180_000);
 
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {

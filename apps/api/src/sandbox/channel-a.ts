@@ -580,8 +580,10 @@ async function withChannelAOperation<T>(
           codemodeTokenFileFromEnvironment(environment, session.id),
         )
       : credentialSession;
+    const fileSystemRoot = await routingSession.fileSystemRoot();
     const service = new SandboxChannelAService({
       session: scopedSession as ChannelASession,
+      workspaceRoot: fileSystemRoot,
       leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
       emit,
     });

@@ -189,7 +189,15 @@ export type SessionClientLike = Pick<
   | "terminalPtyResize"
   | "terminalPtyClose"
 > &
-  Partial<Pick<OpenGeniClient, "createVideoArtifactPlaybackSource" | "streamWorkspaceLiveEvents">>;
+  Partial<
+    Pick<
+      OpenGeniClient,
+      | "createVideoArtifactPlaybackSource"
+      | "streamWorkspaceLiveEvents"
+      | "listSessionBackgroundCommands"
+      | "cancelSessionBackgroundCommand"
+    >
+  >;
 
 /**
  * Tenant-safe client surface required by the session-only React entry.

@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES,
+  AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS,
+  AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS,
+  AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE,
+} from "./agent-authored-durable-text";
+import { HumanInputQuestion } from "./index";
 
 export const COMPANY_PROFILE_SCALAR_MAX_CHARS = 2_048;
 export const COMPANY_PROFILE_ENTRY_MAX_CHARS = 1_024;
@@ -100,10 +107,56 @@ export const CompanyProfileContent = z
   });
 export type CompanyProfileContent = z.infer<typeof CompanyProfileContent>;
 
+/**
+ * The same profile, bounded for an **agent** author. The human `account:admin`
+ * route keeps `CompanyProfileContent` and its wider limits; this is the shape
+ * the first-party `company_profile_propose` tool accepts, because the profile is
+ * the largest always-on prompt surface in the product and a model left to its
+ * own judgement fills every field to the ceiling.
+ */
+export const AgentAuthoredCompanyProfileContent = CompanyProfileContent.superRefine(
+  (value, context) => {
+    for (const field of ["identity", "mission"] as const) {
+      const scalar = value[field];
+      if (scalar !== null && scalar.length > AGENT_AUTHORED_COMPANY_PROFILE_SCALAR_MAX_CHARS) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: `${field} is ${scalar.length} characters. ${AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE}`,
+        });
+      }
+    }
+    for (const field of ["products", "customers", "goals", "constraints"] as const) {
+      for (const [index, entry] of value[field].entries()) {
+        if (entry.content.length > AGENT_AUTHORED_COMPANY_PROFILE_ENTRY_MAX_CHARS) {
+          context.addIssue({
+            code: "custom",
+            path: [field, index, "content"],
+            message: `this entry is ${entry.content.length} characters. ${AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE}`,
+          });
+        }
+      }
+    }
+    const contentBytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    if (contentBytes > AGENT_AUTHORED_COMPANY_PROFILE_CONTENT_MAX_UTF8_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `this profile is ${contentBytes} UTF-8 bytes. ${AGENT_AUTHORED_COMPANY_PROFILE_TOO_LONG_MESSAGE}`,
+      });
+    }
+  },
+);
+export type AgentAuthoredCompanyProfileContent = z.infer<typeof AgentAuthoredCompanyProfileContent>;
+
 export const CompanyProfileRevisionIntent = z.enum(["active", "proposal"]);
 export type CompanyProfileRevisionIntent = z.infer<typeof CompanyProfileRevisionIntent>;
 
-export const CompanyProfileProvenanceSource = z.enum(["human", "durable_learning", "migration"]);
+export const CompanyProfileProvenanceSource = z.enum([
+  "human",
+  "agent_admin",
+  "durable_learning",
+  "migration",
+]);
 export type CompanyProfileProvenanceSource = z.infer<typeof CompanyProfileProvenanceSource>;
 
 export const CompanyProfilePrincipalKind = z.enum(["human_session", "agent_attempt", "service"]);
@@ -239,6 +292,74 @@ export const CompanyProfileMutationResponse = z.object({
   event: CompanyProfileActivationEvent.nullable(),
 });
 export type CompanyProfileMutationResponse = z.infer<typeof CompanyProfileMutationResponse>;
+
+export const COMPANY_PROFILE_AGENT_APPROVE_OPTION = "activate" as const;
+export const COMPANY_PROFILE_AGENT_REJECT_OPTION = "skip" as const;
+
+export const CompanyProfileAgentAttempt = z
+  .object({
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
+    agentSubjectId: z.string().trim().min(1).max(1_024),
+  })
+  .strict();
+export type CompanyProfileAgentAttempt = z.infer<typeof CompanyProfileAgentAttempt>;
+
+export const CompanyProfileAgentProposalRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    profile: CompanyProfileContent,
+    reason: z.string().trim().min(1).max(COMPANY_PROFILE_REASON_MAX_CHARS),
+  })
+  .strict();
+export type CompanyProfileAgentProposalRequest = z.infer<typeof CompanyProfileAgentProposalRequest>;
+
+// z.lazy avoids an import cycle because HumanInputQuestion is declared in the
+// root contracts module that re-exports this file.
+export const CompanyProfileAgentHumanInputPrompt = z.object({
+  questions: z.array(z.lazy(() => HumanInputQuestion)).length(1),
+  allowSkip: z.literal(false),
+});
+export type CompanyProfileAgentHumanInputPrompt = z.infer<
+  typeof CompanyProfileAgentHumanInputPrompt
+>;
+
+export const CompanyProfileAgentProposalReceipt = z.object({
+  status: z.literal("confirmation_required"),
+  operationId: z.string().uuid(),
+  proposalReceiptId: z.string().uuid(),
+  revision: CompanyProfileRevision,
+  humanInput: CompanyProfileAgentHumanInputPrompt,
+  confirmWith: z.literal("company_profile_confirm"),
+  replayed: z.boolean(),
+});
+export type CompanyProfileAgentProposalReceipt = z.infer<typeof CompanyProfileAgentProposalReceipt>;
+
+export const CompanyProfileAgentConfirmRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    proposalReceiptId: z.string().uuid(),
+    humanInputRequestId: z.string().uuid(),
+  })
+  .strict();
+export type CompanyProfileAgentConfirmRequest = z.infer<typeof CompanyProfileAgentConfirmRequest>;
+
+export const CompanyProfileAgentConfirmationReceipt = z.object({
+  status: z.literal("activated"),
+  operationId: z.string().uuid(),
+  confirmationReceiptId: z.string().uuid(),
+  proposalReceiptId: z.string().uuid(),
+  humanInputRequestId: z.string().uuid(),
+  mutation: CompanyProfileMutationResponse,
+  replayed: z.boolean(),
+});
+export type CompanyProfileAgentConfirmationReceipt = z.infer<
+  typeof CompanyProfileAgentConfirmationReceipt
+>;
 
 export const CompanyProfileDiffRequest = z
   .object({ fromRevisionId: z.string().uuid(), toRevisionId: z.string().uuid() })

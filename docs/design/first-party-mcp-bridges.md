@@ -59,27 +59,18 @@ descriptor. Compiler-wide OpenAPI destination governance remains separate work.
   committed catalog (`https://connect.squareup.com/v2/mcp/cash-app`). It needs
   no local bridge. A broader Square bridge requires a separately reviewed tool
   surface and product identity; the old SSE premise is not current.
-- **GitHub** retains its host-owned GitHub App installation and repository
-  allowlist authority. It is deliberately not converted into a Connection or
-  duplicate catalog Connector by this contract.
-
-### Proposed GitHub bridge follow-up
-
-Keep the existing single GitHub Integration row and owner-consent flow. Add one
-host-authority local bridge that mints a short-lived installation token only
-after rechecking the exact live workspace binding and selected repository for
-each call. The first reviewed surface should be:
-
-- reads: repository list, issue get/list, pull-request get/list, file get, and
-  code search;
-- writes: issue create/comment and pull-request create/comment;
-- every write remains approval-gated and uses a caller operation identity when
-  GitHub exposes a safe idempotency/reconciliation seam; otherwise an ambiguous
-  provider outcome is reported and never replayed.
-
-The bridge should require `github:use`, keep installation tokens host-only, and
-remain absent from generic Connection/OAuth resolution. Repository identity
-must be one of the binding's current durable allowlist entries before token
-mint or provider I/O. Expanding this surface, especially reviews, merges,
-workflow dispatch, branch mutation, or repository administration, needs a
-separate safety and approval review.
+- **GitHub** uses one static-reviewed `GitHubRestMcpServer` protocol bridge with
+  two non-substitutable worker authority adapters: the workspace GitHub App
+  acts as the OpenGeni bot, while personal OAuth acts as the exact connected
+  user. The default-off `OPENGENI_GITHUB_REST_MCP_ENABLED` flag adds the
+  resource-backed namespaces only when an accepted turn carries matching
+  repositories. Arguments can select only `owner/name` from that private
+  accepted set; they cannot select a connection or actor. Every physical API
+  request revalidates the current installation/Connection and repository row.
+  Reads cover repositories, branches/refs, files, issues, pull requests,
+  checks/status, and bounded code search. Reviewed writes cover branch/ref,
+  issue, pull-request, comment, and review-request creation/update only. Missing
+  write policy defaults to Ask; explicit Allow/Ask/Block remains attempt-frozen
+  for model and Codemode calls. Mutations are never replayed after an ambiguous
+  provider outcome. Merge, force-push, ref deletion, releases, workflows,
+  administration, and other unreviewed mutations are absent.

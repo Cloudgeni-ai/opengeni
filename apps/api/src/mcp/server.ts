@@ -44,6 +44,7 @@ import {
   TASK_NOTE_MAX_LIFETIME_DAYS,
   TASK_NOTE_REASON_MAX_BYTES,
   TASK_NOTE_TEXT_MAX_BYTES,
+  SubmitHumanInputResponseRequest,
 } from "@opengeni/contracts";
 import {
   countVariableSets,
@@ -102,6 +103,8 @@ import {
   createTaskNote,
   listTaskNotes,
   replaceTaskNote,
+  acceptSessionHumanInputResponse,
+  HumanInputResponseValidationError,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import { allowedFirstPartyMcpToolsForSession, codemodeWorkspaceUrl } from "@opengeni/config";
@@ -239,8 +242,8 @@ import {
 import { AtlassianConnectionMetadata } from "@opengeni/contracts/atlassian";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyBrainGovernedWriteTools } from "./company-brain-governed-writes";
+import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
 import { registerRememberTools } from "./remember";
-import { registerCompanyProfileTools } from "./company-profile";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 
@@ -434,9 +437,14 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["documents:search", "sessions:control", "workspace:read"],
   },
-  // Agent-directed company-profile proposals record an inactive organization
-  // revision; activation stays with the organization account admin.
-  company_profile_propose: { sessionRequired: true, allOf: ["workspace:read", "sessions:control"] },
+  company_profile_propose: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "workspace:read"],
+  },
+  company_profile_confirm: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "workspace:read"],
+  },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -459,6 +467,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   session_pause: { allOf: ["sessions:control"] },
   session_resume: { allOf: ["sessions:control"] },
   session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
+  // A live attempt may answer another session's structured human-input
+  // request (never a tool approval, which stays human-only).
+  session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
   set_other_session_title: { allOf: ["sessions:control"] },
   interaction_discover: { sessionRequired: true, allOf: ["sessions:read"] },
   browser_open: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -789,6 +800,20 @@ export function buildOpenGeniMcpServer(
       },
       json,
     });
+    registerCompanyProfileAgentAdminTools({
+      server,
+      db: deps.db,
+      attempt: {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        ...attempt,
+        agentSubjectId: grant.subjectId,
+      },
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
     registerRememberTools({
       server,
       db: deps.db,
@@ -797,20 +822,6 @@ export function buildOpenGeniMcpServer(
         workspaceId: grant.workspaceId,
         ...attempt,
       },
-      authorize: async () => {
-        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
-      },
-      json,
-    });
-    registerCompanyProfileTools({
-      server,
-      db: deps.db,
-      attempt: {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        ...attempt,
-      },
-      actorSubjectId: grant.subjectId,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },
@@ -2510,13 +2521,16 @@ function registerGoalTools(
     {
       description:
         "Create a goal when this session has none, or replace a completed goal with a new one. While active, idle moments synthesize continuation turns until goal_complete or goal_pause. To change an active or paused goal, use goal_update with its objective revision, a change kind, and rationale.",
+      // `maxAutoContinuations` is deliberately not agent-facing: the ceiling is
+      // API/scheduled-task pacing configuration, and an agent that set its own
+      // cap used to silence its orchestration for hours. Continuation pacing is
+      // the deployment's input-aware idle backoff instead.
       inputSchema: {
         text: goalText,
         successCriteria: successCriteriaSchema.optional(),
-        maxAutoContinuations: z4.number().int().positive().optional(),
       },
     },
-    async ({ text, successCriteria, maxAutoContinuations }) => {
+    async ({ text, successCriteria }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -2536,7 +2550,7 @@ function registerGoalTools(
         sessionId,
         text,
         successCriteria: successCriteria ?? null,
-        maxAutoContinuations: maxAutoContinuations ?? null,
+        maxAutoContinuations: null,
         createdBy: "agent",
         actor: "agent",
       });
@@ -3984,7 +3998,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in; its rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
+        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in and never previews a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim): waiting work is represented by queuedPromptCount until the turn is claimed. Rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -4068,7 +4082,7 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` as an exclusive lookup for the authoritative newest durable sequence in exactly one semantic class; `receipt` is the concise alias for `tool_receipt`, and latest cannot be combined with type or class filters. Add `resultMode=compact` to latest for one bounded result-bearing completion/checkpoint/receipt without another inference. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
+          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Monitoring mode also omits a human/API user.message whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim; waiting work is represented by sessions_list queuedPromptCount); the row appears at its own sequence once the turn is claimed. Use `latest` as an exclusive lookup for the authoritative newest durable sequence in exactly one semantic class; `receipt` is the concise alias for `tool_receipt`, and latest cannot be combined with type or class filters. Add `resultMode=compact` to latest for one bounded result-bearing completion/checkpoint/receipt without another inference. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads, including unclaimed prompt rows, require mode=forensic or the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           after: z4.number().int().nonnegative().optional(),
@@ -4141,6 +4155,7 @@ function registerWorkspaceOrchestrationTools(
           includeClasses: latestClass ? [latestClass] : (includeClasses ?? []),
           excludeClasses: excludeClasses ?? [],
           ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+          ...(mode === "monitoring" ? { excludeUnclaimedHumanPrompts: true } : {}),
           ...(latestClass ? { authoritativeLatest: true } : {}),
           maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
         });
@@ -4639,6 +4654,85 @@ function registerWorkspaceOrchestrationTools(
                 stoppingPreviousAttempt: result.interruptionCount > 0,
               },
               updateId: result.updateId,
+              nextAction: { tool: "session_get", arguments: { sessionId } },
+            }),
+          );
+        },
+      );
+
+      server.registerTool(
+        "session_human_input_respond",
+        {
+          description:
+            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId. Use it only when you actually know the answer; otherwise report the exact blocker to the user. Tool approvals are decided by humans only and cannot be answered here. The response is recorded as an agent-attempt answer and resumes that session's blocked turn.",
+          inputSchema: {
+            sessionId: z4.string().uuid(),
+            requestId: z4.string().uuid(),
+            response: z4.unknown(),
+            idempotencyKey: z4.string().uuid(),
+          },
+        },
+        async ({ sessionId, requestId, response, idempotencyKey }) => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.human_input.write");
+          const context = exactAgentCommandContext(grant, callerSessionId, "first_party_mcp");
+          const parsedResponse = SubmitHumanInputResponseRequest.parse(response);
+          let accepted: Awaited<ReturnType<typeof acceptSessionHumanInputResponse>>;
+          try {
+            accepted = await acceptSessionHumanInputResponse(deps.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId,
+              requestId,
+              response: parsedResponse,
+              respondedBy: `agent_attempt:${context.callerAttemptId}`,
+              respondedByKind: "agent_attempt",
+              clientEventId: idempotencyKey,
+            });
+          } catch (error) {
+            if (error instanceof HumanInputResponseValidationError) {
+              throw new Error(`human-input response rejected: ${error.message}`, { cause: error });
+            }
+            throw error;
+          }
+          if (accepted.action === "not_found") {
+            throw new Error("human-input request not found");
+          }
+          await publishDurableSessionEvents(
+            deps.bus,
+            grant.workspaceId,
+            sessionId,
+            accepted.events,
+          );
+          if (accepted.workflowWakeRevision !== null) {
+            await deps.workflowClient.signalApprovalDecision({
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId,
+              eventId: accepted.events[0]?.id ?? requestId,
+              workflowId: `session-${sessionId}`,
+              workflowWakeRevision: accepted.workflowWakeRevision,
+            });
+          }
+          if (accepted.action === "conflict") {
+            throw new Error(`human-input request is ${accepted.request.status}`);
+          }
+          return json(
+            mcpMutationReceipt({
+              operation: "session_human_input_respond",
+              committed: true,
+              outcome: accepted.events.length === 0 ? "replayed" : "updated",
+              changed: accepted.events.length > 0,
+              resource: {
+                type: "session_human_input_request",
+                id: requestId,
+                state: accepted.request.status,
+              },
+              relatedResources: [{ type: "session", id: sessionId }],
+              timestamp: accepted.request.respondedAt ?? new Date().toISOString(),
+              idempotency: {
+                status: accepted.events.length === 0 ? "replayed" : "applied",
+              },
+              facts: { outcome: accepted.request.response?.outcome ?? null },
               nextAction: { tool: "session_get", arguments: { sessionId } },
             }),
           );
@@ -5248,7 +5342,14 @@ function requireVariableSetsUseForMcpAttachment(
   }
 }
 
-function repositoryWithScheduledTaskResource(
+/**
+ * Project one allowlisted GitHub App repository into the resource an agent or
+ * scheduled task attaches. Every listed repository is in the workspace
+ * allowlist, public or private, so every resource carries the stable ids
+ * that mint the scoped installation token; a bare URI would clone anonymously
+ * and could never push.
+ */
+export function repositoryWithScheduledTaskResource(
   repository: GitHubRepository,
 ): GitHubRepository & { resource: ResourceRef } {
   const uri = normalizedRepositoryUri(repository.cloneUrl);
@@ -5260,12 +5361,8 @@ function repositoryWithScheduledTaskResource(
       ref: repository.defaultBranch,
       provider: "github",
       mountPath: defaultRepositoryMountPath(uri, "github"),
-      ...(repository.private
-        ? {
-            githubInstallationId: repository.installationId,
-            githubRepositoryId: repository.id,
-          }
-        : {}),
+      githubInstallationId: repository.installationId,
+      githubRepositoryId: repository.id,
     },
   };
 }

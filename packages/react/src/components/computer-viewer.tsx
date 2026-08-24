@@ -45,6 +45,7 @@ import { useComputerSessions } from "../hooks/use-computer-sessions";
 import { useInteractionInterventions } from "../hooks/use-interaction-interventions";
 import { cn } from "../lib/cn";
 import { copyTextToClipboard } from "../lib/clipboard";
+import { isSourcePlacementChangedError } from "../lib/interaction-errors";
 import type { EmbeddedComputerInteractionClientOverride } from "../session-context";
 import { InteractionInterventionBanner } from "./interaction-intervention-banner";
 import { DesktopViewer } from "./desktop-viewer";
@@ -93,11 +94,26 @@ export function ComputerViewer({
     () => registry.relevantSessions.filter((session) => isLiveComputer(session)),
     [registry.relevantSessions],
   );
+  const connectedPlacementLoss = useMemo(
+    () =>
+      registry.relevantSessions.find(
+        (session) =>
+          session.lifecycle === "lost" &&
+          session.failureCode === "source_placement_changed" &&
+          session.placement.kind === "connected_machine",
+      ) ?? null,
+    [registry.relevantSessions],
+  );
   const recentRelevantFailure = useMemo(
     () =>
       liveRelevant.length === 0
-        ? (registry.relevantSessions.find((session) =>
-            ["failed", "lost"].includes(session.lifecycle),
+        ? (registry.relevantSessions.find(
+            (session) =>
+              ["failed", "lost"].includes(session.lifecycle) &&
+              !(
+                session.failureCode === "source_placement_changed" &&
+                session.placement.kind === "connected_machine"
+              ),
           ) ?? null)
         : null,
     [liveRelevant.length, registry.relevantSessions],
@@ -136,6 +152,7 @@ export function ComputerViewer({
   const autoCreateSessionRef = useRef<string | null>(null);
   const emptyCatalogConfirmationRef = useRef<string | null>(null);
   const endedGenerationLossRef = useRef(new Set<string>());
+  const recreatedPlacementLossRef = useRef(new Set<string>());
   const [suppressGenericCreate, setSuppressGenericCreate] = useState(false);
   const endStaleComputer = registry.end;
   useEffect(() => {
@@ -167,6 +184,7 @@ export function ComputerViewer({
     handledRequestRef.current = null;
     autoCreateSessionRef.current = null;
     emptyCatalogConfirmationRef.current = null;
+    recreatedPlacementLossRef.current.clear();
     setSuppressGenericCreate(false);
     setCreateError(null);
     setSelection(
@@ -235,6 +253,10 @@ export function ComputerViewer({
     computerSessionId: selection?.sessionId ?? null,
     enabled: enabled && selection !== null && controllerReady,
   });
+  useEffect(() => {
+    if (!isSourcePlacementChangedError(computer.error, "computer_session")) return;
+    void refreshRegistry();
+  }, [computer.error, refreshRegistry]);
   const act = computer.act;
   const actFromFrame = computer.actFromFrame;
   const refreshComputer = computer.refresh;
@@ -336,6 +358,31 @@ export function ComputerViewer({
         setCreating(false);
       });
   }, [createSession, notifyError, selectComputerSession, sessionId]);
+
+  useEffect(() => {
+    if (
+      !enabled ||
+      registry.loading ||
+      registry.refreshing ||
+      liveRelevant.length > 0 ||
+      !connectedPlacementLoss ||
+      recreatedPlacementLossRef.current.has(connectedPlacementLoss.id)
+    ) {
+      return;
+    }
+    recreatedPlacementLossRef.current.add(connectedPlacementLoss.id);
+    autoCreateSessionRef.current = sessionId;
+    emptyCatalogConfirmationRef.current = null;
+    createComputer();
+  }, [
+    connectedPlacementLoss,
+    createComputer,
+    enabled,
+    liveRelevant.length,
+    registry.loading,
+    registry.refreshing,
+    sessionId,
+  ]);
 
   useEffect(() => {
     // Once this task's Desktop has been observed, a later transient empty

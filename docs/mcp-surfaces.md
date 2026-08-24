@@ -17,7 +17,7 @@ page exists so you pick the right one in one read.
 First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.
-- `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
+- `remember` / `remember_confirm` — explicit user-directed durable write with one bound human confirmation when the learning policy does not activate automatically. Content is bounded by the destination it lands in: 600 characters for a mandatory workspace rule, 1,200 for a preference, 4,000 for a Knowledge fact, on every agent surface reaching those destinations including task-note promotion (see [`company-brain-write-routing.md`](company-brain-write-routing.md)).
 
 These tools are session-scoped: they register only when the delegated bearer carries
 a worker-signed `sessionId` claim and the workspace's `settings.memoryEnabled`
@@ -26,7 +26,7 @@ the setting is off.
 
 First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEnabled`):
 
-- `company_profile_propose` - records one inactive organization company-profile proposal (`durable_learning` provenance, `agent-attempt:<attemptId>` source) for an exact agent attempt; it never activates, and an organization account admin activates it from Company Brain → Company profile & goals (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-profile administration for an exact agent attempt whose live turn was initiated by the organization owner: `propose` stages one inactive immutable full-profile revision (`agent_admin` provenance) and returns the exact `request_human_input` payload; `confirm` activates it only after that same human answered `activate`, through the existing profile lifecycle with immutable receipts (see [`company-profile.md`](company-profile.md)).
 
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 
