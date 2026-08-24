@@ -88,6 +88,7 @@ export function providerRecoveryResult(input: {
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable"
         ? Math.max(
             providerDelay ?? 0,
@@ -217,7 +218,12 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
     input.failureCode !== "mcp_transport_timeout" ||
     input.modelRequestStarted ||
     !Number.isSafeInteger(input.detail.executionGeneration) ||
-    input.detail.executionGeneration <= 1
+    input.detail.executionGeneration <= 1 ||
+    !Number.isSafeInteger(input.detail.providerRecoveryCount) ||
+    input.detail.providerRecoveryCount <= 0 ||
+    input.detail.providerRecoveryCount > MAX_AUTOMATIC_PROVIDER_RECOVERIES ||
+    !Number.isSafeInteger(input.detail.continueDelayMs) ||
+    input.detail.continueDelayMs <= 0
   ) {
     return null;
   }

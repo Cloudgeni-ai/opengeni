@@ -4385,6 +4385,8 @@ describe("escaped MCP transport timeout classifier", () => {
       turnId: "turn-2",
       triggerEventId: "trigger-1",
       executionGeneration: 2,
+      providerRecoveryCount: 1,
+      continueDelayMs: 2_000,
     };
     const escaped = escapedMcpTimeoutRecoveryFailure({
       failureCode: "mcp_transport_timeout",
@@ -4403,6 +4405,13 @@ describe("escaped MCP transport timeout classifier", () => {
         failureCode: "mcp_transport_timeout",
         modelRequestStarted: false,
         detail: { ...detail, executionGeneration: 1 },
+      }),
+    ).toBeNull();
+    expect(
+      escapedMcpTimeoutRecoveryFailure({
+        failureCode: "mcp_transport_timeout",
+        modelRequestStarted: false,
+        detail: { ...detail, providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1 },
       }),
     ).toBeNull();
     expect(
@@ -4961,17 +4970,25 @@ describe("transient provider error classifier", () => {
   });
 
   test("provider recovery backs off connectivity failures and honors rate-limit hints", () => {
-    expect(
-      [1, 2, 3, 4, 5].map((attemptNumber) =>
-        providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber }),
-      ),
-    ).toEqual([
+    const expectedConnectivityBackoff = [
       { status: "recovering", continueDelayMs: 2_000 },
       { status: "recovering", continueDelayMs: 5_000 },
       { status: "recovering", continueDelayMs: 15_000 },
       { status: "recovering", continueDelayMs: 30_000 },
       { status: "recovering", continueDelayMs: 60_000 },
-    ]);
+    ];
+    for (const failureCode of [
+      "provider_unavailable",
+      "upstream_connectivity_unavailable",
+      "mcp_transport_timeout",
+      "mcp_transport_unavailable",
+    ]) {
+      expect(
+        [1, 2, 3, 4, 5].map((attemptNumber) =>
+          providerRecoveryResult({ failureCode, attemptNumber }),
+        ),
+      ).toEqual(expectedConnectivityBackoff);
+    }
     const exhausted = providerRecoveryResult({
       failureCode: "provider_unavailable",
       attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,

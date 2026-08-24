@@ -8,6 +8,7 @@ let turn: {
   id: string;
   triggerEventId: string;
   executionGeneration: number;
+  metadata: Record<string, unknown>;
 } | null;
 let recoveryResult:
   | { action: "recovering"; events: unknown[] }
@@ -51,6 +52,8 @@ const input = {
   turnId: "turn-1",
   triggerEventId: "trigger-1",
   executionGeneration: 2,
+  providerRecoveryCount: 1,
+  continueDelayMs: 2_000,
 };
 
 describe("recoverEscapedMcpTimeout", () => {
@@ -62,6 +65,7 @@ describe("recoverEscapedMcpTimeout", () => {
       id: input.turnId,
       triggerEventId: input.triggerEventId,
       executionGeneration: input.executionGeneration,
+      metadata: {},
     };
     recoveryResult = {
       action: "recovering",
@@ -78,10 +82,12 @@ describe("recoverEscapedMcpTimeout", () => {
         triggerEventId: input.triggerEventId,
         attemptId: input.attemptId,
         reason: "mcp_transport_timeout",
+        providerRecoveryCount: input.providerRecoveryCount,
         detail: {
           code: "mcp_transport_timeout",
           retryable: true,
-          continueDelayMs: 60_000,
+          continueDelayMs: input.continueDelayMs,
+          providerRecoveryCount: input.providerRecoveryCount,
           recoverySource: "workflow_activity_failure",
         },
         fromStatuses: ["running"],
@@ -98,6 +104,7 @@ describe("recoverEscapedMcpTimeout", () => {
       id: input.turnId,
       triggerEventId: input.triggerEventId,
       executionGeneration: 1,
+      metadata: {},
     };
     expect(
       await makeActivities().recoverEscapedMcpTimeout({
@@ -110,7 +117,25 @@ describe("recoverEscapedMcpTimeout", () => {
       id: input.turnId,
       triggerEventId: "different-trigger",
       executionGeneration: input.executionGeneration,
+      metadata: {},
     };
+    expect(await makeActivities().recoverEscapedMcpTimeout(input)).toEqual({
+      action: "ineligible",
+    });
+    expect(recoveryCalls).toHaveLength(0);
+    expect(publishedEvents).toHaveLength(0);
+  });
+
+  test("rejects a recovery count that does not advance the durable turn count", async () => {
+    recoveryCalls.length = 0;
+    publishedEvents.length = 0;
+    turn = {
+      id: input.turnId,
+      triggerEventId: input.triggerEventId,
+      executionGeneration: input.executionGeneration,
+      metadata: { providerRecoveryCount: 1 },
+    };
+
     expect(await makeActivities().recoverEscapedMcpTimeout(input)).toEqual({
       action: "ineligible",
     });

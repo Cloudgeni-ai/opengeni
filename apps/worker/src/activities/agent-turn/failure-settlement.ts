@@ -1329,13 +1329,13 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     });
   }
   if (failure.retryable && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
+    const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
+    const recoveryResult = providerRecoveryResult({
+      failureCode: failure.code,
+      attemptNumber: nextProviderRecoveryCount,
+      retryAfterMs: providerRetryAfterMs(error),
+    });
     try {
-      const nextProviderRecoveryCount = attempt.providerRecoveryCount + 1;
-      const recoveryResult = providerRecoveryResult({
-        failureCode: failure.code,
-        attemptNumber: nextProviderRecoveryCount,
-        retryAfterMs: providerRetryAfterMs(error),
-      });
       if (recoveryResult.status === "recovering") {
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -1367,15 +1367,20 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
     } catch (recoveryError) {
-      const escaped = escapedMcpTimeoutRecoveryFailure({
-        failureCode: failure.code,
-        modelRequestStarted: attempt.modelRequestStarted,
-        detail: {
-          turnId: attempt.turnId,
-          triggerEventId: attempt.triggerEventId!,
-          executionGeneration: attempt.executionGeneration,
-        },
-      });
+      const escaped =
+        recoveryResult.status === "recovering"
+          ? escapedMcpTimeoutRecoveryFailure({
+              failureCode: failure.code,
+              modelRequestStarted: attempt.modelRequestStarted,
+              detail: {
+                turnId: attempt.turnId,
+                triggerEventId: attempt.triggerEventId!,
+                executionGeneration: attempt.executionGeneration,
+                providerRecoveryCount: nextProviderRecoveryCount,
+                continueDelayMs: recoveryResult.continueDelayMs,
+              },
+            })
+          : null;
       if (escaped) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
