@@ -101,6 +101,15 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       { table: "workspace_memberships", policy: "personal_document_authority_capability_read" },
       { table: "workspace_memberships", policy: "scoped_compute_capability_read" },
       { table: "workspace_memberships", policy: "variable_set_authority_capability_read" },
+      // The Default-collection backfill needs to enumerate every workspace in an
+      // account from inside its SECURITY DEFINER lifecycle, so it opens a
+      // marker-gated window on `workspaces`. Recorded here because it is broader
+      // than the three above: it is FOR ALL with no account predicate in either
+      // USING or WITH CHECK, so if RLS were ever enabled on `workspaces` this
+      // would be the entire admission set and the marker alone would decide.
+      // Confined to that definer today, but it is the one entry on this list
+      // that would need narrowing before `workspaces` could adopt RLS.
+      { table: "workspaces", policy: "document_default_backfill_lifecycle" },
     ]);
   }, 180_000);
 

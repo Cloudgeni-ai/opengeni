@@ -5302,6 +5302,55 @@ export type MoveDocumentRequest = {
   targetBaseId?: string | undefined;
 };
 
+export type DocumentAuthorityTuple = {
+  kind: DocumentAuthorityKind;
+  workspaceId: string | null;
+  subjectId: string | null;
+  authorityId: string | null;
+};
+
+export type ReclassifyDocumentAuthorityRequest = {
+  operationId: string;
+  expectedAuthority: DocumentAuthorityTuple;
+  targetAuthorityKind: DocumentAuthorityKind;
+};
+
+export type DocumentAuthorityReclassification = {
+  operationId: string;
+  documentId: string;
+  previousAuthority: DocumentAuthorityTuple;
+  authority: DocumentAuthorityTuple;
+  createdAt: string;
+};
+
+export type ListDocumentAuthorityReclassificationsOptions = {
+  limit?: number | undefined;
+  cursor?: string | undefined;
+};
+
+export type ListDocumentAuthorityReclassificationsResponse = {
+  receipts: DocumentAuthorityReclassification[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+export type RunDocumentDefaultCollectionBackfillRequest = {
+  runId: string;
+  operationId: string;
+  batchSize?: number | undefined;
+};
+
+export type DocumentDefaultCollectionBackfill = {
+  runId: string;
+  operationId: string;
+  status: "running" | "completed";
+  lastWorkspaceId: string | null;
+  processedCount: number;
+  createdCount: number;
+  adoptedCount: number;
+  completedAt: string | null;
+};
+
 export type DocumentSearchRequest = {
   query: string;
   baseIds?: string[] | undefined;

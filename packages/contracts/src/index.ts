@@ -4843,6 +4843,77 @@ export const MoveDocumentRequest = z.object({
 });
 export type MoveDocumentRequest = z.infer<typeof MoveDocumentRequest>;
 
+export const DocumentAuthorityTuple = z.object({
+  kind: DocumentAuthorityKind,
+  workspaceId: z.string().uuid().nullable(),
+  subjectId: z.string().nullable(),
+  authorityId: z.string().uuid().nullable(),
+});
+export type DocumentAuthorityTuple = z.infer<typeof DocumentAuthorityTuple>;
+
+export const ReclassifyDocumentAuthorityRequest = z.object({
+  operationId: z.string().uuid(),
+  expectedAuthority: DocumentAuthorityTuple,
+  targetAuthorityKind: DocumentAuthorityKind,
+});
+export type ReclassifyDocumentAuthorityRequest = z.infer<typeof ReclassifyDocumentAuthorityRequest>;
+
+export const DocumentAuthorityReclassification = z.object({
+  operationId: z.string().uuid(),
+  documentId: z.string().uuid(),
+  previousAuthority: DocumentAuthorityTuple,
+  authority: DocumentAuthorityTuple,
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type DocumentAuthorityReclassification = z.infer<typeof DocumentAuthorityReclassification>;
+
+export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT = 50;
+export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT = 100;
+export const DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS = 1_024;
+
+export const ListDocumentAuthorityReclassificationsQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
+    .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
+  cursor: z.string().min(1).max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).optional(),
+});
+export type ListDocumentAuthorityReclassificationsQuery = z.infer<
+  typeof ListDocumentAuthorityReclassificationsQuery
+>;
+
+export const ListDocumentAuthorityReclassificationsResponse = z.object({
+  receipts: z.array(DocumentAuthorityReclassification),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+});
+export type ListDocumentAuthorityReclassificationsResponse = z.infer<
+  typeof ListDocumentAuthorityReclassificationsResponse
+>;
+
+export const RunDocumentDefaultCollectionBackfillRequest = z.object({
+  runId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  batchSize: z.number().int().min(1).max(100).default(50),
+});
+export type RunDocumentDefaultCollectionBackfillRequest = z.infer<
+  typeof RunDocumentDefaultCollectionBackfillRequest
+>;
+
+export const DocumentDefaultCollectionBackfill = z.object({
+  runId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  status: z.enum(["running", "completed"]),
+  lastWorkspaceId: z.string().uuid().nullable(),
+  processedCount: z.number().int().nonnegative(),
+  createdCount: z.number().int().nonnegative(),
+  adoptedCount: z.number().int().nonnegative(),
+  completedAt: z.string().datetime({ offset: true }).nullable(),
+});
+export type DocumentDefaultCollectionBackfill = z.infer<typeof DocumentDefaultCollectionBackfill>;
+
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
   baseIds: z.array(z.string().uuid()).optional(),

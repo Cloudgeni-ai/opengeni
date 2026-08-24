@@ -294,6 +294,104 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
+  test("0339 pins Document migration routines and rejects TEMP relation shadows", async () => {
+    if (!available) return;
+    const routines = await admin<
+      Array<{ schema: string; name: string; securityDefiner: boolean; settings: string[] | null }>
+    >`
+      select
+        namespace.nspname as schema,
+        procedure.proname as name,
+        procedure.prosecdef as "securityDefiner",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where (
+        namespace.nspname = ${SCHEMA}
+        and procedure.proname in (
+          'reclassify_document_authority',
+          'list_document_authority_reclassifications',
+          'run_document_default_collection_backfill'
+        )
+      ) or (
+        namespace.nspname = 'opengeni_private'
+        and procedure.proname in (
+          'apply_document_authority',
+          'apply_document_chunk_authority'
+        )
+      )
+      order by namespace.nspname, procedure.proname`;
+    expect([...routines]).toEqual([
+      {
+        schema: "opengeni_private",
+        name: "apply_document_authority",
+        securityDefiner: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        schema: "opengeni_private",
+        name: "apply_document_chunk_authority",
+        securityDefiner: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        schema: SCHEMA,
+        name: "list_document_authority_reclassifications",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        schema: SCHEMA,
+        name: "reclassify_document_authority",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+      {
+        schema: SCHEMA,
+        name: "run_document_default_collection_backfill",
+        securityDefiner: true,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
+
+    const app = postgres(APP_URL, { max: 1 });
+    try {
+      const result = await app.begin(async (tx) => {
+        const accountId = crypto.randomUUID();
+        const workspaceId = crypto.randomUUID();
+        const documentId = crypto.randomUUID();
+        const subjectId = `user:temp-shadow-${crypto.randomUUID()}`;
+        await tx`
+          create temporary table document_authority_reclassifications (
+            operation_id uuid,
+            account_id uuid,
+            request_workspace_id uuid,
+            document_id uuid,
+            actor_subject_id text,
+            result jsonb,
+            created_at timestamptz
+          ) on commit drop`;
+        await tx`
+          insert into document_authority_reclassifications values (
+            ${crypto.randomUUID()}::uuid, ${accountId}::uuid, ${workspaceId}::uuid,
+            ${documentId}::uuid, ${subjectId}, ${tx.json({ shadowed: true })}, clock_timestamp()
+          )`;
+        await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${workspaceId}, true)`;
+        await tx`select set_config('opengeni.subject_id', ${subjectId}, true)`;
+        return await tx<Array<{ result: unknown }>>`
+          select result
+          from ${tx(SCHEMA)}.list_document_authority_reclassifications(
+            ${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${documentId}::uuid,
+            2, null, null
+          ) as result`;
+      });
+      expect([...result]).toEqual([]);
+    } finally {
+      await app.end();
+    }
+  }, 180_000);
+
   test("0323 pins every new definer routine to the dedicated schema", async () => {
     if (!available) return;
     const routines = await admin<

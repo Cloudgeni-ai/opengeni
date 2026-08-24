@@ -135,6 +135,26 @@ Configured/local subjects without an eligible active organization membership,
 and existing personal Documents, remain on the legacy origin-workspace lane
 instead of being guessed into a new organization-user authority.
 
+Migration `0339_document_authority_reclassification.sql` turns that deliberate
+non-guessing rule into an explicit administrator workflow. The caller supplies
+an idempotent operation id plus the exact expected Document authority tuple;
+the owner-only lifecycle writes an immutable before/after receipt and updates
+the Document and all chunks atomically. Stale tuples, conflicting operation-id
+reuse, a non-original subject claiming personal authority, and organization
+changes without exact account administration all fail closed. Origin
+workspace, base, file, creator, and content provenance never change. The exact
+account-admin capability is minted by the canonical access resolver and bound
+to its account and actor, rather than inferred from an organization-membership
+row or caller-set GUC. That keeps managed, local/configured, and signed delegated
+administrators equivalent. Activated personal Documents remain operable from a
+currently accessible same-organization sibling workspace after origin access is
+lost; targeting workspace authority still requires the immutable origin route.
+Receipt reads are bounded scope-bound cursor pages. A separate resumable
+run/operation/receipt ledger creates or adopts one internal Default collection
+per organization workspace without using collections as authority. A later
+cross-domain migration may consume these receipts as evidence but must not
+perform a second Document reclassification.
+
 Agent access is separate from human ownership. At exact attempt admission the
 database freezes only ready, agent-enabled personal Documents backed by an
 active `document.read` grant for that target workspace and the session's exact

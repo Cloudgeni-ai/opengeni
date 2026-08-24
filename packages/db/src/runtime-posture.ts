@@ -228,6 +228,14 @@ const PERSONAL_DOCUMENT_AUTHORITY_ROUTINES = [
   "resolve_document_original_file(uuid, uuid, text, uuid)",
   "resolve_session_attempt_personal_document_reads(uuid, uuid, uuid, uuid)",
 ] as const;
+const DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE =
+  "document_migration_capability_active(text)";
+const DOCUMENT_MIGRATION_CAPABILITY_TABLE = "document_migration_capabilities";
+const DOCUMENT_MIGRATION_AUTHORITY_ROUTINES = [
+  "list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamp with time zone, uuid)",
+  "reclassify_document_authority(jsonb)",
+  "run_document_default_collection_backfill(jsonb)",
+] as const;
 const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean)",
   "list_scoped_variable_sets(uuid, uuid, uuid, text, text)",
@@ -443,6 +451,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...CONNECTION_AUTHORITY_ROUTINES,
   ...PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES,
   ...PERSONAL_DOCUMENT_AUTHORITY_ROUTINES,
+  ...DOCUMENT_MIGRATION_AUTHORITY_ROUTINES,
   ...SCOPED_COMPUTE_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
@@ -542,8 +551,12 @@ export const FORCE_RLS_TABLES = [
   "connector_action_requests",
   "credit_ledger_entries",
   "device_enrollment_requests",
+  "document_authority_reclassifications",
   "document_bases",
   "document_chunks",
+  "document_default_collection_backfill_operations",
+  "document_default_collection_backfill_receipts",
+  "document_default_collection_backfill_runs",
   "documents",
   "editable_artifact_blob_refs",
   "editable_artifact_idempotency_receipts",
@@ -967,6 +980,7 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "company_profile_activation_events",
   "company_profile_heads",
   "company_profile_snapshots",
+  "document_authority_reclassifications",
   "knowledge_lifecycle_events",
   "knowledge_memory_lifecycle_events",
   "knowledge_memory_relationships",
@@ -1089,6 +1103,9 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "company_profile_agent_proposal_receipts",
   "connection_use_audit_facts",
   "connection_use_once_consumption_receipts",
+  "document_default_collection_backfill_operations",
+  "document_default_collection_backfill_receipts",
+  "document_default_collection_backfill_runs",
   "editable_artifact_live_tickets",
   "editable_artifact_scope_authorization_heads",
   "governed_learning_activation_receipts",
@@ -1531,6 +1548,7 @@ export async function inspectRuntimeDatabasePosture(
               ${SCHEDULED_PERSONAL_RESOURCE_CAPABILITY_TABLE},
               ${VARIABLE_SET_CAPABILITY_TABLE},
               ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
+              ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
               ${SCOPED_COMPUTE_CAPABILITY_TABLE}
             )
         `),
@@ -2142,7 +2160,10 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
-    } else if ((PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)) {
+    } else if (
+      (PERSONAL_DOCUMENT_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name) ||
+      (DOCUMENT_MIGRATION_AUTHORITY_ROUTINES as readonly string[]).includes(routine.name)
+    ) {
       const authorityOwner = tableByName.get("documents")?.owner ?? targetSchemaOwner;
       if (authorityOwner && routine.owner !== authorityOwner) {
         violations.push(
@@ -2497,6 +2518,59 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.publicExecute) {
       violations.push(
         `PUBLIC has forbidden personal-document capability predicate ${routine.name}`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", table.select],
+      ["INSERT", table.insert],
+      ["UPDATE", table.update],
+      ["DELETE", table.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
+    }
+  }
+
+  const documentMigrationCapabilityTables = posture.privateTables.filter(
+    (table) => table.name === DOCUMENT_MIGRATION_CAPABILITY_TABLE,
+  );
+  const documentMigrationCapabilityRoutines = posture.privateRoutines.filter(
+    (routine) => routine.name === DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE,
+  );
+  if (documentMigrationCapabilityTables.length !== 1) {
+    violations.push(
+      `document-migration capability table ${DOCUMENT_MIGRATION_CAPABILITY_TABLE} is missing or ambiguous`,
+    );
+  }
+  if (documentMigrationCapabilityRoutines.length !== 1) {
+    violations.push(
+      `document-migration capability predicate ${DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+    );
+  }
+  if (
+    documentMigrationCapabilityTables.length === 1 &&
+    documentMigrationCapabilityRoutines.length === 1
+  ) {
+    const table = documentMigrationCapabilityTables[0]!;
+    const routine = documentMigrationCapabilityRoutines[0]!;
+    if (routine.owner !== table.owner) {
+      violations.push(
+        `document-migration capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+      );
+    }
+    if (!routine.securityDefiner) {
+      violations.push(
+        `document-migration capability predicate ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(`runtime role lacks document-migration capability predicate ${routine.name}`);
+    }
+    if (routine.publicExecute) {
+      violations.push(
+        `PUBLIC has forbidden document-migration capability predicate ${routine.name}`,
       );
     }
     const directPrivileges = [

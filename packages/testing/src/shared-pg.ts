@@ -159,6 +159,17 @@ export type OwnerMigratedTestDatabase = {
   adminUrl: string;
   /** Superuser pool scoped to the same database. */
   admin: postgres.Sql;
+  /**
+   * The password the shared container's `opengeni_app` role actually has.
+   *
+   * PostgreSQL roles are CLUSTER-wide, not per-database, so `provisionRoles`
+   * with `rlsStrategy: "force"` issues `ALTER ROLE opengeni_app … PASSWORD` that
+   * takes effect for EVERY database in the container - including the shared
+   * template every other test file connects to. Passing a fresh password there
+   * makes concurrent shared-harness tests fail `28P01`, and passes in isolation,
+   * so pass this value instead and keep the ALTER an idempotent re-assertion.
+   */
+  appPassword: string;
   /** Drops the database, then the owner role, and decrements the refcount. */
   release: () => Promise<void>;
 };
@@ -749,6 +760,7 @@ export async function acquireOwnerMigratedTestDatabase(
       ownerRole,
       adminUrl,
       admin,
+      appPassword: APP_PASSWORD,
       release: async () => {
         if (released) {
           return;
