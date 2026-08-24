@@ -1191,6 +1191,23 @@ Dry runs still write nothing. The four membership-specific reason codes are
 part of the fixed, content-free vocabulary; no subject or proposed owner is
 stored in the ledger.
 
+Migration 0336 also repairs the two seams that walk feeds on. Migration 0290
+gave `list_organization_membership_backfill_anchors` and
+`list_organization_memberships_without_personal_workspace` the
+`organization_membership_backfill` marker on the shared
+`organization_tenancy_lifecycle` policy; migration 0305 restated that policy's
+marker list to add `personal_resource_grant_management` and dropped 0290's
+entry. Both seams have returned `[]` ever since for a NON-superuser migration
+owner - measured on `acquireOwnerMigratedTestDatabase`, not inferred. Because
+they are SECURITY DEFINER owned by that role, even a superuser *caller* gets the
+owner's RLS, so only a superuser-migrated database (every prior test harness)
+hid it. The consequence was that an already-anchored subject read as
+provisionable and the memberships carrying no personal workspace - the actual
+target population - were invisible, so the walk could not converge them and its
+receipt counts were wrong. 0336 restores that visibility as its own narrow
+read-only policy, `organization_membership_backfill_read`, so the next migration
+to restate the shared list cannot delete it again.
+
 #### Variable Sets, Rigs, and Connected Machines need no data rewrite
 
 These three families are already terminally classified, and the phase D
@@ -1887,6 +1904,19 @@ inventory/parity digests; the migration never invents historical evidence. The
 database recomputes inventory, parity, and receipt evidence while holding the
 complete source-table fence and rejects a stale or fabricated supplied digest
 with SQLSTATE `40001`.
+
+Migration 0336 additionally makes that receipt writable. Migration 0303 created
+`session_tenancy_activations` with FORCE ROW LEVEL SECURITY and a
+`FOR SELECT`-only policy and no INSERT policy at all, so under the documented
+non-superuser-owner posture the activation was denied `42501` on its own append
+after every gate had already passed - the cutover could not commit at all. The
+new `session_tenancy_activation_receipt_insert` policy re-opens exactly that one
+command for exactly the migration owner, gated on a
+`session_tenancy_activation` marker the function sets only around the append and
+restores on every exit, and fenced to the transaction's own organization. INSERT
+is the complete write set: the table is append-only, no `UPDATE` or `DELETE`
+writer exists anywhere in the tree, and activation is one-way. The runtime role
+keeps `SELECT` and nothing else.
 
 Migration 0336 also freezes the deployment-wide advisory boundary
 `session-tenancy-canonical-boundary:v1` behind the owner-only

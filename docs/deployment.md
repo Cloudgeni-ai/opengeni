@@ -520,17 +520,15 @@ For each subsequent activation:
    greenfield provisioning writes its complete graph before taking the same
    fence and the reversed order would deadlock.
 
-   **Known blocker, not owned by migration 0336.** Migration 0303 gave
-   `session_tenancy_activations` `FORCE ROW LEVEL SECURITY` plus a
-   `FOR SELECT`-only policy, so under the documented non-superuser migration
-   owner posture the activation's own receipt `INSERT` is denied with SQLSTATE
-   `42501` after every gate has already passed. Everything up to and including
-   `check_tenancy_backfill_activation_evidence(...).ready` plus clean parity
-   gates and lanes does work under that posture - see
-   `packages/db/test/migration-0336-owner-migrated-tenancy-cutover.test.ts`,
-   which pins this exact boundary - but the cutover cannot commit until 0303's
-   write posture is repaired
-   ([`force-rls-migration-backfills.md`](force-rls-migration-backfills.md)).
+   Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
+   SECURITY` and a `FOR SELECT`-only policy, so under this exact
+   non-superuser-owner posture the activation's own receipt `INSERT` was denied
+   with SQLSTATE `42501` after every gate had already passed. Migration 0336
+   re-opens that single command behind an owner-only marker policy; the runtime
+   role keeps `SELECT` and nothing else, and the table has no `UPDATE` or
+   `DELETE` writer at all. `packages/db/test/migration-0336-owner-migrated-tenancy-cutover.test.ts`
+   commits a real receipt through this posture, so the cutover is executable end
+   to end ([`force-rls-migration-backfills.md`](force-rls-migration-backfills.md)).
 8. start only that same digest's API and workers, and require the startup and
    readiness posture checks to pass before reopening admission.
 

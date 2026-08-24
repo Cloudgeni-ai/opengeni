@@ -149,6 +149,43 @@ BEGIN
 END
 $connection_authority_binding_policies$;
 
+-- Migration 0290 gave its two read-only membership seams the
+-- `organization_membership_backfill` marker on the shared
+-- `organization_tenancy_lifecycle` policy. Migration 0305 then restated that
+-- policy's marker list to add `personal_resource_grant_management` and dropped
+-- 0290's entry, so `list_organization_membership_backfill_anchors` and
+-- `list_organization_memberships_without_personal_workspace` have returned `[]`
+-- ever since for a NON-superuser migration owner - measured, not inferred, on
+-- `acquireOwnerMigratedTestDatabase`. Both are SECURITY DEFINER owned by that
+-- role, so even a superuser CALLER gets the owner's RLS; only a
+-- superuser-migrated database (every existing test harness) hid it.
+--
+-- The consequence is phase D's membership half: an already-anchored subject is
+-- misread as provisionable, and the memberships that carry no personal
+-- workspace - the actual backfill target population - are invisible, so the
+-- walk can never converge them and its `organization_memberships` receipt
+-- counts are wrong.
+--
+-- Restored as its own narrow read-only policy rather than as a fourth entry in
+-- the shared list, so the next migration to restate that list cannot silently
+-- delete it again. Both seams are plain `SELECT`s, so `FOR SELECT` is exactly
+-- the command they issue.
+DO $organization_membership_backfill_read_policy$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+  migration_owner text := current_user;
+BEGIN
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY organization_membership_backfill_read '
+      || 'ON %I.organization_memberships FOR SELECT USING (current_user = %L AND '
+      || 'current_setting(''opengeni.organization_tenancy_lifecycle'', true) '
+      || '= ''organization_membership_backfill'' AND account_id = nullif('
+      || 'current_setting(''opengeni.account_id'', true), '''')::uuid)',
+    data_schema, migration_owner
+  );
+END
+$organization_membership_backfill_read_policy$;
+
 -- The single owner-authority seam both connection-binding branches use.
 -- `organization_memberships` and `organization_user_resource_authorities` are
 -- FORCE ROW LEVEL SECURITY, and OpenGeni migrates and runs its SECURITY DEFINER
@@ -946,6 +983,33 @@ REVOKE ALL ON FUNCTION lock_session_tenancy_activation_boundary() FROM PUBLIC;
 COMMENT ON FUNCTION lock_session_tenancy_activation_boundary() IS
   'Owner-only deployment boundary fence shared by operator activation and atomic greenfield activation.';
 
+-- Migration 0303 gave `session_tenancy_activations` FORCE ROW LEVEL SECURITY
+-- and a `FOR SELECT`-only policy, and no INSERT policy at all. Under the
+-- documented production posture - a NON-superuser owner without BYPASSRLS -
+-- the activation's own receipt write was therefore denied `42501` AFTER every
+-- gate had already passed, which made the whole cutover unexecutable. The
+-- runtime role holds only `GRANT SELECT` on this table and is not the owner, so
+-- an owner-only marker policy re-opens exactly the one command
+-- `activate_session_tenancy_product` issues and nothing else. INSERT is the
+-- complete write set: the table is append-only, has no UPDATE or DELETE writer
+-- anywhere in the tree, and activation is one-way with no rollback path.
+DO $session_tenancy_activation_receipt_policy$
+DECLARE
+  data_schema text := pg_catalog.current_schema();
+  migration_owner text := current_user;
+BEGIN
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY session_tenancy_activation_receipt_insert '
+      || 'ON %I.session_tenancy_activations FOR INSERT WITH CHECK ('
+      || 'current_user = %L AND '
+      || 'current_setting(''opengeni.organization_tenancy_lifecycle'', true) '
+      || '= ''session_tenancy_activation'' AND account_id = nullif('
+      || 'current_setting(''opengeni.account_id'', true), '''')::uuid)',
+    data_schema, migration_owner
+  );
+END
+$session_tenancy_activation_receipt_policy$;
+
 -- Existing receipts replay before new evidence requirements. A new activation
 -- takes the organization lifecycle advisory prefix, verifies the app drain,
 -- write-locks every report source, and only then takes the deployment boundary.
@@ -967,6 +1031,9 @@ AS $activation$
 DECLARE
   existing session_tenancy_activations%ROWTYPE;
   inserted session_tenancy_activations%ROWTYPE;
+  previous_lifecycle text := pg_catalog.current_setting(
+    'opengeni.organization_tenancy_lifecycle', true
+  );
   inventory_report jsonb;
   parity_report jsonb;
   backfill_evidence jsonb;
@@ -1159,13 +1226,29 @@ BEGIN
     RAISE EXCEPTION 'session tenancy activation backfill evidence is structurally invalid'
       USING ERRCODE = '55000';
   END IF;
-  INSERT INTO session_tenancy_activations (
-    account_id, activation_version, inventory_digest, parity_digest,
-    activated_by, backfill_receipt_ids
-  ) VALUES (
-    p_account_id, 1, p_inventory_digest, p_parity_digest,
-    pg_catalog.btrim(p_activated_by), evidence_receipt_ids
-  ) RETURNING * INTO inserted;
+  -- The narrow marker window for the one append this function performs. The
+  -- `RETURNING` read is covered by 0303's existing organization-isolation
+  -- SELECT policy, whose account GUC this function already set above.
+  BEGIN
+    PERFORM pg_catalog.set_config(
+      'opengeni.organization_tenancy_lifecycle', 'session_tenancy_activation', true
+    );
+    INSERT INTO session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest,
+      activated_by, backfill_receipt_ids
+    ) VALUES (
+      p_account_id, 1, p_inventory_digest, p_parity_digest,
+      pg_catalog.btrim(p_activated_by), evidence_receipt_ids
+    ) RETURNING * INTO inserted;
+    PERFORM pg_catalog.set_config(
+      'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
+    );
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM pg_catalog.set_config(
+      'opengeni.organization_tenancy_lifecycle', coalesce(previous_lifecycle, ''), true
+    );
+    RAISE;
+  END;
   account_id := inserted.account_id;
   activation_version := inserted.activation_version;
   activated_at := inserted.activated_at;

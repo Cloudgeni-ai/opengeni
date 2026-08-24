@@ -17,15 +17,17 @@
 //     activation) rather than silently degrading to `legacy_user` - which after
 //     activation is a hard `42501` that permanently removes personal
 //     Gmail/Slack/MCP connect from every activated organization;
+//   * migration 0290's two read-only membership seams seeing their rows at all
+//     - 0305 restated the shared lifecycle policy's marker list and dropped
+//     0290's entry, so phase D's membership backfill has been blind since;
 //   * the bounded `legacy_user -> user` upgrader converging a deterministic
 //     candidate instead of raising `42501 connection backfill membership
 //     authority is unavailable` on every one of them; and
-//   * the whole cutover the issue exists to deliver: six settled backfill
-//     receipts, `check_tenancy_backfill_activation_evidence(...).ready`, clean
-//     parity gates and lanes, and the exact remaining boundary - migration
-//     0303's own FORCE-RLS `session_tenancy_activations` write, which is a
-//     separate defect this migration does not own and which is pinned here
-//     rather than worked around.
+//   * the whole cutover the issue exists to deliver, committing for real: six
+//     settled backfill receipts, `check_tenancy_backfill_activation_evidence`
+//     `ready`, clean parity gates and lanes, and a durable
+//     `session_tenancy_activations` receipt - whose INSERT was itself denied
+//     `42501` by 0303's `FOR SELECT`-only policy on a FORCE-RLS table.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
@@ -266,18 +268,13 @@ describe("migration 0336 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
     expect(Array.isArray(evidence.receiptIds) ? evidence.receiptIds.length : 0).toBe(6);
 
     // ---- the cutover itself ----------------------------------------------
-    // Everything 0336 owns is clean here: every parity gate and lane is zero
-    // and the six receipts are settled. `activate_session_tenancy_product`
-    // nonetheless cannot commit under this posture, and the reason is OUTSIDE
-    // this migration: migration 0303 gave `session_tenancy_activations` FORCE
-    // RLS plus a `FOR SELECT`-only policy, so the activation's own INSERT is
-    // blinded for the non-superuser migration owner exactly the way every other
-    // FORCE-RLS write is (`docs/force-rls-migration-backfills.md`). Pinned
-    // here as the exact remaining boundary rather than worked around: when
-    // 0303's write posture is repaired this expectation must flip to a real
-    // receipt.
+    // The activation must actually COMMIT its receipt under this posture.
+    // Migration 0303 gave `session_tenancy_activations` FORCE RLS with a
+    // `FOR SELECT`-only policy and no INSERT policy at all, so this write was
+    // denied `42501` after every gate had already passed; 0336 re-opens exactly
+    // that one command behind an owner-only marker.
     const receiptIds: string[] = evidence.receiptIds;
-    const digests = await runInAccount(async (tx) => {
+    const activation = await runInAccount(async (tx) => {
       const [inventoryRow] = await tx<Array<{ report: unknown }>>`
         select inventory_organization_tenancy(${accountId}::uuid) as report`;
       const [parityRow] = await tx<Array<{ report: Record<string, any> }>>`
@@ -291,41 +288,52 @@ describe("migration 0336 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
       expect(
         Object.entries(parity.lanes as Record<string, number>).filter(([, count]) => count !== 0),
       ).toEqual([]);
-      return { inventory: digest(inventoryRow!.report), parity: digest(parity) };
+      const [row] = await tx<
+        Array<{ accountId: string; activationVersion: number; replay: boolean }>
+      >`
+        select account_id as "accountId", activation_version as "activationVersion", replay
+        from activate_session_tenancy_product(
+          ${accountId}::uuid, ${digest(inventoryRow!.report)}, ${digest(parity)},
+          'ope-204 owner-migrated test', ${["opengeni_app"]}::text[]
+        )`;
+      return row!;
+    });
+    expect(activation).toEqual({ accountId, activationVersion: 1, replay: false });
+
+    const [receipt] = await admin<
+      Array<{ receipts: string[]; activatedBy: string; version: number }>
+    >`
+      select backfill_receipt_ids::text[] as receipts, activated_by as "activatedBy",
+        activation_version::int as version
+      from session_tenancy_activations where account_id = ${accountId}`;
+    expect(receipt).toEqual({
+      receipts: receiptIds,
+      activatedBy: "ope-204 owner-migrated test",
+      version: 1,
     });
 
-    let activationFailure: unknown;
-    try {
-      await runInAccount(async (tx) => {
-        await tx`
-          select * from activate_session_tenancy_product(
-            ${accountId}::uuid, ${digests.inventory}, ${digests.parity},
-            'ope-204 owner-migrated test', ${["opengeni_app"]}::text[]
-          )`;
-      });
-    } catch (error) {
-      activationFailure = error;
-    }
-    expect(nestedPostgresSqlState(activationFailure)).toBe("42501");
-    expect(String((activationFailure as Error).message)).toContain("session_tenancy_activations");
+    // The marker the receipt policy gates on must not survive the call, and the
+    // policy must not have opened the table to anything else.
+    const [leaked] = await ownerSql<Array<{ marker: string }>>`
+      select current_setting('opengeni.organization_tenancy_lifecycle', true) as marker`;
+    expect(leaked?.marker ?? "").toBe("");
 
-    // The durable receipt an activation leaves behind, seeded as the superuser
-    // so the rest of the chain is exercised. Six exact receipt ids is what the
-    // 0336 constraint now admits, so this also proves the ledger binding.
-    await admin`
-      insert into session_tenancy_activations (
-        account_id, activation_version, inventory_digest, parity_digest,
-        activated_by, backfill_receipt_ids
-      ) values (
-        ${accountId}, 1, ${digests.inventory}, ${digests.parity},
-        'ope-204 owner-migrated test', ${receiptIds}::uuid[]
-      )`;
-    const [receipt] = await admin<Array<{ receipts: number }>>`
-      select cardinality(backfill_receipt_ids) as receipts
-      from session_tenancy_activations where account_id = ${accountId}`;
-    expect(receipt).toEqual({ receipts: 6 });
+    // Replay is idempotent for the identical evidence, and must not append.
+    const replayed = await runInAccount(async (tx) => {
+      const [inventoryRow] = await tx<Array<{ report: unknown }>>`
+        select inventory_organization_tenancy(${accountId}::uuid) as report`;
+      const [parityRow] = await tx<Array<{ report: unknown }>>`
+        select check_organization_tenancy_parity(${accountId}::uuid, 10, 30) as report`;
+      const [row] = await tx<Array<{ replay: boolean }>>`
+        select replay from activate_session_tenancy_product(
+          ${accountId}::uuid, ${digest(inventoryRow!.report)}, ${digest(parityRow!.report)},
+          'ope-204 owner-migrated test', ${["opengeni_app"]}::text[]
+        )`;
+      return row!.replay;
+    });
+    expect(replayed).toBe(true);
 
-    // ---- after activation the mint path must still work -------------------
+    // ---- after that real activation the mint path must still work ---------
     const postActivation = await mintConnection(
       anchoredSubject,
       anchoredPersonalWorkspaceId,
@@ -345,5 +353,94 @@ describe("migration 0336 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
       strangerFailure = error;
     }
     expect(nestedPostgresSqlState(strangerFailure)).toBe("42501");
+  }, 900_000);
+
+  test("0290's membership backfill seams see their own rows under this posture", async () => {
+    if (!owned || !owner) return;
+    const { admin } = owned;
+    const ownerSql = owner;
+
+    const accountId = crypto.randomUUID();
+    const anchoredWorkspaceId = crypto.randomUUID();
+    const anchoredSubject = `user:anchored-${crypto.randomUUID()}`;
+    const pendingSubject = `user:pending-${crypto.randomUUID()}`;
+    await admin`
+      insert into managed_accounts (id, name, external_source, external_id)
+      values (${accountId}, 'ope-204 membership seams', 'better-auth:user', ${accountId})`;
+    await admin`
+      insert into workspaces (id, account_id, name)
+      values (${anchoredWorkspaceId}, ${accountId}, 'ope-204 anchored personal')`;
+    const [anchored] = await admin<Array<{ id: string }>>`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id
+      ) values (${accountId}, ${anchoredSubject}, 'active', ${anchoredWorkspaceId})
+      returning id`;
+    // The actual backfill target population: a membership that carries no
+    // personal workspace yet. `organization_memberships_active_personal_workspace_check`
+    // reserves the NULL pointer for the `provisioning` status, which is exactly
+    // what 0290's seam enumerates alongside `active`.
+    const [pending] = await admin<Array<{ id: string }>>`
+      insert into organization_memberships (account_id, subject_id, status)
+      values (${accountId}, ${pendingSubject}, 'provisioning')
+      returning id`;
+
+    const inAccount = async <T>(run: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> => {
+      const boxed = (await ownerSql.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${accountId}, true)`;
+        return { value: await run(tx as postgres.TransactionSql) };
+      })) as unknown as { value: T };
+      return boxed.value;
+    };
+
+    const anchors = await inAccount(async (tx) => {
+      const [row] = await tx<Array<{ anchors: Array<Record<string, unknown>> }>>`
+        select list_organization_membership_backfill_anchors(
+          ${accountId}::uuid, ${[anchoredSubject, pendingSubject]}::text[]
+        ) as anchors`;
+      return row!.anchors;
+    });
+    expect(anchors).toEqual([
+      {
+        subjectId: anchoredSubject,
+        membershipId: anchored!.id,
+        status: "active",
+        personalWorkspaceId: anchoredWorkspaceId,
+      },
+      {
+        subjectId: pendingSubject,
+        membershipId: pending!.id,
+        status: "provisioning",
+        personalWorkspaceId: null,
+      },
+    ]);
+
+    const withoutPersonalWorkspace = await inAccount(async (tx) => {
+      const [row] = await tx<Array<{ pending: Array<Record<string, unknown>> }>>`
+        select list_organization_memberships_without_personal_workspace(
+          ${accountId}::uuid, 25, null
+        ) as pending`;
+      return row!.pending;
+    });
+    expect(withoutPersonalWorkspace).toEqual([
+      {
+        subjectId: pendingSubject,
+        membershipId: pending!.id,
+        status: "provisioning",
+        personalWorkspaceId: null,
+      },
+    ]);
+
+    // The seam restores the marker, and it is scoped to its own organization.
+    const [leaked] = await ownerSql<Array<{ marker: string }>>`
+      select current_setting('opengeni.organization_tenancy_lifecycle', true) as marker`;
+    expect(leaked?.marker ?? "").toBe("");
+    const foreign = await inAccount(async (tx) => {
+      const [row] = await tx<Array<{ anchors: unknown[] }>>`
+        select list_organization_membership_backfill_anchors(
+          ${accountId}::uuid, ${[`user:absent-${crypto.randomUUID()}`]}::text[]
+        ) as anchors`;
+      return row!.anchors;
+    });
+    expect(foreign).toEqual([]);
   }, 900_000);
 });

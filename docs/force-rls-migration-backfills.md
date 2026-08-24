@@ -100,12 +100,35 @@ with a row lock on it. That is exactly how migration 0256's connection
 owner-membership lookup became blind on every production deployment while its
 sibling classifier - the same join without `FOR SHARE` - kept working.
 
+The organization-tenancy lane alone has produced four instances, all invisible
+until a test ran through `acquireOwnerMigratedTestDatabase`:
+
+| Writer | Table | Command it issues | Was covered by |
+| --- | --- | --- | --- |
+| `bind_connection_authority` (mint) | `organization_memberships` | `SELECT ... FOR SHARE` | a `FOR SELECT` policy only |
+| `bind_connection_authority` (mint) | `organization_user_resource_authorities` | `INSERT` | nothing |
+| `bind_connection_authority` (backfill verify) | `organization_memberships` | `SELECT ... FOR SHARE` | a `FOR SELECT` policy only |
+| `activate_session_tenancy_product` | `session_tenancy_activations` | `INSERT` | a `FOR SELECT` policy only |
+
+A fifth, same class but not a write: 0305 restated the shared
+`organization_tenancy_lifecycle` marker list on `organization_memberships` and
+dropped 0290's `organization_membership_backfill` entry, silently blinding both
+membership-backfill read seams. That is the argument for giving a seam its own
+narrow policy instead of appending a marker to a shared list.
+
+The shape of a guard that would have caught every one of these is small and
+specific: **for each SECURITY DEFINER routine, assert that every FORCE-RLS table
+it touches has a policy covering the exact command it issues** - `FOR SELECT`
+plus `FOR UPDATE`/`ALL` for a row-locking read, `FOR INSERT` for an append -
+satisfiable by the routine's owner. It needs the routine's real statement list,
+so it belongs in a test that inspects `pg_policies` against a declared
+writer/command table, not in the source-scanning
+`scripts/check-migration-rls-backfills.ts`, which strips `CREATE FUNCTION`
+bodies by design and structurally cannot see any of them.
+
 `packages/db/test/migration-0336-owner-migrated-tenancy-cutover.test.ts` is the
 regression harness for the runtime half, the way
 `migration-0296-force-rls-backfill-repair.test.ts` is for the migration half.
-Note that `scripts/check-migration-rls-backfills.ts` strips `CREATE FUNCTION`
-bodies by design, so it cannot see either of these - only a test through
-`acquireOwnerMigratedTestDatabase` can.
 
 ### Enforcement
 
