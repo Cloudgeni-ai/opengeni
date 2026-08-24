@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { creatorHue, creatorInitials } from "./creator-initials";
+import {
+  creatorAnnouncement,
+  creatorHue,
+  creatorInitials,
+  creatorLabel,
+  railRowCreator,
+} from "./creator-initials";
 import { buildRailForest, channelRailSections, summarizeRailNodes } from "./sessions-group";
 import type { Session } from "../types";
 
@@ -275,6 +281,37 @@ describe("creatorInitials", () => {
     expect(hue).toBe(creatorHue("user:test"));
     expect(hue).toBeGreaterThanOrEqual(0);
     expect(hue).toBeLessThan(360);
+  });
+});
+
+describe("railRowCreator", () => {
+  const createdBy = { kind: "subject", subjectId: "user:bendik", label: "Bendik" } as const;
+
+  test("a top-level session offers its creator", () => {
+    expect(railRowCreator({ parentSessionId: null, createdBy })).toBe(createdBy);
+  });
+
+  test("a spawned session offers none: it inherits its parent's creator", () => {
+    expect(railRowCreator({ parentSessionId: "manager", createdBy })).toBeNull();
+  });
+});
+
+describe("creatorAnnouncement", () => {
+  test("announces only creators whose chip actually renders", () => {
+    expect(creatorAnnouncement({ kind: "subject", subjectId: "user:x", label: "Ada" })).toBe("Ada");
+    expect(creatorAnnouncement(null)).toBeNull();
+    expect(creatorAnnouncement({ kind: "service", subjectId: "scheduled-task" })).toBeNull();
+    expect(creatorAnnouncement({ kind: "subject", subjectId: "unattributed-legacy" })).toBeNull();
+  });
+});
+
+describe("creatorLabel", () => {
+  test("prefers a trimmed label and falls back to the subject id", () => {
+    expect(creatorLabel({ kind: "subject", subjectId: "user:x", label: "  Bendik  " })).toBe(
+      "Bendik",
+    );
+    expect(creatorLabel({ kind: "subject", subjectId: "user:x", label: "   " })).toBe("user:x");
+    expect(creatorLabel({ kind: "subject", subjectId: "user:x" })).toBe("user:x");
   });
 });
 

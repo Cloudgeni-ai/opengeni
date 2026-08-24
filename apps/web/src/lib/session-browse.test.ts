@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { Session } from "@/types";
 
+import { railRowCreator } from "./creator-initials";
 import {
+  buildPinnedRailSections,
   filterSessionsForBrowse,
   groupSessionsForBrowse,
+  projectRailSessions,
   sessionCreatorLabelMap,
   sessionCreatorLabel,
   sessionCreatorOptions,
@@ -152,5 +155,50 @@ describe("session browse projections", () => {
         label: "Alex · Subject · tenant-a:alex",
       },
     ]);
+  });
+});
+
+describe("flat rail projection", () => {
+  const parent = session({ id: "manager" });
+  const child = session({
+    id: "worker",
+    parentSessionId: "manager",
+    createdBy: { kind: "subject", subjectId: "user:grace", label: "Grace Hopper" },
+  });
+
+  test("hierarchy mode keeps lineage exactly as the server sent it", () => {
+    const rows = [parent, child];
+
+    expect(projectRailSessions(rows, true)).toBe(rows);
+    expect(projectRailSessions(rows, true)[1]!.parentSessionId).toBe("manager");
+  });
+
+  test("a flat projection makes every row top-level", () => {
+    const projected = projectRailSessions([parent, child], false);
+
+    expect(projected.map((row) => row.parentSessionId)).toEqual([null, null]);
+    // The originals are untouched; only the render-time copy is flattened.
+    expect(child.parentSessionId).toBe("manager");
+  });
+
+  test("browse groupings and search sections agree on which rows are top-level", () => {
+    // Both flat consumers must read the same projection. Feeding one of them
+    // the raw rows leaves a chip-less child sitting beside chipped roots in a
+    // list where every row is top-level and no parent is on screen.
+    const projected = projectRailSessions([parent, child], false);
+    const grouped = groupSessionsForBrowse(projected, "created", { now: NOW });
+    const searched = buildPinnedRailSections(projected);
+
+    const groupedRows = [
+      ...grouped.running,
+      ...grouped.grouped.flatMap((bucket) => bucket.sessions),
+    ];
+    expect(groupedRows.map((node) => node.session.id).sort()).toEqual(["manager", "worker"]);
+    for (const node of groupedRows) {
+      expect(railRowCreator(node.session)).not.toBeNull();
+    }
+    for (const node of searched.ordinary.grouped.flatMap((bucket) => bucket.sessions)) {
+      expect(railRowCreator(node.session)).not.toBeNull();
+    }
   });
 });
