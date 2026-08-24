@@ -1349,10 +1349,12 @@ durable warning acknowledgement; visibility and acknowledgement are
 idempotency-bound. The destination receives fresh owner/provenance, authority
 epoch 1, root id, and singleton sandbox group while copying exact history and
 no live grants, credentials, Connections/delegations, turns, goals, MCP,
-Variable Set, Rig, process, personal-resource authority, or pins. The web Fork
-dialog defaults to the source visibility, lets the owner choose either scope,
-shows the private-content warning when required, and verifies the fresh owned
-destination before navigation.
+Variable Set, Rig, process, personal-resource authority, or pins. A private
+source remains owner-only; a current workspace member may fork a shared source,
+and the destination is owned by that actor. The web Fork dialog defaults to the
+source visibility, lets an authorized actor choose either scope, shows the
+private-content warning when required, and verifies the fresh owned destination
+before navigation.
 
 Migration 0304 is rolling. It replaces only the stable private-session read
 predicate so the exact active owner membership may prove access through either

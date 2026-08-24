@@ -620,38 +620,75 @@ describe("managed-human session surface inside their own personal workspace", ()
       true,
     );
 
-    for (const operation of ["visibility", "fork"] as const) {
-      const facts = [];
-      for (const [index, targetId] of targetIds.entries()) {
-        facts.push(
-          await tenancyErrorFact(
-            await requestTenancyOperation(
-              app,
-              caller.legacyWorkspaceId,
-              targetId,
-              { cookie: caller.cookie },
-              operation,
-              `canonical-${operation}-${index}`,
-            ),
+    const visibilityFacts = [];
+    for (const [index, targetId] of targetIds.entries()) {
+      visibilityFacts.push(
+        await tenancyErrorFact(
+          await requestTenancyOperation(
+            app,
+            caller.legacyWorkspaceId,
+            targetId,
+            { cookie: caller.cookie },
+            "visibility",
+            `canonical-visibility-${index}`,
           ),
-        );
-      }
-      expect(facts).toEqual([
-        {
-          status: 404,
-          error: {
-            status: 404,
-            code: "not_found",
-            message: "Session not found.",
-            retryable: false,
-          },
-        },
-        facts[0],
-        facts[0],
-      ]);
+        ),
+      );
     }
-    // Only each shared-session request reaches the host. The missing and
-    // another-owner private targets are denied by durable target resolution.
+    expect(visibilityFacts).toEqual([
+      {
+        status: 404,
+        error: {
+          status: 404,
+          code: "not_found",
+          message: "Session not found.",
+          retryable: false,
+        },
+      },
+      visibilityFacts[0],
+      visibilityFacts[0],
+    ]);
+
+    const missingFork = await tenancyErrorFact(
+      await requestTenancyOperation(
+        app,
+        caller.legacyWorkspaceId,
+        targetIds[0]!,
+        { cookie: caller.cookie },
+        "fork",
+        "canonical-fork-missing",
+      ),
+    );
+    const sharedFork = await requestTenancyOperation(
+      app,
+      caller.legacyWorkspaceId,
+      sharedSessionId,
+      { cookie: caller.cookie },
+      "fork",
+      "canonical-fork-shared",
+    );
+    expect(sharedFork.status).toBe(201);
+    expect(await sharedFork.json()).toMatchObject({
+      visibility: "private",
+      authorityEpoch: 1,
+      replay: false,
+    });
+    const privateFork = await tenancyErrorFact(
+      await requestTenancyOperation(
+        app,
+        caller.legacyWorkspaceId,
+        privateSessionId,
+        { cookie: caller.cookie },
+        "fork",
+        "canonical-fork-private",
+      ),
+    );
+    expect(privateFork).toEqual(missingFork);
+
+    // Only each shared-session request reaches the host. The owner-only
+    // visibility mutation still denies this member, while the shared-source
+    // fork succeeds into fresh member-owned private authority. Missing and
+    // another-owner private targets stay non-enumerating.
     expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
 
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;

@@ -131,9 +131,15 @@ BEGIN
   FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'session fork source session is unavailable'
     USING ERRCODE = 'P0002'; END IF;
-  IF source_session.owner_organization_membership_id IS DISTINCT FROM actor_membership.id
+  -- A private source remains owner-only. A workspace-shared source follows
+  -- current workspace authority, and the fork becomes a fresh session owned
+  -- by the actor. This is what lets any authorized collaborator fork shared
+  -- work privately without retaining the source owner's authority.
+  IF source_session.visibility = 'user_private' AND (
+    source_session.owner_organization_membership_id IS DISTINCT FROM actor_membership.id
     OR source_session.owner_subject_id IS DISTINCT FROM actor_membership.subject_id
-  THEN RAISE EXCEPTION 'session fork is owner-only'
+  )
+  THEN RAISE EXCEPTION 'session fork source session is private'
     USING ERRCODE = '42501'; END IF;
 
   -- Resolve the durable operation receipt before inspecting mutable source

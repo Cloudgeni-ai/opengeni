@@ -11,12 +11,14 @@ import {
   ensureManagedAccessForUser,
   forkSessionContent,
   getSession,
+  getSessionForSubject,
   getSessionGoal,
   getSessionHistoryItems,
   listSessionGoalRevisions,
   listSessionEvents,
   listSessionTurns,
   nestedPostgresSqlState,
+  SessionTenancyAccessError,
   SessionTenancyConflictError,
   SessionTenancyInvalidRequestError,
   transitionSessionVisibility,
@@ -787,6 +789,83 @@ describe("migration 0303 session tenancy product activation", () => {
         operationKey: privateToSharedKey,
       }),
     ).toEqual({ ...privateToShared, replay: true });
+  }, 180_000);
+
+  test("lets a workspace member fork a shared source into fresh private authority", async () => {
+    if (!shared || !client) return;
+    const value = await sessionVisibilityFixture();
+
+    const memberFork = await forkSessionContent(client.db, {
+      sourceWorkspaceId: value.ownerGrant.workspaceId,
+      sourceSessionId: value.session.id,
+      actorSubjectId: value.otherSubjectId,
+      destinationWorkspaceId: value.ownerGrant.workspaceId,
+      destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
+      operationKey: `member-private-fork:${crypto.randomUUID()}`,
+    });
+    expect(memberFork).toMatchObject({
+      visibility: "user_private",
+      authorityEpoch: 1,
+      copiedHistoryItemCount: 1,
+      replay: false,
+    });
+
+    const [destination] = await shared.admin<
+      Array<{ ownerId: string; ownerSubjectId: string; sourceSessionId: string }>
+    >`
+      select owner_organization_membership_id as "ownerId",
+        owner_subject_id as "ownerSubjectId",
+        forked_from_session_id as "sourceSessionId"
+      from sessions where id = ${memberFork.sessionId}`;
+    expect(destination).toEqual({
+      ownerId: value.otherMembershipId,
+      ownerSubjectId: value.otherSubjectId,
+      sourceSessionId: value.session.id,
+    });
+
+    // The source owner can later make the shared source private. The member
+    // then loses the source but keeps the independent private destination they
+    // own, proving that source authority was not retained by the fork.
+    await transitionSessionVisibility(client.db, {
+      workspaceId: value.ownerGrant.workspaceId,
+      sessionId: value.session.id,
+      actorSubjectId: value.ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `source-private-after-member-fork:${crypto.randomUUID()}`,
+    });
+    expect(
+      await getSessionForSubject(
+        client.db,
+        value.ownerGrant.workspaceId,
+        value.session.id,
+        value.otherSubjectId,
+      ),
+    ).toBeNull();
+    expect(
+      await getSessionForSubject(
+        client.db,
+        value.ownerGrant.workspaceId,
+        memberFork.sessionId,
+        value.otherSubjectId,
+      ),
+    ).toMatchObject({
+      id: memberFork.sessionId,
+      tenancy: { visibility: "private", ownedByCurrentUser: true },
+    });
+
+    await expect(
+      forkSessionContent(client.db, {
+        sourceWorkspaceId: value.ownerGrant.workspaceId,
+        sourceSessionId: value.session.id,
+        actorSubjectId: value.otherSubjectId,
+        destinationWorkspaceId: value.ownerGrant.workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        operationKey: `member-cannot-fork-private-source:${crypto.randomUUID()}`,
+      }),
+    ).rejects.toBeInstanceOf(SessionTenancyAccessError);
   }, 180_000);
 
   test("blocks transition to private while an interaction holder retains sandbox access", async () => {

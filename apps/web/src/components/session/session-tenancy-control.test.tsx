@@ -204,7 +204,7 @@ beforeEach(() => {
 });
 
 describe("SessionTenancyControl", () => {
-  test("renders only activated tenancy and keeps nonowners read-only", async () => {
+  test("renders only activated tenancy and lets shared-session members fork without managing visibility", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -240,6 +240,13 @@ describe("SessionTenancyControl", () => {
     expect(container.textContent).toContain("Workspace");
     expect(container.querySelector('[aria-label^="Workspace session access"]')).not.toBeNull();
     expect(container.querySelector('[aria-label$="Manage session access"]')).toBeNull();
+    const memberActions = container.querySelector<HTMLButtonElement>(
+      'button[aria-label$="Session actions"]',
+    );
+    expect(memberActions).not.toBeNull();
+    await act(async () => memberActions!.click());
+    expect(container.textContent).not.toContain("Limit this session to me…");
+    expect(container.textContent).toContain("Fork session…");
 
     await act(async () => root.unmount());
     container.remove();

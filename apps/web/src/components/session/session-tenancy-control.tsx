@@ -209,6 +209,11 @@ export function SessionTenancyControl({
 
   const displayedTenancy = override;
   const mayManage = Boolean(displayedTenancy?.ownedByCurrentUser && managedSession);
+  const mayFork = Boolean(
+    displayedTenancy &&
+    managedSession &&
+    (displayedTenancy.visibility === "workspace" || displayedTenancy.ownedByCurrentUser),
+  );
   const isCurrentInvocation = useCallback(
     (
       acceptedTarget: SessionTenancyTarget,
@@ -429,7 +434,7 @@ export function SessionTenancyControl({
 
   const forkSession = useCallback(
     async (visibility: SessionVisibility): Promise<boolean> => {
-      if (!displayedTenancy || !mayManage) return true;
+      if (!displayedTenancy || !mayFork) return true;
       const acceptedTransition = captureWorkspaceInvocation(target.workspaceId);
       if (!acceptedTransition) return true;
       const operationSequence = operationSequenceRef.current + 1;
@@ -501,7 +506,7 @@ export function SessionTenancyControl({
       client,
       displayedTenancy,
       isCurrentInvocation,
-      mayManage,
+      mayFork,
       onOpenSession,
       operationController,
       operationScope,
@@ -541,20 +546,24 @@ export function SessionTenancyControl({
       )}
       <span className="hidden sm:inline">{stateLabel}</span>
       {failure ? <CircleAlertIcon className="size-3.5 text-status-waiting" aria-hidden /> : null}
-      {mayManage ? <ChevronDownIcon className="size-3.5 text-fg-muted" aria-hidden /> : null}
+      {mayFork ? <ChevronDownIcon className="size-3.5 text-fg-muted" aria-hidden /> : null}
     </span>
   );
 
   return (
     <TooltipProvider delayDuration={300}>
       <section aria-label="Session access" className="flex shrink-0 items-center">
-        {mayManage ? (
+        {mayFork ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild disabled={busy}>
               <button
                 ref={accessTriggerRef}
                 type="button"
-                aria-label={`${stateLabel} session access. Manage session access`}
+                aria-label={
+                  mayManage
+                    ? `${stateLabel} session access. Manage session access`
+                    : `${stateLabel} session access. Session actions`
+                }
                 aria-busy={busy}
                 className="rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               >
@@ -573,15 +582,19 @@ export function SessionTenancyControl({
                 <p className="text-sm font-medium">{stateLabel} session</p>
                 <p className="mt-0.5 text-xs text-muted-foreground">{stateDescription}</p>
               </div>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onSelect={() =>
-                  setConfirmation({ kind: "visibility", visibility: alternateVisibility })
-                }
-              >
-                {privateSession ? <UsersIcon /> : <LockKeyholeIcon />}
-                {retryingVisibility ? `Retry: ${visibilityAction}` : visibilityAction}
-              </DropdownMenuItem>
+              {mayManage ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      setConfirmation({ kind: "visibility", visibility: alternateVisibility })
+                    }
+                  >
+                    {privateSession ? <UsersIcon /> : <LockKeyholeIcon />}
+                    {retryingVisibility ? `Retry: ${visibilityAction}` : visibilityAction}
+                  </DropdownMenuItem>
+                </>
+              ) : null}
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onSelect={() =>

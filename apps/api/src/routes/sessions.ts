@@ -459,10 +459,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw sessionAuthorizationHttpError(new SessionAuthorizationUnavailableError());
     }
     if (operation === "session.visibility.write" || operation === "session.fork.create") {
-      // These two owner-only product mutations perform their target-free
-      // managed-cookie, permission, and activation gates inside core before
-      // resolving the target exactly once. Running the generic middleware here
-      // would both create a pre-gate existence oracle and double-call the host.
+      // These product mutations perform their target-free managed-cookie,
+      // permission, and activation gates inside core before resolving the
+      // target exactly once. Visibility changes remain owner-only; a shared
+      // source may be forked by any currently authorized workspace member.
+      // Running the generic middleware here would both create a pre-gate
+      // existence oracle and double-call the host.
       await next();
       return;
     }

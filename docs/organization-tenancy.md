@@ -388,8 +388,10 @@ else, so each is a broken feature, not an authority hole:
   `transition_session_visibility` and `fork_session_content` with the exact
   active-membership personal-workspace-or-ordinary-membership disjunction. The
   API/core/SDK caller is now active for explicitly activated organizations;
-  the web console is its managed-owner caller, while worker, MCP, runtime, and
-  React package callers remain future work. 0225's
+  the web console is its managed-human caller. Visibility transitions and
+  private-source forks remain owner-only, while any currently authorized
+  workspace member may fork a shared source into fresh authority of their own.
+  Worker, MCP, runtime, and React package callers remain future work. 0225's
   `guard_session_authority_write` was the same defect and is repaired by
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
@@ -1006,10 +1008,13 @@ The activated database contract is intentionally narrow:
 
 The practical product consequence is deliberately bounded. Only an activated
 organization's canonical managed-human owner may change an otherwise quiescent
-same-workspace session between `workspace_shared` and `user_private`, or make an
-independent same-workspace private or workspace-shared fork. API keys, delegated/service callers,
-administrators acting on another human's session, workers, MCP, runtime, React,
-and external non-cookie clients have no product control. The SDK requires an explicit idempotency key.
+same-workspace session between `workspace_shared` and `user_private`, or fork a
+private source. Any canonical managed human with current access to a
+workspace-shared source may make an independent same-workspace private or
+workspace-shared fork, which is owned by that actor and retains no source
+authority. API keys, delegated/service callers, workers, MCP, runtime, React,
+and external non-cookie clients have no product control. The SDK requires an
+explicit idempotency key.
 Fork requests additionally require an explicit destination visibility and
 acknowledgement boolean; visibility changes require the current public authority epoch.
 Subject-authorized session reads expose the secret-safe `tenancy` projection
@@ -1588,8 +1593,10 @@ fencing is delivered by migration 0222.
 Migration 0225 delivered the first database half. Migration 0303 replaces its
 auto-cancelling mutation functions with the activated, proven-quiescent
 contract described in "Session-visibility and fork public activation".
-The bounded API/core/SDK owner caller is now active behind the per-organization
-receipt, and the bounded managed web UI is its active owning-human SDK caller.
+The bounded API/core/SDK managed-human caller is now active behind the
+per-organization receipt. The managed web UI keeps visibility changes and
+private-source forks owner-only, and exposes shared-source forks to current
+workspace members.
 Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace
 forks, attachments, and personal-resource grant UX remain out of scope.
 
@@ -1850,9 +1857,10 @@ That startup interlock is forward-only posture, not a rollback mechanism.
 - worker, MCP, runtime, or `packages/react` callers for the activated
   `transition_session_visibility` and `fork_session_content` lifecycle
   functions; cross-workspace fork, attachment APIs, and
-  personal-grant UI also remain out of scope. The bounded API/core/SDK owner
-  caller, bounded managed web owning-human SDK caller, and activation-gated
-  subject read projection are active (see "Session-visibility and fork
+  personal-grant UI also remain out of scope. The bounded API/core/SDK
+  managed-human caller, managed web owner controls plus shared-member Fork
+  action, and activation-gated subject read projection are active (see
+  "Session-visibility and fork
   public activation");
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;
