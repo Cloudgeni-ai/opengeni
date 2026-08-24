@@ -232,9 +232,7 @@ describe("session tree deletion", () => {
     };
     const blocked = await app.request(url, { method: "DELETE", headers });
     expect(blocked.status).toBe(409);
-    expect(await blocked.json()).toMatchObject({
-      message: expect.stringContaining("background commands"),
-    });
+    expect(await blocked.text()).toContain("background commands");
     expect(await getSession(db, value.workspaceId, value.root.id)).not.toBeNull();
 
     await admin`

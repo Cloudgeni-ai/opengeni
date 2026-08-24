@@ -3,19 +3,19 @@ import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
-const migrationUrl = new URL("../drizzle/0327_session_background_commands.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0328_session_background_commands.sql", import.meta.url);
 
 let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0327-session-background-commands");
+  shared = await acquireSharedTestDatabase("migration-0328-session-background-commands");
 });
 
 afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0327 session background commands", () => {
+describe("migration 0328 session background commands", () => {
   test("declares provider-neutral identity, active indexes, RLS, and reaper eligibility", async () => {
     const sql = await readFile(migrationUrl, "utf8");
     expect(sql.startsWith("-- deployment-mode: rolling\n")).toBe(true);
