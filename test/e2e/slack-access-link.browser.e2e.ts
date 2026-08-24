@@ -235,7 +235,7 @@ describe("Slack access-link browser acceptance", () => {
       await page.getByLabel("Email").fill("slack-link@example.test");
       await page.getByLabel("Password").fill("correct-horse-battery-staple");
       await page.locator('form button[type="submit"]').click();
-      await expectText(page.locator("body"), "Sign in failed");
+      await expectText(page.locator("body"), "Couldn't sign in");
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toEqual([]);
 
@@ -285,7 +285,7 @@ describe("Slack access-link browser acceptance", () => {
       expect(state.requestStatus).toBe("cancelled");
       expect(new URL(page.url()).hash).toBe("");
       await page.reload({ waitUntil: "networkidle" });
-      await expectText(page.locator("main"), "No workspace access");
+      await expectText(page.locator("main"), "Slack link unavailable");
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toHaveLength(1);
       expect(await page.getByRole("button", { name: "Cancel" }).count()).toBe(0);
