@@ -783,7 +783,7 @@ export const organizationMembershipOperationReceipts = pgTable(
     identity: primaryKey({ columns: [table.accountId, table.operationId] }),
     actionValid: check(
       "organization_membership_operation_receipts_action_check",
-      sql`${table.action} in ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention')`,
+      sql`${table.action} in ('invite', 'accept', 'revoke_invitation', 'change_role', 'suspend', 'reactivate', 'offboard', 'retention', 'create_workspace')`,
     ),
     inputHashValid: check(
       "organization_membership_operation_receipts_input_hash_check",

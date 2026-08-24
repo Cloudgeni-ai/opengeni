@@ -18,7 +18,6 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
   UserIcon,
-  UserPlusIcon,
   UsersIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -750,7 +749,6 @@ function MembersSectionContent({
   const [slackAccessRequestsError, setSlackAccessRequestsError] = useState<Error | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [editPermissions, setEditPermissions] = useState<Set<string>>(() => new Set());
@@ -859,40 +857,6 @@ function MembersSectionContent({
       refreshGenerationRef.current += 1;
     };
   }, [refresh]);
-
-  async function addMember() {
-    const trimmed = email.trim();
-    if (!trimmed) {
-      toast.error("Enter an email address");
-      return;
-    }
-    setBusy(true);
-    try {
-      const member = await client.addWorkspaceMember(workspaceId, {
-        email: trimmed,
-        permissions: [...defaultWorkspaceMemberPermissions],
-      });
-      setMembers((current) => [
-        ...current.filter((existing) => existing.subjectId !== member.subjectId),
-        member,
-      ]);
-      setEmail("");
-      toast.success("Member added");
-    } catch (caught) {
-      const message = caught instanceof Error ? caught.message : String(caught);
-      // The API returns 404 "user is not registered" — email invites for
-      // not-yet-registered users are deferred. Surface that as a friendly hint.
-      if (message.includes("not registered")) {
-        toast.error("No account for that email", {
-          description: "Email invites are coming soon. Ask them to sign up first, then add them.",
-        });
-      } else {
-        toast.error("Failed to add member", { description: message });
-      }
-    } finally {
-      setBusy(false);
-    }
-  }
 
   function startEditing(member: WorkspaceMember) {
     setEditing(member.subjectId);
@@ -1005,30 +969,18 @@ function MembersSectionContent({
       </div>
 
       {canManage ? (
-        <form
-          className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void addMember();
-          }}
-        >
-          <Input
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            className="h-9"
-            placeholder="teammate@example.com"
-            aria-label="Add member by email"
-          />
-          <Button type="submit" disabled={busy || !email.trim()}>
-            {busy ? (
-              <Loader2Icon className="size-3.5 animate-spin" />
-            ) : (
-              <UserPlusIcon className="size-3.5" />
-            )}
-            Add
+        <Notice title="Workspace access is managed from the organization">
+          Invite people to the organization first, then choose which workspaces they can access.
+          <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
+            <Link
+              to="/workspaces/$workspaceId/organization"
+              params={{ workspaceId }}
+              search={{ section: "overview" }}
+            >
+              Manage organization workspaces
+            </Link>
           </Button>
-        </form>
+        </Notice>
       ) : null}
 
       {canManage && slackAccessRequests.length > 0 ? (

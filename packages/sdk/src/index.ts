@@ -382,6 +382,7 @@ export type {
   OrganizationSummary,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
+  CreateOrganizationWorkspaceRequest,
   UpdateOrganizationNameRequest,
   UpdateOrganizationPrivateSessionSettingsRequest,
   BillingUsageResponse,

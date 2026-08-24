@@ -256,6 +256,17 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("printf 'OPENGENI_MCP_INTERNAL_URL=%s\\n'");
   });
 
+  test("keeps the browser API hostname aligned with the local web hostname", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain(
+      'browser_base_url="${OPENGENI_WEB_BASE_URL:-${OPENGENI_PUBLIC_BASE_URL:-}}"',
+    );
+    expect(source).toContain(
+      'export VITE_API_BASE_URL="http://${browser_loopback_host}:${OPENGENI_API_PORT}"',
+    );
+  });
+
   test("admits only an exact-head runtime in a source-tagged local image", async () => {
     const [source, imagePreparation] = await Promise.all([
       Bun.file(scriptPath).text(),

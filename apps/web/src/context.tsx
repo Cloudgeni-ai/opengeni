@@ -11,7 +11,7 @@ import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
-import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
+import { CheckIcon, LockIcon } from "lucide-react";
 import {
   createContext,
   lazy,
@@ -34,7 +34,6 @@ import {
   fetchAuthSession,
   fetchClientConfig,
   getStoredAccessKey,
-  sendVerificationEmail,
   setStoredAccessKey,
   signInEmail,
   signOutManaged,
@@ -45,6 +44,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
+import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import {
   loadCurrentManagedSelfContext,
@@ -122,6 +122,18 @@ import type {
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
     default: module.AnalyticsManager,
+  })),
+);
+
+const ManagedWorkspaceOnboardingPanel = lazy(() =>
+  import("@/components/managed-workspace-onboarding").then((module) => ({
+    default: module.ManagedWorkspaceOnboardingPanel,
+  })),
+);
+
+const ManagedAuthPanel = lazy(() =>
+  import("@/components/managed-auth-panel").then((module) => ({
+    default: module.ManagedAuthPanel,
   })),
 );
 
@@ -507,7 +519,9 @@ export function RootRouteComponent() {
     workspaceId: null,
     revision: 0,
   });
-  const principalTransitionIdentity = useRef<PrincipalTransitionIdentity>({ revision: 0 });
+  const principalTransitionIdentity = useRef<PrincipalTransitionIdentity>({
+    revision: 0,
+  });
   const workspaceOperationSequence = useRef(0);
   const activeCreateOperation = useRef<WorkspaceOperationIdentity | null>(null);
   const githubManifestOperationSequence = useRef(0);
@@ -542,6 +556,10 @@ export function RootRouteComponent() {
   const keyAuthRequired =
     clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
+  const managedEmailVerificationRequired =
+    clientConfig?.auth.mode === "managedSession"
+      ? (clientConfig.auth.emailVerificationRequired ?? true)
+      : true;
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
   const authReady = keyAuthReady && managedAuthReady;
@@ -555,7 +573,9 @@ export function RootRouteComponent() {
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
@@ -1491,7 +1511,11 @@ export function RootRouteComponent() {
         )
       ) {
         if (attempted) {
-          options?.onFailure?.({ error: problem, request: attempted.request, outcomeUnknown });
+          options?.onFailure?.({
+            error: problem,
+            request: attempted.request,
+            outcomeUnknown,
+          });
         }
         toast.error("Failed to start session", {
           description: composerSubmissionErrorMessage(problem),
@@ -1727,7 +1751,7 @@ export function RootRouteComponent() {
       if (signup.status === "stale") return;
       captureProductAnalyticsEvent("signup_submitted", {
         method: "email",
-        verification_required: true,
+        verification_required: managedEmailVerificationRequired,
       });
     } else {
       const signin = await runCurrentTransitionInvocation({
@@ -1747,12 +1771,12 @@ export function RootRouteComponent() {
     });
     if (sessionRead.status === "stale") return;
     const nextSession = sessionRead.value;
+    if (!nextSession && !(mode === "signup" && managedEmailVerificationRequired)) {
+      throw new ManagedAuthSessionUnavailableError(mode);
+    }
     authPrincipalIdRef.current = nextSession?.user.id ?? null;
     setAuthSession(nextSession);
     setAccessKeyVersion((version) => version + 1);
-    if (!nextSession && mode === "signup") {
-      toast.success("Check your email to verify the account");
-    }
   }
 
   async function handleManagedSignOut() {
@@ -1815,7 +1839,10 @@ export function RootRouteComponent() {
     async (workspaceId: string) =>
       await slackLinkPrepareController.prepare(
         workspaceId,
-        async (token) => await client.prepareSlackUserLinkAccess(workspaceId, { linkToken: token }),
+        async (token) =>
+          await client.prepareSlackUserLinkAccess(workspaceId, {
+            linkToken: token,
+          }),
       ),
     [client],
   );
@@ -2015,7 +2042,12 @@ export function RootRouteComponent() {
       ) : managedAuthRequired && authSession === undefined ? (
         <LoadingPanel label="Checking session" />
       ) : managedAuthRequired && !authSession ? (
-        <ManagedAuthPanel onSubmit={handleManagedAuth} />
+        <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
+          <ManagedAuthPanel
+            onSubmit={handleManagedAuth}
+            emailVerificationRequired={managedEmailVerificationRequired}
+          />
+        </Suspense>
       ) : accessError && !accessLoading ? (
         <ProblemPanel
           title="Workspace access unavailable"
@@ -2033,10 +2065,25 @@ export function RootRouteComponent() {
       ) : accessLoading || !appContext ? (
         <LoadingPanel label="Loading workspace access" />
       ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
-        <ProblemPanel
-          title="No workspace access"
-          description="You don't have access to any workspace yet."
-        />
+        managedAuthRequired ? (
+          <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
+            <ManagedWorkspaceOnboardingPanel
+              client={client}
+              onAccessChanged={revalidatePrincipalAccess}
+              onOpenWorkspace={async (workspaceId) => {
+                await navigate({
+                  to: "/workspaces/$workspaceId/sessions",
+                  params: { workspaceId },
+                });
+              }}
+            />
+          </Suspense>
+        ) : (
+          <ProblemPanel
+            title="No workspace access"
+            description="You don't have access to any workspace yet."
+          />
+        )
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />
@@ -2148,161 +2195,6 @@ function AccessKeyPanel(props: {
         >
           <CheckIcon className="size-4" />
           Continue
-        </Button>
-      </form>
-    </section>
-  );
-}
-
-function ManagedAuthPanel(props: {
-  onSubmit: (
-    mode: "signin" | "signup",
-    input: { name: string; email: string; password: string },
-  ) => Promise<void>;
-}) {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [resendBusy, setResendBusy] = useState(false);
-
-  async function submit() {
-    if (!email.trim() || password.length < 8 || (mode === "signup" && !name.trim())) {
-      toast.error("Enter valid account details");
-      return;
-    }
-    setBusy(true);
-    try {
-      await props.onSubmit(mode, {
-        name: name.trim() || email.trim(),
-        email: email.trim(),
-        password,
-      });
-    } catch (error) {
-      toast.error(mode === "signup" ? "Sign up failed" : "Sign in failed", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function resendVerification() {
-    const normalizedEmail = email.trim();
-    if (!normalizedEmail) {
-      toast.error("Enter your email");
-      return;
-    }
-    setResendBusy(true);
-    try {
-      await sendVerificationEmail({ email: normalizedEmail });
-      toast.success("Verification email sent");
-    } catch (error) {
-      toast.error("Failed to send verification email", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    } finally {
-      setResendBusy(false);
-    }
-  }
-
-  return (
-    <section className="flex flex-1 items-center justify-center px-4">
-      <form
-        className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <div className="mb-4 flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <UserIcon className="size-4" />
-          </span>
-          <div>
-            <h1 className="text-base font-semibold">
-              {mode === "signup" ? "Create account" : "Sign in"}
-            </h1>
-            <p className="text-sm text-fg-subtle">
-              Email and password access for the managed console.
-            </p>
-          </div>
-        </div>
-        <div className="mb-4 grid grid-cols-2 rounded-md border border-border bg-bg p-1">
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "signin" ? "secondary" : "ghost"}
-            onClick={() => setMode("signin")}
-          >
-            Sign in
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "signup" ? "secondary" : "ghost"}
-            onClick={() => setMode("signup")}
-          >
-            Sign up
-          </Button>
-        </div>
-        {mode === "signup" ? (
-          <div className="mb-3">
-            <Label htmlFor="managed-auth-name">Name</Label>
-            <Input
-              id="managed-auth-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              autoComplete="name"
-              className="mt-2"
-            />
-          </div>
-        ) : null}
-        <div className="mb-3">
-          <Label htmlFor="managed-auth-email">Email</Label>
-          <Input
-            id="managed-auth-email"
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            autoComplete="email"
-            className="mt-2"
-            autoFocus
-          />
-        </div>
-        <div>
-          <Label htmlFor="managed-auth-password">Password</Label>
-          <Input
-            id="managed-auth-password"
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            autoComplete={mode === "signin" ? "current-password" : "new-password"}
-            className="mt-2"
-          />
-        </div>
-        <Button type="submit" className="mt-4 w-full" disabled={busy}>
-          {busy ? (
-            <Loader2Icon className="size-4 animate-spin" />
-          ) : (
-            <CheckIcon className="size-4" />
-          )}
-          {mode === "signup" ? "Create account" : "Sign in"}
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          className="mt-2 w-full"
-          disabled={resendBusy || busy}
-          onClick={() => void resendVerification()}
-        >
-          {resendBusy ? (
-            <Loader2Icon className="size-4 animate-spin" />
-          ) : (
-            <RefreshCwIcon className="size-4" />
-          )}
-          Resend verification email
         </Button>
       </form>
     </section>
