@@ -168,6 +168,7 @@ describe("release schema contract", () => {
       "0332_organization_shared_workspace_control_plane.sql",
       "0333_session_turn_prompt_routing.sql",
       "0334_connected_machine_workspace_root.sql",
+      "0335_slack_workspace_routing.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -617,8 +618,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0334_connected_machine_workspace_root.sql")) {
         return includesActivation
-          ? "34e6f107db58c27e56d14558a98aa178e081753d1fa6f1c8547cd71947f82ca2"
-          : "12b765b2e7c99d847a85c67ea3a37fd0a5bdbd5cb1af5789120f1d7edb535331";
+          ? "3d058b3b8c05d2ebf84de1b1024c995ec131c3c4dcb973a0c42014bca1046e3f"
+          : "eab718bef0df92dd9c78feb9639c0098ec0bbce267de79146315091ce8289d98";
       }
       if (migrations.has("0333_session_turn_prompt_routing.sql")) {
         return includesActivation
