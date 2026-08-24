@@ -24,6 +24,7 @@
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
+//   /dev/capability-ux-v4                     → DEV-only capability/settings prototype
 import {
   Navigate,
   RouterProvider,
@@ -35,60 +36,32 @@ import {
 import { ProblemPanel } from "@/components/common";
 import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
-import {
-  parseComposerLaunchSearch,
-  type ComposerLaunchSearch,
-} from "@/lib/composer-launch";
+import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 
 type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
 
-export {
-  workspaceAgentPath,
-  workspaceSessionPath,
-  workspaceSessionsPath,
-} from "@/lib/routes";
+export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
 
 const LazyCapabilitiesRoute = lazyRouteComponent(
   () => import("@/routes/capabilities"),
   "CapabilitiesRoute",
 );
-const LazyAgentsRoute = lazyRouteComponent(
-  () => import("@/routes/agents"),
-  "AgentsRoute",
-);
+const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
 const LazyAgentTopologyPreviewRoute = lazyRouteComponent(
   () => import("@/routes/agents"),
   "AgentTopologyPreviewRoute",
 );
-const LazyDeviceRoute = lazyRouteComponent(
-  () => import("@/routes/device"),
-  "DeviceRoute",
-);
-const LazyDocumentsRoute = lazyRouteComponent(
-  () => import("@/routes/documents"),
-  "DocumentsRoute",
-);
-const LazyMemoryRoute = lazyRouteComponent(
-  () => import("@/routes/memory"),
-  "MemoryRoute",
-);
+const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
+const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
+const LazyMemoryRoute = lazyRouteComponent(() => import("@/routes/memory"), "MemoryRoute");
 const LazyVariableSetsRoute = lazyRouteComponent(
   () => import("@/routes/variable-sets"),
   "VariableSetsRoute",
 );
-const LazyMachinesRoute = lazyRouteComponent(
-  () => import("@/routes/machines"),
-  "MachinesRoute",
-);
-const LazyInsightsRoute = lazyRouteComponent(
-  () => import("@/routes/insights"),
-  "InsightsRoute",
-);
-const LazyPriorityRoute = lazyRouteComponent(
-  () => import("@/routes/priority"),
-  "PriorityRoute",
-);
+const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
+const LazyPriorityRoute = lazyRouteComponent(() => import("@/routes/priority"), "PriorityRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
   "OrgSettingsRoute",
@@ -97,22 +70,13 @@ const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
 );
-const LazyRigsRoute = lazyRouteComponent(
-  () => import("@/routes/rigs"),
-  "RigsRoute",
-);
+const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
   "RigDetailRoute",
 );
-const LazySchedulesRoute = lazyRouteComponent(
-  () => import("@/routes/schedules"),
-  "SchedulesRoute",
-);
-const LazySessionRoute = lazyRouteComponent(
-  () => import("@/routes/session"),
-  "SessionRoute",
-);
+const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
+const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
 const LazySessionDeepLinkRoute = lazyRouteComponent(
   () => import("@/routes/session-deep-link"),
   "SessionDeepLinkRoute",
@@ -129,10 +93,7 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   () => import("@/routes/workspace-state"),
   "WorkspaceStateRoute",
 );
-const LazyArtifactsRoute = lazyRouteComponent(
-  () => import("@/routes/artifacts"),
-  "ArtifactsRoute",
-);
+const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
 const LazyEditableArtifactRoute = lazyRouteComponent(
   () => import("@/routes/editable-artifact"),
   "EditableArtifactRoute",
@@ -144,6 +105,10 @@ const LazyWorkspaceShellRoute = lazyRouteComponent(
 const LazyComposerChromeGalleryRoute = lazyRouteComponent(
   () => import("@/routes/composer-chrome"),
   "ComposerChromeGalleryRoute",
+);
+const LazyCapabilityUxV4Route = lazyRouteComponent(
+  () => import("@/routes/capability-ux-v4"),
+  "CapabilityUxV4Route",
 );
 
 const rootRoute = createRootRoute({
@@ -167,9 +132,7 @@ const sessionDeepLinkRoute = createRoute({
 const billingReturnRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "billing",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { checkout?: CheckoutOutcome } => {
+  validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
     const checkout = parseCheckoutOutcome(search);
     return checkout ? { checkout } : {};
   },
@@ -183,9 +146,7 @@ const deviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "device",
   validateSearch: (search: Record<string, unknown>): { user_code?: string } =>
-    typeof search.user_code === "string" && search.user_code
-      ? { user_code: search.user_code }
-      : {},
+    typeof search.user_code === "string" && search.user_code ? { user_code: search.user_code } : {},
   component: Device,
 });
 // Password-reset completion page. Top-level and PUBLIC: the emailed link
@@ -196,9 +157,7 @@ const resetPasswordRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "reset-password",
   validateSearch: (search: Record<string, unknown>): { token?: string } =>
-    typeof search.token === "string" && search.token
-      ? { token: search.token }
-      : {},
+    typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
@@ -213,6 +172,11 @@ const agentTopologyPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/agent-topology",
   component: AgentTopologyPreview,
+});
+const capabilityUxV4Route = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/capability-ux-v4",
+  component: CapabilityUxV4,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -316,8 +280,7 @@ const workspaceSchedulesRoute = createRoute({
       : {}),
     // Set when arriving from a session that a schedule started, so the page can
     // reveal that one task instead of leaving the reader to find it.
-    ...(typeof search.taskId === "string" &&
-    SCHEDULES_SEARCH_UUID.test(search.taskId)
+    ...(typeof search.taskId === "string" && SCHEDULES_SEARCH_UUID.test(search.taskId)
       ? { taskId: search.taskId }
       : {}),
   }),
@@ -329,9 +292,7 @@ const workspaceDocumentsRoute = createRoute({
   // Memory used to live inside Documents, so existing timeline links and
   // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
   // compatibility redirect to the first-class Memory surface.
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { memory?: string; from?: "brain" } => ({
+  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
     ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
     ...(search.from === "brain" ? { from: "brain" as const } : {}),
   }),
@@ -343,9 +304,7 @@ const workspaceMemoryRoute = createRoute({
   // `?memory=<id>` deep-links a memory record (from a timeline memory step): the
   // Memory page reveals + highlights that record even when the filters would
   // otherwise hide it. Unknown values are ignored.
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { memory?: string; from?: "brain" } => ({
+  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
     ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
     ...(search.from === "brain" ? { from: "brain" as const } : {}),
   }),
@@ -401,10 +360,7 @@ const workspaceOrganizationRoute = createRoute({
       search.section === "billing"
         ? search.section
         : undefined;
-    return {
-      ...(checkout ? { checkout } : {}),
-      ...(section ? { section } : {}),
-    };
+    return { ...(checkout ? { checkout } : {}), ...(section ? { section } : {}) };
   },
   component: Organization,
 });
@@ -413,9 +369,7 @@ const workspaceOrganizationRoute = createRoute({
 const workspaceAccountRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "account",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { checkout?: CheckoutOutcome } => {
+  validateSearch: (search: Record<string, unknown>): { checkout?: CheckoutOutcome } => {
     const checkout = parseCheckoutOutcome(search);
     return checkout ? { checkout } : {};
   },
@@ -428,7 +382,7 @@ const routeTree = rootRoute.addChildren([
   deviceRoute,
   resetPasswordRoute,
   ...(import.meta.env.DEV
-    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute]
+    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, capabilityUxV4Route]
     : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
@@ -487,24 +441,12 @@ function RootIndexRoute() {
       />
     );
   }
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/sessions"
-      params={{ workspaceId }}
-      replace
-    />
-  );
+  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
 }
 
 function WorkspaceIndexRedirect() {
   const { workspaceId } = workspaceRoute.useParams();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/sessions"
-      params={{ workspaceId }}
-      replace
-    />
-  );
+  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
 }
 
 function WorkspaceShell() {
@@ -548,13 +490,7 @@ function VariableSets() {
 
 function VariableSetsRedirect() {
   const { workspaceId } = workspaceEnvironmentsRoute.useParams();
-  return (
-    <Navigate
-      to="/workspaces/$workspaceId/variable-sets"
-      params={{ workspaceId }}
-      replace
-    />
-  );
+  return <Navigate to="/workspaces/$workspaceId/variable-sets" params={{ workspaceId }} replace />;
 }
 
 function Rigs() {
@@ -597,9 +533,7 @@ function PacksRedirect() {
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
-  return (
-    <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />
-  );
+  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
 }
 
 function Schedules() {
@@ -627,12 +561,7 @@ function Documents() {
       />
     );
   }
-  return (
-    <LazyDocumentsRoute
-      workspaceId={workspaceId}
-      returnToBrain={from === "brain"}
-    />
-  );
+  return <LazyDocumentsRoute workspaceId={workspaceId} returnToBrain={from === "brain"} />;
 }
 
 function Memory() {
@@ -667,23 +596,13 @@ function ArtifactDetail() {
 }
 
 function EditableArtifact() {
-  return (
-    <LazyEditableArtifactRoute
-      {...workspaceEditableArtifactRoute.useParams()}
-    />
-  );
+  return <LazyEditableArtifactRoute {...workspaceEditableArtifactRoute.useParams()} />;
 }
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
   const { checkout, section } = workspaceOrganizationRoute.useSearch();
-  return (
-    <LazyOrgSettingsRoute
-      workspaceId={workspaceId}
-      checkout={checkout}
-      section={section}
-    />
-  );
+  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} section={section} />;
 }
 
 function AccountRedirect() {
@@ -715,6 +634,10 @@ function ComposerChromeGallery() {
 
 function AgentTopologyPreview() {
   return <LazyAgentTopologyPreviewRoute />;
+}
+
+function CapabilityUxV4() {
+  return <LazyCapabilityUxV4Route />;
 }
 
 function BillingReturnRoute() {

@@ -8,19 +8,10 @@ import {
 } from "@opengeni/contracts";
 import type { CreateSessionRequest, SessionEvent } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
-import {
-  composerSubmissionErrorMessage,
-  type SessionEventsConnectionState,
-} from "@opengeni/react";
+import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
-import {
-  CheckIcon,
-  Loader2Icon,
-  LockIcon,
-  RefreshCwIcon,
-  UserIcon,
-} from "lucide-react";
+import { CheckIcon, Loader2Icon, LockIcon, RefreshCwIcon, UserIcon } from "lucide-react";
 import {
   createContext,
   lazy,
@@ -156,9 +147,7 @@ export type AppContextValue = {
   /** Token-free initial-route marker for a rejected legacy query bearer. */
   invalidSlackLinkQueryWorkspaceId: string | null;
   /** Creates or joins the one server-side prepare request for the bootstrapped bearer. */
-  preparePendingSlackLink: (
-    workspaceId: string,
-  ) => Promise<SlackUserLinkAccessRequest | null>;
+  preparePendingSlackLink: (workspaceId: string) => Promise<SlackUserLinkAccessRequest | null>;
   clearSlackLinkContinuation: () => void;
   accessKeyVersion: number;
   keyAuthRequired: boolean;
@@ -219,26 +208,16 @@ export type AppContextValue = {
   /** Clear and rebind every workspace/session-local draft and cache before display. */
   prepareWorkspaceTransition: (workspaceId: string) => void;
   /** Capture the exact routed workspace/principal transition for one async invocation. */
-  captureWorkspaceInvocation: (
-    workspaceId: string,
-  ) => WorkspaceTransitionIdentity | null;
+  captureWorkspaceInvocation: (workspaceId: string) => WorkspaceTransitionIdentity | null;
   /** True only while an invocation still owns the routed workspace/principal UI. */
-  ownsWorkspaceInvocation: (
-    workspaceId: string,
-    accepted: WorkspaceTransitionIdentity,
-  ) => boolean;
+  ownsWorkspaceInvocation: (workspaceId: string, accepted: WorkspaceTransitionIdentity) => boolean;
   addManualRepository: () => void;
   forgetAccessKey: () => void;
   handleManagedSignOut: () => Promise<void>;
   /** Reload grants, workspaces, and managed self-membership from the cookie. */
   revalidatePrincipalAccess: () => void;
-  createWorkspace: (
-    request: CreateWorkspaceRequest,
-  ) => Promise<Workspace | null>;
-  renameWorkspace: (
-    workspaceId: string,
-    name: string,
-  ) => Promise<Workspace | null>;
+  createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
+  renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   setWorkspaceInferenceControl: (
     workspaceId: string,
     action: "pause" | "resume",
@@ -251,10 +230,7 @@ export type AppContextValue = {
   /** Set (or clear, with `null`) the workspace's default rig — used by session
    * create fallback. Upserts the returned workspace so the "Default" badge and
    * any default-derived UI reflect it without a reload. */
-  setWorkspaceDefaultRig: (
-    workspaceId: string,
-    rigId: string | null,
-  ) => Promise<Workspace | null>;
+  setWorkspaceDefaultRig: (workspaceId: string, rigId: string | null) => Promise<Workspace | null>;
   updateSessionTitle: (
     workspaceId: string,
     sessionId: string,
@@ -273,16 +249,10 @@ export type AppContextValue = {
     signal?: AbortSignal,
     options?: { sync?: boolean },
   ) => Promise<void>;
-  refreshWorkspaceMcpServers: (
-    workspaceId: string,
-    signal?: AbortSignal,
-  ) => Promise<void>;
+  refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
   /** Resolves true when the unlink succeeded; failures self-toast and resolve false. */
-  disconnectGitHubInstallation: (
-    workspaceId: string,
-    installationId: number,
-  ) => Promise<boolean>;
+  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<boolean>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
@@ -320,8 +290,7 @@ export type StartSessionFailure = Readonly<{
   outcomeUnknown: boolean;
 }>;
 
-export type SlackLinkPreparePhase =
-  "none" | "raw" | "in_flight" | "prepared" | "failed";
+export type SlackLinkPreparePhase = "none" | "raw" | "in_flight" | "prepared" | "failed";
 
 /**
  * A signed-out Slack deep link has already been scrubbed from browser history,
@@ -335,9 +304,7 @@ export function preserveSlackLinkForManagedAuth(
   return mode === "signin" && phase === "raw";
 }
 
-export function createSlackLinkPrepareController<Request>(
-  value: PendingSlackLink | null,
-) {
+export function createSlackLinkPrepareController<Request>(value: PendingSlackLink | null) {
   let workspaceId = value?.workspaceId ?? null;
   let bearer = value?.token ?? null;
   let inFlight: Promise<Request> | null = null;
@@ -359,8 +326,7 @@ export function createSlackLinkPrepareController<Request>(
       requestedWorkspaceId: string,
       exchange: (token: string) => Promise<Request>,
     ): Promise<Request | null> => {
-      if (!workspaceId || requestedWorkspaceId !== workspaceId)
-        return Promise.resolve(null);
+      if (!workspaceId || requestedWorkspaceId !== workspaceId) return Promise.resolve(null);
       if (prepared !== null) return Promise.resolve(prepared);
       if (hasFailure) return Promise.reject(failure);
       if (inFlight) return inFlight;
@@ -393,8 +359,7 @@ export function createSlackLinkPrepareController<Request>(
           },
         )
         .finally(() => {
-          if (generation === claimedGeneration && inFlight === flight)
-            inFlight = null;
+          if (generation === claimedGeneration && inFlight === flight) inFlight = null;
         });
       inFlight = flight;
       return flight;
@@ -421,10 +386,9 @@ const bootstrappedInvalidSlackLinkQueryWorkspaceId =
     ? null
     : invalidSlackLinkQueryWorkspaceIdFromUrl(window.location.href);
 stripSlackLinkFromBrowserLocation();
-const slackLinkPrepareController =
-  createSlackLinkPrepareController<SlackUserLinkAccessRequest>(
-    bootstrappedPendingSlackLink,
-  );
+const slackLinkPrepareController = createSlackLinkPrepareController<SlackUserLinkAccessRequest>(
+  bootstrappedPendingSlackLink,
+);
 
 type SessionEventFeed = { sessionId: string; events: SessionEvent[] } | null;
 
@@ -474,12 +438,8 @@ export function useAppContext(): AppContextValue {
   return value;
 }
 
-export function workspaceLabel(
-  workspace: Workspace,
-  workspaces: Workspace[],
-): string {
-  const hasMultipleAccounts =
-    new Set(workspaces.map((candidate) => candidate.accountId)).size > 1;
+export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): string {
+  const hasMultipleAccounts = new Set(workspaces.map((candidate) => candidate.accountId)).size > 1;
   if (!hasMultipleAccounts) {
     return workspace.name;
   }
@@ -490,91 +450,66 @@ export function RootRouteComponent() {
   const [session, setSessionState] = useState<Session | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
-  const [authSession, setAuthSession] = useState<
-    AuthSession | null | undefined
-  >(undefined);
-  const [accessContext, setAccessContext] = useState<AccessContext | null>(
-    null,
-  );
+  const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
+  const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [managedSelfContext, setManagedSelfContext] =
-    useState<ManagedSelfContext | null>(null);
-  const [
-    slackLinkContinuationWorkspaceId,
-    setSlackLinkContinuationWorkspaceId,
-  ] = useState<string | null>(slackLinkPrepareController.workspaceId);
-  const [
-    invalidSlackLinkQueryWorkspaceId,
-    setInvalidSlackLinkQueryWorkspaceId,
-  ] = useState<string | null>(bootstrappedInvalidSlackLinkQueryWorkspaceId);
+  const [managedSelfContext, setManagedSelfContext] = useState<ManagedSelfContext | null>(null);
+  const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
+    string | null
+  >(slackLinkPrepareController.workspaceId);
+  const [invalidSlackLinkQueryWorkspaceId, setInvalidSlackLinkQueryWorkspaceId] = useState<
+    string | null
+  >(bootstrappedInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<string | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
-  const [reasoningEffort, setReasoningEffort] =
-    useState<IntelligenceEffort>("low");
+  const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
   // Changes/Files dock starts collapsed; user opens via the session-panel toggle.
   // No localStorage — only an in-memory default (toggle still works for the session).
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [connectionState, setConnectionState] =
-    useState<SessionEventsConnectionState>("idle");
+  const [connectionState, setConnectionState] = useState<SessionEventsConnectionState>("idle");
   const [sessionEventFeedStore] = useState(createSessionEventFeedStore);
   const [manualRepos, setManualRepos] = useState<RepoDraft[]>([]);
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [nextRepoId, setNextRepoId] = useState(1);
-  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(
-    () => new Set(),
-  );
-  const [selectedRepoRefs, setSelectedRepoRefs] = useState<
-    Record<number, string>
-  >({});
+  const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
+  const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
   const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
   const [githubStatusFailed, setGithubStatusFailed] = useState(false);
   const [githubCatalogReady, setGithubCatalogReady] = useState(false);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
-  const [workspaceMcpServers, setWorkspaceMcpServers] = useState<
-    McpServerOption[]
-  >([]);
+  const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
   const [workspaceCapabilityCatalog, setWorkspaceCapabilityCatalog] = useState<
     CapabilityCatalogItem[]
   >([]);
-  const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] =
-    useState(false);
-  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<
-    Set<string>
-  >(() => new Set());
-  const [workspaceStateOwnerId, setWorkspaceStateOwnerId] = useState<
-    string | null
-  >(null);
+  const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
+  const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [workspaceStateOwnerId, setWorkspaceStateOwnerId] = useState<string | null>(null);
   const workspaceTransitionIdentity = useRef<WorkspaceTransitionIdentity>({
     workspaceId: null,
     revision: 0,
   });
-  const principalTransitionIdentity = useRef<PrincipalTransitionIdentity>({
-    revision: 0,
-  });
+  const principalTransitionIdentity = useRef<PrincipalTransitionIdentity>({ revision: 0 });
   const workspaceOperationSequence = useRef(0);
   const activeCreateOperation = useRef<WorkspaceOperationIdentity | null>(null);
   const githubManifestOperationSequence = useRef(0);
-  const activeGitHubManifestOperation =
-    useRef<WorkspaceOperationIdentity | null>(null);
+  const activeGitHubManifestOperation = useRef<WorkspaceOperationIdentity | null>(null);
   const githubDisconnectOperationSequence = useRef(0);
-  const activeGitHubDisconnectOperation =
-    useRef<WorkspaceOperationIdentity | null>(null);
+  const activeGitHubDisconnectOperation = useRef<WorkspaceOperationIdentity | null>(null);
   const authPrincipalIdRef = useRef<string | null>(null);
   const accessPrincipalIdRef = useRef<string | null>(null);
-  const managedSelfContextIdentityRef =
-    useRef<ManagedSelfContextIdentity | null>(null);
+  const managedSelfContextIdentityRef = useRef<ManagedSelfContextIdentity | null>(null);
   // Every available tool is selected when it first appears. Explicit
   // deselections survive subsequent catalog refreshes.
   const previousCapabilityToolIds = useRef<Set<string>>(new Set());
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
-  const mcpCatalogRequests = useRef(
-    new Map<string, Promise<CapabilityCatalogResponse>>(),
-  );
+  const mcpCatalogRequests = useRef(new Map<string, Promise<CapabilityCatalogResponse>>());
   // Stable CREATE idempotency key for the in-flight session create. Generated
   // lazily and reused across retries (and across a double-click that re-enters
   // startSession before busy flips), so duplicate creates collapse to one
@@ -588,14 +523,11 @@ export function RootRouteComponent() {
   const [busy, setBusy] = useState(false);
   const [repoBusy, setRepoBusy] = useState(false);
   const [githubAppBusy, setGithubAppBusy] = useState(false);
-  const [hasAccessKey, setHasAccessKey] = useState(
-    () => getStoredAccessKey() !== null,
-  );
+  const [hasAccessKey, setHasAccessKey] = useState(() => getStoredAccessKey() !== null);
   const [accessKeyDraft, setAccessKeyDraft] = useState("");
   const [accessKeyVersion, setAccessKeyVersion] = useState(0);
   const keyAuthRequired =
-    clientConfig?.auth.mode === "deploymentKey" ||
-    clientConfig?.auth.mode === "configuredToken";
+    clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
   const keyAuthReady = !keyAuthRequired || hasAccessKey;
   const managedAuthReady = !managedAuthRequired || Boolean(authSession);
@@ -610,9 +542,7 @@ export function RootRouteComponent() {
   // Public routes render ahead of every auth/config gate: a user completing a
   // password reset is signed out by definition, so `/reset-password` must never
   // be intercepted by the sign-in panel or workspace-access loading.
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
-  });
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const hasSearchParameters = useRouterState({
     select: (state) => Object.keys(state.location.search).length > 0,
   });
@@ -620,9 +550,10 @@ export function RootRouteComponent() {
   // always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
     import.meta.env.DEV &&
-    (pathname === "/dev/composer-chrome" || pathname === "/dev/agent-topology");
-  const isPublicAuthRoute =
-    pathname === "/reset-password" || isPublicDevHarness;
+    (pathname === "/dev/composer-chrome" ||
+      pathname === "/dev/agent-topology" ||
+      pathname === "/dev/capability-ux-v4");
+  const isPublicAuthRoute = pathname === "/reset-password" || isPublicDevHarness;
   useEffect(() => {
     if (
       invalidSlackLinkQueryWorkspaceId &&
@@ -641,18 +572,15 @@ export function RootRouteComponent() {
     void accessKeyVersion;
     return createOpenGeniClient();
   }, [accessKeyVersion]);
-  const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>(
-    (value) => {
-      setSessionState((current) => {
-        const next =
-          typeof value === "function"
-            ? (value as (previous: Session | null) => Session | null)(current)
-            : value;
-        return sameSessionForContext(current, next) ? current : next;
-      });
-    },
-    [],
-  );
+  const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
+    setSessionState((current) => {
+      const next =
+        typeof value === "function"
+          ? (value as (previous: Session | null) => Session | null)(current)
+          : value;
+      return sameSessionForContext(current, next) ? current : next;
+    });
+  }, []);
 
   const resetSessionView = useCallback(() => {
     setSession(null);
@@ -675,15 +603,10 @@ export function RootRouteComponent() {
       const transition =
         workspaceId === null
           ? {
-              identity: invalidateWorkspaceTransition(
-                workspaceTransitionIdentity.current,
-              ),
+              identity: invalidateWorkspaceTransition(workspaceTransitionIdentity.current),
               changed: true,
             }
-          : beginWorkspaceTransition(
-              workspaceTransitionIdentity.current,
-              workspaceId,
-            );
+          : beginWorkspaceTransition(workspaceTransitionIdentity.current, workspaceId);
       if (!force && !transition.changed) {
         return;
       }
@@ -725,20 +648,14 @@ export function RootRouteComponent() {
   const captureWorkspaceInvocation = useCallback(
     (workspaceId: string): WorkspaceTransitionIdentity | null => {
       const accepted = workspaceTransitionIdentity.current;
-      return ownsWorkspaceTransition(accepted, accepted, workspaceId)
-        ? accepted
-        : null;
+      return ownsWorkspaceTransition(accepted, accepted, workspaceId) ? accepted : null;
     },
     [],
   );
 
   const ownsWorkspaceInvocation = useCallback(
     (workspaceId: string, accepted: WorkspaceTransitionIdentity): boolean =>
-      ownsWorkspaceTransition(
-        workspaceTransitionIdentity.current,
-        accepted,
-        workspaceId,
-      ),
+      ownsWorkspaceTransition(workspaceTransitionIdentity.current, accepted, workspaceId),
     [],
   );
 
@@ -809,18 +726,12 @@ export function RootRouteComponent() {
       .then((nextSession) => {
         if (
           cancelled ||
-          !ownsPrincipalTransition(
-            principalTransitionIdentity.current,
-            acceptedPrincipal,
-          )
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
         ) {
           return;
         }
         const nextPrincipalId = nextSession?.user.id ?? null;
-        if (
-          authPrincipalIdRef.current !== null &&
-          authPrincipalIdRef.current !== nextPrincipalId
-        ) {
+        if (authPrincipalIdRef.current !== null && authPrincipalIdRef.current !== nextPrincipalId) {
           invalidatePrincipalWorkspaceState();
         }
         authPrincipalIdRef.current = nextPrincipalId;
@@ -829,10 +740,7 @@ export function RootRouteComponent() {
       .catch(() => {
         if (
           cancelled ||
-          !ownsPrincipalTransition(
-            principalTransitionIdentity.current,
-            acceptedPrincipal,
-          )
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
         ) {
           return;
         }
@@ -873,18 +781,11 @@ export function RootRouteComponent() {
           request: () => client.listOrganizationMemberships(),
         })
       : Promise.resolve(null);
-    void Promise.all([
-      client.getAccessContext(),
-      client.listWorkspaces(),
-      selfContextPromise,
-    ])
+    void Promise.all([client.getAccessContext(), client.listWorkspaces(), selfContextPromise])
       .then(([context, nextWorkspaces, nextManagedSelfContext]) => {
         if (
           cancelled ||
-          !ownsPrincipalTransition(
-            principalTransitionIdentity.current,
-            acceptedPrincipal,
-          )
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
         ) {
           return;
         }
@@ -895,9 +796,7 @@ export function RootRouteComponent() {
           nextManagedSelfContext &&
           context.subjectId !== nextManagedSelfContext.identity.subjectId
         ) {
-          throw new Error(
-            "managed self context did not match the authenticated subject",
-          );
+          throw new Error("managed self context did not match the authenticated subject");
         }
         if (
           accessPrincipalIdRef.current !== null &&
@@ -918,10 +817,7 @@ export function RootRouteComponent() {
       .catch((error) => {
         if (
           cancelled ||
-          !ownsPrincipalTransition(
-            principalTransitionIdentity.current,
-            acceptedPrincipal,
-          )
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
         ) {
           return;
         }
@@ -935,10 +831,7 @@ export function RootRouteComponent() {
       .finally(() => {
         if (
           !cancelled &&
-          ownsPrincipalTransition(
-            principalTransitionIdentity.current,
-            acceptedPrincipal,
-          )
+          ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
         ) {
           setAccessLoading(false);
         }
@@ -965,14 +858,11 @@ export function RootRouteComponent() {
     if (!clientConfig) return;
     const workspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
     if (!workspaceId) return;
-    const workspace = workspaces.find(
-      (candidate) => candidate.id === workspaceId,
-    );
+    const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
     if (!workspace) return;
     const configured = resolveWorkspaceSessionDefaults(workspace.settings);
     const nextModel = configured?.model ?? clientConfig.defaultModel;
-    const nextEffort =
-      configured?.reasoningEffort ?? initialReasoningEffort(clientConfig);
+    const nextEffort = configured?.reasoningEffort ?? initialReasoningEffort(clientConfig);
     const key = `${workspaceId}\u0000${nextModel}\u0000${nextEffort}`;
     if (appliedWorkspaceSessionDefaultsKey.current === key) return;
     appliedWorkspaceSessionDefaultsKey.current = key;
@@ -981,25 +871,14 @@ export function RootRouteComponent() {
     setLatencyMode("standard");
   }, [clientConfig, pathname, workspaces]);
 
-  const selectedInstalledRepositories = githubRepos.filter((repo) =>
-    selectedRepoIds.has(repo.id),
-  );
-  const selectedInstallationId =
-    selectedInstalledRepositories[0]?.installationId ?? null;
-  const repositoryGroups = useMemo(
-    () => groupRepositories(githubRepos),
-    [githubRepos],
-  );
+  const selectedInstalledRepositories = githubRepos.filter((repo) => selectedRepoIds.has(repo.id));
+  const selectedInstallationId = selectedInstalledRepositories[0]?.installationId ?? null;
+  const repositoryGroups = useMemo(() => groupRepositories(githubRepos), [githubRepos]);
   const toolMcpServers = useMemo(
-    () =>
-      mergeMcpServerOptions(
-        selectableMcpServers(clientConfig),
-        workspaceMcpServers,
-      ),
+    () => mergeMcpServerOptions(selectableMcpServers(clientConfig), workspaceMcpServers),
     [clientConfig, workspaceMcpServers],
   );
-  const routedWorkspaceId =
-    /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
+  const routedWorkspaceId = /^\/workspaces\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const routedWorkspace =
     workspaces.find((workspace) => workspace.id === routedWorkspaceId) ?? null;
   const configuredWorkspaceToolDefaults = useMemo(
@@ -1014,13 +893,7 @@ export function RootRouteComponent() {
       : toolMcpServers.map((server) => server.id);
   }, [configuredWorkspaceToolDefaults, toolMcpServers]);
   const currentResources = useMemo(
-    () =>
-      buildResources(
-        manualRepos,
-        githubRepos,
-        selectedRepoIds,
-        selectedRepoRefs,
-      ),
+    () => buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs),
     [manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs],
   );
 
@@ -1029,9 +902,7 @@ export function RootRouteComponent() {
       return;
     }
     const availableIds = toolMcpServers.map((server) => server.id);
-    const defaultsKey = `${routedWorkspaceId ?? ""}\u0000${[
-      ...workspaceDefaultToolIds,
-    ]
+    const defaultsKey = `${routedWorkspaceId ?? ""}\u0000${[...workspaceDefaultToolIds]
       .sort()
       .join("\u0000")}`;
     if (appliedWorkspaceToolDefaultsKey.current !== defaultsKey) {
@@ -1049,24 +920,14 @@ export function RootRouteComponent() {
       ),
     );
     previousCapabilityToolIds.current = new Set(availableIds);
-  }, [
-    clientConfig,
-    routedWorkspaceId,
-    toolMcpServers,
-    workspaceDefaultToolIds,
-  ]);
+  }, [clientConfig, routedWorkspaceId, toolMcpServers, workspaceDefaultToolIds]);
 
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.
-  async function createWorkspace(
-    request: CreateWorkspaceRequest,
-  ): Promise<Workspace | null> {
+  async function createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace | null> {
     const acceptedTransition = workspaceTransitionIdentity.current;
     const ownsInvocation = () =>
-      ownsTransitionInvocation(
-        workspaceTransitionIdentity.current,
-        acceptedTransition,
-      );
+      ownsTransitionInvocation(workspaceTransitionIdentity.current, acceptedTransition);
     let created: Workspace;
     try {
       const creation = await runCurrentTransitionInvocation({
@@ -1105,18 +966,13 @@ export function RootRouteComponent() {
     return created;
   }
 
-  async function renameWorkspace(
-    workspaceId: string,
-    name: string,
-  ): Promise<Workspace | null> {
+  async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace | null> {
     const acceptedTransition = captureWorkspaceInvocation(workspaceId);
     if (!acceptedTransition) return null;
     try {
       const update = await runCurrentTransitionInvocation({
-        isCurrent: () =>
-          ownsWorkspaceInvocation(workspaceId, acceptedTransition),
-        request: async () =>
-          await client.updateWorkspace(workspaceId, { name }),
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        request: async () => await client.updateWorkspace(workspaceId, { name }),
       });
       if (update.status === "stale") return null;
       setWorkspaces((current) => upsertWorkspace(current, update.value));
@@ -1135,18 +991,14 @@ export function RootRouteComponent() {
   ): Promise<boolean> {
     const acceptedTransition = captureWorkspaceInvocation(workspaceId);
     if (!acceptedTransition) return false;
-    const current = workspaces.find(
-      (workspace) => workspace.id === workspaceId,
-    );
+    const current = workspaces.find((workspace) => workspace.id === workspaceId);
     const update = await runCurrentTransitionInvocation({
       isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
       request: async () =>
         await client.setWorkspaceInferenceState(workspaceId, {
           action,
           clientEventId: crypto.randomUUID(),
-          ...(current
-            ? { expectedRevision: current.inferenceControl.revision }
-            : {}),
+          ...(current ? { expectedRevision: current.inferenceControl.revision } : {}),
         }),
     });
     if (update.status === "stale") return false;
@@ -1175,8 +1027,7 @@ export function RootRouteComponent() {
       const acceptedTransition = captureWorkspaceInvocation(workspaceId);
       if (!acceptedTransition) return;
       const refresh = await runCurrentTransitionInvocation({
-        isCurrent: () =>
-          ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
         request: async () => await client.getWorkspace(workspaceId),
       });
       if (refresh.status === "stale") return;
@@ -1196,10 +1047,8 @@ export function RootRouteComponent() {
     if (!acceptedTransition) return null;
     try {
       const update = await runCurrentTransitionInvocation({
-        isCurrent: () =>
-          ownsWorkspaceInvocation(workspaceId, acceptedTransition),
-        request: async () =>
-          await client.updateWorkspaceSettings(workspaceId, settings),
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        request: async () => await client.updateWorkspaceSettings(workspaceId, settings),
       });
       if (update.status === "stale") return null;
       setWorkspaces((current) => upsertWorkspace(current, update.value));
@@ -1220,8 +1069,7 @@ export function RootRouteComponent() {
     if (!acceptedTransition) return null;
     try {
       const update = await runCurrentTransitionInvocation({
-        isCurrent: () =>
-          ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
         request: async () =>
           await client.setWorkspaceDefaultRig(workspaceId, {
             rigId,
@@ -1251,8 +1099,7 @@ export function RootRouteComponent() {
     if (!acceptedTransition) return null;
     try {
       const update = await runCurrentTransitionInvocation({
-        isCurrent: () =>
-          ownsWorkspaceInvocation(workspaceId, acceptedTransition),
+        isCurrent: () => ownsWorkspaceInvocation(workspaceId, acceptedTransition),
         request: async () =>
           await client.updateSession(workspaceId, sessionId, {
             title,
@@ -1290,8 +1137,7 @@ export function RootRouteComponent() {
   ): Promise<Session | null> {
     const acceptedTransition = captureWorkspaceInvocation(workspaceId);
     if (!acceptedTransition) return null;
-    const ownsInvocation = () =>
-      ownsWorkspaceInvocation(workspaceId, acceptedTransition);
+    const ownsInvocation = () => ownsWorkspaceInvocation(workspaceId, acceptedTransition);
     const before = session;
     const optimisticVersion = (expectedVersion ?? before?.pinVersion ?? 0) + 1;
     const optimistic: Session | null =
@@ -1330,16 +1176,12 @@ export function RootRouteComponent() {
       const reconciliation = await runCurrentTransitionInvocation({
         isCurrent: ownsInvocation,
         request: async () =>
-          await client
-            .getSession(workspaceId, sessionId, { fresh: true })
-            .catch(() => null),
+          await client.getSession(workspaceId, sessionId, { fresh: true }).catch(() => null),
       });
       if (reconciliation.status === "stale") return null;
       const authoritative = reconciliation.value;
       if (authoritative) {
-        setSession((current) =>
-          reconcileFailedSessionPin(current, optimistic, authoritative),
-        );
+        setSession((current) => reconcileFailedSessionPin(current, optimistic, authoritative));
         notifySessionPinChanged(workspaceId, sessionId);
         // A lost response after commit is a successful desired-state mutation,
         // not a failed pin. Returning the point-read result keeps the UI
@@ -1377,8 +1219,7 @@ export function RootRouteComponent() {
   async function deleteWorkspace(workspaceId: string): Promise<boolean> {
     const acceptedTransition = captureWorkspaceInvocation(workspaceId);
     if (!acceptedTransition) return false;
-    const ownsInvocation = () =>
-      ownsWorkspaceInvocation(workspaceId, acceptedTransition);
+    const ownsInvocation = () => ownsWorkspaceInvocation(workspaceId, acceptedTransition);
     try {
       const deletion = await runCurrentTransitionInvocation({
         isCurrent: ownsInvocation,
@@ -1391,9 +1232,7 @@ export function RootRouteComponent() {
       });
       return false;
     }
-    setWorkspaces((current) =>
-      current.filter((workspace) => workspace.id !== workspaceId),
-    );
+    setWorkspaces((current) => current.filter((workspace) => workspace.id !== workspaceId));
     try {
       const accessRefresh = await runCurrentTransitionInvocation({
         isCurrent: ownsInvocation,
@@ -1410,19 +1249,9 @@ export function RootRouteComponent() {
   }
 
   const refreshGitHub = useCallback(
-    async (
-      workspaceId: string,
-      signal?: AbortSignal,
-      options?: { sync?: boolean },
-    ) => {
+    async (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => {
       const acceptedTransition = workspaceTransitionIdentity.current;
-      if (
-        !ownsWorkspaceTransition(
-          acceptedTransition,
-          acceptedTransition,
-          workspaceId,
-        )
-      ) {
+      if (!ownsWorkspaceTransition(acceptedTransition, acceptedTransition, workspaceId)) {
         return;
       }
       const ownsRefresh = () =>
@@ -1436,11 +1265,7 @@ export function RootRouteComponent() {
       setRepoBusy(true);
       try {
         const status = await client.getGitHubApp(workspaceId);
-        if (
-          signal?.aborted ||
-          githubRefreshId.current !== refreshId ||
-          !ownsRefresh()
-        ) {
+        if (signal?.aborted || githubRefreshId.current !== refreshId || !ownsRefresh()) {
           return;
         }
         setGithubStatus(status);
@@ -1453,11 +1278,7 @@ export function RootRouteComponent() {
           const { repositories } = options?.sync
             ? await client.syncGitHubRepositories(workspaceId)
             : await client.listGitHubRepositories(workspaceId);
-          if (
-            signal?.aborted ||
-            githubRefreshId.current !== refreshId ||
-            !ownsRefresh()
-          ) {
+          if (signal?.aborted || githubRefreshId.current !== refreshId || !ownsRefresh()) {
             return;
           }
           setGithubRepos(repositories);
@@ -1566,8 +1387,7 @@ export function RootRouteComponent() {
       const sessionTools = options?.sessionTools;
       if (!workspaceMcpCatalogReady && !sessionTools) {
         toast.error("Tools are still loading", {
-          description:
-            "Wait for the workspace tool catalog to finish loading, then try again.",
+          description: "Wait for the workspace tool catalog to finish loading, then try again.",
         });
         return null;
       }
@@ -1592,14 +1412,12 @@ export function RootRouteComponent() {
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
           workspaceDefaultMcpServerIds:
-            configuredWorkspaceToolDefaults?.mcpServerIds ??
-            workspaceDefaultToolIds,
+            configuredWorkspaceToolDefaults?.mcpServerIds ?? workspaceDefaultToolIds,
           workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
           channelId: options?.channelId,
-          expectedNewSessionDraftRevision:
-            options?.expectedNewSessionDraftRevision,
+          expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
           startMode: options?.startMode,
           visibility: options?.visibility,
         }),
@@ -1608,10 +1426,7 @@ export function RootRouteComponent() {
       pendingCreateAttempt.current = attempt.pending;
       const created = await client.createSession(workspaceId, attempt.request);
       // Do not clear a newer concurrent attempt that replaced this one.
-      if (
-        pendingCreateAttempt.current?.idempotencyKey ===
-        attempt.pending.idempotencyKey
-      ) {
+      if (pendingCreateAttempt.current?.idempotencyKey === attempt.pending.idempotencyKey) {
         pendingCreateAttempt.current = null;
       }
       // The create may commit after the operator has switched workspaces. The
@@ -1639,8 +1454,7 @@ export function RootRouteComponent() {
       });
       return created;
     } catch (error) {
-      const { error: problem, outcomeUnknown } =
-        classifyCreateSessionFailure(error);
+      const { error: problem, outcomeUnknown } = classifyCreateSessionFailure(error);
       if (attempted) {
         pendingCreateAttempt.current = retainCreateSessionAttemptAfterFailure({
           current: pendingCreateAttempt.current,
@@ -1657,11 +1471,7 @@ export function RootRouteComponent() {
         )
       ) {
         if (attempted) {
-          options?.onFailure?.({
-            error: problem,
-            request: attempted.request,
-            outcomeUnknown,
-          });
+          options?.onFailure?.({ error: problem, request: attempted.request, outcomeUnknown });
         }
         toast.error("Failed to start session", {
           description: composerSubmissionErrorMessage(problem),
@@ -1669,10 +1479,7 @@ export function RootRouteComponent() {
       }
       return null;
     } finally {
-      const settlement = settleWorkspaceOperation(
-        activeCreateOperation.current,
-        operation,
-      );
+      const settlement = settleWorkspaceOperation(activeCreateOperation.current, operation);
       activeCreateOperation.current = settlement.active;
       if (settlement.settledCurrent) {
         setBusy(false);
@@ -1730,10 +1537,7 @@ export function RootRouteComponent() {
         });
       }
     } finally {
-      const settlement = settleWorkspaceOperation(
-        activeGitHubManifestOperation.current,
-        operation,
-      );
+      const settlement = settleWorkspaceOperation(activeGitHubManifestOperation.current, operation);
       activeGitHubManifestOperation.current = settlement.active;
       if (settlement.settledCurrent) {
         setGithubAppBusy(false);
@@ -1760,8 +1564,7 @@ export function RootRouteComponent() {
         currentTransition: () => workspaceTransitionIdentity.current,
         operation,
         workspaceId,
-        request: async () =>
-          await client.unlinkGitHubInstallation(workspaceId, installationId),
+        request: async () => await client.unlinkGitHubInstallation(workspaceId, installationId),
       });
       if (
         unlink.status === "stale" ||
@@ -1781,11 +1584,7 @@ export function RootRouteComponent() {
       );
       setSelectedRepoIds(
         (current) =>
-          new Set(
-            [...current].filter(
-              (repositoryId) => !removedRepositoryIds.has(repositoryId),
-            ),
-          ),
+          new Set([...current].filter((repositoryId) => !removedRepositoryIds.has(repositoryId))),
       );
       setSelectedRepoRefs((current) =>
         Object.fromEntries(
@@ -1837,8 +1636,7 @@ export function RootRouteComponent() {
       !selectedRepoIds.has(repo.id)
     ) {
       toast.info("This session uses one GitHub token", {
-        description:
-          "Clear selected repositories to choose repositories from another account.",
+        description: "Clear selected repositories to choose repositories from another account.",
       });
       return;
     }
@@ -1858,10 +1656,7 @@ export function RootRouteComponent() {
   }
 
   function addManualRepository() {
-    setManualRepos((current) => [
-      ...current,
-      { id: nextRepoId, url: "", ref: "main" },
-    ]);
+    setManualRepos((current) => [...current, { id: nextRepoId, url: "", ref: "main" }]);
     setNextRepoId((value) => value + 1);
     setManualReposOpen(true);
   }
@@ -1903,10 +1698,7 @@ export function RootRouteComponent() {
     });
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
-      ownsPrincipalTransition(
-        principalTransitionIdentity.current,
-        acceptedPrincipal,
-      );
+      ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
     if (mode === "signup") {
       const signup = await runCurrentTransitionInvocation({
         isCurrent: ownsInvocation,
@@ -1947,10 +1739,7 @@ export function RootRouteComponent() {
     invalidatePrincipalWorkspaceState();
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
-      ownsPrincipalTransition(
-        principalTransitionIdentity.current,
-        acceptedPrincipal,
-      );
+      ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
     // Keep the authenticated tree hidden until an ambiguous response has been
     // reconciled against the authoritative cookie session.
     setAuthSession(undefined);
@@ -1992,36 +1781,21 @@ export function RootRouteComponent() {
   );
   const contextCreateWorkspace = useLatestCallback(createWorkspace);
   const contextRenameWorkspace = useLatestCallback(renameWorkspace);
-  const contextSetWorkspaceInferenceControl = useLatestCallback(
-    setWorkspaceInferenceControl,
-  );
-  const contextUpdateWorkspaceSettings = useLatestCallback(
-    updateWorkspaceSettings,
-  );
-  const contextSetWorkspaceDefaultRig = useLatestCallback(
-    setWorkspaceDefaultRig,
-  );
+  const contextSetWorkspaceInferenceControl = useLatestCallback(setWorkspaceInferenceControl);
+  const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
+  const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
   const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
-  const contextStartGitHubAppManifestFlow = useLatestCallback(
-    startGitHubAppManifestFlow,
-  );
-  const contextDisconnectGitHubInstallation = useLatestCallback(
-    disconnectGitHubInstallation,
-  );
-  const contextToggleGitHubRepository = useLatestCallback(
-    toggleGitHubRepository,
-  );
+  const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
+  const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
+  const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
   const preparePendingSlackLink = useCallback(
     async (workspaceId: string) =>
       await slackLinkPrepareController.prepare(
         workspaceId,
-        async (token) =>
-          await client.prepareSlackUserLinkAccess(workspaceId, {
-            linkToken: token,
-          }),
+        async (token) => await client.prepareSlackUserLinkAccess(workspaceId, { linkToken: token }),
       ),
     [client],
   );
@@ -2208,10 +1982,7 @@ export function RootRouteComponent() {
       ) : !clientConfig && !configError ? (
         <LoadingPanel label="Loading OpenGeni" />
       ) : configError ? (
-        <ProblemPanel
-          title="Client configuration unavailable"
-          description={configError}
-        />
+        <ProblemPanel title="Client configuration unavailable" description={configError} />
       ) : keyAuthRequired && !hasAccessKey ? (
         <AccessKeyPanel
           authMode={clientConfig?.auth.mode}
@@ -2247,8 +2018,7 @@ export function RootRouteComponent() {
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />
-          {import.meta.env.DEV &&
-          import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+          {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
             <TanStackRouterDevtools position="bottom-right" />
           ) : null}
         </AppContext.Provider>
@@ -2257,10 +2027,7 @@ export function RootRouteComponent() {
   );
 }
 
-function submitGitHubManifest(
-  actionUrl: string,
-  manifest: Record<string, unknown>,
-): void {
+function submitGitHubManifest(actionUrl: string, manifest: Record<string, unknown>): void {
   const form = document.createElement("form");
   form.method = "POST";
   form.action = actionUrl;
@@ -2277,34 +2044,24 @@ function submitGitHubManifest(
   form.submit();
 }
 
-export function pendingSlackLinkFromUrl(
-  value: string,
-): PendingSlackLink | null {
+export function pendingSlackLinkFromUrl(value: string): PendingSlackLink | null {
   const url = new URL(value, "https://opengeni.invalid");
   const match = /^\/workspaces\/([^/]+)\/capabilities\/?$/.exec(url.pathname);
   if (!match?.[1]) return null;
-  const fragment = new URLSearchParams(
-    url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
-  );
+  const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
   const token = fragment.get("slack_link");
   if (!token || token.length > 2_048) return null;
   return { workspaceId: decodeURIComponent(match[1]), token };
 }
 
-export function invalidSlackLinkQueryWorkspaceIdFromUrl(
-  value: string,
-): string | null {
+export function invalidSlackLinkQueryWorkspaceIdFromUrl(value: string): string | null {
   const url = new URL(value, "https://opengeni.invalid");
   const match = /^\/workspaces\/([^/]+)\/capabilities\/?$/.exec(url.pathname);
-  return match?.[1] && url.searchParams.has("slack_link")
-    ? decodeURIComponent(match[1])
-    : null;
+  return match?.[1] && url.searchParams.has("slack_link") ? decodeURIComponent(match[1]) : null;
 }
 
 function pendingSlackLinkFromBrowserLocation(): PendingSlackLink | null {
-  return typeof window === "undefined"
-    ? null
-    : pendingSlackLinkFromUrl(window.location.href);
+  return typeof window === "undefined" ? null : pendingSlackLinkFromUrl(window.location.href);
 }
 
 function stripSlackLinkFromBrowserLocation(): void {
@@ -2321,11 +2078,7 @@ function stripSlackLinkFromBrowserLocation(): void {
     const nextFragment = fragment.toString();
     url.hash = nextFragment ? `#${nextFragment}` : "";
   }
-  window.history.replaceState(
-    null,
-    "",
-    `${url.pathname}${url.search}${url.hash}`,
-  );
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 function AccessKeyPanel(props: {
@@ -2351,9 +2104,7 @@ function AccessKeyPanel(props: {
             <h1 className="text-base font-semibold">Access key required</h1>
             <p className="text-sm text-fg-subtle">
               Enter the{" "}
-              {props.authMode === "configuredToken"
-                ? "configured bearer token"
-                : "deployment key"}{" "}
+              {props.authMode === "configuredToken" ? "configured bearer token" : "deployment key"}{" "}
               for this OpenGeni instance.
             </p>
           </div>
@@ -2395,11 +2146,7 @@ function ManagedAuthPanel(props: {
   const [resendBusy, setResendBusy] = useState(false);
 
   async function submit() {
-    if (
-      !email.trim() ||
-      password.length < 8 ||
-      (mode === "signup" && !name.trim())
-    ) {
+    if (!email.trim() || password.length < 8 || (mode === "signup" && !name.trim())) {
       toast.error("Enter valid account details");
       return;
     }
@@ -2509,9 +2256,7 @@ function ManagedAuthPanel(props: {
             type="password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            autoComplete={
-              mode === "signin" ? "current-password" : "new-password"
-            }
+            autoComplete={mode === "signin" ? "current-password" : "new-password"}
             className="mt-2"
           />
         </div>
