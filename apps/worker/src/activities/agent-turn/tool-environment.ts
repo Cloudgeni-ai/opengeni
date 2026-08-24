@@ -699,9 +699,14 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     eventing.codemodeDispatcher.start();
   };
   if (eventing.preparedTools.ready) {
-    eventing.toolPreparationReady = eventing.preparedTools.ready.then((tools) => {
+    const toolPreparationReady = eventing.preparedTools.ready.then((tools) => {
       activatePreparedToolEnvironment(tools);
     });
+    // The lazy runtime awaits and rethrows this exact failure when a model
+    // attempts to use tools. Attach a handler immediately so an early MCP
+    // rejection cannot become a process-level unhandled rejection first.
+    void toolPreparationReady.catch(() => undefined);
+    eventing.toolPreparationReady = toolPreparationReady;
   } else {
     activatePreparedToolEnvironment(eventing.preparedTools);
   }
