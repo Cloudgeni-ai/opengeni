@@ -57,7 +57,7 @@ import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
-import type { WorkspaceTab } from "@opengeni/react";
+import { useRigs, useVariableSets, type WorkspaceTab } from "@opengeni/react";
 import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
 import type {
@@ -1307,6 +1307,13 @@ function SessionChatPane(props: {
   const composerPolicyValidRef = useRef(false);
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
+  const variableSets = useVariableSets({ enabled: fixedResourceCatalogEnabled });
+  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
+  const selectedVariableSet = variableSets.variableSets.find(
+    (candidate) => candidate.id === props.session.variableSetId,
+  );
+  const selectedRig = rigs.rigs.find((candidate) => candidate.id === props.session.rigId);
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -1318,7 +1325,9 @@ function SessionChatPane(props: {
     enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
       variableSetId: props.session.variableSetId,
+      variableSetScope: selectedVariableSet?.scope ?? null,
       rigId: props.session.rigId,
+      rigScope: selectedRig?.scope ?? null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,

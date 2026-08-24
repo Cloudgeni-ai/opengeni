@@ -288,7 +288,7 @@ describe("usePersonalResourceAttachment", () => {
             accessSubjectId: "user:owner",
             managedSelfContext: current.managedSelfContext,
             workspace,
-            fixed: { variableSetId, rigId: null },
+            fixed: { variableSetId, variableSetScope: "user", rigId: null },
             personalWorkspaceTarget: false,
           }),
         undefined,
@@ -297,6 +297,62 @@ describe("usePersonalResourceAttachment", () => {
       expect(hook.result.current.selected.resourceCount).toBe(0);
       expect(hook.result.current.error).toBe(failure);
       expect(hook.result.current.requiresDecision).toBe(true);
+      expect(hook.result.current.intent).toBeUndefined();
+      await hook.unmount();
+    });
+  }
+
+  for (const [name, fixed] of [
+    [
+      "organization Variable Set",
+      {
+        variableSetId,
+        variableSetScope: "organization" as const,
+        rigId: null,
+      },
+    ],
+    [
+      "workspace Rig",
+      {
+        variableSetId: null,
+        rigId: "77777777-7777-4777-8777-777777777777",
+        rigScope: "workspace" as const,
+      },
+    ],
+  ] as const) {
+    test(`${name} never exposes the Personal-resource access failure`, async () => {
+      const failure = new Error("personal catalog unavailable");
+      const client = {
+        listVariableSets: async () => {
+          throw failure;
+        },
+        listRigs: async () => {
+          throw failure;
+        },
+        listUserResourceAuthorities: async () => {
+          throw failure;
+        },
+      } as unknown as OpenGeniCoreClient;
+      const current = identity("owner");
+      const hook = await renderHook(
+        () =>
+          usePersonalResourceAttachment({
+            client,
+            authMode: "managedSession",
+            authSession: current.authSession,
+            accessSubjectId: "user:owner",
+            managedSelfContext: current.managedSelfContext,
+            workspace,
+            fixed,
+            personalWorkspaceTarget: false,
+          }),
+        undefined,
+      );
+      await flush();
+      expect(hook.result.current.eligible).toBe(true);
+      expect(hook.result.current.loading).toBe(false);
+      expect(hook.result.current.error).toBeNull();
+      expect(hook.result.current.requiresDecision).toBe(false);
       expect(hook.result.current.intent).toBeUndefined();
       await hook.unmount();
     });

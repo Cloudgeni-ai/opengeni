@@ -22,6 +22,8 @@ import {
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
+  type UseRigsResult,
+  type UseVariableSetsResult,
 } from "@opengeni/react";
 import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
@@ -171,6 +173,13 @@ function SessionsIndexRouteContent({
   );
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
+  const variableSets = useVariableSets({ enabled: fixedResourceCatalogEnabled });
+  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
+  const selectedVariableSet = variableSets.variableSets.find(
+    (candidate) => candidate.id === draft.variableSetId,
+  );
+  const selectedRig = rigs.rigs.find((candidate) => candidate.id === draft.rigId);
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -221,7 +230,10 @@ function SessionsIndexRouteContent({
     enabled: draft.compute.kind === "sandbox",
     fixed: {
       variableSetId: draft.compute.kind === "sandbox" ? draft.variableSetId || null : null,
+      variableSetScope:
+        draft.compute.kind === "sandbox" ? (selectedVariableSet?.scope ?? null) : null,
       rigId: draft.compute.kind === "sandbox" ? draft.rigId || null : null,
+      rigScope: draft.compute.kind === "sandbox" ? (selectedRig?.scope ?? null) : null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     createVisibility: personalWorkspace ? "private" : draft.visibility,
@@ -864,6 +876,8 @@ function SessionsIndexRouteContent({
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
             personalAttachment={personalAttachment}
+            variableSets={variableSets}
+            rigs={rigs}
             selectedChannelId={selectedChannelId}
             selectionHistory={selectionHistory}
           />
@@ -1255,6 +1269,8 @@ function ComputeTargetControl(props: {
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalAttachment: PersonalResourceAttachmentController;
+  variableSets: UseVariableSetsResult;
+  rigs: UseRigsResult;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
 }) {
@@ -1397,6 +1413,8 @@ function ComputeTargetControl(props: {
             onChange={onChange}
             disabled={props.disabled}
             personalAttachment={props.personalAttachment}
+            variableSets={props.variableSets}
+            rigs={props.rigs}
           />
           <FleetErrorNotice onRetry={() => void fleet.refresh()} />
         </section>
@@ -1408,6 +1426,8 @@ function ComputeTargetControl(props: {
         onChange={onChange}
         disabled={props.disabled}
         personalAttachment={props.personalAttachment}
+        variableSets={props.variableSets}
+        rigs={props.rigs}
       />
     );
   }
@@ -1450,6 +1470,8 @@ function ComputeTargetControl(props: {
           onChange={onChange}
           disabled={props.disabled}
           personalAttachment={props.personalAttachment}
+          variableSets={props.variableSets}
+          rigs={props.rigs}
         />
       ) : (
         <ConnectedMachineFields
@@ -1525,16 +1547,16 @@ function ManagedSandboxFields(props: {
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalAttachment: PersonalResourceAttachmentController;
+  variableSets: UseVariableSetsResult;
+  rigs: UseRigsResult;
 }) {
   const { draft, onChange } = props;
-  const variableSets = useVariableSets();
-  const rigs = useRigs();
   const personalRigs = props.personalAttachment.catalog?.rigs ?? [];
   const personalVariableSets = props.personalAttachment.catalog?.variableSets ?? [];
   const personalRigIds = new Set(personalRigs.map((resource) => resource.id));
   const personalVariableSetIds = new Set(personalVariableSets.map((resource) => resource.id));
-  const workspaceRigs = rigs.rigs.filter((resource) => !personalRigIds.has(resource.id));
-  const workspaceVariableSets = variableSets.variableSets.filter(
+  const workspaceRigs = props.rigs.rigs.filter((resource) => !personalRigIds.has(resource.id));
+  const workspaceVariableSets = props.variableSets.variableSets.filter(
     (resource) => !personalVariableSetIds.has(resource.id),
   );
   const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;

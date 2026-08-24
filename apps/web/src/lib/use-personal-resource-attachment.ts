@@ -1,6 +1,7 @@
 import {
   PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
   type PersonalResourceAttachmentIntent,
+  type ResourceAuthorityScope,
   type SendMessageInput,
   type Session,
   type Workspace,
@@ -20,7 +21,12 @@ import {
   type PersonalResourceCatalog,
 } from "./personal-resource-attachments";
 
-type FixedPersonalResources = { variableSetId: string | null; rigId: string | null };
+type FixedPersonalResources = {
+  variableSetId: string | null;
+  variableSetScope?: ResourceAuthorityScope | null | undefined;
+  rigId: string | null;
+  rigScope?: ResourceAuthorityScope | null | undefined;
+};
 type PersonalResourceAttachmentAttempt = {
   personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
 };
@@ -69,7 +75,6 @@ export function usePersonalResourceAttachment(input: {
   onReloadSession?: (() => Promise<void>) | undefined;
 }): PersonalResourceAttachmentController {
   const onReloadSession = input.onReloadSession;
-  const hasFixedResources = input.fixed.variableSetId !== null || input.fixed.rigId !== null;
   const resolvedScope =
     input.enabled === false
       ? null
@@ -142,7 +147,10 @@ export function usePersonalResourceAttachment(input: {
         setError(null);
       } catch (cause) {
         if (generation !== loadGeneration.current || acceptedScopeKey.current !== scopeKey) return;
-        setCatalog(null);
+        // Keep the last positively identified personal-resource catalog on a
+        // refresh failure. Clearing it would misclassify an outage as revoked
+        // authority and would make an unrelated workspace-scoped selection
+        // surface a Personal-resource error.
         setError(cause instanceof Error ? cause : new Error(String(cause)));
       } finally {
         if (generation === loadGeneration.current && acceptedScopeKey.current === scopeKey) {
@@ -171,7 +179,12 @@ export function usePersonalResourceAttachment(input: {
   // Eligibility is a synchronous fence. Do not wait for the transition effect
   // to clear prior owner state before hiding it from a connected-machine send.
   const selected = personalSelection(scope ? catalog : null, input.fixed);
-  const fixedIdentity = `${input.fixed.variableSetId ?? ""}:${input.fixed.rigId ?? ""}`;
+  const fixedIdentity = [
+    input.fixed.variableSetId ?? "",
+    input.fixed.variableSetScope ?? "unknown",
+    input.fixed.rigId ?? "",
+    input.fixed.rigScope ?? "unknown",
+  ].join(":");
   const selectedIdentity = `${fixedIdentity}:${selected.resourceCount}`;
   const priorSelectionIdentity = useRef(selectedIdentity);
   const priorFixedIdentity = useRef(fixedIdentity);
@@ -210,12 +223,17 @@ export function usePersonalResourceAttachment(input: {
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
   const fixedResourceCount =
     Number(input.fixed.variableSetId !== null) + Number(input.fixed.rigId !== null);
+  const positivelyPersonal =
+    sourceLost ||
+    selected.personalResourceCount > 0 ||
+    (input.fixed.variableSetId !== null && input.fixed.variableSetScope === "user") ||
+    (input.fixed.rigId !== null && input.fixed.rigScope === "user");
   const closureError = selected.closureUnverified
     ? new Error(
         "The selected personal-resource authority closure could not be verified. Retry or choose a non-personal resource.",
       )
     : null;
-  const effectiveError = error ?? closureError;
+  const effectiveError = positivelyPersonal ? (error ?? closureError) : null;
   const intent = scope
     ? buildPersonalResourceAttachmentIntent({
         mode,
@@ -228,7 +246,9 @@ export function usePersonalResourceAttachment(input: {
   const requiresDecision =
     scope !== null &&
     (sourceLost ||
-      (fixedResourceCount > 0 && (loading || refreshing || effectiveError !== null)) ||
+      (positivelyPersonal &&
+        fixedResourceCount > 0 &&
+        (loading || refreshing || effectiveError !== null)) ||
       (selected.resourceCount > 0 &&
         (mode === null || (visibility === "workspace" && !acknowledged))));
 
@@ -276,12 +296,12 @@ export function usePersonalResourceAttachment(input: {
     // becomes submission UI only after the user has actually selected a fixed
     // personal resource; an unavailable optional catalog must not turn an
     // ordinary new-session composer into an error state.
-    loading: hasFixedResources && loading,
-    refreshing: hasFixedResources && refreshing,
-    error: hasFixedResources ? effectiveError : null,
+    loading: positivelyPersonal && fixedResourceCount > 0 && loading,
+    refreshing: positivelyPersonal && fixedResourceCount > 0 && refreshing,
+    error: positivelyPersonal && fixedResourceCount > 0 ? effectiveError : null,
     notice,
     sourceLost,
-    truncated: hasFixedResources && (catalog?.truncated ?? false),
+    truncated: positivelyPersonal && fixedResourceCount > 0 && (catalog?.truncated ?? false),
     catalog,
     selected,
     mode,
