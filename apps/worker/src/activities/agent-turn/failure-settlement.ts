@@ -54,6 +54,7 @@ import { createTurnHistorySink } from "./history-sink";
 
 import { BudgetExhaustedError } from "./admission";
 import {
+  providerRecoveryExhaustedFailure,
   providerRecoveryResult,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
@@ -1298,7 +1299,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // truth, recover this SAME accepted turn, then let the workflow re-claim
   // it after a pacing delay. This is independent of goal state and never
   // relies on a synthetic continuation prompt.
-  const failure = agentRunFailurePayload(error, {
+  let failure = agentRunFailurePayload(error, {
     isCodexTurn: billingState.isCodexTurn,
   }) as ReturnType<typeof agentRunFailurePayload>;
   if (isSessionEventPersistenceError(error)) {
@@ -1335,33 +1336,36 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         attemptNumber: nextProviderRecoveryCount,
         retryAfterMs: providerRetryAfterMs(error),
       });
-      await flushRuntimeBatcher();
-      await historySink.reconcileConversationTruth({ requireDurable: true });
-      const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-        sessionId: input.sessionId,
-        turnId: attempt.turnId,
-        triggerEventId: attempt.triggerEventId!,
-        attemptId: input.attemptId,
-        reason: failure.code ?? "provider_unavailable",
-        providerRecoveryCount: nextProviderRecoveryCount,
-        detail: {
-          ...failure,
-          continueDelayMs: recoveryResult.continueDelayMs,
+      if (recoveryResult.status === "recovering") {
+        await flushRuntimeBatcher();
+        await historySink.reconcileConversationTruth({ requireDurable: true });
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: attempt.turnId,
+          triggerEventId: attempt.triggerEventId!,
+          attemptId: input.attemptId,
+          reason: failure.code ?? "provider_unavailable",
           providerRecoveryCount: nextProviderRecoveryCount,
-        },
-      });
-      if (recovery.action === "stale") {
-        acknowledgeLostAttemptOwnership();
-        control.activityStatus = "cancelled";
-        control.turnMetricOutcome = "cancelled";
-        return claimedResult({ status: "cancelled" });
+          detail: {
+            ...failure,
+            continueDelayMs: recoveryResult.continueDelayMs,
+            providerRecoveryCount: nextProviderRecoveryCount,
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          control.activityStatus = "cancelled";
+          control.turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        acknowledgeRecoveryQuiescence();
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        control.turnMetricOutcome = "recovering";
+        control.activityStatus = "recovering";
+        control.activityError = error;
+        return claimedResult(recoveryResult);
       }
-      acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-      control.turnMetricOutcome = "recovering";
-      control.activityStatus = "recovering";
-      control.activityError = error;
-      return claimedResult(recoveryResult);
+      failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
     } catch (recoveryError) {
       const escaped = escapedMcpTimeoutRecoveryFailure({
         failureCode: failure.code,

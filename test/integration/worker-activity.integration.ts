@@ -77,7 +77,10 @@ import {
 } from "@opengeni/runtime";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
+import {
+  MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+  PROVIDER_BACKPRESSURE_DELAY_MS,
+} from "../../apps/worker/src/activities/agent-turn";
 import {
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
@@ -1537,6 +1540,123 @@ describe("worker activities integration", () => {
       status: "recovering",
       activeAttemptId: null,
     });
+  });
+
+  test("repeated required-MCP connection refusal exhausts automatic same-turn recovery", async () => {
+    const grant = await testGrant(dbClient.db);
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "stop retrying when required MCP stays unavailable",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    await createSessionGoal(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      text: "prove recovery does not become a goal continuation loop",
+      createdBy: "api",
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      {
+        type: "user.message",
+        payload: { text: "stop retrying when required MCP stays unavailable" },
+      },
+    ]);
+    const raw = new Error("MCP connect failed for https://private.example/token-value");
+    raw.cause = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8000"), {
+      code: "ECONNREFUSED",
+    });
+    const baseRuntime = createProductionAgentRuntime({
+      model: new ScriptedModel([{ outputText: "unused" }]),
+    });
+    const runtime: OpenGeniRuntime = {
+      ...baseRuntime,
+      runStream: async () => {
+        throw mcpTransportErrorWithRetryMetadata(raw);
+      },
+    };
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime,
+    });
+    const workflowId = "workflow-required-mcp-recovery-exhaustion";
+    const workflowRunId = crypto.randomUUID();
+
+    for (let recovery = 1; recovery <= MAX_AUTOMATIC_PROVIDER_RECOVERIES; recovery += 1) {
+      await expect(
+        activities.runAgentTurn({
+          attemptId: crypto.randomUUID(),
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+          trigger: { kind: "next" },
+          workflowId,
+          workflowRunId,
+        }),
+      ).resolves.toMatchObject({
+        status: "recovering",
+      });
+    }
+
+    await expect(
+      activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: session.id,
+        trigger: { kind: "next" },
+        workflowId,
+        workflowRunId,
+      }),
+    ).resolves.toMatchObject({ status: "failed" });
+
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 200);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(
+      MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+    );
+    expect(events.filter((event) => event.type === "goal.continuation")).toHaveLength(0);
+    expect(events.findLast((event) => event.type === "turn.failed")?.payload).toMatchObject({
+      code: "mcp_transport_unavailable",
+      retryable: false,
+      recoveryExhausted: true,
+      providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+    });
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "failed",
+      activeAttemptId: null,
+    });
+
+    const revived = await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "retry now that the dependency has recovered",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: "medium",
+    });
+    expect(revived.accepted.type).toBe("user.message");
+    expect(revived.turn.status).toBe("queued");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("queued");
+    expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "active",
+    );
   });
 
   test("a rolling-replacement first-party MCP 404 recovers the same goal turn before inference", async () => {

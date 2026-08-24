@@ -28,6 +28,10 @@ describe("organization administration surface", () => {
       "listOrganizationInvitations",
       "acceptOrganizationInvitation",
       "updateOrganizationMember",
+      "updateOrganizationWorkspace",
+      "addOrganizationWorkspaceMember",
+      "updateOrganizationWorkspaceMember",
+      "removeOrganizationWorkspaceMember",
       "getOrganizationRetentionPolicy",
       "updateOrganizationRetentionPolicy",
     ]) {
@@ -40,17 +44,21 @@ describe("organization administration surface", () => {
       expect(adminSource).toContain(`${helper}(`);
     }
     expect(adminSource).not.toContain("personalWorkspaceId");
-    expect(adminSource).toContain("Stable masked identifier");
-    expect(adminSource).toContain("Profile name and email are unavailable from this API.");
+    expect(adminSource).toContain("member.name?.trim()");
+    expect(adminSource).toContain("member.email");
+    expect(adminSource).toContain("Add organization member");
+    expect(adminSource).toContain("Workspace administrator");
+    expect(adminSource).not.toContain(".addWorkspaceMember(");
+    expect(adminSource).not.toContain(".removeWorkspaceMember(");
     expect(adminSource).toContain("props.onAuthorityChanged()");
   });
 
   test("names destructive consequences and restores keyboard focus", () => {
-    expect(adminSource).toContain("Access is revoked immediately");
+    expect(adminSource).toContain("This immediately pauses organization access");
     expect(adminSource).toContain(
-      "Shared-workspace grants removed during suspension are not restored",
+      "Shared-workspace access removed when access was paused is not restored",
     );
-    expect(adminSource).toContain("Offboarding is terminal");
+    expect(adminSource).toContain("Removing a member is permanent");
     expect(adminSource).toContain("restoreFocusRef={actionTriggerRef}");
     expect(adminSource).toContain("restoreFocusFallbackRef={peopleHeadingRef}");
     expect(adminSource).toContain('aria-live="polite"');
@@ -79,11 +87,11 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain("visibleBusyResource || incoming.loading");
   });
 
-  test("documents the bounded UI while keeping provider delivery outside this backend phase", () => {
+  test("documents the bounded organization and workspace control plane", () => {
     expect(tenancyDocs).toContain("bounded organization\nadministration surface");
     expect(tenancyDocs).toContain("reads and mutations use independent operation lanes");
-    expect(tenancyDocs).toContain("Provider email delivery\nremains a non-goal");
-    expect(tenancyDocs).toContain("pre-registration name and initial-workspace access");
+    expect(tenancyDocs).toContain("Provider email delivery remains a\nnon-goal");
+    expect(tenancyDocs).toContain("0332_organization_shared_workspace_control_plane.sql");
     expect(tenancyDocs).not.toContain("member-management\nUI remain deferred");
   });
 });

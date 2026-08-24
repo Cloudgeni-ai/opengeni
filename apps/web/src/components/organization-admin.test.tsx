@@ -6,10 +6,7 @@ import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
 
 import { destructiveActionFocusTarget } from "@/components/ui/confirm-dialog";
-import {
-  maskedOrganizationSubject,
-  type OrganizationAdminIdentity,
-} from "@/lib/organization-admin";
+import { type OrganizationAdminIdentity } from "@/lib/organization-admin";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
@@ -85,6 +82,8 @@ function member(
     id: `membership-${suffix}`,
     organizationId: identity.organizationId,
     subjectId: identity.subjectId,
+    name: "Test person",
+    email: "person@example.com",
     role,
     status: "active",
     authorizationRevision: 1,
@@ -350,6 +349,9 @@ describe("organization administration component fences", () => {
     const onOrganizationChanged = mock(() => undefined);
     const client = {
       getOrganizationAdministrationOverview,
+      listOrganizationMembers: mock(async () => ({
+        members: [member(identityA, "overview")],
+      })),
       updateOrganizationName,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
@@ -366,6 +368,8 @@ describe("organization administration component fences", () => {
             managedSession
             accessibleWorkspaceIds={new Set(["workspace-company"])}
             onOrganizationChanged={onOrganizationChanged}
+            onCreateWorkspace={async () => undefined}
+            onCreateOrganization={async () => undefined}
           />
         </StrictMode>,
       );
@@ -399,9 +403,89 @@ describe("organization administration component fences", () => {
     container.remove();
   });
 
+  test("uses the organization control plane for shared-workspace settings and access", async () => {
+    const updateOrganizationWorkspace = mock(async () => ({
+      id: "workspace-company",
+      accountId: identityA.organizationId,
+      name: "Company systems",
+    }));
+    const updateOrganizationWorkspaceMember = mock(async () => ({
+      subjectId: "user:alice",
+      subjectLabel: "Alice Example",
+      role: "admin",
+      permissions: ["workspace:admin"],
+      createdAt: timestamp,
+    }));
+    const client = {
+      getOrganizationAdministrationOverview: mock(async () => overview(identityA)),
+      listOrganizationMembers: mock(async () => ({
+        members: [member(identityA, "overview")],
+      })),
+      updateOrganizationWorkspace,
+      updateOrganizationWorkspaceMember,
+    } as unknown as OpenGeniCoreClient;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={client}
+          identity={identityA}
+          actorRole="owner"
+          managedSession
+          accessibleWorkspaceIds={new Set()}
+          onOrganizationChanged={() => undefined}
+          onCreateWorkspace={async () => undefined}
+          onCreateOrganization={async () => undefined}
+        />,
+      );
+    });
+    await flush();
+
+    const workspaceName = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Workspace name for Company platform"]',
+    );
+    if (!workspaceName) throw new Error("Missing workspace name input");
+    await enterText(workspaceName, "Company systems");
+    await act(async () => button(container, "Save name").click());
+    await flush();
+    expect(updateOrganizationWorkspace).toHaveBeenCalledWith(
+      identityA.organizationId,
+      "workspace-company",
+      { name: "Company systems" },
+    );
+
+    const access = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Workspace access for Alice Example"]',
+    );
+    if (!access) throw new Error("Missing workspace access select");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(access), "value")?.set?.call(
+        access,
+        "admin",
+      );
+      access.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(updateOrganizationWorkspaceMember).toHaveBeenCalledWith(
+      identityA.organizationId,
+      "workspace-company",
+      "user:alice",
+      { role: "admin", permissions: ["workspace:admin"] },
+    );
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("retries an outcome-unknown rename with the exact operation id", async () => {
     const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
-    const uncertain = Object.assign(new Error("response lost"), { outcomeUnknown: true });
+    const uncertain = Object.assign(new Error("response lost"), {
+      outcomeUnknown: true,
+    });
     const updateOrganizationName = mock(async (...args: unknown[]) => {
       if (updateOrganizationName.mock.calls.length === 1) throw uncertain;
       const request = args[1] as { name: string };
@@ -413,6 +497,9 @@ describe("organization administration component fences", () => {
     });
     const client = {
       getOrganizationAdministrationOverview,
+      listOrganizationMembers: mock(async () => ({
+        members: [member(identityA, "overview")],
+      })),
       updateOrganizationName,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
@@ -428,6 +515,8 @@ describe("organization administration component fences", () => {
           managedSession
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => undefined}
+          onCreateWorkspace={async () => undefined}
+          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -457,6 +546,51 @@ describe("organization administration component fences", () => {
     container.remove();
   });
 
+  test("lets an ordinary member create another organization and safely retries it", async () => {
+    const uncertain = Object.assign(new Error("response lost"), {
+      outcomeUnknown: true,
+    });
+    const onCreateOrganization = mock(async (_name: string, _operationId: string) => {
+      if (onCreateOrganization.mock.calls.length === 1) throw uncertain;
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <OrganizationOverviewSection
+          client={{} as OpenGeniCoreClient}
+          identity={identityA}
+          actorRole="member"
+          managedSession
+          accessibleWorkspaceIds={new Set()}
+          onOrganizationChanged={() => undefined}
+          onCreateWorkspace={async () => undefined}
+          onCreateOrganization={onCreateOrganization}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Create another organization");
+    expect(container.textContent).toContain("does not allow you to change this organization");
+    const nameInput = container.querySelector<HTMLInputElement>(
+      'input[aria-label="New organization name"]',
+    );
+    if (!nameInput) throw new Error("Missing new organization name input");
+    await enterText(nameInput, "Independent team");
+    await act(async () => button(container, "Create").click());
+    await flush();
+    await act(async () => button(container, "Create").click());
+    await flush();
+
+    expect(onCreateOrganization).toHaveBeenCalledTimes(2);
+    expect(onCreateOrganization.mock.calls[1]?.[1]).toBe(onCreateOrganization.mock.calls[0]?.[1]);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("reports a failed account-menu refresh without misreporting a committed rename", async () => {
     const getOrganizationAdministrationOverview = mock(async () => overview(identityA));
     const updateOrganizationName = mock(async () => ({
@@ -466,6 +600,9 @@ describe("organization administration component fences", () => {
     }));
     const client = {
       getOrganizationAdministrationOverview,
+      listOrganizationMembers: mock(async () => ({
+        members: [member(identityA, "overview")],
+      })),
       updateOrganizationName,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
@@ -481,6 +618,8 @@ describe("organization administration component fences", () => {
           managedSession
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => Promise.reject(new Error("access refresh unavailable"))}
+          onCreateWorkspace={async () => undefined}
+          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -511,8 +650,15 @@ describe("organization administration component fences", () => {
 
   test("keeps people reads and mutations owned through StrictMode setup cleanup setup", async () => {
     const actor = member(identityA, "strict-actor");
-    const secondOwner = { ...member(identityA, "strict-owner-2"), subjectId: "user:owner-2" };
-    const listOrganizationMembers = mock(async () => ({ members: [actor, secondOwner] }));
+    const secondOwner = {
+      ...member(identityA, "strict-owner-2"),
+      subjectId: "user:owner-2",
+      name: "Second Owner",
+      email: "owner-2@example.com",
+    };
+    const listOrganizationMembers = mock(async () => ({
+      members: [actor, secondOwner],
+    }));
     const updateOrganizationMember = mock(async () => ({
       ...actor,
       status: "suspended" as const,
@@ -525,7 +671,10 @@ describe("organization administration component fences", () => {
         invitations: [],
         nextCursor: null,
       }),
-      listOrganizationInvitations: async () => ({ invitations: [], nextCursor: null }),
+      listOrganizationInvitations: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
       updateOrganizationMember,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
@@ -548,14 +697,25 @@ describe("organization administration component fences", () => {
     await flush();
 
     expect(listOrganizationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(container.textContent).toContain(maskedOrganizationSubject(secondOwner.subjectId));
-    await act(async () => button(container, "Suspend You").click());
-    await act(async () => button(container, "Suspend member").click());
+    expect(container.textContent).toContain("Second Owner");
+    const roleSelect = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Organization role for Test person (you)"]',
+    );
+    expect(roleSelect).not.toBeNull();
+    expect(roleSelect?.parentElement?.classList.contains("relative")).toBe(true);
+    expect(Array.from(roleSelect?.options ?? []).map((option) => option.textContent)).toContain(
+      "Administrator",
+    );
+    expect(container.textContent).not.toContain("Suspend");
+    expect(container.textContent).not.toContain("Offboard");
+    expect(container.textContent).toContain("Remove");
+    await act(async () => button(container, "Pause access").click());
+    await act(async () => button(container, "Confirm pause").click());
     await flush();
 
     expect(updateOrganizationMember).toHaveBeenCalledTimes(1);
     expect(onAuthorityChanged).toHaveBeenCalledTimes(1);
-    expect(toastSuccess).toHaveBeenCalledWith("Member suspended");
+    expect(toastSuccess).toHaveBeenCalledWith("Member access paused");
 
     await act(async () => root.unmount());
     container.remove();
@@ -590,9 +750,7 @@ describe("organization administration component fences", () => {
     await flush();
 
     expect(getOrganizationRetentionPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(container.textContent).toContain(
-      "Retain offboarded members' personal data indefinitely",
-    );
+    expect(container.textContent).toContain("Retain removed members' personal data indefinitely");
     const deleteAfter = Array.from(container.querySelectorAll("input")).find(
       (input) =>
         input.getAttribute("type") === "radio" &&
@@ -637,7 +795,10 @@ describe("organization administration component fences", () => {
         ],
       }),
       listOrganizationInvitationsForOrganization,
-      listOrganizationInvitations: async () => ({ invitations: [], nextCursor: null }),
+      listOrganizationInvitations: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
       createOrganizationInvitation,
       revokeOrganizationInvitation,
     } as unknown as OpenGeniCoreClient;
@@ -662,17 +823,17 @@ describe("organization administration component fences", () => {
     await enterText(email, "new-member@example.test");
 
     await act(async () => button(container, "Load more invitations").click());
-    expect(button(container, "Invite registered user").disabled).toBe(true);
+    expect(button(container, "Invite").disabled).toBe(true);
     expect(button(container, "Revoke invitation for member@example.test").disabled).toBe(true);
     expect(createOrganizationInvitation).not.toHaveBeenCalled();
     expect(revokeOrganizationInvitation).not.toHaveBeenCalled();
 
     pageRead.resolve({ invitations: [], nextCursor: "page-2" });
     await flush();
-    expect(button(container, "Invite registered user").disabled).toBe(false);
+    expect(button(container, "Invite").disabled).toBe(false);
     expect(button(container, "Revoke invitation for member@example.test").disabled).toBe(false);
 
-    await act(async () => button(container, "Invite registered user").click());
+    await act(async () => button(container, "Invite").click());
     expect(createOrganizationInvitation).toHaveBeenCalledTimes(1);
     expect(button(container, "Load more invitations").disabled).toBe(true);
     createResult.resolve({
@@ -694,7 +855,7 @@ describe("organization administration component fences", () => {
     expect(button(container, "Load more invitations").disabled).toBe(true);
     revokeResult.resolve({ ...listedInvite, status: "revoked", revision: 2 });
     await flush();
-    expect(container.textContent).toContain("member · revoked");
+    expect(container.textContent).toContain("Member · revoked");
     expect(button(container, "Load more invitations").disabled).toBe(false);
 
     await act(async () => root.unmount());
@@ -771,7 +932,12 @@ describe("organization administration component fences", () => {
   test("makes a delayed people mutation inert after keyed A to B remount", async () => {
     const pendingUpdate = deferred<OrganizationMember>();
     const actorA = member(identityA, "actor-a");
-    const secondOwner = { ...member(identityA, "owner-2"), subjectId: "user:owner-2" };
+    const secondOwner = {
+      ...member(identityA, "owner-2"),
+      subjectId: "user:owner-2",
+      name: "Second Owner",
+      email: "owner-2@example.com",
+    };
     const actorB = member(identityB, "actor-b");
     const updateOrganizationMember = mock(() => pendingUpdate.promise);
     const onAuthorityChanged = mock(() => undefined);
@@ -783,7 +949,10 @@ describe("organization administration component fences", () => {
         invitations: [],
         nextCursor: null,
       }),
-      listOrganizationInvitations: async () => ({ invitations: [], nextCursor: null }),
+      listOrganizationInvitations: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
       updateOrganizationMember,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
@@ -803,8 +972,8 @@ describe("organization administration component fences", () => {
       );
     });
     await flush();
-    await act(async () => button(container, "Suspend You").click());
-    await act(async () => button(container, "Suspend member").click());
+    await act(async () => button(container, "Pause access").click());
+    await act(async () => button(container, "Confirm pause").click());
 
     await act(async () => {
       root.render(
@@ -819,14 +988,18 @@ describe("organization administration component fences", () => {
       );
     });
     await flush();
-    pendingUpdate.resolve({ ...actorA, status: "suspended", authorizationRevision: 2 });
+    pendingUpdate.resolve({
+      ...actorA,
+      status: "suspended",
+      authorizationRevision: 2,
+    });
     await flush();
 
     expect(updateOrganizationMember).toHaveBeenCalledTimes(1);
     expect(onAuthorityChanged).not.toHaveBeenCalled();
     expect(toastSuccess).not.toHaveBeenCalled();
     expect(container.textContent).toContain("You");
-    expect(container.textContent).not.toContain(maskedOrganizationSubject(secondOwner.subjectId));
+    expect(container.textContent).not.toContain("Second Owner");
 
     await act(async () => root.unmount());
     container.remove();
@@ -894,12 +1067,17 @@ describe("organization administration component fences", () => {
   test("does not expose or invoke owner/admin invitation revocation for an admin", async () => {
     const revokeOrganizationInvitation = mock(async () => invitation("member"));
     const client = {
-      listOrganizationMembers: async () => ({ members: [member(identityA, "admin", "admin")] }),
+      listOrganizationMembers: async () => ({
+        members: [member(identityA, "admin", "admin")],
+      }),
       listOrganizationInvitationsForOrganization: async () => ({
         invitations: [invitation("owner"), invitation("admin"), invitation("member")],
         nextCursor: null,
       }),
-      listOrganizationInvitations: async () => ({ invitations: [], nextCursor: null }),
+      listOrganizationInvitations: async () => ({
+        invitations: [],
+        nextCursor: null,
+      }),
       revokeOrganizationInvitation,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");

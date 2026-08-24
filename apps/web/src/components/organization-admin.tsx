@@ -24,6 +24,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import {
   beginOrganizationAdminOperation,
   canInviteOrganizationRole,
@@ -44,6 +45,7 @@ import {
   type OrganizationAdminOperationSlot,
 } from "@/lib/organization-admin";
 import { formatTimestamp } from "@/lib/format";
+import { defaultWorkspaceMemberPermissions } from "@/lib/permissions";
 import type {
   OrganizationAdministrationOverview,
   OrganizationInvitation,
@@ -51,6 +53,7 @@ import type {
   OrganizationMembershipRole,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
+  OrganizationWorkspaceAccessMember,
 } from "@/types";
 
 type OwnedState<Value> = {
@@ -61,6 +64,52 @@ type OwnedState<Value> = {
 };
 
 type MemberAction = "suspend" | "reactivate" | "offboard";
+
+const ORGANIZATION_ROLE_LABELS: Record<OrganizationMembershipRole, string> = {
+  owner: "Owner",
+  admin: "Administrator",
+  member: "Member",
+};
+
+type WorkspaceAccessPreset = "member" | "admin" | "custom";
+
+function workspaceAccessPreset(member: OrganizationWorkspaceAccessMember): WorkspaceAccessPreset {
+  if (member.permissions.includes("workspace:admin")) return "admin";
+  const defaults = defaultWorkspaceMemberPermissions;
+  return member.permissions.length === defaults.size &&
+    member.permissions.every((permission) => defaults.has(permission))
+    ? "member"
+    : "custom";
+}
+
+function workspaceAccessPresetPermissions(preset: Exclude<WorkspaceAccessPreset, "custom">) {
+  return preset === "admin" ? ["workspace:admin"] : [...defaultWorkspaceMemberPermissions];
+}
+
+function organizationMemberStatusLabel(status: OrganizationMember["status"]): string {
+  if (status === "suspended") return "Access paused";
+  if (status === "revoked") return "Removed";
+  if (status === "provisioning") return "Joining";
+  return "Active";
+}
+
+function memberActionTitle(action: MemberAction, target: string): string {
+  if (action === "suspend") return `Pause access for ${target}?`;
+  if (action === "reactivate") return `Restore access for ${target}?`;
+  return `Remove ${target} from the organization?`;
+}
+
+function memberActionConfirmLabel(action: MemberAction): string {
+  if (action === "suspend") return "Confirm pause";
+  if (action === "reactivate") return "Restore member access";
+  return "Remove member";
+}
+
+function memberActionFailureTitle(action: MemberAction): string {
+  if (action === "suspend") return "Could not pause member access";
+  if (action === "reactivate") return "Could not restore member access";
+  return "Could not remove member";
+}
 
 type PendingOrganizationRename = {
   ownerKey: string;
@@ -242,6 +291,17 @@ export function OrganizationPrivateSessionsSection(props: {
   );
 }
 
+function organizationMemberLabel(member: OrganizationMember, currentSubjectId?: string): string {
+  if (member.name?.trim()) {
+    return member.subjectId === currentSubjectId
+      ? `${member.name.trim()} (you)`
+      : member.name.trim();
+  }
+  if (member.email) return member.email;
+  if (member.subjectId === currentSubjectId) return "You";
+  return maskedOrganizationSubject(member.subjectId);
+}
+
 export function OrganizationOverviewSection(props: {
   client: OpenGeniCoreClient;
   identity: OrganizationAdminIdentity;
@@ -249,6 +309,8 @@ export function OrganizationOverviewSection(props: {
   managedSession: boolean;
   accessibleWorkspaceIds: ReadonlySet<string>;
   onOrganizationChanged: () => void | Promise<void>;
+  onCreateWorkspace: (name: string, operationId: string) => Promise<void>;
+  onCreateOrganization: (name: string, operationId: string) => Promise<void>;
 }) {
   const identityKey = organizationAdminIdentityKey(props.identity);
   const identityRef = useRef<OrganizationAdminIdentity | null>(props.identity);
@@ -256,6 +318,14 @@ export function OrganizationOverviewSection(props: {
   const sequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
   const activeRef = useRef(new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>());
   const pendingRenameRef = useRef<PendingOrganizationRename | null>(null);
+  const pendingCreateOrganizationRef = useRef<{
+    name: string;
+    operationId: string;
+  } | null>(null);
+  const pendingCreateWorkspaceRef = useRef<{
+    name: string;
+    operationId: string;
+  } | null>(null);
   const [state, setState] = useState<OwnedState<OrganizationAdministrationOverview | null>>({
     ownerKey: "",
     value: null,
@@ -265,6 +335,17 @@ export function OrganizationOverviewSection(props: {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
+  const [organizationMembers, setOrganizationMembers] = useState<OrganizationMember[]>([]);
+  const [workspaceAssignments, setWorkspaceAssignments] = useState<Record<string, string>>({});
+  const [workspaceAssignmentAccess, setWorkspaceAssignmentAccess] = useState<
+    Record<string, Exclude<WorkspaceAccessPreset, "custom">>
+  >({});
+  const [workspaceNameDrafts, setWorkspaceNameDrafts] = useState<Record<string, string>>({});
+  const [accessBusyWorkspaceId, setAccessBusyWorkspaceId] = useState<string | null>(null);
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+  const [newOrganizationName, setNewOrganizationName] = useState("");
+  const [creatingOrganization, setCreatingOrganization] = useState(false);
   const canAdminister = props.actorRole === "owner" || props.actorRole === "admin";
 
   const claim = useCallback(
@@ -309,15 +390,26 @@ export function OrganizationOverviewSection(props: {
 
   const load = useCallback(async () => {
     if (!props.managedSession || !canAdminister || !props.identity.organizationId) {
-      setState({ ownerKey: identityKey, value: null, loading: false, error: null });
+      setState({
+        ownerKey: identityKey,
+        value: null,
+        loading: false,
+        error: null,
+      });
       return;
     }
     const operation = claim("read");
-    setState((current) => ({ ...current, ownerKey: identityKey, loading: true, error: null }));
+    setState((current) => ({
+      ...current,
+      ownerKey: identityKey,
+      loading: true,
+      error: null,
+    }));
     try {
-      const overview = await props.client.getOrganizationAdministrationOverview(
-        props.identity.organizationId,
-      );
+      const [overview, memberPage] = await Promise.all([
+        props.client.getOrganizationAdministrationOverview(props.identity.organizationId),
+        props.client.listOrganizationMembers(props.identity.organizationId),
+      ]);
       if (!owns(operation)) return;
       const pendingRename = pendingRenameRef.current;
       if (
@@ -328,7 +420,16 @@ export function OrganizationOverviewSection(props: {
         pendingRenameRef.current = null;
       }
       setName(overview.organization.name);
-      setState({ ownerKey: identityKey, value: overview, loading: false, error: null });
+      setWorkspaceNameDrafts(
+        Object.fromEntries(overview.workspaces.map((workspace) => [workspace.id, workspace.name])),
+      );
+      setOrganizationMembers(memberPage.members.filter((member) => member.status === "active"));
+      setState({
+        ownerKey: identityKey,
+        value: overview,
+        loading: false,
+        error: null,
+      });
     } catch (error) {
       if (!owns(operation)) return;
       setState({
@@ -337,6 +438,7 @@ export function OrganizationOverviewSection(props: {
         loading: false,
         error: error instanceof Error ? error : new Error(String(error)),
       });
+      setOrganizationMembers([]);
     }
   }, [canAdminister, claim, identityKey, owns, props.client, props.identity, props.managedSession]);
 
@@ -353,6 +455,169 @@ export function OrganizationOverviewSection(props: {
         .map((member) => member.subjectId),
     ) ?? [],
   ).size;
+
+  async function addWorkspaceAccess(workspaceId: string) {
+    const membershipId = workspaceAssignments[workspaceId];
+    const member = organizationMembers.find((candidate) => candidate.id === membershipId);
+    if (!member) return;
+    const preset = workspaceAssignmentAccess[workspaceId] ?? "member";
+    setAccessBusyWorkspaceId(workspaceId);
+    try {
+      await props.client.addOrganizationWorkspaceMember(
+        props.identity.organizationId,
+        workspaceId,
+        {
+          organizationMembershipId: member.id,
+          role: preset,
+          permissions: workspaceAccessPresetPermissions(preset),
+        },
+      );
+      setWorkspaceAssignments((current) => ({ ...current, [workspaceId]: "" }));
+      setWorkspaceAssignmentAccess((current) => ({
+        ...current,
+        [workspaceId]: "member",
+      }));
+      toast.success(`${organizationMemberLabel(member)} can now access this workspace`);
+      await load();
+    } catch (error) {
+      toast.error("Couldn't add workspace access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setAccessBusyWorkspaceId(null);
+    }
+  }
+
+  async function updateWorkspaceAccess(
+    workspaceId: string,
+    member: OrganizationWorkspaceAccessMember,
+    preset: Exclude<WorkspaceAccessPreset, "custom">,
+  ) {
+    setAccessBusyWorkspaceId(workspaceId);
+    try {
+      await props.client.updateOrganizationWorkspaceMember(
+        props.identity.organizationId,
+        workspaceId,
+        member.subjectId,
+        {
+          role: preset,
+          permissions: workspaceAccessPresetPermissions(preset),
+        },
+      );
+      toast.success(preset === "admin" ? "Workspace administrator saved" : "Member access saved");
+      await load();
+    } catch (error) {
+      toast.error("Couldn't update workspace access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setAccessBusyWorkspaceId(null);
+    }
+  }
+
+  async function removeWorkspaceAccess(workspaceId: string, subjectId: string) {
+    setAccessBusyWorkspaceId(workspaceId);
+    try {
+      await props.client.removeOrganizationWorkspaceMember(
+        props.identity.organizationId,
+        workspaceId,
+        subjectId,
+      );
+      toast.success("Workspace access removed");
+      await load();
+    } catch (error) {
+      toast.error("Couldn't remove workspace access", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setAccessBusyWorkspaceId(null);
+    }
+  }
+
+  async function saveWorkspaceName(workspaceId: string, currentName: string) {
+    const requestedName = workspaceNameDrafts[workspaceId]?.trim();
+    if (!requestedName || requestedName === currentName) return;
+    setAccessBusyWorkspaceId(workspaceId);
+    try {
+      await props.client.updateOrganizationWorkspace(props.identity.organizationId, workspaceId, {
+        name: requestedName,
+      });
+      toast.success("Workspace name updated");
+      await load();
+    } catch (error) {
+      toast.error("Couldn't update workspace name", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setAccessBusyWorkspaceId(null);
+    }
+  }
+
+  async function createWorkspace() {
+    const requestedName = newWorkspaceName.trim();
+    if (!requestedName) return;
+    const currentAttempt = pendingCreateWorkspaceRef.current;
+    const attempt =
+      currentAttempt?.name === requestedName
+        ? currentAttempt
+        : { name: requestedName, operationId: crypto.randomUUID() };
+    pendingCreateWorkspaceRef.current = attempt;
+    setCreatingWorkspace(true);
+    try {
+      await props.onCreateWorkspace(attempt.name, attempt.operationId);
+      pendingCreateWorkspaceRef.current = null;
+      setNewWorkspaceName("");
+      toast.success(`${requestedName} created`);
+      await load();
+    } catch (error) {
+      const outcomeUnknown =
+        typeof error === "object" &&
+        error !== null &&
+        (error as { outcomeUnknown?: unknown }).outcomeUnknown === true;
+      if (!outcomeUnknown) pendingCreateWorkspaceRef.current = null;
+      toast.error("Couldn't create workspace", {
+        description: outcomeUnknown
+          ? "The result is not known yet. Retry to safely reconcile the same request."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      });
+    } finally {
+      setCreatingWorkspace(false);
+    }
+  }
+
+  async function createOrganization() {
+    const requestedName = newOrganizationName.trim();
+    if (!requestedName) return;
+    const currentAttempt = pendingCreateOrganizationRef.current;
+    const attempt =
+      currentAttempt?.name === requestedName
+        ? currentAttempt
+        : { name: requestedName, operationId: crypto.randomUUID() };
+    pendingCreateOrganizationRef.current = attempt;
+    setCreatingOrganization(true);
+    try {
+      await props.onCreateOrganization(attempt.name, attempt.operationId);
+      pendingCreateOrganizationRef.current = null;
+      setNewOrganizationName("");
+    } catch (error) {
+      const outcomeUnknown =
+        typeof error === "object" &&
+        error !== null &&
+        (error as { outcomeUnknown?: unknown }).outcomeUnknown === true;
+      if (!outcomeUnknown) pendingCreateOrganizationRef.current = null;
+      toast.error("Couldn't create organization", {
+        description: outcomeUnknown
+          ? "The result is not known yet. Retry to safely reconcile the same request."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      });
+    } finally {
+      setCreatingOrganization(false);
+    }
+  }
 
   async function saveName() {
     const requestedName = name.trim();
@@ -424,11 +689,54 @@ export function OrganizationOverviewSection(props: {
     }
   }
 
-  if (!props.managedSession || !canAdminister) {
+  const createOrganizationSection = (
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4 sm:grid-cols-[minmax(0,1fr)_minmax(20rem,auto)] sm:items-end">
+      <div>
+        <h2 className="text-sm font-medium">Create another organization</h2>
+        <p className="mt-1 text-xs text-fg-muted">
+          Start a separate company or team with its own people, workspaces, and settings.
+        </p>
+      </div>
+      <form
+        className="flex gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void createOrganization();
+        }}
+      >
+        <Input
+          aria-label="New organization name"
+          placeholder="Organization name"
+          value={newOrganizationName}
+          onChange={(event) => setNewOrganizationName(event.target.value)}
+        />
+        <Button
+          type="submit"
+          size="sm"
+          disabled={!newOrganizationName.trim() || creatingOrganization}
+        >
+          {creatingOrganization ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+          Create
+        </Button>
+      </form>
+    </section>
+  );
+
+  if (!props.managedSession) {
     return (
       <Notice tone="muted" title="Organization overview unavailable">
-        An active organization owner or administrator session is required.
+        A managed user session is required.
       </Notice>
+    );
+  }
+  if (!canAdminister) {
+    return (
+      <div className="grid gap-4">
+        {createOrganizationSection}
+        <Notice tone="muted" title="Organization administration unavailable">
+          Your current organization role does not allow you to change this organization.
+        </Notice>
+      </div>
     );
   }
   if (visible.error) {
@@ -509,17 +817,46 @@ export function OrganizationOverviewSection(props: {
         <div className="grid gap-2 sm:grid-cols-3">
           <Metric label="Shared workspaces" value={overview.workspaces.length} />
           <Metric label="People with access" value={peopleWithAccess} />
-          <Metric label="Your role" value={props.actorRole ?? "Unknown"} />
+          <Metric
+            label="Your role"
+            value={props.actorRole ? ORGANIZATION_ROLE_LABELS[props.actorRole] : "Unknown"}
+          />
         </div>
       </section>
 
+      {createOrganizationSection}
+
       <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
-        <div>
-          <h2 className="text-sm font-medium">Workspace access</h2>
-          <p className="mt-1 text-xs text-fg-muted">
-            Every shared workspace in this organization. Personal workspaces and their content are
-            never included.
-          </p>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-medium">Workspaces &amp; access</h2>
+            <p className="mt-1 text-xs text-fg-muted">
+              Create shared workspaces, then choose which organization members can use each one.
+              Personal workspaces stay private.
+            </p>
+          </div>
+          <form
+            className="flex min-w-64 gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createWorkspace();
+            }}
+          >
+            <Input
+              aria-label="New workspace name"
+              placeholder="New workspace name"
+              value={newWorkspaceName}
+              onChange={(event) => setNewWorkspaceName(event.target.value)}
+            />
+            <Button
+              type="submit"
+              size="sm"
+              disabled={!newWorkspaceName.trim() || creatingWorkspace}
+            >
+              {creatingWorkspace ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+              Create workspace
+            </Button>
+          </form>
         </div>
         {overview.workspaces.length === 0 ? (
           <p className="rounded-md border border-dashed border-border p-4 text-sm text-fg-muted">
@@ -527,64 +864,209 @@ export function OrganizationOverviewSection(props: {
           </p>
         ) : (
           <div className="grid gap-2">
-            {overview.workspaces.map((workspace) => (
-              <details
-                key={workspace.id}
-                className="group rounded-lg border border-border/80 bg-bg/25"
-              >
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <Building2Icon className="size-4 shrink-0 text-brand" />
-                    <span className="truncate text-sm font-medium">{workspace.name}</span>
-                    {props.accessibleWorkspaceIds.has(workspace.id) ? (
-                      <span className="rounded-full border border-border px-1.5 py-0.5 text-2xs text-fg-muted">
-                        You have access
-                      </span>
+            {overview.workspaces.map((workspace) => {
+              const workspaceSubjectIds = new Set(
+                workspace.members.map((member) => member.subjectId),
+              );
+              const assignableMembers = organizationMembers.filter(
+                (member) => !workspaceSubjectIds.has(member.subjectId),
+              );
+              return (
+                <details
+                  key={workspace.id}
+                  className="group rounded-lg border border-border/80 bg-bg/25"
+                >
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-3">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <Building2Icon className="size-4 shrink-0 text-brand" />
+                      <span className="truncate text-sm font-medium">{workspace.name}</span>
+                      {props.accessibleWorkspaceIds.has(workspace.id) ? (
+                        <span className="rounded-full border border-border px-1.5 py-0.5 text-2xs text-fg-muted">
+                          You have access
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="shrink-0 text-xs text-fg-muted">
+                      {workspace.members.length}{" "}
+                      {workspace.members.length === 1 ? "member" : "members"}
+                    </span>
+                  </summary>
+                  <div className="grid gap-3 border-t border-border/70 px-3 py-3">
+                    <form
+                      className="flex flex-wrap items-end gap-2"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void saveWorkspaceName(workspace.id, workspace.name);
+                      }}
+                    >
+                      <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
+                        Workspace name
+                        <Input
+                          aria-label={`Workspace name for ${workspace.name}`}
+                          value={workspaceNameDrafts[workspace.id] ?? workspace.name}
+                          disabled={accessBusyWorkspaceId === workspace.id}
+                          onChange={(event) =>
+                            setWorkspaceNameDrafts((current) => ({
+                              ...current,
+                              [workspace.id]: event.target.value,
+                            }))
+                          }
+                        />
+                      </label>
+                      <Button
+                        type="submit"
+                        size="sm"
+                        variant="secondary"
+                        disabled={
+                          accessBusyWorkspaceId === workspace.id ||
+                          !(workspaceNameDrafts[workspace.id] ?? "").trim() ||
+                          (workspaceNameDrafts[workspace.id] ?? "").trim() === workspace.name
+                        }
+                      >
+                        Save name
+                      </Button>
+                    </form>
+                    {assignableMembers.length > 0 ? (
+                      <div className="flex flex-wrap items-end gap-2 rounded-md border border-border/70 bg-surface/60 p-2">
+                        <label className="grid min-w-56 flex-1 gap-1 text-xs text-fg-muted">
+                          Add organization member
+                          <Select
+                            className="min-w-56"
+                            value={workspaceAssignments[workspace.id] ?? ""}
+                            disabled={accessBusyWorkspaceId === workspace.id}
+                            onChange={(event) =>
+                              setWorkspaceAssignments((current) => ({
+                                ...current,
+                                [workspace.id]: event.target.value,
+                              }))
+                            }
+                          >
+                            <option value="">Choose a person…</option>
+                            {assignableMembers.map((member) => (
+                              <option key={member.id} value={member.id}>
+                                {organizationMemberLabel(member, props.identity.subjectId)}
+                              </option>
+                            ))}
+                          </Select>
+                        </label>
+                        <label className="grid min-w-52 gap-1 text-xs text-fg-muted">
+                          Workspace access
+                          <Select
+                            aria-label={`Workspace access for new member in ${workspace.name}`}
+                            value={workspaceAssignmentAccess[workspace.id] ?? "member"}
+                            disabled={accessBusyWorkspaceId === workspace.id}
+                            onChange={(event) =>
+                              setWorkspaceAssignmentAccess((current) => ({
+                                ...current,
+                                [workspace.id]: event.target.value as "member" | "admin",
+                              }))
+                            }
+                          >
+                            <option value="member">Member</option>
+                            <option value="admin">Workspace administrator</option>
+                          </Select>
+                        </label>
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={
+                            accessBusyWorkspaceId === workspace.id ||
+                            !(workspaceAssignments[workspace.id] ?? "")
+                          }
+                          onClick={() => void addWorkspaceAccess(workspace.id)}
+                        >
+                          {accessBusyWorkspaceId === workspace.id ? (
+                            <Loader2Icon className="size-3.5 animate-spin" />
+                          ) : null}
+                          Add access
+                        </Button>
+                      </div>
                     ) : null}
-                  </span>
-                  <span className="shrink-0 text-xs text-fg-muted">
-                    {workspace.members.length}{" "}
-                    {workspace.members.length === 1 ? "member" : "members"}
-                  </span>
-                </summary>
-                <div className="border-t border-border/70 px-3 py-2">
-                  {workspace.members.length === 0 ? (
-                    <p className="py-2 text-xs text-fg-subtle">No direct workspace access.</p>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full text-left text-xs">
-                        <thead className="text-fg-subtle">
-                          <tr>
-                            <th className="py-1 pr-4 font-medium">Person or service</th>
-                            <th className="py-1 pr-4 font-medium">Role</th>
-                            <th className="py-1 font-medium">Access</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {workspace.members.map((member) => (
-                            <tr key={member.membershipId} className="border-t border-border/50">
-                              <td className="py-2 pr-4">
-                                <span className="font-medium">
-                                  {member.subjectLabel ??
-                                    maskedOrganizationSubject(member.subjectId)}
-                                </span>
-                                <span className="ml-2 text-2xs capitalize text-fg-subtle">
-                                  {member.principalKind}
-                                </span>
-                              </td>
-                              <td className="py-2 pr-4 capitalize">{member.role}</td>
-                              <td className="py-2 text-fg-muted">
-                                {member.permissions.length} permissions
-                              </td>
+                    {workspace.members.length === 0 ? (
+                      <p className="py-2 text-xs text-fg-subtle">No direct workspace access.</p>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-left text-xs">
+                          <thead className="text-fg-subtle">
+                            <tr>
+                              <th className="py-1 pr-4 font-medium">Person or service</th>
+                              <th className="py-1 pr-4 font-medium">Workspace access</th>
+                              <th className="py-1 font-medium">Details</th>
+                              <th className="py-1 text-right font-medium">Actions</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
-              </details>
-            ))}
+                          </thead>
+                          <tbody>
+                            {workspace.members.map((member) => (
+                              <tr key={member.membershipId} className="border-t border-border/50">
+                                <td className="py-2 pr-4">
+                                  <span className="font-medium">
+                                    {member.subjectLabel ??
+                                      maskedOrganizationSubject(member.subjectId)}
+                                  </span>
+                                  <span className="ml-2 text-2xs capitalize text-fg-subtle">
+                                    {member.principalKind}
+                                  </span>
+                                </td>
+                                <td className="py-2 pr-4">
+                                  {member.principalKind === "human" ? (
+                                    <Select
+                                      aria-label={`Workspace access for ${
+                                        member.subjectLabel ??
+                                        maskedOrganizationSubject(member.subjectId)
+                                      }`}
+                                      className="min-w-48"
+                                      value={workspaceAccessPreset(member)}
+                                      disabled={accessBusyWorkspaceId === workspace.id}
+                                      onChange={(event) => {
+                                        const preset = event.target.value;
+                                        if (preset === "member" || preset === "admin") {
+                                          void updateWorkspaceAccess(workspace.id, member, preset);
+                                        }
+                                      }}
+                                    >
+                                      {workspaceAccessPreset(member) === "custom" ? (
+                                        <option value="custom">Custom access</option>
+                                      ) : null}
+                                      <option value="member">Member</option>
+                                      <option value="admin">Workspace administrator</option>
+                                    </Select>
+                                  ) : (
+                                    <span className="capitalize text-fg-muted">{member.role}</span>
+                                  )}
+                                </td>
+                                <td className="py-2 text-fg-muted">
+                                  {workspaceAccessPreset(member) === "admin"
+                                    ? "Can manage settings, access, and workspace content"
+                                    : workspaceAccessPreset(member) === "member"
+                                      ? "Can work in this workspace"
+                                      : `${member.permissions.length} custom permissions`}
+                                </td>
+                                <td className="py-2 text-right">
+                                  {member.subjectId !== props.identity.subjectId &&
+                                  member.principalKind === "human" ? (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      disabled={accessBusyWorkspaceId === workspace.id}
+                                      onClick={() =>
+                                        void removeWorkspaceAccess(workspace.id, member.subjectId)
+                                      }
+                                    >
+                                      Remove access
+                                    </Button>
+                                  ) : null}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </details>
+              );
+            })}
           </div>
         )}
       </section>
@@ -620,11 +1102,27 @@ export function OrganizationPeopleSection(props: {
     error: null,
   });
   const [adminInvitesState, setAdminInvitesState] = useState<
-    OwnedState<{ invitations: OrganizationInvitation[]; nextCursor: string | null }>
-  >({ ownerKey: "", value: { invitations: [], nextCursor: null }, loading: false, error: null });
+    OwnedState<{
+      invitations: OrganizationInvitation[];
+      nextCursor: string | null;
+    }>
+  >({
+    ownerKey: "",
+    value: { invitations: [], nextCursor: null },
+    loading: false,
+    error: null,
+  });
   const [incomingState, setIncomingState] = useState<
-    OwnedState<{ invitations: OrganizationInvitation[]; nextCursor: string | null }>
-  >({ ownerKey: "", value: { invitations: [], nextCursor: null }, loading: false, error: null });
+    OwnedState<{
+      invitations: OrganizationInvitation[];
+      nextCursor: string | null;
+    }>
+  >({
+    ownerKey: "",
+    value: { invitations: [], nextCursor: null },
+    loading: false,
+    error: null,
+  });
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<OrganizationMembershipRole>("member");
   const [roleDrafts, setRoleDrafts] = useState<Record<string, OrganizationMembershipRole>>({});
@@ -683,11 +1181,21 @@ export function OrganizationPeopleSection(props: {
 
   const loadMembers = useCallback(async () => {
     if (!props.managedSession || !canAdminister) {
-      setMembersState({ ownerKey: identityKey, value: [], loading: false, error: null });
+      setMembersState({
+        ownerKey: identityKey,
+        value: [],
+        loading: false,
+        error: null,
+      });
       return;
     }
     const operation = claim("members", "read");
-    setMembersState({ ownerKey: identityKey, value: [], loading: true, error: null });
+    setMembersState({
+      ownerKey: identityKey,
+      value: [],
+      loading: true,
+      error: null,
+    });
     try {
       const response = await props.client.listOrganizationMembers(props.identity.organizationId);
       if (!owns(operation)) return;
@@ -948,7 +1456,10 @@ export function OrganizationPeopleSection(props: {
       const updated = await props.client.revokeOrganizationInvitation(
         props.identity.organizationId,
         invitation.id,
-        { expectedRevision: invitation.revision, operationId: crypto.randomUUID() },
+        {
+          expectedRevision: invitation.revision,
+          operationId: crypto.randomUUID(),
+        },
       );
       if (!owns(operation)) return false;
       setAdminInvitesState((current) => ({
@@ -1094,10 +1605,20 @@ export function OrganizationPeopleSection(props: {
         ),
       }));
       setLiveOutcome(
-        `${maskedOrganizationSubject(updated.subjectId)} ${action === "offboard" ? "offboarded" : action === "suspend" ? "suspended" : "reactivated"}.`,
+        `${maskedOrganizationSubject(updated.subjectId)}: ${
+          action === "offboard"
+            ? "removed from the organization"
+            : action === "suspend"
+              ? "access paused"
+              : "access restored"
+        }.`,
       );
       toast.success(
-        `Member ${action === "offboard" ? "offboarded" : action === "suspend" ? "suspended" : "reactivated"}`,
+        action === "offboard"
+          ? "Member removed from the organization"
+          : action === "suspend"
+            ? "Member access paused"
+            : "Member access restored",
       );
       if (updated.subjectId === props.identity.subjectId) props.onAuthorityChanged();
       return true;
@@ -1109,7 +1630,9 @@ export function OrganizationPeopleSection(props: {
         if (!ownsIdentity()) return false;
       }
       toast.error(
-        isOrganizationConflict(error) ? "Membership state changed" : `Could not ${action} member`,
+        isOrganizationConflict(error)
+          ? "Membership state changed"
+          : memberActionFailureTitle(action),
         {
           description: isOrganizationConflict(error)
             ? "The authoritative member list was refreshed. Review it before trying again."
@@ -1156,8 +1679,8 @@ export function OrganizationPeopleSection(props: {
               People
             </h2>
             <p className="mt-1 text-xs text-fg-muted">
-              Organization authority and lifecycle status. Workspace access is administered
-              separately.
+              Invite your team, choose their organization role, and manage who can access each
+              shared workspace.
             </p>
           </div>
           {canAdminister ? (
@@ -1200,10 +1723,7 @@ export function OrganizationPeopleSection(props: {
                 member,
                 activeOwnerCount,
               );
-              const label =
-                member.subjectId === props.identity.subjectId
-                  ? "You"
-                  : maskedOrganizationSubject(member.subjectId);
+              const label = organizationMemberLabel(member, props.identity.subjectId);
               const roleDraft = roleDrafts[member.id] ?? member.role;
               return (
                 <article
@@ -1212,25 +1732,24 @@ export function OrganizationPeopleSection(props: {
                 >
                   <div className="min-w-0">
                     <h3 className="truncate text-sm font-medium">{label}</h3>
-                    <p className="mt-0.5 text-xs text-fg-subtle">
-                      Profile name and email are unavailable from this API. Stable masked identifier
-                      shown.
-                    </p>
+                    {member.email && member.email !== label ? (
+                      <p className="mt-0.5 truncate text-xs text-fg-subtle">{member.email}</p>
+                    ) : null}
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      <span className="rounded-full border border-border px-2 py-0.5 text-xs capitalize">
-                        {member.role}
+                      <span className="rounded-full border border-border px-2 py-0.5 text-xs">
+                        {ORGANIZATION_ROLE_LABELS[member.role]}
                       </span>
-                      <span className="rounded-full border border-border px-2 py-0.5 text-xs capitalize text-fg-muted">
-                        {member.status}
+                      <span className="rounded-full border border-border px-2 py-0.5 text-xs text-fg-muted">
+                        {organizationMemberStatusLabel(member.status)}
                       </span>
                     </div>
                   </div>
-                  <div className="flex flex-wrap items-end justify-end gap-2">
+                  <div className="grid min-w-48 content-start gap-2 sm:justify-items-end">
                     {capability.canChangeRole ? (
-                      <label className="grid gap-1 text-xs text-fg-muted">
-                        Role for {label}
-                        <select
-                          className="h-9 rounded-md border border-border bg-bg px-2 text-sm text-fg"
+                      <label className="grid w-full gap-1 text-xs text-fg-muted sm:w-48">
+                        Organization role
+                        <Select
+                          aria-label={`Organization role for ${label}`}
                           value={roleDraft}
                           disabled={visibleBusyResource === "members"}
                           onChange={(event) =>
@@ -1242,65 +1761,79 @@ export function OrganizationPeopleSection(props: {
                         >
                           {capability.allowedRoles.map((role) => (
                             <option key={role} value={role}>
-                              {role}
+                              {ORGANIZATION_ROLE_LABELS[role]}
                             </option>
                           ))}
-                        </select>
+                        </Select>
                       </label>
                     ) : null}
-                    {capability.canChangeRole && roleDraft !== member.role ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={visibleBusyResource === "members"}
-                        onClick={() => void changeRole(member)}
-                      >
-                        Change role for {label}
-                      </Button>
-                    ) : null}
-                    {capability.canSuspend ? (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        disabled={visibleBusyResource === "members"}
-                        onClick={(event) => {
-                          actionTriggerRef.current = event.currentTarget;
-                          setMemberConfirmation({ member, action: "suspend" });
-                        }}
-                      >
-                        Suspend {label}
-                      </Button>
-                    ) : null}
-                    {capability.canReactivate ? (
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        disabled={visibleBusyResource === "members"}
-                        onClick={(event) => {
-                          actionTriggerRef.current = event.currentTarget;
-                          setMemberConfirmation({ member, action: "reactivate" });
-                        }}
-                      >
-                        Reactivate {label}
-                      </Button>
-                    ) : null}
-                    {capability.canOffboard ? (
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="sm"
-                        disabled={visibleBusyResource === "members"}
-                        onClick={(event) => {
-                          actionTriggerRef.current = event.currentTarget;
-                          setMemberConfirmation({ member, action: "offboard" });
-                        }}
-                      >
-                        <UserMinusIcon className="size-3.5" />
-                        Offboard {label}
-                      </Button>
-                    ) : null}
+                    <div className="flex w-full flex-wrap justify-end gap-2">
+                      {capability.canChangeRole && roleDraft !== member.role ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          disabled={visibleBusyResource === "members"}
+                          onClick={() => void changeRole(member)}
+                        >
+                          Save role
+                        </Button>
+                      ) : null}
+                      {capability.canSuspend ? (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          aria-label={`Pause access for ${label}`}
+                          disabled={visibleBusyResource === "members"}
+                          onClick={(event) => {
+                            actionTriggerRef.current = event.currentTarget;
+                            setMemberConfirmation({
+                              member,
+                              action: "suspend",
+                            });
+                          }}
+                        >
+                          Pause access
+                        </Button>
+                      ) : null}
+                      {capability.canReactivate ? (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          aria-label={`Restore access for ${label}`}
+                          disabled={visibleBusyResource === "members"}
+                          onClick={(event) => {
+                            actionTriggerRef.current = event.currentTarget;
+                            setMemberConfirmation({
+                              member,
+                              action: "reactivate",
+                            });
+                          }}
+                        >
+                          Restore access
+                        </Button>
+                      ) : null}
+                      {capability.canOffboard ? (
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          aria-label={`Remove ${label} from the organization`}
+                          disabled={visibleBusyResource === "members"}
+                          onClick={(event) => {
+                            actionTriggerRef.current = event.currentTarget;
+                            setMemberConfirmation({
+                              member,
+                              action: "offboard",
+                            });
+                          }}
+                        >
+                          <UserMinusIcon className="size-3.5" />
+                          Remove
+                        </Button>
+                      ) : null}
+                    </div>
                   </div>
                 </article>
               );
@@ -1323,16 +1856,18 @@ export function OrganizationPeopleSection(props: {
               People &amp; invitations
             </h2>
             <p className="mt-1 text-xs text-fg-muted">
-              Invitations currently require an existing registered user and expire after seven days.
+              Invite someone by email. OpenGeni records the invitation here; invitation-email
+              delivery is not connected yet. If they do not have an account, ask them to sign up
+              with the same address.
             </p>
           </div>
           <fieldset
             disabled={visibleBusyResource === "admin-invitations" || adminInvites.loading}
             className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
           >
-            <legend className="sr-only">Invite a registered user</legend>
+            <legend className="sr-only">Invite someone to the organization</legend>
             <div className="grid gap-1">
-              <Label htmlFor="organization-invite-email">Registered user email</Label>
+              <Label htmlFor="organization-invite-email">Email address</Label>
               <Input
                 id="organization-invite-email"
                 type="email"
@@ -1341,10 +1876,9 @@ export function OrganizationPeopleSection(props: {
                 onChange={(event) => setInviteEmail(event.target.value)}
               />
             </div>
-            <label className="grid gap-1 text-sm">
+            <label className="grid min-w-44 gap-1 text-sm">
               Organization role
-              <select
-                className="h-9 rounded-md border border-border bg-bg px-2 text-sm"
+              <Select
                 value={inviteRole}
                 onChange={(event) =>
                   setInviteRole(event.target.value as OrganizationMembershipRole)
@@ -1354,10 +1888,10 @@ export function OrganizationPeopleSection(props: {
                   .filter((role) => canInviteOrganizationRole(props.actorRole, role))
                   .map((role) => (
                     <option key={role} value={role}>
-                      {role}
+                      {ORGANIZATION_ROLE_LABELS[role]}
                     </option>
                   ))}
-              </select>
+              </Select>
             </label>
             <Button
               className="self-end"
@@ -1370,7 +1904,7 @@ export function OrganizationPeopleSection(props: {
               }
               onClick={() => void createInvitation()}
             >
-              Invite registered user
+              Invite
             </Button>
           </fieldset>
           {adminInvites.error ? (
@@ -1392,8 +1926,8 @@ export function OrganizationPeopleSection(props: {
                 >
                   <div>
                     <span className="font-medium">{invite.targetEmail}</span>
-                    <span className="ml-2 capitalize text-fg-muted">
-                      {invite.role} · {invite.status}
+                    <span className="ml-2 text-fg-muted">
+                      {ORGANIZATION_ROLE_LABELS[invite.role]} · {invite.status}
                     </span>
                     <div className="mt-0.5 text-fg-subtle">
                       Expires {formatTimestamp(invite.expiresAt)}
@@ -1474,7 +2008,9 @@ export function OrganizationPeopleSection(props: {
                   <span className="font-medium">
                     Organization {invite.organizationId.slice(0, 8)}
                   </span>
-                  <span className="ml-2 capitalize text-fg-muted">{invite.role}</span>
+                  <span className="ml-2 text-fg-muted">
+                    {ORGANIZATION_ROLE_LABELS[invite.role]}
+                  </span>
                   <div className="mt-0.5 text-fg-subtle">
                     Created for {invite.targetEmail} · expires {formatTimestamp(invite.expiresAt)}
                   </div>
@@ -1518,16 +2054,19 @@ export function OrganizationPeopleSection(props: {
         }}
         title={
           memberConfirmation
-            ? `${memberConfirmation.action === "offboard" ? "Offboard" : memberConfirmation.action === "suspend" ? "Suspend" : "Reactivate"} ${memberConfirmation.member.subjectId === props.identity.subjectId ? "your membership" : maskedOrganizationSubject(memberConfirmation.member.subjectId)}?`
+            ? memberActionTitle(
+                memberConfirmation.action,
+                memberConfirmation.member.subjectId === props.identity.subjectId
+                  ? "your membership"
+                  : maskedOrganizationSubject(memberConfirmation.member.subjectId),
+              )
             : "Update member?"
         }
         description={
           memberConfirmation ? memberActionDescription(memberConfirmation.action) : undefined
         }
         confirmLabel={
-          memberConfirmation
-            ? `${memberConfirmation.action === "offboard" ? "Offboard" : memberConfirmation.action === "suspend" ? "Suspend" : "Reactivate"} member`
-            : "Update member"
+          memberConfirmation ? memberActionConfirmLabel(memberConfirmation.action) : "Update member"
         }
         destructive={memberConfirmation?.action !== "reactivate"}
         cancelAutoFocus
@@ -1564,12 +2103,12 @@ export function OrganizationPeopleSection(props: {
 
 function memberActionDescription(action: MemberAction): string {
   if (action === "suspend") {
-    return "Access is revoked immediately, shared-workspace grants are removed, personal grants are revoked, and nonterminal work is cancelled. Personal data is retained under the organization retention policy.";
+    return "This immediately pauses organization access, removes shared-workspace access, revokes personal grants, and cancels unfinished work. Personal data is retained under the organization retention policy.";
   }
   if (action === "reactivate") {
-    return "Active organization membership and the member's own Personal workspace access are restored. Shared-workspace grants removed during suspension are not restored automatically.";
+    return "This restores organization membership and the member's own Personal workspace. Shared-workspace access removed when access was paused is not restored automatically.";
   }
-  return "Offboarding is terminal: access is revoked immediately, work is cancelled, the member cannot be re-invited, and retained personal data follows the organization retention policy.";
+  return "Removing a member is permanent: access ends immediately, unfinished work is cancelled, the member cannot be invited again, and retained personal data follows the organization retention policy.";
 }
 
 export function OrganizationRetentionSection(props: {
@@ -1640,17 +2179,32 @@ export function OrganizationRetentionSection(props: {
   }, [props.identity]);
   const load = useCallback(async () => {
     if (!canRead) {
-      setState({ ownerKey: identityKey, value: null, loading: false, error: null });
+      setState({
+        ownerKey: identityKey,
+        value: null,
+        loading: false,
+        error: null,
+      });
       return;
     }
     const operation = claim("read");
-    setState({ ownerKey: identityKey, value: null, loading: true, error: null });
+    setState({
+      ownerKey: identityKey,
+      value: null,
+      loading: true,
+      error: null,
+    });
     try {
       const policy = await props.client.getOrganizationRetentionPolicy(
         props.identity.organizationId,
       );
       if (!owns(operation)) return;
-      setState({ ownerKey: identityKey, value: policy, loading: false, error: null });
+      setState({
+        ownerKey: identityKey,
+        value: policy,
+        loading: false,
+        error: null,
+      });
       setMode(policy.mode);
       setDays(String(policy.retentionDays ?? 30));
     } catch (error) {
@@ -1691,7 +2245,12 @@ export function OrganizationRetentionSection(props: {
         },
       );
       if (!owns(operation)) return false;
-      setState({ ownerKey: identityKey, value: updated, loading: false, error: null });
+      setState({
+        ownerKey: identityKey,
+        value: updated,
+        loading: false,
+        error: null,
+      });
       setLiveOutcome("Retention policy updated.");
       toast.success("Retention policy updated");
       return true;
@@ -1732,11 +2291,11 @@ export function OrganizationRetentionSection(props: {
             className="flex items-center gap-1.5 text-sm font-medium"
           >
             <ShieldCheckIcon className="size-3.5 text-brand" />
-            Personal-data retention after offboarding
+            Personal-data retention after removal
           </h2>
           <p className="mt-1 text-xs text-fg-muted">
-            Retention controls stored personal data after terminal offboarding. It never delays
-            immediate access revocation.
+            Retention controls stored personal data after someone is permanently removed. It never
+            delays immediate access removal.
           </p>
         </div>
         {canRead ? (
@@ -1792,7 +2351,7 @@ export function OrganizationRetentionSection(props: {
                   checked={mode === "retain"}
                   onChange={() => setMode("retain")}
                 />
-                Retain personal data indefinitely after offboarding
+                Retain personal data indefinitely after removal
               </label>
               <label className="flex gap-2 text-sm">
                 <input
@@ -1848,8 +2407,8 @@ export function OrganizationRetentionSection(props: {
         title="Change personal-data retention policy?"
         description={
           mode === "retain"
-            ? "Offboarded members' personal data will be retained indefinitely. This does not restore or preserve their access."
-            : `Offboarded members' personal data will become eligible for the bounded operator cleanup sweep after ${days} days. Access is still revoked immediately at offboarding.`
+            ? "Removed members' personal data will be retained indefinitely. This does not restore or preserve their access."
+            : `Removed members' personal data will become eligible for the bounded operator cleanup sweep after ${days} days. Access still ends immediately when the member is removed.`
         }
         confirmLabel="Change retention policy"
         destructive={mode === "delete_after"}

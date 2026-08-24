@@ -51,15 +51,31 @@ import {
 // this ceiling. Explicit rate limits retain the minute-granular fallback.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 export const PROVIDER_CONNECTIVITY_BACKOFF_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
+export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_MS.length;
+
+export type ProviderRecoveryResult =
+  | {
+      status: "recovering";
+      continueDelayMs: number;
+    }
+  | {
+      status: "exhausted";
+      providerRecoveryCount: number;
+      maxProviderRecoveryCount: number;
+    };
 
 export function providerRecoveryResult(input: {
   failureCode: string | undefined;
   attemptNumber: number;
   retryAfterMs?: number | null;
-}): {
-  status: "recovering";
-  continueDelayMs: number;
-} {
+}): ProviderRecoveryResult {
+  if (input.attemptNumber > MAX_AUTOMATIC_PROVIDER_RECOVERIES) {
+    return {
+      status: "exhausted",
+      providerRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+      maxProviderRecoveryCount: MAX_AUTOMATIC_PROVIDER_RECOVERIES,
+    };
+  }
   const providerDelay =
     input.retryAfterMs !== null &&
     input.retryAfterMs !== undefined &&
@@ -86,6 +102,29 @@ export function providerRecoveryResult(input: {
   return {
     status: "recovering",
     continueDelayMs,
+  };
+}
+
+export function providerRecoveryExhaustedFailure<
+  T extends Record<string, unknown> & { error: string },
+>(
+  failure: T,
+  recovery: Extract<ProviderRecoveryResult, { status: "exhausted" }>,
+): T & {
+  retryable: false;
+  recoveryExhausted: true;
+  providerRecoveryCount: number;
+  maxProviderRecoveryCount: number;
+  lastRetryableError: string;
+} {
+  return {
+    ...failure,
+    error: `Automatic same-turn recovery stopped after ${recovery.providerRecoveryCount} retries because the upstream dependency remained unavailable. Send a new message to retry after the dependency recovers.`,
+    retryable: false,
+    recoveryExhausted: true,
+    providerRecoveryCount: recovery.providerRecoveryCount,
+    maxProviderRecoveryCount: recovery.maxProviderRecoveryCount,
+    lastRetryableError: failure.error,
   };
 }
 

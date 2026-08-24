@@ -249,7 +249,11 @@ import type {
   ListOrganizationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
+  AddOrganizationWorkspaceMemberRequest,
   CreateOrganizationInvitationRequest,
+  CreateOrganizationRequest,
+  CreateOrganizationResponse,
+  CreateOrganizationWorkspaceRequest,
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
@@ -3754,6 +3758,13 @@ export class OpenGeniClient {
     );
   }
 
+  /** Create a new organization owned by the current managed human. */
+  async createOrganization(
+    request: CreateOrganizationRequest,
+  ): Promise<CreateOrganizationResponse> {
+    return await this.requestJson<CreateOrganizationResponse>("POST", "/v1/organizations", request);
+  }
+
   /** Pending and historical invitations addressed to the current managed human. */
   async listOrganizationInvitations(
     options: { cursor?: string; limit?: number } = {},
@@ -3843,6 +3854,86 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/organizations/${organizationId}`,
       request,
+    );
+  }
+
+  /**
+   * Organization control-plane update for a shared workspace. This does not
+   * require or create operational workspace access for the organization admin.
+   */
+  async updateOrganizationWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateWorkspaceRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
+      request,
+    );
+  }
+
+  /** Create a shared workspace without implicitly granting the actor access. */
+  async createOrganizationWorkspace(
+    organizationId: string,
+    request: CreateOrganizationWorkspaceRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "POST",
+      `/v1/organizations/${organizationId}/workspaces`,
+      request,
+    );
+  }
+
+  async updateOrganizationWorkspaceSettings(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateWorkspaceSettingsRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/settings`,
+      request,
+    );
+  }
+
+  async addOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    request: AddOrganizationWorkspaceMemberRequest,
+  ): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>(
+      "POST",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members`,
+      request,
+    );
+  }
+
+  async updateOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    subjectId: string,
+    request: UpdateWorkspaceMemberRequest,
+  ): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
+        subjectId,
+      )}`,
+      request,
+    );
+  }
+
+  async removeOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    subjectId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
+        subjectId,
+      )}`,
     );
   }
 
