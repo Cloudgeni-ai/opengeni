@@ -166,6 +166,7 @@ describe("release schema contract", () => {
       "0330_api_key_descriptions.sql",
       "0331_managed_organization_creation.sql",
       "0332_organization_shared_workspace_control_plane.sql",
+      "0333_session_turn_prompt_routing.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -199,6 +200,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "6de1a4fc6f0dc0e67852cef996b6d0e01326d180c67d188cb7fcb9c704bc5cdd",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0333_session_turn_prompt_routing.sql",
+      ),
+    ).toMatchObject({
+      sha256: "3eab54938c65c4db7af9ae3421045e6f44af01a27b06129093a58f1ae22ea05c",
       deploymentMode: "rolling",
     });
     expect(
@@ -599,8 +608,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0333_session_turn_prompt_routing.sql")) {
         return includesActivation
-          ? "9dc02f21cc037d92b17716abdf3bb45a9b15c8100f72a9da70fc2e9e00c11d57"
-          : "05cb061cd55087923fcc8664b3697527da678806aa3b450c21a217ef1203b99b";
+          ? "81a28040b800ad49a3c49e1d9bec22303884646b16afbfb9cf0f9e8f470c52ff"
+          : "859139de533a92053241f2dfc1c1eba04a4c9e62c4290564b533899a32c3d204";
       }
       if (migrations.has("0326_interaction_operation_error_codes.sql")) {
         return includesActivation
