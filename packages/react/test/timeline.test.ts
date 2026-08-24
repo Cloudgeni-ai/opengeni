@@ -717,6 +717,55 @@ describe("buildTimeline", () => {
     expect(turnBIndex).toBeGreaterThan(followUpIndex);
   });
 
+  test("an accepted Send stays directly in chat before start and across reconstruction", () => {
+    const items = buildTimeline([
+      eventAt(16, "user.message", { text: "Run this now" }, { turnId: null }),
+      eventAt(
+        17,
+        "turn.queued",
+        {
+          turnId: "turn-accepted",
+          triggerEventId: "evt-16",
+          source: "user",
+          routing: "accepted_for_execution",
+        },
+        { turnId: "turn-accepted" },
+      ),
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        kind: "user-message",
+        id: "evt-16",
+        text: "Run this now",
+      }),
+    ]);
+  });
+
+  test("an explicitly queued Send never flashes into chat before its turn event arrives", () => {
+    const waiting = eventAt(
+      16,
+      "user.message",
+      { text: "Wait behind current work", routing: "queued_for_execution" },
+      { turnId: null },
+    );
+    expect(buildTimeline([waiting])).toEqual([]);
+
+    const started = buildTimeline([
+      waiting,
+      eventAt(
+        20,
+        "turn.started",
+        { triggerEventId: "evt-16" },
+        { turnId: "turn-with-partial-history" },
+      ),
+    ]);
+    expect(started[0]).toMatchObject({
+      kind: "user-message",
+      text: "Wait behind current work",
+    });
+  });
+
   test("an accepted Steer stays directly in chat before start and across reconstruction", () => {
     const items = buildTimeline([
       eventAt(

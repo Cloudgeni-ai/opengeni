@@ -1914,6 +1914,13 @@ export async function submitHumanPromptInTransaction(
     editedSourceModelContext !== undefined
       ? editedSourceModelContext
       : (input.modelContext ?? null);
+  const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
+  const routing: SessionPromptRouting =
+    input.delivery === "steer"
+      ? "accepted_for_steering"
+      : before.state === "paused" || session.activeTurnId || existingQueued.length > 0
+        ? "queued_for_execution"
+        : "accepted_for_execution";
   let sequence = session.lastSequence;
   const eventValues: SessionEventInsertWithPayload[] = [
     {
@@ -1941,18 +1948,12 @@ export async function submitHumanPromptInTransaction(
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         delivery: input.delivery,
+        routing,
         initiator: frozenInitiator.initiator,
       },
       occurredAt: now,
     },
   ];
-  const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
-  const routing: SessionPromptRouting =
-    input.delivery === "steer"
-      ? "accepted_for_steering"
-      : before.state === "paused" || session.activeTurnId || existingQueued.length > 0
-        ? "queued_for_execution"
-        : "accepted_for_execution";
   const [turn] = await db
     .insert(schema.sessionTurns)
     .values(
@@ -1966,6 +1967,7 @@ export async function submitHumanPromptInTransaction(
           temporalWorkflowId: workflowId,
           status: "queued",
           source: input.source,
+          promptRouting: routing,
           position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
           annotations,
@@ -2051,6 +2053,7 @@ export async function submitHumanPromptInTransaction(
       turnId,
       triggerEventId: acceptedEventId,
       source: input.source,
+      routing,
       initiator: frozenInitiator.initiator,
     },
     occurredAt: now,

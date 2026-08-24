@@ -19,8 +19,8 @@ export function sessionTimelineEmptyStateCopy(
   switch (status) {
     case "queued":
       return {
-        title: "Queued to start",
-        description: "Your prompt is saved and will start when this session is admitted.",
+        title: "Starting the agent",
+        description: "Your prompt is in the conversation while the agent starts.",
       };
     case "running":
       return {
