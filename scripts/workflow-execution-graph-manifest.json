@@ -78,7 +78,7 @@
     },
     {
       "path": ".github/workflows/source-admission.yml",
-      "sha256": "f18606d2da2fef8dc7726958e5fbe753b4567a7df043f5549f650ef491310673"
+      "sha256": "dff0ac659656f7158bad6936bcc1fdee321beccfdf134944f087612efef37a3f"
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",
@@ -1291,7 +1291,7 @@
       "workflow": ".github/workflows/source-admission.yml",
       "job": "verify",
       "step": "Execute the exact base-owned admission verifier",
-      "sha256": "48befe1e1f09b43c7f5951b3a31776fe7d28ac20945291a2afe7e8beaa10abdf"
+      "sha256": "1fea293d52d68f63debb78965e555985a4383b85ac96726f688d9ae62d800bb0"
     },
     {
       "workflow": ".github/workflows/staging-canary-dispatch.yml",

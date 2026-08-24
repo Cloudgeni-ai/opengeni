@@ -1002,11 +1002,16 @@ The exact reviewed head must still resolve directly from its canonical
 `Current-base source admission` check. Version PRs receive that named check
 from trusted `ci.yml` dispatch. The `source-admission.yml` workflow is
 hotfix-into-production only; its required-check name stays on a skip-success
-report job so promote PRs from live `main` remain mergeable. The check admits
-the immutable provider event head against the PR's provider merge-base tree; it
-does not require the event base to equal continuously moving `main`. The
-base-owned workflow/helper SHA must remain in protected `production` ancestry
-for hotfix admission, and the provider base/head/repository,
+report job so promote PRs from live `main` remain mergeable. GitHub loads a
+`pull_request_target` workflow from protected default-branch `main`, even when
+the PR base is `production`. That controller therefore validates its real
+default-branch workflow identity, reads the production base SHA from the exact
+pull-request event, fetches and hash-pins the verifier from that immutable event
+base, and invokes it with an explicit base-owned workflow context. The check
+admits the immutable provider event head against
+the PR's provider merge-base tree; it does not require the event base to equal
+continuously moving `main`. The base-owned helper SHA must remain in protected
+`production` ancestry for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
 and terminal head identity remain fail-closed. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
