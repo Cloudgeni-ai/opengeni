@@ -648,6 +648,18 @@ describe("migration 0339 Document authority reclassification", () => {
       where account_id = ${accountId}::uuid and resource_kind = 'document'
         and resource_id = ${document!.id}::uuid`;
     expect(authorityCount!.total).toBe(1);
+    // The security-relevant half: reactivating the AUTHORITY must not resurrect
+    // the delegation the rollback revoked. The reactivation touches only the
+    // authority row, so the grant stays revoked and a future caller has to issue
+    // a fresh one. This is the assertion a refactor of the ON CONFLICT arm is
+    // most likely to break.
+    const [grantAfterRetry] = await admin<
+      Array<{ status: string; generation: number; revokedAt: string | null }>
+    >`
+      select status, generation::int as generation, revoked_at as "revokedAt"
+      from organization_user_resource_grants where id = ${grant!.id}::uuid`;
+    expect(grantAfterRetry).toMatchObject({ status: "revoked", generation: 2 });
+    expect(grantAfterRetry!.revokedAt).not.toBeNull();
 
     // Restore the rolled-back shape so the pagination assertions below still
     // describe the same receipt history they were written against.

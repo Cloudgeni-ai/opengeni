@@ -637,10 +637,17 @@ BEGIN
     -- policy on `organization_memberships` is `FOR SELECT` only, so `FOR SHARE`
     -- / `FOR KEY SHARE` / `FOR UPDATE` all return ZERO ROWS here without
     -- raising - the same silent-blinding class as the FORCE-RLS backfill no-op.
-    -- The referential pin that matters is taken anyway: the INSERT below is
-    -- checked against `organization_user_resource_authorities_membership_fk`,
-    -- and RI checks bypass row security and take `FOR KEY SHARE` on the exact
-    -- membership row, so it cannot be deleted or re-keyed under us.
+    -- The membership still cannot be deleted or re-keyed under us, by one of
+    -- two mechanisms depending on which arm the write below takes. On the
+    -- fresh-insert arm the RI check for
+    -- `organization_user_resource_authorities_membership_fk` bypasses row
+    -- security and takes `FOR KEY SHARE` on the exact membership row. On the
+    -- ON CONFLICT DO UPDATE arm no row is inserted and the FK columns are
+    -- unchanged, so PostgreSQL skips the RI check entirely - but the row it is
+    -- reactivating already references that membership under ON DELETE RESTRICT,
+    -- so the DELETE is refused by that reference instead. Either way a
+    -- concurrent non-key `UPDATE` of the membership is NOT blocked; that
+    -- narrower write-skew window is documented as a known residual.
     SELECT membership.* INTO owner_member
     FROM organization_memberships membership
     WHERE membership.account_id = account_id_value
