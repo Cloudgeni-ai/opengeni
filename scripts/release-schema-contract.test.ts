@@ -169,9 +169,30 @@ describe("release schema contract", () => {
       "0333_session_turn_prompt_routing.sql",
       "0334_connected_machine_workspace_root.sql",
       "0335_slack_workspace_routing.sql",
+      "0336_atomic_session_fork_visibility.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
+    expect(completeSourceContract).toMatchObject({
+      fileCount: 345,
+      latestMigration: "0336_atomic_session_fork_visibility.sql",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0330_api_key_descriptions.sql",
+      ),
+    ).toMatchObject({
+      sha256: "7167987a841c839601069749768f37032c2890136e42128116954c4d92baad22",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0336_atomic_session_fork_visibility.sql",
+      ),
+    ).toMatchObject({
+      sha256: "75604a1d9cce1bf698184e87d4f0405493e200e06378938b2f10adbfaa565f2d",
+      deploymentMode: "rolling",
+    });
     const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
     const sourceContract =
       forwardMigrationPaths.length > 0
@@ -617,6 +638,11 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0334_connected_machine_workspace_root.sql")) {
+        // Re-pinned: #1799 computed these against a tree that did not yet
+        // contain #1805's reconciliation, so protected main landed red at
+        // ca8aad33d. The aggregate covers the whole filtered migration set, not
+        // just the file a PR adds, so a pin goes stale the moment another
+        // migration merges first. Recomputed from origin/main.
         return includesActivation
           ? "3d058b3b8c05d2ebf84de1b1024c995ec131c3c4dcb973a0c42014bca1046e3f"
           : "eab718bef0df92dd9c78feb9639c0098ec0bbce267de79146315091ce8289d98";

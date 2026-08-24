@@ -144,8 +144,7 @@ describe("Personal workspace accessibility in Chromium", () => {
       expect(
         await menu.getByRole("menuitem", { name: "Share this session with workspace…" }).count(),
       ).toBe(1);
-      expect(await menu.getByRole("menuitem", { name: "Private copy" }).count()).toBe(0);
-      expect(await menu.getByRole("menuitem", { name: /Fork session/ }).count()).toBe(0);
+      expect(await menu.getByRole("menuitem", { name: "Fork session…" }).count()).toBe(1);
       await tenancyPage.keyboard.press("Escape");
       await menu.waitFor({ state: "hidden" });
     }

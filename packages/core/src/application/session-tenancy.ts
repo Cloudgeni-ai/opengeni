@@ -14,11 +14,13 @@ import {
   getSessionEventForSubject,
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
+  replayAppliedSessionFork,
   sessionTenancyProductActivated,
   SessionTenancyAccessError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
   type Database,
+  type ForkSessionContentResult,
 } from "@opengeni/db";
 import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import { requirePermission, type AccessGrantAuthorization } from "../access";
@@ -191,6 +193,32 @@ async function runTenancyMutation<T>(operation: () => Promise<T>): Promise<T> {
   }
 }
 
+async function projectAndPublishSessionFork(
+  deps: SessionTenancyDependencies,
+  actorSubjectId: string,
+  result: ForkSessionContentResult,
+): Promise<ForkSessionResponse> {
+  const response = ForkSessionResponse.parse({
+    operationId: result.operationId,
+    eventId: result.eventId,
+    eventSequence: result.eventSequence,
+    sessionId: result.sessionId,
+    workspaceId: result.workspaceId,
+    visibility: sessionVisibilityToPublic(result.visibility),
+    authorityEpoch: result.authorityEpoch,
+    copiedHistoryItemCount: result.copiedHistoryItemCount,
+    replay: result.replay,
+  });
+  await publishExactCommittedEvent(deps, {
+    workspaceId: response.workspaceId,
+    sessionId: response.sessionId,
+    subjectId: actorSubjectId,
+    eventId: response.eventId,
+    eventSequence: response.eventSequence,
+  });
+  return response;
+}
+
 export async function updateManagedHumanSessionVisibility(
   deps: SessionTenancyDependencies,
   authorization: AccessGrantAuthorization,
@@ -237,7 +265,7 @@ export async function updateManagedHumanSessionVisibility(
   return response;
 }
 
-export async function forkManagedHumanSessionPrivate(
+export async function forkManagedHumanSession(
   deps: SessionTenancyDependencies,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
@@ -249,40 +277,45 @@ export async function forkManagedHumanSessionPrivate(
     "sessions:read",
     "sessions:create",
   ]);
-  await requireSessionAuthorization(deps, authorization.grant, {
-    sessionId: sourceSessionId,
-    operation: "session.fork.create",
-    surface: authorizationSurface,
-  });
+  const forkInput = {
+    sourceWorkspaceId: workspaceId,
+    sourceSessionId,
+    actorSubjectId: authorization.grant.subjectId,
+    destinationWorkspaceId: workspaceId,
+    destinationVisibility:
+      request.visibility === "private" ? ("user_private" as const) : ("workspace_shared" as const),
+    workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
+    operationKey: request.idempotencyKey,
+  };
+  const recoverAppliedReceipt = async () =>
+    await runTenancyMutation(async () => await replayAppliedSessionFork(deps.db, forkInput));
 
-  const result = await runTenancyMutation(
-    async () =>
-      await forkSessionContent(deps.db, {
-        sourceWorkspaceId: workspaceId,
-        sourceSessionId,
-        actorSubjectId: authorization.grant.subjectId,
-        destinationWorkspaceId: workspaceId,
-        destinationVisibility: "user_private",
-        operationKey: request.idempotencyKey,
-      }),
-  );
-  const response = ForkSessionResponse.parse({
-    operationId: result.operationId,
-    eventId: result.eventId,
-    eventSequence: result.eventSequence,
-    sessionId: result.sessionId,
-    workspaceId: result.workspaceId,
-    visibility: sessionVisibilityToPublic(result.visibility),
-    authorityEpoch: result.authorityEpoch,
-    copiedHistoryItemCount: result.copiedHistoryItemCount,
-    replay: result.replay,
-  });
-  await publishExactCommittedEvent(deps, {
-    workspaceId,
-    sessionId: response.sessionId,
-    subjectId: authorization.grant.subjectId,
-    eventId: response.eventId,
-    eventSequence: response.eventSequence,
-  });
-  return response;
+  // A committed response is owned by the exact actor/key/request tuple and no
+  // longer depends on mutable source visibility. Resolve it before source/host
+  // authorization so a lost response remains recoverable after the source
+  // owner makes a formerly shared session private.
+  const applied = await recoverAppliedReceipt();
+  if (applied) {
+    return await projectAndPublishSessionFork(deps, authorization.grant.subjectId, applied);
+  }
+
+  try {
+    await requireSessionAuthorization(deps, authorization.grant, {
+      sessionId: sourceSessionId,
+      operation: "session.fork.create",
+      surface: authorizationSurface,
+    });
+  } catch (authorizationError) {
+    // Close the race where a duplicate request checked before the first commit
+    // but mutable source/host authority changed immediately after it. Only an
+    // exact applied receipt can convert the authorization failure into replay.
+    const racedApplied = await recoverAppliedReceipt();
+    if (racedApplied) {
+      return await projectAndPublishSessionFork(deps, authorization.grant.subjectId, racedApplied);
+    }
+    throw authorizationError;
+  }
+
+  const result = await runTenancyMutation(async () => await forkSessionContent(deps.db, forkInput));
+  return await projectAndPublishSessionFork(deps, authorization.grant.subjectId, result);
 }

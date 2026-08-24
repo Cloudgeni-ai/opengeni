@@ -388,8 +388,10 @@ else, so each is a broken feature, not an authority hole:
   `transition_session_visibility` and `fork_session_content` with the exact
   active-membership personal-workspace-or-ordinary-membership disjunction. The
   API/core/SDK caller is now active for explicitly activated organizations;
-  the web console is its managed-owner caller, while worker, MCP, runtime, and
-  React package callers remain future work. 0225's
+  the web console is its managed-human caller. Visibility transitions and
+  private-source forks remain owner-only, while any currently authorized
+  workspace member may fork a shared source into fresh authority of their own.
+  Worker, MCP, runtime, and React package callers remain future work. 0225's
   `guard_session_authority_write` was the same defect and is repaired by
   migration 0302 (described above); do not add these back to this list. (Many
   other SQL seams - 0253, 0258, 0262, 0264, 0275, 0280 - already carry the
@@ -866,7 +868,7 @@ Null owner/authority/grant fields are non-authority. Contract parsing likewise
 defaults omitted resource scope to `workspace`; `user` scope requires one
 complete opaque delegation.
 
-## Session-visibility and private-fork public activation
+## Session-visibility and fork public activation
 
 `0225_session_visibility_fork_activation.sql` shipped the first database
 surface; `0303_session_tenancy_product_activation.sql` replaces its unsafe
@@ -959,7 +961,7 @@ as contextual evidence, before inserting one immutable
 `session_tenancy_activations` receipt. A mutation without that exact version-1
 organization receipt fails closed.
 
-0303 is also an intentional signature cutover: it removes the historical
+0303 was also an intentional signature cutover: it removes the historical
 eight-argument transition and fork routines and installs only the corresponding
 nine-argument routines with a mandatory activation-version argument and no SQL
 default. There is no compatibility wrapper because no legacy product caller
@@ -968,6 +970,11 @@ undefined-function rather than infer or bypass activation. The 0225/0289
 migration bodies remain historical checkpoints;
 anything running against the fully migrated schema, including later migration
 tests, must supply version `1` and operate under the exact durable receipt.
+Migration 0336 is a rolling expansion on top of that cutover. It retains the
+nine-argument private-only overload for an in-flight old caller's exact retry
+and adds the ten-argument product overload with an explicit acknowledgement
+boolean. New callers use only the ten-argument overload. No defaulted or
+activation-free signature is reintroduced.
 
 The activated database contract is intentionally narrow:
 
@@ -985,21 +992,38 @@ The activated database contract is intentionally narrow:
   proven transition advances the epoch, revokes old-epoch personal grants,
   clears staged personal delegations, preserves 0301 cache/pin behavior, and
   appends one event without a workflow wake.
-- The first fork contract is same-workspace and private-only. It serializes a
-  quiescent source, creates a new root and singleton group, copies the durable
+- The fork contract is same-workspace with an explicit `user_private` or
+  `workspace_shared` destination. A private source may fork to workspace scope
+  only when the request durably acknowledges that its complete conversation
+  will be exposed there. The acknowledgement and destination visibility are
+  bound into the idempotency hash. One atomic function serializes a quiescent
+  source, inserts the destination directly at its selected visibility, creates
+  a fresh owner/epoch/provenance/root/singleton group, copies the exact durable
   content allowlist (including typed reasoning/latency), and copies no live
-  goal/turn, MCP, Variable Set, Rig, sandbox identity, credential, or personal
-  grant.
+  grant, credential, Connection/delegation, goal/turn, MCP, Variable Set, Rig,
+  sandbox identity/process, personal-resource authority, or pin. It never
+  creates a private fork and then transitions it. A separate read-only replay
+  capability resolves only an exact applied actor/workspace/source/key/request-
+  hash receipt before mutable source authorization, so a lost successful
+  response remains recoverable after a shared source becomes private. Changed
+  intent conflicts, and an absent or fresh key returns no result and must pass
+  current source plus embedding-host authorization.
 - Both adapters return the exact durable event id and sequence required by a
   later core publisher.
 
 The practical product consequence is deliberately bounded. Only an activated
 organization's canonical managed-human owner may change an otherwise quiescent
-same-workspace session between `workspace_shared` and `user_private`, or make an
-independent same-workspace private fork. API keys, delegated/service callers,
-administrators acting on another human's session, workers, MCP, runtime, React,
-and external non-cookie clients have no product control. The SDK requires an explicit idempotency key, and
-visibility changes additionally require the current public authority epoch.
+same-workspace session between `workspace_shared` and `user_private`, or fork a
+private source. Any canonical managed human with current access to a
+workspace-shared source may make an independent same-workspace private or
+workspace-shared fork, which is owned by that actor and retains no source
+authority. API keys, delegated/service callers, workers, MCP, runtime, React,
+and external non-cookie clients have no product control. The SDK requires an
+explicit idempotency key.
+Fork requests additionally require an explicit destination visibility and
+acknowledgement boolean; visibility changes require the current public authority epoch.
+Applied fork replay still requires the exact actor's live workspace authority
+and cannot be used to discover another destination or source.
 Subject-authorized session reads expose the secret-safe `tenancy` projection
 only after activation. The console renders state only when that projection is
 present. Its app-lifetime controller retains one exact operation key across
@@ -1007,7 +1031,8 @@ same-target component reload and outcome-unknown/replay recovery, while exact
 principal, workspace-transition, and session changes retire old keys. A replay
 refetches current tenancy before presentation, so a superseding epoch or missing
 projection cannot be mistaken for the historical receipt. Same-workspace fork
-navigation additionally requires a fresh owned-private destination. Route and
+navigation additionally requires a fresh owned destination at the receipt's
+selected visibility. Route and
 principal transitions make delayed browser outcomes inert.
 `test/session-visibility-contract-surface.test.ts` pins the server caller
 boundary; the web component and Chromium acceptance tests pin the browser
@@ -1574,11 +1599,13 @@ fencing is delivered by migration 0222.
 
 Migration 0225 delivered the first database half. Migration 0303 replaces its
 auto-cancelling mutation functions with the activated, proven-quiescent
-contract described in "Session-visibility and private-fork public activation".
-The bounded API/core/SDK owner caller is now active behind the per-organization
-receipt, and the bounded managed web UI is its active owning-human SDK caller.
-Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace or
-public fork, attachments, and personal-resource grant UX remain out of scope.
+contract described in "Session-visibility and fork public activation".
+The bounded API/core/SDK managed-human caller is now active behind the
+per-organization receipt. The managed web UI keeps visibility changes and
+private-source forks owner-only, and exposes shared-source forks to current
+workspace members.
+Worker, MCP, runtime, and `packages/react` remain non-callers; cross-workspace
+forks, attachments, and personal-resource grant UX remain out of scope.
 
 Cache and pin stripping is delivered by migration
 `0301_session_snapshot_and_pin_visibility.sql`. Migration 0225 installed
@@ -1836,10 +1863,11 @@ That startup interlock is forward-only posture, not a rollback mechanism.
 - resource CRUD or discovery changes;
 - worker, MCP, runtime, or `packages/react` callers for the activated
   `transition_session_visibility` and `fork_session_content` lifecycle
-  functions; cross-workspace/public fork, session sharing, attachment APIs, and
-  personal-grant UI also remain out of scope. The bounded API/core/SDK owner
-  caller, bounded managed web owning-human SDK caller, and activation-gated
-  subject read projection are active (see "Session-visibility and private-fork
+  functions; cross-workspace fork, attachment APIs, and
+  personal-grant UI also remain out of scope. The bounded API/core/SDK
+  managed-human caller, managed web owner controls plus shared-member Fork
+  action, and activation-gated subject read projection are active (see
+  "Session-visibility and fork
   public activation");
 - Connected Machine, rig, variable-set, connection, Codex, or Document
   materialization changes;

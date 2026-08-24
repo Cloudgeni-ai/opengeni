@@ -1503,8 +1503,19 @@ export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibi
 export const ForkSessionRequest = z
   .object({
     idempotencyKey: SessionTenancyIdempotencyKey,
+    visibility: SessionVisibility,
+    workspaceSharedAcknowledged: z.boolean(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.visibility === "private" && value.workspaceSharedAcknowledged) {
+      context.addIssue({
+        code: "custom",
+        path: ["workspaceSharedAcknowledged"],
+        message: "workspaceSharedAcknowledged must be false for a private destination",
+      });
+    }
+  });
 export type ForkSessionRequest = z.infer<typeof ForkSessionRequest>;
 
 export const ForkSessionResponse = z
@@ -1514,7 +1525,7 @@ export const ForkSessionResponse = z
     eventSequence: z.number().int().positive(),
     sessionId: z.string().uuid(),
     workspaceId: z.string().uuid(),
-    visibility: z.literal("private"),
+    visibility: SessionVisibility,
     authorityEpoch: z.literal(1),
     copiedHistoryItemCount: z.number().int().nonnegative(),
     replay: z.boolean(),
@@ -15361,7 +15372,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-atomic-session-fork-visibility-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;

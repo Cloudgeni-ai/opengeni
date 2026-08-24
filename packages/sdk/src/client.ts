@@ -939,7 +939,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create an independent same-workspace private fork of an owned, quiescent session. */
+  /** Create an independent same-workspace fork with explicit destination visibility. */
   async forkSession(
     workspaceId: string,
     sessionId: string,

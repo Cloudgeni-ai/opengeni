@@ -142,7 +142,9 @@ describe("CodemodeClient", () => {
       requests.every(({ authorization }) => authorization === "Bearer exact-attempt-token"),
     ).toBe(true);
     expect(
-      requests.every(({ apiContract }) => apiContract === "2026-08-machine-resource-policy-v1"),
+      requests.every(
+        ({ apiContract }) => apiContract === "2026-08-atomic-session-fork-visibility-v1",
+      ),
     ).toBe(true);
     expect(requests[1]!.body).toMatchObject({ operationId, identity: definition.identity });
   });

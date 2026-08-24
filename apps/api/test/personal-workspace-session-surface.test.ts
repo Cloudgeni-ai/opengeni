@@ -321,6 +321,22 @@ async function activateSessionTenancy(human: ManagedHuman): Promise<void> {
     )`;
 }
 
+/**
+ * Migration 0336 applies the same organization owner/admin product decision to a
+ * private fork destination in a SHARED workspace that migration 0323 applies to
+ * a private create, so a test that forks privately outside a personal workspace
+ * has to represent an organization that enabled it. Activation alone deliberately
+ * does not: an organization activated after 0323 starts disabled.
+ */
+async function enablePrivateSessions(human: ManagedHuman): Promise<void> {
+  if (!shared) throw new Error("test database unavailable");
+  await shared.admin`
+    insert into organization_private_session_settings (
+      account_id, enabled, version, updated_by_membership_id
+    ) values (${human.accountId}, true, 1, null)
+    on conflict (account_id) do update set enabled = true`;
+}
+
 async function addOrdinaryWorkspaceMember(
   owner: ManagedHuman,
   member: ManagedHuman,
@@ -359,7 +375,11 @@ async function requestTenancyOperation(
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify(
         operation === "fork"
-          ? { idempotencyKey: `matrix-fork-${suffix}` }
+          ? {
+              idempotencyKey: `matrix-fork-${suffix}`,
+              visibility: "private",
+              workspaceSharedAcknowledged: false,
+            }
           : {
               visibility: "private",
               expectedAuthorityEpoch: 1,
@@ -507,7 +527,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     });
   }, 180_000);
 
-  test("PUT visibility and POST private fork activate only for the canonical owner cookie", async () => {
+  test("PUT visibility and POST explicit fork activate only for the canonical owner cookie", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
     await activateSessionTenancy(human);
@@ -550,19 +570,27 @@ describe("managed-human session surface inside their own personal workspace", ()
       {
         method: "POST",
         headers,
-        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+        body: JSON.stringify({
+          idempotencyKey: "api-personal-fork",
+          visibility: "workspace",
+          workspaceSharedAcknowledged: true,
+        }),
       },
     );
     expect(fork.status).toBe(201);
     const created = (await fork.json()) as { sessionId: string; eventId: string };
-    expect(created).toMatchObject({ visibility: "private", authorityEpoch: 1, replay: false });
+    expect(created).toMatchObject({ visibility: "workspace", authorityEpoch: 1, replay: false });
 
     const replay = await app.request(
       `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
       {
         method: "POST",
         headers,
-        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+        body: JSON.stringify({
+          idempotencyKey: "api-personal-fork",
+          visibility: "workspace",
+          workspaceSharedAcknowledged: true,
+        }),
       },
     );
     expect(replay.status).toBe(200);
@@ -571,11 +599,7 @@ describe("managed-human session surface inside their own personal workspace", ()
       sessionId: created.sessionId,
       eventId: created.eventId,
     });
-    expect(hostOperations).toEqual([
-      "session.visibility.write",
-      "session.fork.create",
-      "session.fork.create",
-    ]);
+    expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
   }, 180_000);
 
   test("tenancy pre-gates are target-blind and each allowed request host-authorizes once", async () => {
@@ -584,6 +608,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     const sessionOwner = await inviteIntoOrganization(caller, "member");
     await addOrdinaryWorkspaceMember(caller, sessionOwner);
     await activateSessionTenancy(caller);
+    await enablePrivateSessions(caller);
 
     const sharedSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
     const privateSessionId = await seedSession(sessionOwner, caller.legacyWorkspaceId);
@@ -608,38 +633,75 @@ describe("managed-human session surface inside their own personal workspace", ()
       true,
     );
 
-    for (const operation of ["visibility", "fork"] as const) {
-      const facts = [];
-      for (const [index, targetId] of targetIds.entries()) {
-        facts.push(
-          await tenancyErrorFact(
-            await requestTenancyOperation(
-              app,
-              caller.legacyWorkspaceId,
-              targetId,
-              { cookie: caller.cookie },
-              operation,
-              `canonical-${operation}-${index}`,
-            ),
+    const visibilityFacts = [];
+    for (const [index, targetId] of targetIds.entries()) {
+      visibilityFacts.push(
+        await tenancyErrorFact(
+          await requestTenancyOperation(
+            app,
+            caller.legacyWorkspaceId,
+            targetId,
+            { cookie: caller.cookie },
+            "visibility",
+            `canonical-visibility-${index}`,
           ),
-        );
-      }
-      expect(facts).toEqual([
-        {
-          status: 404,
-          error: {
-            status: 404,
-            code: "not_found",
-            message: "Session not found.",
-            retryable: false,
-          },
-        },
-        facts[0],
-        facts[0],
-      ]);
+        ),
+      );
     }
-    // Only each shared-session request reaches the host. The missing and
-    // another-owner private targets are denied by durable target resolution.
+    expect(visibilityFacts).toEqual([
+      {
+        status: 404,
+        error: {
+          status: 404,
+          code: "not_found",
+          message: "Session not found.",
+          retryable: false,
+        },
+      },
+      visibilityFacts[0],
+      visibilityFacts[0],
+    ]);
+
+    const missingFork = await tenancyErrorFact(
+      await requestTenancyOperation(
+        app,
+        caller.legacyWorkspaceId,
+        targetIds[0]!,
+        { cookie: caller.cookie },
+        "fork",
+        "canonical-fork-missing",
+      ),
+    );
+    const sharedFork = await requestTenancyOperation(
+      app,
+      caller.legacyWorkspaceId,
+      sharedSessionId,
+      { cookie: caller.cookie },
+      "fork",
+      "canonical-fork-shared",
+    );
+    expect(sharedFork.status).toBe(201);
+    expect(await sharedFork.json()).toMatchObject({
+      visibility: "private",
+      authorityEpoch: 1,
+      replay: false,
+    });
+    const privateFork = await tenancyErrorFact(
+      await requestTenancyOperation(
+        app,
+        caller.legacyWorkspaceId,
+        privateSessionId,
+        { cookie: caller.cookie },
+        "fork",
+        "canonical-fork-private",
+      ),
+    );
+    expect(privateFork).toEqual(missingFork);
+
+    // Only each shared-session request reaches the host. The owner-only
+    // visibility mutation still denies this member, while the shared-source
+    // fork succeeds into fresh member-owned private authority. Missing and
+    // another-owner private targets stay non-enumerating.
     expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
 
     const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -707,6 +769,104 @@ describe("managed-human session surface inside their own personal workspace", ()
       });
     }
     expect(hostOperations).toEqual(["session.visibility.write", "session.fork.create"]);
+  }, 180_000);
+
+  test("an exact fork receipt replays after its shared source becomes private", async () => {
+    if (!shared || !client) return;
+    const caller = await provisionManagedHuman();
+    const sourceOwner = await inviteIntoOrganization(caller, "member");
+    await addOrdinaryWorkspaceMember(caller, sourceOwner);
+    await activateSessionTenancy(caller);
+    await enablePrivateSessions(caller);
+    const sourceSessionId = await seedSession(sourceOwner, caller.legacyWorkspaceId);
+    const idempotencyKey = `api-private-source-replay-${crypto.randomUUID()}`;
+    const hostOperations: SessionAuthorizationOperation[] = [];
+    const app = buildApp(
+      {
+        authorizeSession: async (input) => {
+          hostOperations.push(input.operation);
+          return { allowed: true, relatedSessionAccess: "root" };
+        },
+        resolveListScope: async () => ({ kind: "all" }),
+      },
+      true,
+    );
+    const url = `http://x/v1/workspaces/${caller.legacyWorkspaceId}/sessions/${sourceSessionId}/forks`;
+    const headers = { cookie: caller.cookie, "content-type": "application/json" };
+    const request = {
+      idempotencyKey,
+      visibility: "private",
+      workspaceSharedAcknowledged: false,
+    };
+
+    const created = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { sessionId: string; eventId: string };
+    expect(createdBody).toMatchObject({ visibility: "private", replay: false });
+
+    await transitionSessionVisibility(client.db, {
+      workspaceId: caller.legacyWorkspaceId,
+      sessionId: sourceSessionId,
+      actorSubjectId: sourceOwner.subjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `api-source-private-${crypto.randomUUID()}`,
+    });
+
+    const replay = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      replay: true,
+      sessionId: createdBody.sessionId,
+      eventId: createdBody.eventId,
+    });
+
+    const changedBody = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...request,
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+      }),
+    });
+    expect(await tenancyErrorFact(changedBody)).toEqual({
+      status: 409,
+      error: {
+        status: 409,
+        code: "idempotency_conflict",
+        message: "The idempotency key was already used with different input.",
+        retryable: false,
+        details: { reason: "operation_reuse" },
+      },
+    });
+
+    const freshKey = await app.request(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...request,
+        idempotencyKey: `api-fresh-private-source-${crypto.randomUUID()}`,
+      }),
+    });
+    expect(await tenancyErrorFact(freshKey)).toEqual({
+      status: 404,
+      error: {
+        status: 404,
+        code: "not_found",
+        message: "Session not found.",
+        retryable: false,
+      },
+    });
+    expect(hostOperations).toEqual(["session.fork.create"]);
   }, 180_000);
 
   test("the premise: the personal workspace has no workspace_memberships row", async () => {

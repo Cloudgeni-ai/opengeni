@@ -112,16 +112,25 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   scoped Variable Sets are the activated exception with explicit
   organization/workspace/user ownership and common personal-resource grants.
   All remaining APIs, resources, sessions, and lists remain
-  workspace-owned/workspace-shared. Session RLS is the one place where the
-  schema is ahead of the product: migration 0225 activated owner derivation, the
-  capability-fenced direct-write trigger, and visibility-aware reads, but its
-  `transition_session_visibility` and `fork_session_content` lifecycle functions
-  are deliberately uncalled outside the `packages/db` test lane, so every
-  production session stays `workspace_shared`. Migration 0323 adds a separate
+  workspace-owned/workspace-shared. Session visibility is now product-reachable
+  for an activated organization: migration 0225 activated owner derivation, the
+  capability-fenced direct-write trigger, and visibility-aware reads; 0303
+  activated the first public caller; and migration 0336 makes
+  `fork_session_content` an atomic, idempotency-keyed fork into either
+  visibility with `replay_applied_session_fork` recovering a committed
+  destination before mutable source authorization is consulted. That boundary
+  is still exactly one caller wide - `packages/core/src/application/session-tenancy.ts`,
+  reached only by the two HTTP routes and the SDK - and
+  `test/session-visibility-contract-surface.test.ts` pins every SQL and adapter
+  entry point, including the replay surface. Worker, MCP, runtime, React, and
+  cross-workspace callers stay forbidden; adding one requires updating that
+  test deliberately. Migration 0323 adds a separate
   owner/admin organization setting (`organization_private_session_settings`)
   that, together with the 0303 readiness receipt, gates new Only-me creates in
-  shared workspaces; it grants no access and leaves the transition/fork
-  boundary untouched. Owner derivation reads STATED
+  shared workspaces; migration 0336 applies the same product decision to a
+  private fork destination in a shared workspace, after keyed replay so a
+  committed fork still replays once an owner disables the setting. The setting
+  grants no access. Owner derivation reads STATED
   authority only: an active membership's own `personal_workspace_id` pointer or
   an explicit `workspace_memberships` row (migration 0302). Never widen it to a
   default workspace, `created_by`, or current access, and never let an
