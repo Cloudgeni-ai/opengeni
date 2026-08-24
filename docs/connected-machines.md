@@ -414,6 +414,15 @@ idempotent `OpCancel`, and only a typed terminal exit/loss is checkpointed as
 proof before settlement. Offline, timeout, malformed, or still-running results
 are deferred. Claim expiry recovers coordination only and never implies process
 death; a successor connection is never queried on the predecessor's behalf.
+Adoption takes the canonical workspace-control and exact turn-attempt fence, so
+it has a total order with Steer, Pause, terminal Cancel, and session deletion.
+Before that transaction starts, the op-stream yield path takes exact
+failure-cancellation authority from the attempt fence. A rejected adoption
+therefore cancels only the frozen op, while a committed row remains session-owned
+even if the tool promise has not unwound yet. Workspace deletion separately
+serializes against both the owning and physical control workspace: active origin
+references block deletion, and settled cross-workspace history is pruned only in
+the transaction that successfully deletes the source workspace.
 
 The server's out-of-order frame stash is only a disposable replay cache, bounded
 in bytes to two negotiated flow windows per operation. Overflow drops that cache

@@ -56,7 +56,11 @@ import {
 } from "./retry-policy";
 import type { SelfhostedOpObservation, SelfhostedOpObserver } from "./op-observer";
 import { selfhostedFaultClass } from "./fault-rendering";
-import { nextDurableOpId } from "../op-correlation";
+import {
+  nextDurableOpId,
+  notifyDurableOpOwnershipTransferStarted,
+  notifyDurableOpOwnershipTransferred,
+} from "../op-correlation";
 import { OpStreamExecClient, type OpStreamJournal } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 
@@ -914,7 +918,7 @@ export class SelfhostedSession {
   get effectiveExecDeadlineMs(): number {
     // Production always threads the setting explicitly (default 0). Preserve the
     // short control timeout only for structural/test callers that omit the newer
-    // exec field entirely, so old embedding code keeps a safe bounded legacy path.
+    // exec field entirely, so those callers remain safely bounded.
     const configured = Math.trunc(this.execTimeoutMs ?? this.timeoutMs);
     if (configured <= 0) return 0;
     return Math.min(configured, SELFHOSTED_MAX_EXEC_TIMEOUT_MS);
@@ -988,9 +992,9 @@ export class SelfhostedSession {
    * op-stream.ts). The durable op id comes from the tool-call correlation
    * context (`{callId}:{ordinal}` — B1) when this exec runs inside an SDK tool
    * invocation; a non-tool caller falls back to a random unique id (never
-   * collides, merely not stable across a turn re-dispatch). Emits the SAME
-   * per-op observation the legacy path does, with `replyBytes` filled from the
-   * reassembled stream (the field the framed transport was designed to own).
+   * collides, merely not stable across a turn re-dispatch). Emits the standard
+   * per-op observation, with `replyBytes` filled from the reassembled stream
+   * (the field the framed transport was designed to own).
    */
   private async execViaOpStream(
     client: OpStreamExecClient,
@@ -1012,6 +1016,7 @@ export class SelfhostedSession {
           ? await client.execWithYield(opId, execReq, executionTimeoutMs, wallMs, {
               yieldMs: backgroundYieldMs,
               onYield: async () => {
+                notifyDurableOpOwnershipTransferStarted(opId);
                 const adopted = await this.adoptBackgroundCommand!({
                   controlWorkspaceId: admission.controlWorkspaceId,
                   enrollmentId: this.agentId,
@@ -1020,6 +1025,7 @@ export class SelfhostedSession {
                   command,
                 });
                 adoptedCommandId = adopted.commandId;
+                notifyDurableOpOwnershipTransferred(opId);
               },
             })
           : {

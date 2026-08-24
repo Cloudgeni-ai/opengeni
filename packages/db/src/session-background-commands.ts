@@ -136,7 +136,8 @@ export async function listSessionBackgroundCommands(
   );
 }
 
-export async function adoptManagedSessionBackgroundCommand(
+/** @internal Caller must already hold the canonical session/control fence. */
+export async function insertManagedSessionBackgroundCommandInTransaction(
   db: Database,
   input: {
     accountId: string;
@@ -147,65 +148,59 @@ export async function adoptManagedSessionBackgroundCommand(
     command: string;
   },
 ): Promise<SessionBackgroundCommand> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const [process] = await tx
-          .select({
-            accountId: schema.sandboxRetainedProcesses.accountId,
-            workspaceId: schema.sandboxRetainedProcesses.workspaceId,
-            sessionId: schema.sandboxRetainedProcesses.sessionId,
-            state: schema.sandboxRetainedProcesses.state,
-          })
-          .from(schema.sandboxRetainedProcesses)
-          .where(eq(schema.sandboxRetainedProcesses.id, input.retainedProcessId))
-          .for("update")
-          .limit(1);
-        if (
-          !process ||
-          process.accountId !== input.accountId ||
-          process.workspaceId !== input.workspaceId ||
-          process.sessionId !== input.sessionId ||
-          process.state !== "active"
-        ) {
-          throw new Error("Managed background command requires its exact active retained process");
-        }
-        const [row] = await tx
-          .insert(schema.sessionBackgroundCommands)
-          .values({
-            id: input.commandId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            provider: "managed",
-            state: "running",
-            retainedProcessId: input.retainedProcessId,
-            commandPreview: commandPreview(input.command),
-          })
-          .onConflictDoUpdate({
-            target: schema.sessionBackgroundCommands.retainedProcessId,
-            targetWhere: sql`${schema.sessionBackgroundCommands.retainedProcessId} is not null`,
-            set: { updatedAt: new Date() },
-          })
-          .returning();
-        if (!row) throw new Error("Managed background command adoption returned no row");
-        if (
-          row.accountId !== input.accountId ||
-          row.workspaceId !== input.workspaceId ||
-          row.sessionId !== input.sessionId ||
-          row.provider !== "managed" ||
-          row.retainedProcessId !== input.retainedProcessId
-        ) {
-          throw new Error("Managed background command adoption conflicted with another identity");
-        }
-        return mapCommand(row);
-      }),
-  );
+  const [process] = await db
+    .select({
+      accountId: schema.sandboxRetainedProcesses.accountId,
+      workspaceId: schema.sandboxRetainedProcesses.workspaceId,
+      sessionId: schema.sandboxRetainedProcesses.sessionId,
+      state: schema.sandboxRetainedProcesses.state,
+    })
+    .from(schema.sandboxRetainedProcesses)
+    .where(eq(schema.sandboxRetainedProcesses.id, input.retainedProcessId))
+    .for("update")
+    .limit(1);
+  if (
+    !process ||
+    process.accountId !== input.accountId ||
+    process.workspaceId !== input.workspaceId ||
+    process.sessionId !== input.sessionId ||
+    process.state !== "active"
+  ) {
+    throw new Error("Managed background command requires its exact active retained process");
+  }
+  const [row] = await db
+    .insert(schema.sessionBackgroundCommands)
+    .values({
+      id: input.commandId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      provider: "managed",
+      state: "running",
+      retainedProcessId: input.retainedProcessId,
+      commandPreview: commandPreview(input.command),
+    })
+    .onConflictDoUpdate({
+      target: schema.sessionBackgroundCommands.retainedProcessId,
+      targetWhere: sql`${schema.sessionBackgroundCommands.retainedProcessId} is not null`,
+      set: { updatedAt: new Date() },
+    })
+    .returning();
+  if (!row) throw new Error("Managed background command adoption returned no row");
+  if (
+    row.accountId !== input.accountId ||
+    row.workspaceId !== input.workspaceId ||
+    row.sessionId !== input.sessionId ||
+    row.provider !== "managed" ||
+    row.retainedProcessId !== input.retainedProcessId
+  ) {
+    throw new Error("Managed background command adoption conflicted with another identity");
+  }
+  return mapCommand(row);
 }
 
-export async function adoptConnectedMachineSessionBackgroundCommand(
+/** @internal Caller must already hold the canonical exact-attempt fence. */
+export async function insertConnectedMachineSessionBackgroundCommandInTransaction(
   db: Database,
   input: {
     accountId: string;
@@ -219,54 +214,48 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
     command: string;
   },
 ): Promise<SessionBackgroundCommand> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sessionBackgroundCommands)
-        .values({
-          id: input.commandId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          provider: "connected_machine",
-          state: "running",
-          controlWorkspaceId: input.controlWorkspaceId,
-          enrollmentId: input.enrollmentId,
-          connectionInstanceId: input.connectionInstanceId,
-          opId: input.opId,
-          commandPreview: commandPreview(input.command),
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.sessionBackgroundCommands.controlWorkspaceId,
-            schema.sessionBackgroundCommands.enrollmentId,
-            schema.sessionBackgroundCommands.connectionInstanceId,
-            schema.sessionBackgroundCommands.opId,
-          ],
-          targetWhere: sql`${schema.sessionBackgroundCommands.provider} = 'connected_machine'`,
-          set: { updatedAt: new Date() },
-        })
-        .returning();
-      if (!row) throw new Error("Connected Machine background command adoption returned no row");
-      if (
-        row.accountId !== input.accountId ||
-        row.workspaceId !== input.workspaceId ||
-        row.sessionId !== input.sessionId ||
-        row.provider !== "connected_machine" ||
-        row.controlWorkspaceId !== input.controlWorkspaceId ||
-        row.enrollmentId !== input.enrollmentId ||
-        row.connectionInstanceId !== input.connectionInstanceId ||
-        row.opId !== input.opId
-      ) {
-        throw new Error(
-          "Connected Machine background command adoption conflicted with another identity",
-        );
-      }
-      return mapCommand(row);
-    },
-  );
+  const [row] = await db
+    .insert(schema.sessionBackgroundCommands)
+    .values({
+      id: input.commandId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      provider: "connected_machine",
+      state: "running",
+      controlWorkspaceId: input.controlWorkspaceId,
+      enrollmentId: input.enrollmentId,
+      connectionInstanceId: input.connectionInstanceId,
+      opId: input.opId,
+      commandPreview: commandPreview(input.command),
+    })
+    .onConflictDoUpdate({
+      target: [
+        schema.sessionBackgroundCommands.controlWorkspaceId,
+        schema.sessionBackgroundCommands.enrollmentId,
+        schema.sessionBackgroundCommands.connectionInstanceId,
+        schema.sessionBackgroundCommands.opId,
+      ],
+      targetWhere: sql`${schema.sessionBackgroundCommands.provider} = 'connected_machine'`,
+      set: { updatedAt: new Date() },
+    })
+    .returning();
+  if (!row) throw new Error("Connected Machine background command adoption returned no row");
+  if (
+    row.accountId !== input.accountId ||
+    row.workspaceId !== input.workspaceId ||
+    row.sessionId !== input.sessionId ||
+    row.provider !== "connected_machine" ||
+    row.controlWorkspaceId !== input.controlWorkspaceId ||
+    row.enrollmentId !== input.enrollmentId ||
+    row.connectionInstanceId !== input.connectionInstanceId ||
+    row.opId !== input.opId
+  ) {
+    throw new Error(
+      "Connected Machine background command adoption conflicted with another identity",
+    );
+  }
+  return mapCommand(row);
 }
 
 /** Claim exact Connected Machine locators globally for provider reconciliation.

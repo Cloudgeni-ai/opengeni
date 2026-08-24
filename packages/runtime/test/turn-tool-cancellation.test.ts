@@ -9,6 +9,7 @@ import {
   cancellableShellCommand,
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
+import { notifyDurableOpOwnershipTransferStarted } from "../src/sandbox/op-correlation";
 import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
 import {
   RoutingMutationOutcomeUnknownError,
@@ -1017,6 +1018,55 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     await invocation;
 
     expect(cancelledOpIds).toEqual(["call_2e_machine_2f_1:0"]);
+  });
+
+  test("Steer cannot cancel a connected-machine op after durable adoption starts", async () => {
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let finishExec!: (output: string) => void;
+    let markTransferred!: () => void;
+    const transferred = new Promise<void>((resolve) => {
+      markTransferred = resolve;
+    });
+    const output = new Promise<string>((resolve) => {
+      finishExec = resolve;
+    });
+    const cancelledOpIds: string[] = [];
+    const session = {
+      supportsPty: () => false,
+      cancelExecCommand: async (opId: string) => {
+        cancelledOpIds.push(opId);
+        return true;
+      },
+    };
+    const exec = functionTool("exec_command", async () => {
+      notifyDurableOpOwnershipTransferStarted("call_2e_machine_2f_adopted:0");
+      markTransferred();
+      return await output;
+    });
+    const [wrapped] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const invocation = wrapped!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }),
+      {
+        toolCall: {
+          type: "function_call",
+          callId: "call.machine/adopted",
+          name: "exec_command",
+          arguments: "{}",
+        },
+      },
+    );
+    await transferred;
+    abort.abort(new Error("steered after adoption"));
+    finishExec("Command running in background");
+    await invocation;
+    await controller.waitForQuiescence();
+
+    expect(cancelledOpIds).toEqual([]);
   });
 
   test("drains a parallel capability operation and rejects any operation admitted after cancellation", async () => {

@@ -815,6 +815,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         initialNative = await runWithToolCallCorrelation(
           correlationId,
           async () => await invokeExecNative(commandInput),
+          {
+            onDurableOpOwnershipTransferStarted: (opId) =>
+              remoteExec?.releaseCancellationAuthority(opId),
+          },
         );
       } catch (error) {
         const retainedProcess =
@@ -1028,6 +1032,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               output = await runWithToolCallCorrelation(
                 correlationId,
                 async () => await tool.invoke(runContext, cancellableInput, details),
+                {
+                  onDurableOpOwnershipTransferStarted: (opId) =>
+                    remoteExec?.releaseCancellationAuthority(opId),
+                },
               );
             } catch (error) {
               const retainedProcess =
@@ -1507,13 +1515,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private registerRemoteExec(
     session: Required<Pick<CommandCancellationSession, "cancelExecCommand">>,
     opId: string,
-  ): ActiveRemoteExec {
+  ): ActiveRemoteExec & { releaseCancellationAuthority(transferredOpId: string): void } {
     let resolveSettled!: () => void;
     const settledPromise = new Promise<void>((resolve) => {
       resolveSettled = resolve;
     });
     let cancellation: Promise<void> | null = null;
-    const entry: ActiveRemoteExec = {
+    const entry: ActiveRemoteExec & {
+      releaseCancellationAuthority(transferredOpId: string): void;
+    } = {
       settled: false,
       settledPromise,
       settle: () => {
@@ -1521,6 +1531,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         entry.settled = true;
         resolveSettled();
         this.remoteExecs.delete(entry);
+      },
+      releaseCancellationAuthority: (transferredOpId: string) => {
+        if (transferredOpId !== opId) return;
+        entry.settle();
       },
       cancel: () => {
         cancellation ??= (async () => {

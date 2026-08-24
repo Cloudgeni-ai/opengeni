@@ -340,6 +340,10 @@ import {
   settleExpiredSessionRealtimeInTransaction,
 } from "./session-realtime";
 import {
+  insertConnectedMachineSessionBackgroundCommandInTransaction,
+  insertManagedSessionBackgroundCommandInTransaction,
+} from "./session-background-commands";
+import {
   isSessionRealtimeDelegationTurnMetadata,
   projectSessionRealtimeDelegationProgressInTransaction,
   projectSessionRealtimeDelegationTerminalInTransaction,
@@ -2392,8 +2396,27 @@ export type DeleteWorkspaceIfQuiescentResult =
         | "only_workspace"
         | "active_sessions"
         | "active_video_generations"
+        | "active_background_commands"
         | "live_sandboxes";
     };
+
+async function lockBackgroundCommandWorkspaceLifecycle(
+  tx: Database,
+  workspaceIds: string[],
+  mode: "share" | "update",
+): Promise<void> {
+  for (const workspaceId of [...new Set(workspaceIds)].sort()) {
+    if (mode === "share") {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock_shared(hashtextextended(${`background-command-workspace:${workspaceId}`}, 0))`,
+      );
+    } else {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`background-command-workspace:${workspaceId}`}, 0))`,
+      );
+    }
+  }
+}
 
 /**
  * Atomically prove a workspace has no live runtime ownership and delete it.
@@ -2415,6 +2438,12 @@ export async function deleteWorkspaceIfQuiescent(
       async (scopedDb) =>
         await scopedDb.transaction(async (txRaw) => {
           const tx = txRaw as unknown as Database;
+          // Adoption takes the matching shared prefix before its canonical
+          // session/attempt or retained-process locks. Taking the exclusive
+          // prefix first prevents parent-FK deletion from deadlocking with an
+          // already-started cross-workspace adoption.
+          await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
+
           const [account] = await tx
             .select({ id: schema.managedAccounts.id })
             .from(schema.managedAccounts)
@@ -2491,6 +2520,16 @@ export async function deleteWorkspaceIfQuiescent(
             .for("update", { noWait: true });
           if (activeVideoGenerations.length > 0) {
             return { status: "active_video_generations" as const };
+          }
+
+          const [backgroundCommands] = await tx.execute<{ activeCount: number | string }>(sql`
+            select opengeni_private.prepare_workspace_background_command_deletion(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid
+            ) as "activeCount"
+          `);
+          if (Number(backgroundCommands?.activeCount ?? 0) > 0) {
+            return { status: "active_background_commands" as const };
           }
 
           const leases = await tx
@@ -2626,6 +2665,12 @@ export async function deleteWorkspaceIfQuiescent(
                       schema.temporalScheduleCleanupOutbox.connectorCleanupCompletedAt,
                     attemptCount: schema.temporalScheduleCleanupOutbox.attemptCount,
                   });
+          await tx.execute(sql`
+            select opengeni_private.prune_settled_cross_workspace_background_commands(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid
+            )
+          `);
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -27148,6 +27193,7 @@ export type DeleteSessionTreeIfQuiescentResult =
         | "not_root"
         | "active_sessions"
         | "active_video_generations"
+        | "active_background_commands"
         | "live_sandboxes"
         | "externally_referenced";
     };
@@ -27296,6 +27342,21 @@ export async function deleteSessionTreeIfQuiescent(
           }
           if (externalForks.length > 0 || sharedGroups.length > 0) {
             return { status: "externally_referenced" as const };
+          }
+
+          const activeBackgroundCommands = await tx
+            .select({ id: schema.sessionBackgroundCommands.id })
+            .from(schema.sessionBackgroundCommands)
+            .where(
+              and(
+                eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+                inArray(schema.sessionBackgroundCommands.sessionId, sessionIds),
+                inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"]),
+              ),
+            )
+            .for("update", { noWait: true });
+          if (activeBackgroundCommands.length > 0) {
+            return { status: "active_background_commands" as const };
           }
 
           const leases = await tx
@@ -32092,6 +32153,69 @@ async function lockTurnAttemptWriteFenceTx(
     return { allowed: false, reason: "turn_terminal", ...base };
   }
   return { allowed: true, workspace, session, turn, attempt };
+}
+
+export class SessionBackgroundCommandAdoptionFencedError extends Error {
+  readonly name = "SessionBackgroundCommandAdoptionFencedError";
+
+  constructor(public readonly reason: TurnAttemptFenceRejectReason) {
+    super(`Background command adoption rejected by turn-attempt fence (${reason})`);
+  }
+}
+
+/** Transfer one exact Connected Machine operation from a live turn attempt to
+ * its session. The canonical write fence gives adoption a total order with
+ * Steer, session/workspace Pause, terminal Cancel, and quiescent tree deletion:
+ * an earlier adoption is visible to later control, while earlier control makes
+ * this stale attempt fail before a session-owned row can appear. */
+export async function adoptConnectedMachineSessionBackgroundCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+    commandId: string;
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+    command: string;
+  },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        // A Connected Machine locator may retain both the owning workspace and
+        // a distinct physical origin workspace. Lock both prefixes in stable
+        // order before the canonical attempt fence so deletion of either side
+        // cannot cross or deadlock the adoption transaction.
+        await lockBackgroundCommandWorkspaceLifecycle(
+          tx,
+          [input.workspaceId, input.controlWorkspaceId],
+          "share",
+        );
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) {
+          throw new SessionBackgroundCommandAdoptionFencedError(fence.reason);
+        }
+        if (fence.session.accountId !== input.accountId) {
+          throw new SessionBackgroundCommandAdoptionFencedError("attempt_changed");
+        }
+        return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, input);
+      }),
+  );
 }
 
 export type InstallOrReadTurnExecutionPolicyForAttemptResult =
@@ -42083,6 +42207,10 @@ export async function retainWorkspaceMutationProcess(
       key: string;
       binding: ModalCheckpointProviderBinding;
     } | null;
+    backgroundCommand?: {
+      commandId: string;
+      command: string;
+    };
     owner:
       | {
           kind: "turn";
@@ -42114,6 +42242,12 @@ export async function retainWorkspaceMutationProcess(
     throw new SandboxWorkspaceMutationFencedError(
       "process_fenced",
       "Retained provider session id must be a positive safe integer",
+    );
+  }
+  if (input.backgroundCommand && input.backgroundCommand.commandId !== input.processId) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Managed background command id must equal its exact retained process id",
     );
   }
   const operation = normalizeWorkspaceMutationOperation(input.operation);
@@ -42173,6 +42307,9 @@ export async function retainWorkspaceMutationProcess(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        if (input.backgroundCommand) {
+          await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "share");
+        }
         // Use the same ownership prefix as mutation admission and settlement.
         // A stale authority still cannot strand a provider process: remember
         // the fence, durably promote the exact process, then reject its output
@@ -42376,6 +42513,33 @@ export async function retainWorkspaceMutationProcess(
           throw new Error("Retained process promotion lost its locked authority");
         }
         const identity = await verifyResolvedAdmissionAuthority(tx, authority, admission);
+        if (identity.failure !== null) {
+          return { process: mapRetainedProcess(process!), failure: identity };
+        }
+        if (input.backgroundCommand) {
+          if (authorityInput.kind === "direct") {
+            const effectiveControl = await evaluateSessionControl(
+              tx,
+              input.workspaceId,
+              input.sessionId,
+              { lock: "none" },
+            );
+            if (effectiveControl.state !== "active") {
+              return {
+                process: mapRetainedProcess(process!),
+                failure: {
+                  failure: "attempt_fenced" as const,
+                  detail: "Managed background command adoption was preceded by Pause or Cancel",
+                },
+              };
+            }
+          }
+          await insertManagedSessionBackgroundCommandInTransaction(tx, {
+            ...input,
+            retainedProcessId: input.processId,
+            ...input.backgroundCommand,
+          });
+        }
         return { process: mapRetainedProcess(process!), failure: identity };
       }),
   );
@@ -47779,8 +47943,8 @@ export async function setEnrollmentDisplayState(
 // Live op-stream cursor: the agent's connect Hello advertises whether it supports
 // the streaming exec transport. This is deliberately persisted separately from the
 // server rollout flag so routing can require BOTH server enablement and the live
-// runner capability; agents predating the op-stream engine remain false and keep
-// using legacy request/reply exec.
+// runner capability; agents predating the op-stream engine remain false, so exec
+// fails closed until they advertise the required transport.
 //
 // CHANGE-GUARDED at the SQL layer: the write fires only when `op_stream` differs
 // from what the row already holds, so a steady-state Hello updates zero rows and

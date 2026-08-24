@@ -176,16 +176,75 @@ describe("session tree deletion", () => {
     const deleted = await app.request(url, {
       method: "DELETE",
       headers: {
-        authorization: await bearer(value.accountId, value.workspaceId, [
-          "sessions:read",
-          "sessions:control",
-        ]),
+        authorization: await bearer(value.accountId, value.workspaceId, ["sessions:control"]),
       },
     });
     expect(deleted.status).toBe(200);
     expect(await deleted.json()).toEqual({ deletedSessionCount: 2 });
     expect(await getSession(db, value.workspaceId, value.root.id)).toBeNull();
     expect(await getSession(db, value.workspaceId, value.child.id)).toBeNull();
+  }, 180_000);
+
+  test("background-command cancellation requires sessions:control before target lookup", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const commandId = crypto.randomUUID();
+    const url = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.root.id}/background-commands/${commandId}`;
+
+    const denied = await app.request(url, {
+      method: "DELETE",
+      headers: {
+        authorization: await bearer(value.accountId, value.workspaceId, ["sessions:read"]),
+      },
+    });
+    expect(denied.status).toBe(403);
+
+    const authorizedMissing = await app.request(url, {
+      method: "DELETE",
+      headers: {
+        authorization: await bearer(value.accountId, value.workspaceId, ["sessions:control"]),
+      },
+    });
+    expect(authorizedMissing.status).toBe(404);
+  }, 180_000);
+
+  test("active background commands block tree deletion until terminal proof is stored", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const commandId = crypto.randomUUID();
+    await admin`
+      insert into session_background_commands (
+        id, account_id, workspace_id, session_id, provider, state,
+        control_workspace_id, enrollment_id, connection_instance_id, op_id,
+        command_preview
+      ) values (
+        ${commandId}, ${value.accountId}, ${value.workspaceId}, ${value.root.id},
+        'connected_machine', 'running', ${value.workspaceId}, ${crypto.randomUUID()},
+        'session-delete-launch', 'session-delete-op', 'sleep 60'
+      )`;
+
+    const url = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.root.id}`;
+    const headers = {
+      authorization: await bearer(value.accountId, value.workspaceId, [
+        "sessions:read",
+        "sessions:control",
+      ]),
+    };
+    const blocked = await app.request(url, { method: "DELETE", headers });
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({
+      message: expect.stringContaining("background commands"),
+    });
+    expect(await getSession(db, value.workspaceId, value.root.id)).not.toBeNull();
+
+    await admin`
+      update session_background_commands set
+        state = 'exited', exit_code = 0, settlement_reason = 'provider_exit',
+        settled_at = now(), updated_at = now()
+      where id = ${commandId}`;
+    const deleted = await app.request(url, { method: "DELETE", headers });
+    expect(deleted.status).toBe(200);
+    expect(await getSession(db, value.workspaceId, value.root.id)).toBeNull();
   }, 180_000);
 
   test("refuses an active root without deleting it", async () => {

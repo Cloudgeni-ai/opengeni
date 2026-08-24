@@ -118,11 +118,20 @@ describe("op-stream exec (fake runner)", () => {
       holdUntilCancel: true,
     });
     const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const transferStarted: string[] = [];
+    const transferred: string[] = [];
 
-    const result = await runWithToolCallCorrelation("call_background", () =>
-      session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
+    const result = await runWithToolCallCorrelation(
+      "call_background",
+      () => session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
+      {
+        onDurableOpOwnershipTransferStarted: (opId) => transferStarted.push(opId),
+        onDurableOpOwnershipTransferred: (opId) => transferred.push(opId),
+      },
     );
 
+    expect(transferStarted).toEqual(["call_background:0"]);
+    expect(transferred).toEqual(["call_background:0"]);
     expect(result).toContain(`command ID ${commandId}`);
     expect(result).toContain("operation call_background:0");
     expect(adoptions).toEqual([

@@ -411,6 +411,11 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             controlWorkspaceId: activeSandboxRecord!.workspaceId,
+            backgroundCommandAttempt: {
+              turnId: turn.id,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
             agentId: activeSandboxRecord!.enrollmentId!,
             // An offline machine must not fail turn admission. Bind an
             // intentionally unserved token so the model receives the normal

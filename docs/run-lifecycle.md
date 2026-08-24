@@ -1054,6 +1054,15 @@ background-command row before returning; that row freezes the physical control
 workspace, enrollment, connection instance, and op ID. The exact parent
 admission/process UUID/provider locator or Connected Machine locator remains
 pinned across active-pointer movement.
+Both provider paths serialize adoption with Steer, Pause, terminal Cancel, and
+session-tree deletion through the canonical workspace-control, workspace,
+session, turn, and exact-attempt fence. Managed promotion and command insertion
+are one transaction. For Connected Machines, the op-stream yield path takes
+exact failure-cancellation authority before the adoption transaction begins;
+if the fence rejects, that path exact-cancels the frozen op, while a committed
+row transfers cancellation to session control and reconciliation. This closes
+the post-commit/pre-unwind window in which attempt cancellation could otherwise
+send `OpCancel` after durable adoption.
 Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
 cancellation, helper exec, and drain polling are process control: they may prove
 exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
@@ -1094,6 +1103,16 @@ zero, and checkpoints the typed terminal provider observation before changing
 the lifecycle row. Running, offline, timed-out, malformed, and successor-only
 states remain active/deferred; connection retirement or elapsed time is not
 physical proof and cannot license replay or rebinding.
+
+Teardown preserves that authority. Session-tree deletion locks and refuses any
+`running` or `stopping` command before cascading session-owned rows. Workspace
+deletion takes a separate transaction-scoped background-command advisory prefix
+before parent rows; adoption takes the matching shared prefix for both the
+owning workspace and a distinct physical control workspace. Active target or
+origin references return a typed blocker. Settled cross-workspace origin history
+is pruned only at the final successful source-workspace deletion boundary, in
+the same transaction as the cascade; a deletion attempt blocked later by leases
+or other durable owners leaves that history intact.
 
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when

@@ -16,11 +16,13 @@ import {
   createSession,
   getRetainedProcess,
   initializeSessionStartAtomically,
+  mutateSessionControlInTransaction,
   readLease,
   recordRetainedProcessReconciliationProof,
   releaseLeaseHolder,
   retainedProcessSettlementIdentity,
   retainWorkspaceMutationProcess,
+  SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
   settleRetainedProcess,
   type Database,
@@ -28,9 +30,9 @@ import {
   type RetainedProcessProviderProof,
   type SandboxRetainedProcess,
   type SandboxRetainedProcessIdentity,
+  withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import {
-  adoptManagedSessionBackgroundCommand,
   listSessionBackgroundCommands,
   requestSessionBackgroundCommandCancellation,
 } from "@opengeni/db/session-background-commands";
@@ -227,6 +229,7 @@ async function promoteTurnProcess(
   input: {
     outcome?: ClosedAttemptOutcome;
     providerSessionId?: number;
+    backgroundCommand?: string;
   } = {},
 ): Promise<ProcessFixture> {
   const ids = await freshWorkspace();
@@ -262,6 +265,11 @@ async function promoteTurnProcess(
     admittedWorkspaceGeneration: admission.workspaceGeneration,
     operation,
     providerBinding: MODAL_PROVIDER_BINDING,
+    ...(input.backgroundCommand
+      ? {
+          backgroundCommand: { commandId: processId, command: input.backgroundCommand },
+        }
+      : {}),
     owner: {
       kind: "turn",
       turnId: attempt.turnId,
@@ -478,16 +486,88 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("Pause before managed adoption fences session ownership but preserves exact cleanup authority", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshTurn(ids);
+    const { instanceId } = await insertWarmLease(ids, {
+      sessionId: attempt.sessionId,
+      holderId: attempt.holderId,
+      holderKind: "turn",
+    });
+    const operation = `retainedProcessPaused-${crypto.randomUUID()}`;
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      turnId: attempt.turnId,
+      executionGeneration: attempt.executionGeneration,
+      attemptId: attempt.attemptId,
+      holderId: attempt.holderId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 7,
+      expectedInstanceId: instanceId,
+      operation,
+    });
+    await withWorkspaceSessionActivityRls(
+      db,
+      { accountId: ids.accountId, workspaceId: ids.workspaceId },
+      async (scopedDb) =>
+        await mutateSessionControlInTransaction(scopedDb, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          actor: { type: "human", subjectId: "user:test-owner" },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+    );
+
+    const processId = crypto.randomUUID();
+    let fenced: SandboxRetainedProcessPromotionFencedError | null = null;
+    try {
+      await retainWorkspaceMutationProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId: 72,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation,
+        providerBinding: MODAL_PROVIDER_BINDING,
+        backgroundCommand: { commandId: processId, command: "sleep 60" },
+        owner: {
+          kind: "turn",
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 7,
+          expectedInstanceId: instanceId,
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
+      fenced = error;
+    }
+
+    expect(fenced?.process).toMatchObject({ id: processId, state: "active" });
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+      }),
+    ).toHaveLength(0);
+  });
+
   test("session-owned cancellation is interrupted and settled with the process", async () => {
     if (!available) return;
-    const fixture = await promoteTurnProcess({ outcome: "completed" });
-    await adoptManagedSessionBackgroundCommand(db, {
-      accountId: fixture.accountId,
-      workspaceId: fixture.workspaceId,
-      sessionId: fixture.sessionId,
-      commandId: fixture.process.id,
-      retainedProcessId: fixture.process.id,
-      command: "bun test --watch",
+    const fixture = await promoteTurnProcess({
+      outcome: "completed",
+      backgroundCommand: "bun test --watch",
     });
     const cancellation = await requestSessionBackgroundCommandCancellation(db, {
       accountId: fixture.accountId,

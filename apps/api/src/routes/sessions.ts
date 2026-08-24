@@ -799,7 +799,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!z.string().uuid().safeParse(commandId).success) {
         throw new HTTPException(404, { message: "background command not found" });
       }
-      const grant = await requireAccessGrant(c, deps, workspaceId);
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
       const result = await requestSessionBackgroundCommandCancellation(db, {
         accountId: grant.accountId,
         workspaceId,
@@ -1817,6 +1817,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       case "active_video_generations":
         throw new HTTPException(409, {
           message: "wait for active video generations to finish before deleting this workstream",
+        });
+      case "active_background_commands":
+        throw new HTTPException(409, {
+          message: "pause or cancel this workstream's background commands before deleting it",
         });
       case "live_sandboxes":
         throw new HTTPException(409, {

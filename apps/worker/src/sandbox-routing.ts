@@ -16,6 +16,7 @@
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
+  adoptConnectedMachineSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
   getRetainedProcess,
@@ -36,8 +37,6 @@ import {
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
 import {
-  adoptConnectedMachineSessionBackgroundCommand,
-  adoptManagedSessionBackgroundCommand,
   settleConnectedMachineSessionBackgroundCommand,
   settleSessionBackgroundCommandForRetainedProcess,
 } from "@opengeni/db/session-background-commands";
@@ -514,6 +513,10 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
+          backgroundCommand: {
+            commandId: retainedProcess.id,
+            command: op,
+          },
           owner: {
             kind: "turn",
             turnId: fence.turnId,
@@ -527,14 +530,6 @@ function afterPersistableHomeMutation(
             routeTargetId: exactAdmission.routeTargetId,
             routeEpoch: exactAdmission.routeEpoch,
           },
-        });
-        await adoptManagedSessionBackgroundCommand(services.db, {
-          accountId: fence.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: ids.sessionId,
-          commandId: retainedProcess.id,
-          retainedProcessId: retainedProcess.id,
-          command: op,
         });
       } catch (error) {
         if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
@@ -730,6 +725,7 @@ export function wrapTurnBoxWithRouting(
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
   const backgroundCommandAccountId = ids.workspaceMutationFence?.accountId;
+  const backgroundCommandAttempt = ids.workspaceMutationFence;
   const beforeMutation = beforePersistableHomeMutation(services, ids, ids.homeLease);
   const afterMutation = afterPersistableHomeMutation(services, ids, ids.homeLease);
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
@@ -773,13 +769,16 @@ export function wrapTurnBoxWithRouting(
     // deadlines the machine-primary establish path uses (short control, long exec).
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
-    ...(backgroundCommandAccountId
+    ...(backgroundCommandAccountId && backgroundCommandAttempt
       ? {
           selfhostedAdoptBackgroundCommand: async (command) => {
             const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
               accountId: backgroundCommandAccountId,
               workspaceId: ids.workspaceId,
               sessionId: ids.sessionId,
+              turnId: backgroundCommandAttempt.turnId,
+              executionGeneration: backgroundCommandAttempt.executionGeneration,
+              attemptId: backgroundCommandAttempt.attemptId,
               commandId: crypto.randomUUID(),
               controlWorkspaceId: command.controlWorkspaceId,
               enrollmentId: command.enrollmentId,
@@ -960,6 +959,7 @@ export function wrapLazyTurnBoxWithRouting(
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
   const backgroundCommandAccountId = ids.workspaceMutationFence?.accountId;
+  const backgroundCommandAttempt = ids.workspaceMutationFence;
   const beforeMutation = beforePersistableHomeMutation(services, ids, args.homeLeaseIdentity);
   const afterMutation = afterPersistableHomeMutation(services, ids, args.homeLeaseIdentity);
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
@@ -1013,13 +1013,16 @@ export function wrapLazyTurnBoxWithRouting(
     relay: relayConfigFromSettings(settings),
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
-    ...(backgroundCommandAccountId
+    ...(backgroundCommandAccountId && backgroundCommandAttempt
       ? {
           selfhostedAdoptBackgroundCommand: async (command) => {
             const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
               accountId: backgroundCommandAccountId,
               workspaceId: ids.workspaceId,
               sessionId: ids.sessionId,
+              turnId: backgroundCommandAttempt.turnId,
+              executionGeneration: backgroundCommandAttempt.executionGeneration,
+              attemptId: backgroundCommandAttempt.attemptId,
               commandId: crypto.randomUUID(),
               controlWorkspaceId: command.controlWorkspaceId,
               enrollmentId: command.enrollmentId,
@@ -1160,6 +1163,13 @@ export type SelfhostedTurnSessionArgs = {
   sessionId: string;
   /** Physical machine-origin workspace used in control-plane routing. */
   controlWorkspaceId?: string;
+  /** Exact launching attempt required before a live Connected Machine command
+   * can transfer into session ownership. Omitted by non-turn/test callers,
+   * which therefore cannot yield a durable background command. */
+  backgroundCommandAttempt?: Pick<
+    NonNullable<RoutingWiringIds["workspaceMutationFence"]>,
+    "turnId" | "executionGeneration" | "attemptId"
+  >;
   /** The target machine's enrollment id == the agent subject id. */
   agentId: string;
   /** Exact daemon process currently leased for the enrollment. */
@@ -1332,20 +1342,27 @@ export async function establishSelfhostedTurnSession(
           );
       return connectionBindingFor(services, enrollment);
     },
-    adoptBackgroundCommand: async (command) => {
-      const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
-        accountId: args.accountId,
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-        commandId: crypto.randomUUID(),
-        controlWorkspaceId: command.controlWorkspaceId,
-        enrollmentId: command.enrollmentId,
-        connectionInstanceId: command.connectionInstanceId,
-        opId: command.opId,
-        command: command.command,
-      });
-      return { commandId: adopted.id };
-    },
+    ...(args.backgroundCommandAttempt
+      ? {
+          adoptBackgroundCommand: async (command) => {
+            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
+              accountId: args.accountId,
+              workspaceId: args.workspaceId,
+              sessionId: args.sessionId,
+              turnId: args.backgroundCommandAttempt!.turnId,
+              executionGeneration: args.backgroundCommandAttempt!.executionGeneration,
+              attemptId: args.backgroundCommandAttempt!.attemptId,
+              commandId: crypto.randomUUID(),
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+              command: command.command,
+            });
+            return { commandId: adopted.id };
+          },
+        }
+      : {}),
     settleBackgroundCommand: async (command) => {
       await settleConnectedMachineSessionBackgroundCommand(db, {
         accountId: args.accountId,

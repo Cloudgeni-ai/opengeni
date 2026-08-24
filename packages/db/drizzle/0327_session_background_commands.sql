@@ -176,6 +176,117 @@ COMMENT ON COLUMN session_background_commands.connection_instance_id IS
 COMMENT ON COLUMN session_background_commands.control_workspace_id IS
   'Connected Machine origin workspace used in the exact physical NATS subject; never rewritten from the session workspace.';
 
+-- Workspace deletion takes the application-level background-command prefix
+-- before its parent rows. These SECURITY DEFINER seams can therefore inspect
+-- cross-workspace origin references without weakening ordinary workspace RLS:
+-- active authority is checked before any other deletion work, while terminal
+-- history is pruned only at the final successful cascade boundary.
+DO $workspace_delete_function$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($create$
+    CREATE FUNCTION opengeni_private.prepare_workspace_background_command_deletion(
+      p_account_id uuid,
+      p_workspace_id uuid
+    )
+    RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    DECLARE
+      active_count integer := 0;
+    BEGIN
+      IF pg_catalog.current_setting('opengeni.account_id', true)
+          IS DISTINCT FROM p_account_id::text
+        OR pg_catalog.current_setting('opengeni.workspace_id', true)
+          IS DISTINCT FROM p_workspace_id::text THEN
+        RAISE EXCEPTION 'workspace background-command deletion scope mismatch'
+          USING ERRCODE = '42501';
+      END IF;
+
+      BEGIN
+        PERFORM command.id
+        FROM %1$I.session_background_commands command
+        WHERE command.account_id = p_account_id
+          AND command.state IN ('running', 'stopping')
+          AND (
+            command.workspace_id = p_workspace_id
+            OR command.control_workspace_id = p_workspace_id
+          )
+        ORDER BY command.id
+        FOR UPDATE NOWAIT;
+        GET DIAGNOSTICS active_count = ROW_COUNT;
+      EXCEPTION WHEN lock_not_available THEN
+        -- A reconciler currently owns lifecycle proof for a matching command;
+        -- deletion remains blocked rather than waiting or losing its locator.
+        RETURN 1;
+      END;
+
+      RETURN active_count;
+    END
+    $function$;
+  $create$, data_schema);
+END
+$workspace_delete_function$;
+
+DO $workspace_prune_function$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($create$
+    CREATE FUNCTION opengeni_private.prune_settled_cross_workspace_background_commands(
+      p_account_id uuid,
+      p_workspace_id uuid
+    )
+    RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $function$
+    DECLARE
+      deleted_count integer := 0;
+    BEGIN
+      IF pg_catalog.current_setting('opengeni.account_id', true)
+          IS DISTINCT FROM p_account_id::text
+        OR pg_catalog.current_setting('opengeni.workspace_id', true)
+          IS DISTINCT FROM p_workspace_id::text THEN
+        RAISE EXCEPTION 'workspace background-command deletion scope mismatch'
+          USING ERRCODE = '42501';
+      END IF;
+
+      DELETE FROM %1$I.session_background_commands command
+      WHERE command.account_id = p_account_id
+        AND command.control_workspace_id = p_workspace_id
+        AND command.workspace_id <> p_workspace_id
+        AND command.state IN ('exited', 'lost');
+      GET DIAGNOSTICS deleted_count = ROW_COUNT;
+      RETURN deleted_count;
+    END
+    $function$;
+  $create$, data_schema);
+END
+$workspace_prune_function$;
+
+REVOKE ALL ON FUNCTION opengeni_private.prepare_workspace_background_command_deletion(
+  uuid, uuid
+) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.prune_settled_cross_workspace_background_commands(
+  uuid, uuid
+) FROM PUBLIC;
+
+DO $workspace_delete_grant$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.prepare_workspace_background_command_deletion(
+      uuid, uuid
+    ) TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION opengeni_private.prune_settled_cross_workspace_background_commands(
+      uuid, uuid
+    ) TO opengeni_app;
+  END IF;
+END
+$workspace_delete_grant$;
+
 DO $settlement_function$
 DECLARE data_schema text := current_schema();
 BEGIN

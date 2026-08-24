@@ -28,10 +28,7 @@ import {
   type Database,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
-import {
-  adoptManagedSessionBackgroundCommand,
-  settleSessionBackgroundCommandForRetainedProcess,
-} from "@opengeni/db/session-background-commands";
+import { settleSessionBackgroundCommandForRetainedProcess } from "@opengeni/db/session-background-commands";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
   isProviderSandboxGoneDuringRoutedOperation,
@@ -308,6 +305,10 @@ export function wrapChannelABoxWithRouting(
             admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
             operation: op,
             providerBinding: boundAdmission.providerBinding ?? null,
+            backgroundCommand: {
+              commandId: retainedProcess.id,
+              command: op,
+            },
             owner: {
               kind: "direct",
               requestId: ids.directRequest.requestId,
@@ -319,14 +320,6 @@ export function wrapChannelABoxWithRouting(
               routeTargetId: exactAdmission.routeTargetId,
               routeEpoch: exactAdmission.routeEpoch,
             },
-          });
-          await adoptManagedSessionBackgroundCommand(db, {
-            accountId: ids.accountId,
-            workspaceId: ids.workspaceId,
-            sessionId: ids.sessionId,
-            commandId: retainedProcess.id,
-            retainedProcessId: retainedProcess.id,
-            command: op,
           });
           return;
         }
