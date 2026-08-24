@@ -138,8 +138,10 @@ Codex quota adds three deliberately separate product seams:
   managed-cookie admin to reconnect the same ChatGPT account; that row-locked
   same-provider upsert may fill only a NULL owner. A different existing owner
   is never transferred by reconnect, and disconnect remains the explicit
-  ownership-reset boundary. The browser refreshes the full overview after a
-  successful reconnect so an exact claim immediately exposes Redeem.
+  ownership-reset boundary. When no matching managed human can be verified, the
+  browser renders a closed view-only explanation with no reclaim action. The
+  browser refreshes the full overview after a successful reconnect so an exact
+  claim immediately exposes Redeem.
 
 The durable redemption attempt separates `processing` (fresh exact actionable
 detail still owed) from `provider_started` (the consume POST may have begun).

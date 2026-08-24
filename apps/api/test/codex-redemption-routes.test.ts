@@ -894,6 +894,24 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     });
     expect(keyResponse.status).toBe(201);
     const productToken = ((await keyResponse.json()) as any).token as string;
+    const productOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+      headers: { authorization: `Bearer ${productToken}` },
+    });
+    expect(productOverview.status).toBe(200);
+    const productAccount = ((await productOverview.json()) as any).accounts[connected.id];
+    expect(productAccount).toMatchObject({
+      canRedeem: false,
+      canResumeRedemption: false,
+      redemptionAccess: {
+        ownership: "managed_human_unavailable",
+        canClaimUnownedViaReconnect: false,
+      },
+    });
+    expect(
+      productAccount.resetCredits.credits.every(
+        (credit: { actionable: boolean }) => !credit.actionable,
+      ),
+    ).toBe(true);
     const productKeyAttempt = await prepare(
       api,
       workspaceId,

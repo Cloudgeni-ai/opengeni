@@ -422,7 +422,7 @@ function AccountUsageMeta({
   );
 }
 
-function ResetCreditInventory({
+export function ResetCreditInventory({
   overview,
   now,
   busy,
@@ -499,6 +499,14 @@ function ResetCreditInventory({
             </Button>
           ) : null}
         </div>
+      ) : viewOnlyOwnership === "managed_human_unavailable" ? (
+        <p
+          className="rounded border border-border/70 bg-surface-2/50 p-2 text-2xs text-fg-muted"
+          role="status"
+        >
+          OpenGeni could not verify a managed human for this browser session. Reset credits are view
+          only, and ownership cannot be claimed or changed here.
+        </p>
       ) : viewOnlyOwnership === "different_human" ? (
         <p
           className="rounded border border-border/70 bg-surface-2/50 p-2 text-2xs text-fg-muted"
