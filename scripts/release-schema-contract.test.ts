@@ -580,8 +580,8 @@ describe("release schema contract", () => {
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0334_document_authority_reclassification.sql")) {
         return includesActivation
-          ? "cba0818b151a1234e09a58504888361ccf09ad4b5a921c7e5d069c2bb28f1c48"
-          : "1e59cc75b674c79bb84b8e61967af5a495c809cc8fc7fcfbabcaa0dbbccc8968";
+          ? "2247b493661878bfac9ba4b7c24b999657428932188d09f6c633ea1f80208e3b"
+          : "fa1214db054d4797b7683c3c6ebbb16530c3c00748582e6367b0a12cf1b22aa1";
       }
       if (migrations.has("0326_interaction_operation_error_codes.sql")) {
         return includesActivation

@@ -418,9 +418,8 @@ DECLARE
     p_command #>> '{expectedAuthority,authorityId}', ''
   )::uuid;
   target_kind text := p_command ->> 'targetAuthorityKind';
-  account_admin_authorized boolean := coalesce(
-    (p_command ->> 'accountAdminAuthorized')::boolean, false
-  );
+  account_admin_authorization jsonb := p_command -> 'accountAdminAuthorization';
+  account_admin_authorized boolean := false;
   input_hash_value text;
   existing_receipt document_authority_reclassifications%ROWTYPE;
   document_row documents%ROWTYPE;
@@ -471,7 +470,27 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
-  input_hash_value := encode(sha256(convert_to(p_command::text, 'UTF8')), 'hex');
+  IF account_admin_authorization IS NOT NULL
+    AND account_admin_authorization <> 'null'::jsonb
+  THEN
+    account_admin_authorized :=
+      jsonb_typeof(account_admin_authorization) = 'object'
+      AND coalesce(account_admin_authorization ->> 'permission', '') = 'account:admin'
+      AND nullif(account_admin_authorization ->> 'accountId', '')::uuid
+        IS NOT DISTINCT FROM account_id_value
+      AND nullif(account_admin_authorization ->> 'actorSubjectId', '')
+        IS NOT DISTINCT FROM actor_subject
+      AND coalesce(account_admin_authorization ->> 'authorizationId', '')
+        ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+  END IF;
+
+  -- The authorization stamp is fresh request provenance, not logical input.
+  -- Excluding it lets a later exactly-authorized HTTP retry converge on the
+  -- immutable operation receipt while changed business input still conflicts.
+  input_hash_value := encode(
+    sha256(convert_to((p_command - 'accountAdminAuthorization')::text, 'UTF8')),
+    'hex'
+  );
   PERFORM pg_advisory_xact_lock(
     hashtextextended('document-authority-reclassification:' || operation_id_value::text, 0)
   );
@@ -490,6 +509,14 @@ BEGIN
       RAISE EXCEPTION 'document reclassification operation id was reused with different input'
         USING ERRCODE = '23505';
     END IF;
+    IF (
+      existing_receipt.previous_authority_kind = 'organization'
+      OR existing_receipt.resulting_authority_kind = 'organization'
+    ) AND NOT account_admin_authorized
+    THEN
+      RAISE EXCEPTION 'organization document reclassification requires exact account authority'
+        USING ERRCODE = '42501';
+    END IF;
     DELETE FROM opengeni_private.document_migration_capabilities
     WHERE backend_pid = pg_backend_pid()
       AND transaction_id = pg_current_xact_id_if_assigned()
@@ -505,7 +532,6 @@ BEGIN
   FROM documents document_value
   WHERE document_value.id = document_id_value
     AND document_value.account_id = account_id_value
-    AND document_value.workspace_id = request_workspace_id_value
   FOR UPDATE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'document not found' USING ERRCODE = 'P0002';
@@ -524,17 +550,10 @@ BEGIN
     RAISE EXCEPTION 'organization document reclassification requires exact account authority'
       USING ERRCODE = '42501';
   END IF;
-  IF (document_row.authority_kind = 'organization' OR target_kind = 'organization')
-    AND NOT EXISTS (
-      SELECT 1 FROM organization_memberships membership
-      WHERE membership.account_id = account_id_value
-        AND membership.subject_id = actor_subject
-        AND membership.status = 'active'
-        AND membership.revoked_at IS NULL
-        AND membership.role IN ('owner', 'admin')
-    )
+  IF target_kind = 'workspace'
+    AND request_workspace_id_value IS DISTINCT FROM document_row.workspace_id
   THEN
-    RAISE EXCEPTION 'organization document reclassification requires exact account authority'
+    RAISE EXCEPTION 'workspace document target requires the immutable origin workspace route'
       USING ERRCODE = '42501';
   END IF;
   IF target_kind = 'personal'
@@ -683,7 +702,10 @@ CREATE FUNCTION list_document_authority_reclassifications(
   p_account_id uuid,
   p_workspace_id uuid,
   p_actor_subject_id text,
-  p_document_id uuid
+  p_document_id uuid,
+  p_limit integer,
+  p_before_created_at timestamptz,
+  p_before_operation_id uuid
 ) RETURNS SETOF jsonb
 LANGUAGE sql
 STABLE
@@ -699,7 +721,16 @@ AS $body$
     AND p_account_id = nullif(current_setting('opengeni.account_id', true), '')::uuid
     AND p_workspace_id = nullif(current_setting('opengeni.workspace_id', true), '')::uuid
     AND p_actor_subject_id = nullif(current_setting('opengeni.subject_id', true), '')
+    AND (
+      p_before_created_at IS NULL
+      OR receipt.created_at < p_before_created_at
+      OR (
+        receipt.created_at = p_before_created_at
+        AND receipt.operation_id < p_before_operation_id
+      )
+    )
   ORDER BY receipt.created_at DESC, receipt.operation_id DESC
+  LIMIT least(greatest(coalesce(p_limit, 1), 1), 101)
 $body$;
 
 CREATE FUNCTION run_document_default_collection_backfill(p_command jsonb)
@@ -715,6 +746,8 @@ DECLARE
   run_id_value uuid := nullif(p_command ->> 'runId', '')::uuid;
   operation_id_value uuid := nullif(p_command ->> 'operationId', '')::uuid;
   batch_size integer := coalesce((p_command ->> 'batchSize')::integer, 50);
+  account_admin_authorization jsonb := p_command -> 'accountAdminAuthorization';
+  account_admin_authorized boolean := false;
   input_hash_value text;
   existing_operation document_default_collection_backfill_operations%ROWTYPE;
   run_row document_default_collection_backfill_runs%ROWTYPE;
@@ -770,19 +803,28 @@ BEGIN
     RAISE EXCEPTION 'document Default collection backfill actor authority is invalid'
       USING ERRCODE = '42501';
   END IF;
-  IF NOT EXISTS (
-    SELECT 1 FROM organization_memberships membership
-    WHERE membership.account_id = account_id_value
-      AND membership.subject_id = actor_subject
-      AND membership.status = 'active'
-      AND membership.revoked_at IS NULL
-      AND membership.role IN ('owner', 'admin')
-  ) THEN
+  IF account_admin_authorization IS NOT NULL
+    AND account_admin_authorization <> 'null'::jsonb
+  THEN
+    account_admin_authorized :=
+      jsonb_typeof(account_admin_authorization) = 'object'
+      AND coalesce(account_admin_authorization ->> 'permission', '') = 'account:admin'
+      AND nullif(account_admin_authorization ->> 'accountId', '')::uuid
+        IS NOT DISTINCT FROM account_id_value
+      AND nullif(account_admin_authorization ->> 'actorSubjectId', '')
+        IS NOT DISTINCT FROM actor_subject
+      AND coalesce(account_admin_authorization ->> 'authorizationId', '')
+        ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+  END IF;
+  IF NOT account_admin_authorized THEN
     RAISE EXCEPTION 'document Default collection backfill requires organization administration'
       USING ERRCODE = '42501';
   END IF;
 
-  input_hash_value := encode(sha256(convert_to(p_command::text, 'UTF8')), 'hex');
+  input_hash_value := encode(
+    sha256(convert_to((p_command - 'accountAdminAuthorization')::text, 'UTF8')),
+    'hex'
+  );
   PERFORM pg_advisory_xact_lock(
     hashtextextended('document-default-collection-backfill:' || run_id_value::text, 0)
   );
@@ -941,7 +983,8 @@ BEGIN
     data_schema, data_schema
   );
   EXECUTE format(
-    'ALTER FUNCTION %I.list_document_authority_reclassifications(uuid,uuid,text,uuid) '
+    'ALTER FUNCTION %I.list_document_authority_reclassifications('
+      || 'uuid,uuid,text,uuid,integer,timestamptz,uuid) '
       || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
@@ -959,7 +1002,9 @@ REVOKE ALL ON TABLE document_default_collection_backfill_operations FROM PUBLIC;
 REVOKE ALL ON TABLE document_default_collection_backfill_receipts FROM PUBLIC;
 REVOKE ALL ON FUNCTION reclassify_document_authority(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION
-  list_document_authority_reclassifications(uuid, uuid, text, uuid) FROM PUBLIC;
+  list_document_authority_reclassifications(
+    uuid, uuid, text, uuid, integer, timestamptz, uuid
+  ) FROM PUBLIC;
 REVOKE ALL ON FUNCTION run_document_default_collection_backfill(jsonb) FROM PUBLIC;
 
 DO $document_migration_runtime_grants$
@@ -973,7 +1018,9 @@ BEGIN
     REVOKE ALL ON TABLE document_default_collection_backfill_receipts FROM opengeni_app;
     GRANT EXECUTE ON FUNCTION reclassify_document_authority(jsonb) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
-      list_document_authority_reclassifications(uuid, uuid, text, uuid) TO opengeni_app;
+      list_document_authority_reclassifications(
+        uuid, uuid, text, uuid, integer, timestamptz, uuid
+      ) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION run_document_default_collection_backfill(jsonb) TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
       opengeni_private.document_migration_capability_active(text) TO opengeni_app;

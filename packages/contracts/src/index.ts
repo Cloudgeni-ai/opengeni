@@ -4906,6 +4906,32 @@ export const DocumentAuthorityReclassification = z.object({
 });
 export type DocumentAuthorityReclassification = z.infer<typeof DocumentAuthorityReclassification>;
 
+export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT = 50;
+export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT = 100;
+export const DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS = 1_024;
+
+export const ListDocumentAuthorityReclassificationsQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
+    .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
+  cursor: z.string().min(1).max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).optional(),
+});
+export type ListDocumentAuthorityReclassificationsQuery = z.infer<
+  typeof ListDocumentAuthorityReclassificationsQuery
+>;
+
+export const ListDocumentAuthorityReclassificationsResponse = z.object({
+  receipts: z.array(DocumentAuthorityReclassification),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+});
+export type ListDocumentAuthorityReclassificationsResponse = z.infer<
+  typeof ListDocumentAuthorityReclassificationsResponse
+>;
+
 export const RunDocumentDefaultCollectionBackfillRequest = z.object({
   runId: z.string().uuid(),
   operationId: z.string().uuid(),

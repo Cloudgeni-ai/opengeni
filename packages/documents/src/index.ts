@@ -7,6 +7,7 @@ import {
   Document,
   DocumentAuthorityKind,
   DocumentAuthorityReclassification,
+  ListDocumentAuthorityReclassificationsResponse,
   DocumentBase,
   DocumentCuration,
   DocumentCurationStatus,
@@ -172,12 +173,20 @@ export type DocumentAuthority = {
   subjectId: string | null;
 };
 
+/** JSON-safe projection of the opaque capability minted by the API access layer. */
+export type DocumentAccountAdminAuthorization = Readonly<{
+  authorizationId: string;
+  accountId: string;
+  actorSubjectId: string;
+  permission: "account:admin";
+}>;
+
 export type ReclassifyDocumentAuthorityInput = ReclassifyDocumentAuthorityRequest & {
   accountId: string;
   workspaceId: string;
   documentId: string;
   actorSubjectId: string;
-  accountAdminAuthorized: boolean;
+  accountAdminAuthorization: DocumentAccountAdminAuthorization | null;
 };
 
 export type RunDocumentDefaultCollectionBackfillInput =
@@ -185,6 +194,7 @@ export type RunDocumentDefaultCollectionBackfillInput =
     accountId: string;
     workspaceId: string;
     actorSubjectId: string;
+    accountAdminAuthorization: DocumentAccountAdminAuthorization;
   };
 
 export type AgentDocumentAuthorityContext = {
@@ -999,6 +1009,7 @@ export async function runDocumentDefaultCollectionBackfill(
         runId: input.runId,
         operationId: input.operationId,
         batchSize: input.batchSize,
+        accountAdminAuthorization: input.accountAdminAuthorization,
       };
       const rows = (await scopedDb.execute(sql`
         SELECT run_document_default_collection_backfill(
@@ -1030,7 +1041,7 @@ export async function reclassifyDocumentAuthority(
         actorSubjectId: input.actorSubjectId,
         expectedAuthority: input.expectedAuthority,
         targetAuthorityKind: input.targetAuthorityKind,
-        accountAdminAuthorized: input.accountAdminAuthorized,
+        accountAdminAuthorization: input.accountAdminAuthorization,
       };
       const rows = (await scopedDb.execute(sql`
         SELECT reclassify_document_authority(${JSON.stringify(command)}::jsonb) AS result
@@ -1049,8 +1060,17 @@ export async function listDocumentAuthorityReclassifications(
     workspaceId: string;
     documentId: string;
     actorSubjectId: string;
+    limit?: number | undefined;
+    cursor?: string | undefined;
   },
 ) {
+  const limit = input.limit ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("document authority receipt limit must be between 1 and 100");
+  }
+  const cursor = input.cursor
+    ? decodeDocumentAuthorityReclassificationCursor(input.cursor, input)
+    : null;
   return await withDocumentAccountRls(
     db,
     input.accountId,
@@ -1062,12 +1082,96 @@ export async function listDocumentAuthorityReclassifications(
           ${input.accountId}::uuid,
           ${input.workspaceId}::uuid,
           ${input.actorSubjectId},
-          ${input.documentId}::uuid
+          ${input.documentId}::uuid,
+          ${limit + 1}::integer,
+          ${cursor?.createdAt ?? null}::timestamptz,
+          ${cursor?.operationId ?? null}::uuid
         ) AS result
       `)) as unknown as Array<{ result: unknown }>;
-      return rows.map((row) => DocumentAuthorityReclassification.parse(row.result));
+      const parsed = rows.map((row) => DocumentAuthorityReclassification.parse(row.result));
+      const hasMore = parsed.length > limit;
+      const receipts = parsed.slice(0, limit);
+      const tail = hasMore ? receipts.at(-1) : null;
+      return ListDocumentAuthorityReclassificationsResponse.parse({
+        receipts,
+        hasMore,
+        nextCursor: tail
+          ? encodeDocumentAuthorityReclassificationCursor(input, {
+              createdAt: tail.createdAt,
+              operationId: tail.operationId,
+            })
+          : null,
+      });
     },
   );
+}
+
+type DocumentAuthorityReclassificationCursor = {
+  createdAt: string;
+  operationId: string;
+};
+
+function documentAuthorityReclassificationCursorScope(input: {
+  accountId: string;
+  workspaceId: string;
+  documentId: string;
+  actorSubjectId: string;
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        "document_authority_reclassification_cursor",
+        1,
+        input.accountId,
+        input.workspaceId,
+        input.documentId,
+        input.actorSubjectId,
+      ]),
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function encodeDocumentAuthorityReclassificationCursor(
+  scope: Parameters<typeof documentAuthorityReclassificationCursorScope>[0],
+  cursor: DocumentAuthorityReclassificationCursor,
+): string {
+  return Buffer.from(
+    JSON.stringify({
+      v: 1,
+      s: documentAuthorityReclassificationCursorScope(scope),
+      t: cursor.createdAt,
+      i: cursor.operationId,
+    }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeDocumentAuthorityReclassificationCursor(
+  value: string,
+  scope: Parameters<typeof documentAuthorityReclassificationCursorScope>[0],
+): DocumentAuthorityReclassificationCursor {
+  try {
+    if (!value || value.length > 1_024) throw new Error("cursor length");
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) throw new Error("cursor encoding");
+    const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    if (
+      Object.keys(parsed).sort().join(",") !== "i,s,t,v" ||
+      parsed.v !== 1 ||
+      parsed.s !== documentAuthorityReclassificationCursorScope(scope) ||
+      typeof parsed.t !== "string" ||
+      !Number.isFinite(new Date(parsed.t).getTime()) ||
+      typeof parsed.i !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(parsed.i)
+    ) {
+      throw new Error("cursor payload");
+    }
+    return { createdAt: parsed.t, operationId: parsed.i };
+  } catch (error) {
+    throw new Error("invalid document authority receipt cursor", { cause: error });
+  }
 }
 
 export async function addDocumentToBase(

@@ -10,8 +10,10 @@ import {
   getDocumentChunk,
   getDocumentOriginalFile,
   listAccessibleDocuments,
+  listDocumentAuthorityReclassifications,
   moveDocumentToBase,
   queueDocumentForReindex,
+  reclassifyDocumentAuthority,
   searchEffectiveKnowledge,
   searchEffectiveDocuments,
   searchDocuments,
@@ -32,6 +34,21 @@ type StoredDocument = {
   baseId: string;
   fileId: string;
 };
+
+function nestedErrorMessages(error: unknown): string {
+  const messages: string[] = [];
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 16) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (typeof record.message === "string") messages.push(record.message);
+    if (record.cause !== undefined) queue.push(record.cause);
+  }
+  return messages.join("\n");
+}
 
 async function freshWorkspace(label: string, accountId?: string): Promise<Workspace> {
   const resolvedAccountId =
@@ -263,6 +280,228 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
     await expect(
       getDocument(forced.db, sibling.workspaceId, created.id, ownerAccess),
     ).resolves.toBeNull();
+  });
+
+  test("reclassification preserves portable personal get, search, and browse isolation", async () => {
+    if (!available) return;
+    const subjectId = `human:${crypto.randomUUID()}`;
+    const otherSubjectId = `human:${crypto.randomUUID()}`;
+    const personal = await freshWorkspace("reclass-personal");
+    const origin = await freshWorkspace("reclass-origin", personal.accountId);
+    const sibling = await freshWorkspace("reclass-sibling", personal.accountId);
+    const otherOrganization = await freshWorkspace("reclass-other");
+    await shared!.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values (${personal.accountId}, ${subjectId}, 'active', ${personal.workspaceId}, 1)`;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role) values
+        (${origin.accountId}, ${origin.workspaceId}, ${subjectId}, 'admin'),
+        (${sibling.accountId}, ${sibling.workspaceId}, ${subjectId}, 'member'),
+        (${sibling.accountId}, ${sibling.workspaceId}, ${otherSubjectId}, 'member')`;
+    const stored = await createReadyDocument(origin, {
+      label: `transition-${crypto.randomUUID()}`,
+      kind: "workspace",
+      subjectId,
+      text: "transitionprobe exact personal authority evidence",
+    });
+    const promoted = await reclassifyDocumentAuthority(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: origin.workspaceId,
+      documentId: stored.documentId,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: subjectId,
+      expectedAuthority: {
+        kind: "workspace",
+        workspaceId: origin.workspaceId,
+        subjectId: null,
+        authorityId: null,
+      },
+      targetAuthorityKind: "personal",
+      accountAdminAuthorization: null,
+    });
+    const promotedAuthorityId = promoted.authority.authorityId;
+    if (!promotedAuthorityId) throw new Error("personal reclassification omitted authority id");
+    expect(promoted.authority).toEqual({
+      kind: "personal",
+      workspaceId: null,
+      subjectId,
+      authorityId: promotedAuthorityId,
+    });
+
+    await shared!.admin`
+      delete from workspace_memberships
+      where account_id = ${origin.accountId} and workspace_id = ${origin.workspaceId}
+        and subject_id = ${subjectId}`;
+
+    const ownerAccess = { viewerSubjectId: subjectId };
+    await expect(
+      getDocument(forced.db, sibling.workspaceId, stored.documentId, ownerAccess),
+    ).resolves.toMatchObject({ id: stored.documentId, workspaceId: origin.workspaceId });
+    const search = await searchEffectiveKnowledge(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      initiatingSubjectId: subjectId,
+      surface: "human",
+      query: "transitionprobe",
+      mode: "keyword",
+      limit: 10,
+    });
+    expect(search.results.map((result) => result.record.id)).toContain(
+      `document_chunk:${stored.chunkId}`,
+    );
+    const browse = await browseEffectiveKnowledge(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      initiatingSubjectId: subjectId,
+      surface: "human",
+      limit: 50,
+    });
+    expect(browse.records.map((record) => record.id)).toContain(`document:${stored.documentId}`);
+    await expect(
+      getEffectiveKnowledgeRecord(forced.db, {
+        accountId: origin.accountId,
+        workspaceId: sibling.workspaceId,
+        initiatingSubjectId: subjectId,
+        surface: "human",
+        id: `document:${stored.documentId}`,
+      }),
+    ).resolves.toMatchObject({ id: `document:${stored.documentId}` });
+
+    const deniedSearch = await searchEffectiveKnowledge(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      initiatingSubjectId: otherSubjectId,
+      surface: "human",
+      query: "transitionprobe",
+      mode: "keyword",
+      limit: 10,
+    });
+    expect(deniedSearch.results.map((result) => result.record.id)).not.toContain(
+      `document_chunk:${stored.chunkId}`,
+    );
+    await expect(
+      getDocument(forced.db, otherOrganization.workspaceId, stored.documentId, ownerAccess),
+    ).resolves.toBeNull();
+
+    let siblingWorkspaceTargetError: unknown;
+    try {
+      await reclassifyDocumentAuthority(forced.db, {
+        accountId: origin.accountId,
+        workspaceId: sibling.workspaceId,
+        documentId: stored.documentId,
+        operationId: crypto.randomUUID(),
+        actorSubjectId: subjectId,
+        expectedAuthority: {
+          kind: "personal",
+          workspaceId: null,
+          subjectId,
+          authorityId: promotedAuthorityId,
+        },
+        targetAuthorityKind: "workspace",
+        accountAdminAuthorization: null,
+      });
+    } catch (error) {
+      siblingWorkspaceTargetError = error;
+    }
+    expect(nestedErrorMessages(siblingWorkspaceTargetError)).toContain(
+      "workspace document target requires the immutable origin workspace route",
+    );
+
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${origin.accountId}, ${origin.workspaceId}, ${subjectId}, 'admin')`;
+    await reclassifyDocumentAuthority(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: origin.workspaceId,
+      documentId: stored.documentId,
+      operationId: crypto.randomUUID(),
+      actorSubjectId: subjectId,
+      expectedAuthority: {
+        kind: "personal",
+        workspaceId: null,
+        subjectId,
+        authorityId: promotedAuthorityId,
+      },
+      targetAuthorityKind: "workspace",
+      accountAdminAuthorization: null,
+    });
+
+    await expect(
+      getDocument(forced.db, sibling.workspaceId, stored.documentId, ownerAccess),
+    ).resolves.toBeNull();
+    const isolatedSearch = await searchEffectiveKnowledge(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      initiatingSubjectId: subjectId,
+      surface: "human",
+      query: "transitionprobe",
+      mode: "keyword",
+      limit: 10,
+    });
+    expect(isolatedSearch.results.map((result) => result.record.id)).not.toContain(
+      `document_chunk:${stored.chunkId}`,
+    );
+    const isolatedBrowse = await browseEffectiveKnowledge(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: sibling.workspaceId,
+      initiatingSubjectId: subjectId,
+      surface: "human",
+      limit: 50,
+    });
+    expect(isolatedBrowse.records.map((record) => record.id)).not.toContain(
+      `document:${stored.documentId}`,
+    );
+    await expect(
+      getEffectiveKnowledgeRecord(forced.db, {
+        accountId: origin.accountId,
+        workspaceId: sibling.workspaceId,
+        initiatingSubjectId: subjectId,
+        surface: "human",
+        id: `document:${stored.documentId}`,
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      getDocument(forced.db, origin.workspaceId, stored.documentId, ownerAccess),
+    ).resolves.toMatchObject({ id: stored.documentId, authorityKind: "workspace" });
+
+    const receiptPageOne = await listDocumentAuthorityReclassifications(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: origin.workspaceId,
+      documentId: stored.documentId,
+      actorSubjectId: subjectId,
+      limit: 1,
+    });
+    const receiptPageOneCursor = receiptPageOne.nextCursor;
+    expect(typeof receiptPageOneCursor).toBe("string");
+    expect(receiptPageOne).toMatchObject({
+      receipts: [{ authority: { kind: "workspace" } }],
+      hasMore: true,
+      nextCursor: receiptPageOneCursor,
+    });
+    const receiptPageTwo = await listDocumentAuthorityReclassifications(forced.db, {
+      accountId: origin.accountId,
+      workspaceId: origin.workspaceId,
+      documentId: stored.documentId,
+      actorSubjectId: subjectId,
+      limit: 1,
+      cursor: receiptPageOneCursor!,
+    });
+    expect(receiptPageTwo).toMatchObject({
+      receipts: [{ authority: { kind: "personal" } }],
+      hasMore: false,
+      nextCursor: null,
+    });
+    await expect(
+      listDocumentAuthorityReclassifications(forced.db, {
+        accountId: origin.accountId,
+        workspaceId: sibling.workspaceId,
+        documentId: stored.documentId,
+        actorSubjectId: subjectId,
+        limit: 1,
+        cursor: receiptPageOneCursor!,
+      }),
+    ).rejects.toThrow("invalid document authority receipt cursor");
   });
 
   test("searches and fetches by account plus immutable authority before ranking", async () => {

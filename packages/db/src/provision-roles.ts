@@ -1530,8 +1530,8 @@ BEGIN
     ) IS NOT NULL THEN
       EXECUTE format('REVOKE ALL ON FUNCTION %I.reclassify_document_authority(jsonb) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.reclassify_document_authority(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
-      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid) FROM PUBLIC', ${literal(schema)});
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamptz, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamptz, uuid) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION %I.run_document_default_collection_backfill(jsonb) FROM PUBLIC', ${literal(schema)});
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.run_document_default_collection_backfill(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.document_migration_capability_active(text) FROM PUBLIC');

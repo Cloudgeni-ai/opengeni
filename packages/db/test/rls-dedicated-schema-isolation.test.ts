@@ -382,7 +382,8 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         return await tx<Array<{ result: unknown }>>`
           select result
           from ${tx(SCHEMA)}.list_document_authority_reclassifications(
-            ${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${documentId}::uuid
+            ${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${documentId}::uuid,
+            2, null, null
           ) as result`;
       });
       expect([...result]).toEqual([]);

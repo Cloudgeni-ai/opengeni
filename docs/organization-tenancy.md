@@ -141,11 +141,18 @@ the owner-only lifecycle writes an immutable before/after receipt and updates
 the Document and all chunks atomically. Stale tuples, conflicting operation-id
 reuse, a non-original subject claiming personal authority, and organization
 changes without exact account administration all fail closed. Origin
-workspace, base, file, creator, and content provenance never change. A separate
-resumable run/operation/receipt ledger creates or adopts one internal Default
-collection per organization workspace without using collections as authority.
-OPE-204 may consume these receipts as migration evidence but does not perform a
-second Document reclassification.
+workspace, base, file, creator, and content provenance never change. The exact
+account-admin capability is minted by the canonical access resolver and bound
+to its account and actor, rather than inferred from an organization-membership
+row or caller-set GUC. That keeps managed, local/configured, and signed delegated
+administrators equivalent. Activated personal Documents remain operable from a
+currently accessible same-organization sibling workspace after origin access is
+lost; targeting workspace authority still requires the immutable origin route.
+Receipt reads are bounded scope-bound cursor pages. A separate resumable
+run/operation/receipt ledger creates or adopts one internal Default collection
+per organization workspace without using collections as authority. A later
+cross-domain migration may consume these receipts as evidence but must not
+perform a second Document reclassification.
 
 Agent access is separate from human ownership. At exact attempt admission the
 database freezes only ready, agent-enabled personal Documents backed by an

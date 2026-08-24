@@ -19,6 +19,18 @@ let app: postgres.Sql | null = null;
 let accountId = "";
 let workspaceIds: string[] = [];
 
+function accountAdminAuthorization(
+  account = accountId,
+  actorSubjectId = subjectId,
+): Record<string, string> {
+  return {
+    authorizationId: crypto.randomUUID(),
+    accountId: account,
+    actorSubjectId,
+    permission: "account:admin",
+  };
+}
+
 async function withScope<T>(
   scope: { accountId: string; workspaceId: string; subjectId: string },
   callback: (tx: postgres.TransactionSql) => Promise<T>,
@@ -149,7 +161,7 @@ describe("migration 0334 Document authority reclassification", () => {
         authorityId: null,
       },
       targetAuthorityKind: "personal",
-      accountAdminAuthorized: false,
+      accountAdminAuthorization: null,
     };
     await expect(
       withScope({ accountId, workspaceId, subjectId: otherSubjectId }, async (tx) => {
@@ -210,6 +222,17 @@ describe("migration 0334 Document authority reclassification", () => {
         )[0]!.result,
     );
     expect(replay).toEqual(first);
+    await expect(
+      withScope({ accountId, workspaceId, subjectId }, async (tx) => {
+        await tx`select reclassify_document_authority(${tx.json({
+          ...command,
+          expectedAuthority: {
+            ...command.expectedAuthority,
+            workspaceId: workspaceIds[2]!,
+          },
+        })}::jsonb)`;
+      }),
+    ).rejects.toThrow("document reclassification operation id was reused with different input");
     expect(first).toMatchObject({
       operationId,
       documentId: document!.id,
@@ -261,6 +284,11 @@ describe("migration 0334 Document authority reclassification", () => {
       receiptCount: 1,
     });
 
+    await admin`
+      delete from workspace_memberships
+      where account_id = ${accountId} and workspace_id = ${workspaceId}
+        and subject_id = ${subjectId}`;
+
     const ownerPortableRows = await withScope(
       { accountId, workspaceId: workspaceIds[2]!, subjectId },
       async (tx) =>
@@ -273,6 +301,40 @@ describe("migration 0334 Document authority reclassification", () => {
     expect([...ownerPortableRows]).toEqual([
       { documentId: document!.id, chunkId: expect.any(String) },
     ]);
+    const portableCommand = {
+      ...command,
+      workspaceId: workspaceIds[2]!,
+      operationId: crypto.randomUUID(),
+      expectedAuthority: {
+        kind: "personal",
+        workspaceId: null,
+        subjectId,
+        authorityId: stored!.documentAuthorityId,
+      },
+      targetAuthorityKind: "personal",
+    };
+    await expect(
+      withScope(
+        { accountId, workspaceId: workspaceIds[2]!, subjectId },
+        async (tx) =>
+          (
+            await tx<Array<{ result: Record<string, unknown> }>>`
+              select reclassify_document_authority(${tx.json(portableCommand)}::jsonb) as result`
+          )[0]!.result,
+      ),
+    ).resolves.toMatchObject({
+      documentId: document!.id,
+      authority: { kind: "personal", authorityId: stored!.documentAuthorityId },
+    });
+    await expect(
+      withScope({ accountId, workspaceId: workspaceIds[2]!, subjectId }, async (tx) => {
+        await tx`select reclassify_document_authority(${tx.json({
+          ...portableCommand,
+          operationId: crypto.randomUUID(),
+          targetAuthorityKind: "workspace",
+        })}::jsonb)`;
+      }),
+    ).rejects.toThrow("workspace document target requires the immutable origin workspace route");
     const otherUserRows = await withScope(
       { accountId, workspaceId, subjectId: otherSubjectId },
       async (tx) =>
@@ -296,7 +358,8 @@ describe("migration 0334 Document authority reclassification", () => {
       async (tx) =>
         await tx<Array<{ result: Record<string, unknown> }>>`
           select list_document_authority_reclassifications(
-            ${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${document!.id}::uuid
+            ${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${document!.id}::uuid,
+            2, null, null
           ) as result`,
     );
     expect(receipts.map((row) => row.result)).toEqual([first]);
@@ -307,7 +370,7 @@ describe("migration 0334 Document authority reclassification", () => {
           ...command,
           operationId: crypto.randomUUID(),
           targetAuthorityKind: "organization",
-          accountAdminAuthorized: true,
+          accountAdminAuthorization: accountAdminAuthorization(),
         })}::jsonb)`;
       }),
     ).rejects.toThrow("document authority changed before reclassification");
@@ -315,6 +378,10 @@ describe("migration 0334 Document authority reclassification", () => {
       select authority_kind as kind, authority_id as "authorityId"
       from documents where id = ${document!.id}`;
     expect(afterConflict).toEqual({ kind: "personal", authorityId: stored!.documentAuthorityId });
+
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${accountId}, ${workspaceId}, ${subjectId}, 'admin')`;
 
     const [grant] = await admin<Array<{ id: string }>>`
       insert into organization_user_resource_grants (
@@ -390,6 +457,29 @@ describe("migration 0334 Document authority reclassification", () => {
       grantStatus: "revoked",
       grantGeneration: 2,
     });
+
+    const firstPage = await withScope(
+      { accountId, workspaceId, subjectId },
+      async (tx) =>
+        await tx<Array<{ result: { createdAt: string; operationId: string } }>>`
+          select list_document_authority_reclassifications(
+            ${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${document!.id}::uuid,
+            1, null, null
+          ) as result`,
+    );
+    expect(firstPage).toHaveLength(1);
+    const firstCursor = firstPage[0]!.result;
+    const secondPage = await withScope(
+      { accountId, workspaceId, subjectId },
+      async (tx) =>
+        await tx<Array<{ result: { createdAt: string; operationId: string } }>>`
+          select list_document_authority_reclassifications(
+            ${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, ${document!.id}::uuid,
+            1, ${firstCursor.createdAt}::timestamptz, ${firstCursor.operationId}::uuid
+          ) as result`,
+    );
+    expect(secondPage).toHaveLength(1);
+    expect(secondPage[0]!.result.operationId).not.toBe(firstCursor.operationId);
   });
 
   test("backfills exactly one Default collection per workspace with resumable evidence", async () => {
@@ -408,6 +498,7 @@ describe("migration 0334 Document authority reclassification", () => {
         runId,
         operationId,
         batchSize: 1,
+        accountAdminAuthorization: accountAdminAuthorization(),
       };
       result = await withScope(
         { accountId, workspaceId: requestWorkspaceId, subjectId },
@@ -431,6 +522,15 @@ describe("migration 0334 Document authority reclassification", () => {
             )[0]!.result,
         );
         expect(replay).toEqual(result);
+        await expect(
+          withScope({ accountId, workspaceId: requestWorkspaceId, subjectId }, async (tx) => {
+            await tx`select run_document_default_collection_backfill(${tx.json({
+              ...command,
+              batchSize: 2,
+              accountAdminAuthorization: accountAdminAuthorization(),
+            })}::jsonb)`;
+          }),
+        ).rejects.toThrow("document Default backfill operation id was reused with different input");
       }
     } while (result!.status === "running");
 
@@ -455,6 +555,109 @@ describe("migration 0334 Document authority reclassification", () => {
         (select count(*)::int from document_default_collection_backfill_operations
           where run_id = ${runId}) as operations`;
     expect(evidence).toEqual({ receipts: workspaceIds.length, operations: operationIds.length });
+  });
+
+  test("accepts an exact API-stamped account administrator without organization membership", async () => {
+    if (!admin || !app) return;
+    const actorSubjectId = `configured-admin:${crypto.randomUUID()}`;
+    const workspaceId = workspaceIds[1]!;
+    await admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${accountId}, ${workspaceId}, ${actorSubjectId}, 'admin')`;
+    const [membershipCount] = await admin<Array<{ count: number }>>`
+      select count(*)::int as count from organization_memberships
+      where account_id = ${accountId} and subject_id = ${actorSubjectId}`;
+    expect(membershipCount?.count).toBe(0);
+
+    const [file] = await admin<Array<{ id: string }>>`
+      insert into files (
+        account_id, workspace_id, status, filename, safe_filename, content_type,
+        size_bytes, bucket, object_key
+      ) values (
+        ${accountId}, ${workspaceId}, 'ready', 'configured-admin.txt',
+        'configured-admin.txt', 'text/plain', 1, 'test',
+        ${`documents/${crypto.randomUUID()}`}
+      ) returning id`;
+    const [base] = await admin<Array<{ id: string }>>`
+      insert into document_bases (account_id, workspace_id, name)
+      values (${accountId}, ${workspaceId}, ${`configured-${crypto.randomUUID()}`})
+      returning id`;
+    const [document] = await admin<Array<{ id: string }>>`
+      insert into documents (
+        account_id, workspace_id, base_id, file_id, status, title, created_by,
+        authority_kind, authority_workspace_id, visibility
+      ) values (
+        ${accountId}, ${workspaceId}, ${base!.id}, ${file!.id}, 'ready',
+        'configured admin', ${actorSubjectId}, 'workspace', ${workspaceId}, 'workspace'
+      ) returning id`;
+    const command = {
+      accountId,
+      workspaceId,
+      documentId: document!.id,
+      operationId: crypto.randomUUID(),
+      actorSubjectId,
+      expectedAuthority: {
+        kind: "workspace",
+        workspaceId,
+        subjectId: null,
+        authorityId: null,
+      },
+      targetAuthorityKind: "organization",
+      accountAdminAuthorization: null,
+    };
+    await expect(
+      withScope({ accountId, workspaceId, subjectId: actorSubjectId }, async (tx) => {
+        await tx`select reclassify_document_authority(${tx.json(command)}::jsonb)`;
+      }),
+    ).rejects.toThrow("organization document reclassification requires exact account authority");
+    await expect(
+      withScope({ accountId, workspaceId, subjectId: actorSubjectId }, async (tx) => {
+        await tx`select reclassify_document_authority(${tx.json({
+          ...command,
+          accountAdminAuthorization: accountAdminAuthorization(
+            accountId,
+            `${actorSubjectId}:wrong`,
+          ),
+        })}::jsonb)`;
+      }),
+    ).rejects.toThrow("organization document reclassification requires exact account authority");
+
+    const accepted = await withScope(
+      { accountId, workspaceId, subjectId: actorSubjectId },
+      async (tx) =>
+        (
+          await tx<Array<{ result: Record<string, unknown> }>>`
+            select reclassify_document_authority(${tx.json({
+              ...command,
+              accountAdminAuthorization: accountAdminAuthorization(accountId, actorSubjectId),
+            })}::jsonb) as result`
+        )[0]!.result,
+    );
+    expect(accepted).toMatchObject({
+      documentId: document!.id,
+      authority: { kind: "organization", workspaceId: null, subjectId: null },
+    });
+
+    const backfillCommand = {
+      accountId,
+      workspaceId,
+      actorSubjectId,
+      runId: crypto.randomUUID(),
+      operationId: crypto.randomUUID(),
+      batchSize: 1,
+      accountAdminAuthorization: accountAdminAuthorization(accountId, actorSubjectId),
+    };
+    const backfill = await withScope(
+      { accountId, workspaceId, subjectId: actorSubjectId },
+      async (tx) =>
+        (
+          await tx<Array<{ result: Record<string, unknown> }>>`
+            select run_document_default_collection_backfill(
+              ${tx.json(backfillCommand)}::jsonb
+            ) as result`
+        )[0]!.result,
+    );
+    expect(backfill).toMatchObject({ runId: backfillCommand.runId, processedCount: 1 });
   });
 
   test("keeps lifecycle tables immutable and inaccessible to direct runtime DML", async () => {

@@ -1328,7 +1328,10 @@ describe("OpenGeniClient documents", () => {
       },
       targetAuthorityKind: "personal",
     });
-    await client.listDocumentAuthorityReclassifications(WORKSPACE_ID, DOCUMENT_ID);
+    await client.listDocumentAuthorityReclassifications(WORKSPACE_ID, DOCUMENT_ID, {
+      limit: 1,
+      cursor: "opaque-cursor",
+    });
     await client.runDocumentDefaultCollectionBackfill(WORKSPACE_ID, {
       runId: BASE_ID,
       operationId: FILE_ID,
@@ -1391,6 +1394,8 @@ describe("OpenGeniClient documents", () => {
       },
       targetAuthorityKind: "personal",
     });
+    expect(new URL(requests[18]!.url).searchParams.get("limit")).toBe("1");
+    expect(new URL(requests[18]!.url).searchParams.get("cursor")).toBe("opaque-cursor");
     expect(JSON.parse(requests[19]!.body!)).toEqual({
       runId: BASE_ID,
       operationId: FILE_ID,

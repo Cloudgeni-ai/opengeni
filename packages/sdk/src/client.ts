@@ -166,6 +166,8 @@ import type {
   CreateKnowledgeDropRequest,
   DocumentAuthorityReclassification,
   DocumentDefaultCollectionBackfill,
+  ListDocumentAuthorityReclassificationsOptions,
+  ListDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
   ReclassifyDocumentAuthorityRequest,
   RunDocumentDefaultCollectionBackfillRequest,
@@ -5387,10 +5389,15 @@ export class OpenGeniClient {
   async listDocumentAuthorityReclassifications(
     workspaceId: string,
     documentId: string,
-  ): Promise<DocumentAuthorityReclassification[]> {
-    return await this.requestJson<DocumentAuthorityReclassification[]>(
+    options: ListDocumentAuthorityReclassificationsOptions = {},
+  ): Promise<ListDocumentAuthorityReclassificationsResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor) params.set("cursor", options.cursor);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<ListDocumentAuthorityReclassificationsResponse>(
       "GET",
-      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications`,
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications${query}`,
     );
   }
 

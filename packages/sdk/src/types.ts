@@ -5279,6 +5279,17 @@ export type DocumentAuthorityReclassification = {
   createdAt: string;
 };
 
+export type ListDocumentAuthorityReclassificationsOptions = {
+  limit?: number | undefined;
+  cursor?: string | undefined;
+};
+
+export type ListDocumentAuthorityReclassificationsResponse = {
+  receipts: DocumentAuthorityReclassification[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
 export type RunDocumentDefaultCollectionBackfillRequest = {
   runId: string;
   operationId: string;

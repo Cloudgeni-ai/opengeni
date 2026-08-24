@@ -13,6 +13,8 @@ import {
   FileDownloadUrlResponse,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
+  ListDocumentAuthorityReclassificationsQuery,
+  ListDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
   ReclassifyDocumentAuthorityRequest,
   RunDocumentDefaultCollectionBackfillRequest,
@@ -53,6 +55,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   requireAccessGrant,
+  requireAccountAdminAuthorizationStamp,
   requireAccessGrantAuthorization,
   saveWorkspaceMemoryWithSlackPublication,
 } from "@opengeni/core";
@@ -110,6 +113,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!hasAccountAdminAuthority(authorization)) {
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
+    const accountAdminAuthorization = requireAccountAdminAuthorizationStamp(authorization);
     const payload = RunDocumentDefaultCollectionBackfillRequest.parse(await c.req.json());
     try {
       return c.json(
@@ -119,6 +123,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             accountId: authorization.grant.accountId,
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
+            accountAdminAuthorization,
           }),
         ),
       );
@@ -225,6 +230,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       );
       const payload = ReclassifyDocumentAuthorityRequest.parse(await c.req.json());
       const accountAdminAuthorized = hasAccountAdminAuthority(authorization);
+      const accountAdminAuthorization = accountAdminAuthorized
+        ? requireAccountAdminAuthorizationStamp(authorization)
+        : null;
       try {
         const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
           viewerSubjectId: authorization.grant.subjectId,
@@ -233,7 +241,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (
           (document.authorityKind === "organization" ||
             payload.targetAuthorityKind === "organization") &&
-          !accountAdminAuthorized
+          !accountAdminAuthorization
         ) {
           throw new HTTPException(403, { message: "missing permission: account:admin" });
         }
@@ -245,7 +253,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
               workspaceId,
               documentId: document.id,
               actorSubjectId: authorization.grant.subjectId,
-              accountAdminAuthorized,
+              accountAdminAuthorization,
             }),
           ),
         );
@@ -261,16 +269,22 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     async (c) => {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
-      return c.json(
-        (
-          await listDocumentAuthorityReclassifications(db, {
-            accountId: grant.accountId,
-            workspaceId,
-            documentId: c.req.param("documentId"),
-            actorSubjectId: grant.subjectId,
-          })
-        ).map((receipt) => DocumentAuthorityReclassification.parse(receipt)),
-      );
+      try {
+        const query = ListDocumentAuthorityReclassificationsQuery.parse(c.req.query());
+        return c.json(
+          ListDocumentAuthorityReclassificationsResponse.parse(
+            await listDocumentAuthorityReclassifications(db, {
+              accountId: grant.accountId,
+              workspaceId,
+              documentId: c.req.param("documentId"),
+              actorSubjectId: grant.subjectId,
+              ...query,
+            }),
+          ),
+        );
+      } catch (error) {
+        throw documentHttpException(error);
+      }
     },
   );
 
@@ -890,7 +904,9 @@ function documentHttpException(error: unknown): HTTPException {
   }
   if (
     message.includes("reclassification input is invalid") ||
-    message.includes("reclassification authority is invalid")
+    message.includes("reclassification authority is invalid") ||
+    message.includes("invalid document authority receipt cursor") ||
+    message.includes("document authority receipt limit")
   ) {
     return new HTTPException(400, { message });
   }

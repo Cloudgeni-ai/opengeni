@@ -197,10 +197,20 @@ supply a UUID operation id and the exact current four-field authority tuple;
 PostgreSQL locks that operation, rejects stale expected state, and writes one
 immutable before/after receipt in the same transaction that changes the
 Document and every chunk. Moving to or from organization authority requires an
-exact account-admin grant, while a personal target is allowed only for the
-Document's immutable creating subject. Retries with the same input return the
-same receipt, conflicting reuse fails, and a failed transaction leaves the old
-authority and provenance intact. The collection remains non-authoritative.
+opaque capability minted from the canonical exact `account:admin` grant; it is
+bound to the command's account and actor but does not require the principal to
+also have a managed `organization_memberships` row, so managed,
+local/configured, and signed delegated account administrators retain the same
+authority contract. A personal target is allowed only for the Document's
+immutable creating subject. The route workspace authorizes the command but
+never changes physical origin: an activated personal Document may be managed
+from another currently accessible same-organization workspace even after origin
+access is lost, while a workspace target must use (and therefore re-authorize)
+the immutable origin-workspace route. Cross-organization routes fail closed.
+Retries with the same logical input return the same receipt, conflicting reuse
+fails, and a failed transaction leaves the old authority and provenance intact.
+Receipt history is a scope-bound opaque-cursor page (default 50, maximum 100),
+never an unbounded array. The collection remains non-authoritative.
 
 The same migration supplies an account-admin-only, bounded Default-collection
 backfill. A stable run id advances a workspace UUID cursor in batches, one

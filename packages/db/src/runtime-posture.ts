@@ -225,7 +225,7 @@ const DOCUMENT_MIGRATION_CAPABILITY_PREDICATE_ROUTINE =
   "document_migration_capability_active(text)";
 const DOCUMENT_MIGRATION_CAPABILITY_TABLE = "document_migration_capabilities";
 const DOCUMENT_MIGRATION_AUTHORITY_ROUTINES = [
-  "list_document_authority_reclassifications(uuid, uuid, text, uuid)",
+  "list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamp with time zone, uuid)",
   "reclassify_document_authority(jsonb)",
   "run_document_default_collection_backfill(jsonb)",
 ] as const;

@@ -10,6 +10,7 @@ const DOCUMENT_ID = "44444444-4444-4444-8444-444444444444";
 const fakeDb = {};
 const listInputs: unknown[] = [];
 const reclassificationInputs: unknown[] = [];
+const reclassificationListInputs: unknown[] = [];
 const backfillInputs: unknown[] = [];
 const defaultBase = {
   id: "33333333-3333-4333-8333-333333333333",
@@ -72,9 +73,12 @@ mock.module("@opengeni/documents", () => ({
     reclassificationInputs.push(input);
     return authorityReceipt;
   }),
-  listDocumentAuthorityReclassifications: mock(async (db: unknown) =>
-    db === fakeDb ? [authorityReceipt] : [],
-  ),
+  listDocumentAuthorityReclassifications: mock(async (db: unknown, input: unknown) => {
+    if (db === fakeDb) reclassificationListInputs.push(input);
+    return db === fakeDb
+      ? { receipts: [authorityReceipt], hasMore: false, nextCursor: null }
+      : { receipts: [], hasMore: false, nextCursor: null };
+  }),
   runDocumentDefaultCollectionBackfill: mock(async (db: unknown, input: unknown) => {
     if (db !== fakeDb) {
       return await realDocuments.runDocumentDefaultCollectionBackfill(db as never, input as never);
@@ -187,7 +191,32 @@ test("requires exact account administration for organization reclassification an
       workspaceId: WORKSPACE_ID,
       documentId: DOCUMENT_ID,
       actorSubjectId: SUBJECT_ID,
-      accountAdminAuthorized: true,
+      accountAdminAuthorization: {
+        authorizationId: expect.any(String),
+        accountId: ACCOUNT_ID,
+        actorSubjectId: SUBJECT_ID,
+        permission: "account:admin",
+      },
+    },
+  ]);
+
+  const receiptPage = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/authority-reclassifications?limit=1`,
+    { headers: { authorization: await bearer(["documents:manage"]) } },
+  );
+  expect(receiptPage.status).toBe(200);
+  expect(await receiptPage.json()).toEqual({
+    receipts: [authorityReceipt],
+    hasMore: false,
+    nextCursor: null,
+  });
+  expect(reclassificationListInputs).toEqual([
+    {
+      accountId: ACCOUNT_ID,
+      workspaceId: WORKSPACE_ID,
+      documentId: DOCUMENT_ID,
+      actorSubjectId: SUBJECT_ID,
+      limit: 1,
     },
   ]);
 
@@ -228,6 +257,12 @@ test("requires exact account administration for organization reclassification an
       accountId: ACCOUNT_ID,
       workspaceId: WORKSPACE_ID,
       actorSubjectId: SUBJECT_ID,
+      accountAdminAuthorization: {
+        authorizationId: expect.any(String),
+        accountId: ACCOUNT_ID,
+        actorSubjectId: SUBJECT_ID,
+        permission: "account:admin",
+      },
     },
   ]);
 });
