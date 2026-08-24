@@ -17,6 +17,8 @@ import {
   listSessionEvents,
   listSessionTurns,
   nestedPostgresSqlState,
+  SessionTenancyConflictError,
+  SessionTenancyInvalidRequestError,
   transitionSessionVisibility,
   withSessionRlsActorContext,
   withWorkspaceRls,
@@ -26,6 +28,10 @@ import {
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle/0303_session_tenancy_product_activation.sql",
+);
+const atomicForkMigrationPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../drizzle/0333_atomic_session_fork_visibility.sql",
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
@@ -133,7 +139,16 @@ async function sessionVisibilityFixture() {
     accountId: ownerGrant.accountId,
     workspaceId: ownerGrant.workspaceId,
     initialMessage: "private session initial message",
-    resources: [],
+    resources: [
+      {
+        kind: "repository",
+        uri: "https://example.test/durable-resource.git",
+        ref: "main",
+        credentialBindingId: crypto.randomUUID(),
+        connectionId: crypto.randomUUID(),
+        installationId: crypto.randomUUID(),
+      },
+    ],
     metadata: {},
     model: "test-model",
     reasoningEffort: "medium" as const,
@@ -311,6 +326,27 @@ describe("migration 0303 session tenancy product activation", () => {
     );
   });
 
+  test("expands forks atomically without reintroducing a private-then-transition path", async () => {
+    const migration = await readFile(atomicForkMigrationPath, "utf8");
+    expect(migration.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
+    expect(migration).toContain("p_workspace_shared_acknowledged boolean");
+    expect(migration).toContain(
+      "p_destination_visibility NOT IN ('user_private', 'workspace_shared')",
+    );
+    expect(migration).toContain("source_session.visibility = 'user_private'");
+    expect(migration).toContain("p_destination_visibility, 1");
+    expect(migration).toContain("'workspaceSharedAcknowledged'");
+    expect(migration).not.toContain("transition_session_visibility(");
+    expect(migration).not.toContain("source_session.variable_set_id");
+    expect(migration).not.toContain("source_session.rig_id");
+    expect(migration).not.toContain("source_session.active_sandbox_id");
+    expect(migration).not.toContain("source_session.codex_pinned_credential_id");
+    expect(migration).not.toContain("INSERT INTO session_turns");
+    expect(migration).not.toContain("INSERT INTO session_goals");
+    expect(migration).not.toContain("INSERT INTO organization_user_resource_grants");
+    expect(migration).not.toContain("INSERT INTO session_pins");
+  });
+
   test("installs both lifecycle capabilities and authority-change constraint", async () => {
     if (!shared) return;
     const functions = await shared.admin<Array<{ name: string; securityDefiner: boolean }>>`
@@ -321,6 +357,7 @@ describe("migration 0303 session tenancy product activation", () => {
       order by routine_name
     `;
     expect(Array.from(functions)).toEqual([
+      { name: "fork_session_content", securityDefiner: true },
       { name: "fork_session_content", securityDefiner: true },
       { name: "transition_session_visibility", securityDefiner: true },
     ]);
@@ -425,6 +462,7 @@ describe("migration 0303 session tenancy product activation", () => {
       actorSubjectId: value.ownerSubjectId,
       destinationWorkspaceId: value.ownerGrant.workspaceId,
       destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
       operationKey,
     });
     expect(forked).toMatchObject({
@@ -498,6 +536,7 @@ describe("migration 0303 session tenancy product activation", () => {
       actorSubjectId: value.ownerSubjectId,
       destinationWorkspaceId: value.ownerGrant.workspaceId,
       destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
       operationKey,
     });
     expect(replay).toEqual({ ...forked, replay: true });
@@ -531,6 +570,152 @@ describe("migration 0303 session tenancy product activation", () => {
       await app.end();
     }
   });
+
+  test("atomically forks shared destinations with acknowledgement, fresh authority, and no live state", async () => {
+    if (!shared || !client) return;
+
+    const sharedSource = await sessionVisibilityFixture();
+    await shared.admin`
+      insert into session_pins (account_id, workspace_id, subject_id, session_id)
+      values (
+        ${sharedSource.ownerGrant.accountId}, ${sharedSource.ownerGrant.workspaceId},
+        ${sharedSource.ownerSubjectId}, ${sharedSource.session.id}
+      )`;
+
+    const sharedFork = await forkSessionContent(client.db, {
+      sourceWorkspaceId: sharedSource.ownerGrant.workspaceId,
+      sourceSessionId: sharedSource.session.id,
+      actorSubjectId: sharedSource.ownerSubjectId,
+      destinationWorkspaceId: sharedSource.ownerGrant.workspaceId,
+      destinationVisibility: "workspace_shared",
+      workspaceSharedAcknowledged: false,
+      operationKey: `shared-fork:${crypto.randomUUID()}`,
+    });
+    expect(sharedFork).toMatchObject({
+      visibility: "workspace_shared",
+      authorityEpoch: 1,
+      copiedHistoryItemCount: 1,
+      replay: false,
+    });
+
+    const [sharedDestination] = await shared.admin<
+      Array<{
+        rootSessionId: string;
+        sandboxGroupId: string;
+        ownerId: string;
+        ownerSubjectId: string;
+        authorityEpoch: number;
+        resources: Array<Record<string, unknown>>;
+        liveStateCount: number;
+        variableSetId: string | null;
+        rigId: string | null;
+        rigVersionId: string | null;
+        codexPinnedCredentialId: string | null;
+        firstPartyMcpPermissions: unknown;
+        initialPersonalConnectionDelegations: unknown[];
+      }>
+    >`
+      select destination.root_session_id as "rootSessionId",
+        destination.sandbox_group_id as "sandboxGroupId",
+        destination.owner_organization_membership_id as "ownerId",
+        destination.owner_subject_id as "ownerSubjectId",
+        destination.authority_epoch as "authorityEpoch",
+        destination.resources,
+        destination.variable_set_id as "variableSetId",
+        destination.rig_id as "rigId",
+        destination.rig_version_id as "rigVersionId",
+        destination.codex_pinned_credential_id as "codexPinnedCredentialId",
+        destination.first_party_mcp_permissions as "firstPartyMcpPermissions",
+        destination.initial_personal_connection_delegations as "initialPersonalConnectionDelegations",
+        (
+          (select count(*) from session_turns row where row.session_id = destination.id) +
+          (select count(*) from session_goals row where row.session_id = destination.id) +
+          (select count(*) from session_mcp_servers row where row.session_id = destination.id) +
+          (select count(*) from organization_user_resource_grants row
+            where row.session_id = destination.id) +
+          (select count(*) from session_pins row where row.session_id = destination.id) +
+          (select count(*) from sandbox_retained_processes row
+            where row.session_id = destination.id)
+        )::int as "liveStateCount"
+      from sessions destination where destination.id = ${sharedFork.sessionId}
+    `;
+    expect(sharedDestination).toMatchObject({
+      rootSessionId: sharedFork.sessionId,
+      sandboxGroupId: sharedFork.sessionId,
+      ownerId: sharedSource.ownerMembershipId,
+      ownerSubjectId: sharedSource.ownerSubjectId,
+      authorityEpoch: 1,
+      liveStateCount: 0,
+      variableSetId: null,
+      rigId: null,
+      rigVersionId: null,
+      codexPinnedCredentialId: null,
+      firstPartyMcpPermissions: null,
+      initialPersonalConnectionDelegations: [],
+    });
+    expect(sharedDestination?.resources).toEqual([
+      {
+        kind: "repository",
+        uri: "https://example.test/durable-resource.git",
+        ref: "main",
+      },
+    ]);
+
+    const privateSource = await sessionVisibilityFixture();
+    await transitionSessionVisibility(client.db, {
+      workspaceId: privateSource.ownerGrant.workspaceId,
+      sessionId: privateSource.session.id,
+      actorSubjectId: privateSource.ownerSubjectId,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `make-private:${crypto.randomUUID()}`,
+    });
+    const privateToSharedKey = `private-to-shared:${crypto.randomUUID()}`;
+    await expect(
+      forkSessionContent(client.db, {
+        sourceWorkspaceId: privateSource.ownerGrant.workspaceId,
+        sourceSessionId: privateSource.session.id,
+        actorSubjectId: privateSource.ownerSubjectId,
+        destinationWorkspaceId: privateSource.ownerGrant.workspaceId,
+        destinationVisibility: "workspace_shared",
+        workspaceSharedAcknowledged: false,
+        operationKey: privateToSharedKey,
+      }),
+    ).rejects.toBeInstanceOf(SessionTenancyInvalidRequestError);
+
+    const privateToShared = await forkSessionContent(client.db, {
+      sourceWorkspaceId: privateSource.ownerGrant.workspaceId,
+      sourceSessionId: privateSource.session.id,
+      actorSubjectId: privateSource.ownerSubjectId,
+      destinationWorkspaceId: privateSource.ownerGrant.workspaceId,
+      destinationVisibility: "workspace_shared",
+      workspaceSharedAcknowledged: true,
+      operationKey: privateToSharedKey,
+    });
+    expect(privateToShared).toMatchObject({ visibility: "workspace_shared", replay: false });
+    await expect(
+      forkSessionContent(client.db, {
+        sourceWorkspaceId: privateSource.ownerGrant.workspaceId,
+        sourceSessionId: privateSource.session.id,
+        actorSubjectId: privateSource.ownerSubjectId,
+        destinationWorkspaceId: privateSource.ownerGrant.workspaceId,
+        destinationVisibility: "workspace_shared",
+        workspaceSharedAcknowledged: false,
+        operationKey: privateToSharedKey,
+      }),
+    ).rejects.toBeInstanceOf(SessionTenancyConflictError);
+    expect(
+      await forkSessionContent(client.db, {
+        sourceWorkspaceId: privateSource.ownerGrant.workspaceId,
+        sourceSessionId: privateSource.session.id,
+        actorSubjectId: privateSource.ownerSubjectId,
+        destinationWorkspaceId: privateSource.ownerGrant.workspaceId,
+        destinationVisibility: "workspace_shared",
+        workspaceSharedAcknowledged: true,
+        operationKey: privateToSharedKey,
+      }),
+    ).toEqual({ ...privateToShared, replay: true });
+  }, 180_000);
 
   test("blocks transition to private while an interaction holder retains sandbox access", async () => {
     if (!shared || !client) return;

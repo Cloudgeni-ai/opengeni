@@ -35,6 +35,7 @@ describe("session tenancy domain", () => {
       sourceSessionId: "2dbf723a-cb9b-45e1-9c37-d51fcb73b32c",
       destinationWorkspaceId: "be0d743d-2434-4fe5-8a82-73108a644a36",
       destinationVisibility: "workspace_shared" as const,
+      workspaceSharedAcknowledged: true,
     };
     expect(canonicalSessionForkHash(input)).toMatch(/^[0-9a-f]{64}$/);
     expect(rootCanonicalSessionForkHash).toBe(canonicalSessionForkHash);
@@ -42,6 +43,7 @@ describe("session tenancy domain", () => {
       canonicalSessionForkHash({
         ...input,
         destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
       }),
     );
   });

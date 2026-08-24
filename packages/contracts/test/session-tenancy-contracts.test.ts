@@ -32,7 +32,30 @@ describe("session tenancy public contracts", () => {
       }).success,
     ).toBe(false);
     expect(
-      ForkSessionRequest.safeParse({ idempotencyKey: "copy-session-1", workspaceId }).success,
+      ForkSessionRequest.safeParse({
+        idempotencyKey: "copy-session-1",
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+        workspaceId,
+      }).success,
+    ).toBe(false);
+    expect(
+      ForkSessionRequest.parse({
+        idempotencyKey: "copy-session-1",
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+      }),
+    ).toEqual({
+      idempotencyKey: "copy-session-1",
+      visibility: "workspace",
+      workspaceSharedAcknowledged: true,
+    });
+    expect(
+      ForkSessionRequest.safeParse({
+        idempotencyKey: "copy-session-1",
+        visibility: "private",
+        workspaceSharedAcknowledged: true,
+      }).success,
     ).toBe(false);
   });
 
@@ -70,7 +93,7 @@ describe("session tenancy public contracts", () => {
     ).toBe(false);
   });
 
-  test("keeps the first fork same-workspace private in its response", () => {
+  test("returns the selected fork visibility", () => {
     expect(
       ForkSessionResponse.parse({
         operationId,
@@ -85,7 +108,7 @@ describe("session tenancy public contracts", () => {
       }),
     ).toMatchObject({ visibility: "private", authorityEpoch: 1 });
     expect(
-      ForkSessionResponse.safeParse({
+      ForkSessionResponse.parse({
         operationId,
         eventId,
         eventSequence: 1,
@@ -95,7 +118,7 @@ describe("session tenancy public contracts", () => {
         authorityEpoch: 1,
         copiedHistoryItemCount: 3,
         replay: false,
-      }).success,
-    ).toBe(false);
+      }),
+    ).toMatchObject({ visibility: "workspace", authorityEpoch: 1 });
   });
 });

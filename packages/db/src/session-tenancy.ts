@@ -119,6 +119,7 @@ export type ForkSessionContentInput = {
   actorSubjectId: string;
   destinationWorkspaceId: string;
   destinationVisibility: SessionTenancyVisibility;
+  workspaceSharedAcknowledged: boolean;
   operationKey: string;
 };
 
@@ -324,17 +325,32 @@ export function canonicalSessionVisibilityTransitionHash(
 export function canonicalSessionForkHash(
   input: Pick<
     ForkSessionContentInput,
-    "sourceSessionId" | "destinationWorkspaceId" | "destinationVisibility"
+    | "sourceSessionId"
+    | "destinationWorkspaceId"
+    | "destinationVisibility"
+    | "workspaceSharedAcknowledged"
   >,
 ): string {
+  const legacyCompatiblePrivateRequest =
+    input.destinationVisibility === "user_private" && !input.workspaceSharedAcknowledged;
   return createHash("sha256")
     .update(
-      JSON.stringify({
-        version: 1,
-        sourceSessionId: input.sourceSessionId,
-        destinationWorkspaceId: input.destinationWorkspaceId,
-        destinationVisibility: input.destinationVisibility,
-      }),
+      JSON.stringify(
+        legacyCompatiblePrivateRequest
+          ? {
+              version: 1,
+              sourceSessionId: input.sourceSessionId,
+              destinationWorkspaceId: input.destinationWorkspaceId,
+              destinationVisibility: input.destinationVisibility,
+            }
+          : {
+              version: 2,
+              sourceSessionId: input.sourceSessionId,
+              destinationWorkspaceId: input.destinationWorkspaceId,
+              destinationVisibility: input.destinationVisibility,
+              workspaceSharedAcknowledged: input.workspaceSharedAcknowledged,
+            },
+      ),
     )
     .digest("hex");
 }
@@ -416,9 +432,6 @@ export async function forkSessionContent(
   if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
     throw new Error("The first session fork contract is same-workspace only");
   }
-  if (input.destinationVisibility !== "user_private") {
-    throw new Error("The first session fork contract is private-only");
-  }
   const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
   await assertSessionTenancyProductActivated(db, input.sourceWorkspaceId);
   const requestHash = canonicalSessionForkHash(input);
@@ -447,6 +460,7 @@ export async function forkSessionContent(
           ${input.actorSubjectId},
           ${input.destinationWorkspaceId}::uuid,
           ${input.destinationVisibility},
+          ${input.workspaceSharedAcknowledged},
           ${input.operationKey},
           ${requestHash},
           ${SESSION_TENANCY_ACTIVATION_VERSION}

@@ -237,7 +237,7 @@ export async function updateManagedHumanSessionVisibility(
   return response;
 }
 
-export async function forkManagedHumanSessionPrivate(
+export async function forkManagedHumanSession(
   deps: SessionTenancyDependencies,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
@@ -262,7 +262,9 @@ export async function forkManagedHumanSessionPrivate(
         sourceSessionId,
         actorSubjectId: authorization.grant.subjectId,
         destinationWorkspaceId: workspaceId,
-        destinationVisibility: "user_private",
+        destinationVisibility:
+          request.visibility === "private" ? "user_private" : "workspace_shared",
+        workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
         operationKey: request.idempotencyKey,
       }),
   );

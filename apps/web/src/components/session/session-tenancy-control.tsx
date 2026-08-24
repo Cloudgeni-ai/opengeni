@@ -4,6 +4,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
   CircleAlertIcon,
+  CopyPlusIcon,
   Loader2Icon,
   LockKeyholeIcon,
   UsersIcon,
@@ -44,7 +45,9 @@ import {
   type WorkspaceTransitionIdentity,
 } from "@/lib/workspace-transition";
 
-type Confirmation = { kind: "visibility"; visibility: SessionVisibility };
+type Confirmation =
+  | { kind: "visibility"; visibility: SessionVisibility }
+  | { kind: "fork"; visibility: SessionVisibility };
 
 export default function SessionRouteAuxiliary(
   props:
@@ -133,6 +136,7 @@ export function SessionTenancyControl({
   ownsWorkspaceInvocation,
   operationController,
   operationScope,
+  onOpenSession,
 }: {
   session: Session;
   events?: SessionEvent[] | undefined;
@@ -157,6 +161,7 @@ export function SessionTenancyControl({
   const visibilityEventSequenceRef = useRef(0);
   const operationSnapshot = operationController.snapshot(operationScope);
   const pendingVisibility = operationSnapshot.visibility;
+  const pendingFork = operationSnapshot.fork;
   const [override, setOverride] = useState(session.tenancy);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(false);
@@ -422,6 +427,89 @@ export function SessionTenancyControl({
     ],
   );
 
+  const forkSession = useCallback(
+    async (visibility: SessionVisibility): Promise<boolean> => {
+      if (!displayedTenancy || !mayManage) return true;
+      const acceptedTransition = captureWorkspaceInvocation(target.workspaceId);
+      if (!acceptedTransition) return true;
+      const operationSequence = operationSequenceRef.current + 1;
+      operationSequenceRef.current = operationSequence;
+      const workspaceSharedAcknowledged =
+        displayedTenancy.visibility === "private" && visibility === "workspace";
+      const attempt = operationController.prepareFork(
+        operationScope,
+        { visibility, workspaceSharedAcknowledged },
+        () => crypto.randomUUID(),
+      );
+      setBusy(true);
+      setFailure(null);
+      let receiptConfirmed = false;
+      try {
+        const result = await runCurrentTransitionInvocation({
+          isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
+          request: async () =>
+            await client.forkSession(target.workspaceId, target.sessionId, {
+              visibility: attempt.visibility,
+              workspaceSharedAcknowledged: attempt.workspaceSharedAcknowledged,
+              idempotencyKey: attempt.idempotencyKey,
+            }),
+        });
+        if (result.status === "stale") return true;
+        receiptConfirmed = true;
+        const destination = await runCurrentTransitionInvocation({
+          isCurrent: () => isCurrentInvocation(target, acceptedTransition, operationSequence),
+          request: async () =>
+            await client.getSession(result.value.workspaceId, result.value.sessionId, {
+              fresh: true,
+            }),
+        });
+        if (destination.status === "stale") return true;
+        if (
+          destination.value.workspaceId !== target.workspaceId ||
+          destination.value.tenancy?.visibility !== result.value.visibility ||
+          !destination.value.tenancy.ownedByCurrentUser
+        ) {
+          throw new Error("The fork receipt did not resolve to the expected owned session.");
+        }
+        operationController.settleFork(operationScope, attempt);
+        const description =
+          result.value.visibility === "private"
+            ? "The independent copy is private to you."
+            : `The independent copy is visible to ${scopeLabel}.`;
+        setAnnouncement(description);
+        toast.success(result.value.replay ? "Session fork recovered" : "Session fork created", {
+          description,
+        });
+        onOpenSession(result.value.workspaceId, result.value.sessionId);
+        return true;
+      } catch (error) {
+        if (!isCurrentInvocation(target, acceptedTransition, operationSequence)) return true;
+        const classified = classifySessionTenancyFailure(error);
+        const retainAttempt =
+          classified.retainAttempt ||
+          (receiptConfirmed && retryableSessionTenancyReconciliationFailure(error));
+        if (!retainAttempt) operationController.settleFork(operationScope, attempt);
+        setFailure(classified.message);
+        setAnnouncement(classified.message);
+        return !retainAttempt;
+      } finally {
+        if (isCurrentInvocation(target, acceptedTransition, operationSequence)) setBusy(false);
+      }
+    },
+    [
+      captureWorkspaceInvocation,
+      client,
+      displayedTenancy,
+      isCurrentInvocation,
+      mayManage,
+      onOpenSession,
+      operationController,
+      operationScope,
+      scopeLabel,
+      target,
+    ],
+  );
+
   if (!displayedTenancy) return null;
 
   const privateSession = displayedTenancy.visibility === "private";
@@ -443,6 +531,7 @@ export function SessionTenancyControl({
   const stateDescription = privateSession
     ? "Only you can open this session."
     : `Visible to people in ${scopeLabel}.`;
+  const retryingFork = pendingFork !== null;
   const stateChip = (
     <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 text-xs font-medium text-fg pointer-coarse:min-h-11">
       {privateSession ? (
@@ -493,6 +582,18 @@ export function SessionTenancyControl({
                 {privateSession ? <UsersIcon /> : <LockKeyholeIcon />}
                 {retryingVisibility ? `Retry: ${visibilityAction}` : visibilityAction}
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={() =>
+                  setConfirmation({
+                    kind: "fork",
+                    visibility: pendingFork?.visibility ?? displayedTenancy.visibility,
+                  })
+                }
+              >
+                <CopyPlusIcon />
+                {retryingFork ? "Retry session fork…" : "Fork session…"}
+              </DropdownMenuItem>
               {failure ? (
                 <>
                   <DropdownMenuSeparator />
@@ -524,23 +625,68 @@ export function SessionTenancyControl({
           if (!open) setConfirmation(null);
         }}
         title={
-          confirmation?.visibility === "workspace"
-            ? `Share this session with ${scopeLabel}?`
-            : "Limit this session to you?"
+          confirmation?.kind === "fork"
+            ? confirmation.visibility === "workspace"
+              ? `Fork a workspace-visible copy?`
+              : "Fork a private copy?"
+            : confirmation?.visibility === "workspace"
+              ? `Share this session with ${scopeLabel}?`
+              : "Limit this session to you?"
         }
         description={
-          confirmation?.visibility === "workspace"
-            ? "People who can access this workspace will be able to open the session after all current work has settled."
-            : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
+          confirmation?.kind === "fork" &&
+          displayedTenancy.visibility === "private" &&
+          confirmation.visibility === "workspace"
+            ? `This private session's complete conversation will be copied into a new session visible to people in ${scopeLabel}. Live credentials, connections, tools, goals, and processes are not copied.`
+            : confirmation?.kind === "fork"
+              ? confirmation.visibility === "workspace"
+                ? `Create an independent copy visible to people in ${scopeLabel}. Live credentials, connections, tools, goals, and processes are not copied.`
+                : "Create an independent copy visible only to you. Live credentials, connections, tools, goals, and processes are not copied."
+              : confirmation?.visibility === "workspace"
+                ? "People who can access this workspace will be able to open the session after all current work has settled."
+                : "Only you will be able to open the session. OpenGeni waits for all current work and sandbox access to settle first."
         }
-        confirmLabel={visibilityConfirmLabel}
+        confirmLabel={
+          confirmation?.kind === "fork"
+            ? retryingFork
+              ? "Retry fork"
+              : confirmation.visibility === "workspace"
+                ? "Fork for workspace"
+                : "Fork privately"
+            : visibilityConfirmLabel
+        }
         destructive={confirmation?.visibility === "workspace"}
         cancelAutoFocus
         restoreFocusRef={accessTriggerRef}
-        onConfirm={() =>
-          confirmation?.kind === "visibility" ? changeVisibility(confirmation.visibility) : true
-        }
+        onConfirm={() => {
+          if (!confirmation) return true;
+          return confirmation.kind === "visibility"
+            ? changeVisibility(confirmation.visibility)
+            : forkSession(confirmation.visibility);
+        }}
       >
+        {confirmation?.kind === "fork" && !retryingFork ? (
+          <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Fork visibility">
+            <Button
+              type="button"
+              variant={confirmation.visibility === "private" ? "default" : "secondary"}
+              role="radio"
+              aria-checked={confirmation.visibility === "private"}
+              onClick={() => setConfirmation({ kind: "fork", visibility: "private" })}
+            >
+              <LockKeyholeIcon /> Private
+            </Button>
+            <Button
+              type="button"
+              variant={confirmation.visibility === "workspace" ? "default" : "secondary"}
+              role="radio"
+              aria-checked={confirmation.visibility === "workspace"}
+              onClick={() => setConfirmation({ kind: "fork", visibility: "workspace" })}
+            >
+              <UsersIcon /> Workspace
+            </Button>
+          </div>
+        ) : null}
         {failure ? (
           <Notice tone="waiting" title="Access change needs attention">
             {failure}

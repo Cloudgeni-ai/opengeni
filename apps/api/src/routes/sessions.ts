@@ -247,7 +247,7 @@ import {
   getActorNewSessionDraft,
   getManagedHumanSessionCreateCapabilities,
   getHumanComposerDraft,
-  forkManagedHumanSessionPrivate,
+  forkManagedHumanSession,
   moveHumanQueuePrompt,
   readSessionLineage,
   saveHumanComposerDraft,
@@ -858,7 +858,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     try {
-      const response = await forkManagedHumanSessionPrivate(
+      const response = await forkManagedHumanSession(
         deps,
         authorization,
         workspaceId,

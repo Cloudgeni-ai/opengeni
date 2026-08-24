@@ -61,6 +61,10 @@ export class SessionTenancyOperationController {
 
   prepareFork(
     scope: SessionTenancyOperationScope,
+    input: {
+      visibility: SessionVisibility;
+      workspaceSharedAcknowledged: boolean;
+    },
     createIdempotencyKey: () => string,
   ): PendingSessionForkAttempt {
     this.bind(scope);
@@ -68,6 +72,7 @@ export class SessionTenancyOperationController {
     this.fork = {
       workspaceId: scope.workspaceId,
       sessionId: scope.sessionId,
+      ...input,
       idempotencyKey: createIdempotencyKey(),
     };
     return this.fork;

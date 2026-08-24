@@ -34,7 +34,7 @@ async function activate(accountId: string, inventory = "0".repeat(64)) {
 }
 
 describe("migration 0303 session tenancy product activation", () => {
-  test("exposes only mandatory activation-versioned lifecycle signatures", async () => {
+  test("exposes the mandatory lifecycle signatures plus the rolling fork overload", async () => {
     if (!shared) return;
     const routines = await shared.admin<
       Array<{
@@ -62,6 +62,12 @@ describe("migration 0303 session tenancy product activation", () => {
         runtimeExecutable: true,
       },
       {
+        name: "fork_session_content",
+        argumentCount: 10,
+        defaultCount: 0,
+        runtimeExecutable: true,
+      },
+      {
         name: "transition_session_visibility",
         argumentCount: 9,
         defaultCount: 0,
@@ -75,6 +81,7 @@ describe("migration 0303 session tenancy product activation", () => {
         versionedTransitionPresent: boolean;
         legacyForkAbsent: boolean;
         versionedForkPresent: boolean;
+        atomicForkPresent: boolean;
       }>
     >`
       select
@@ -89,13 +96,17 @@ describe("migration 0303 session tenancy product activation", () => {
         ) is null as "legacyForkAbsent",
         to_regprocedure(
           'fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer)'
-        ) is not null as "versionedForkPresent"
+        ) is not null as "versionedForkPresent",
+        to_regprocedure(
+          'fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)'
+        ) is not null as "atomicForkPresent"
     `;
     expect(signatures).toEqual({
       legacyTransitionAbsent: true,
       versionedTransitionPresent: true,
       legacyForkAbsent: true,
       versionedForkPresent: true,
+      atomicForkPresent: true,
     });
   });
 

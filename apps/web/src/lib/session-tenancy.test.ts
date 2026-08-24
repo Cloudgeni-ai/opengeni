@@ -69,20 +69,35 @@ describe("session tenancy browser operation state", () => {
     const createKey = () => `operation-key-${++generated}`;
     const first = prepareSessionForkAttempt(
       null,
-      { workspaceId: "workspace-a", sessionId: "session-a" },
+      {
+        workspaceId: "workspace-a",
+        sessionId: "session-a",
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+      },
       createKey,
     );
     expect(
       prepareSessionForkAttempt(
         first,
-        { workspaceId: "workspace-a", sessionId: "session-a" },
+        {
+          workspaceId: "workspace-a",
+          sessionId: "session-a",
+          visibility: "workspace",
+          workspaceSharedAcknowledged: true,
+        },
         createKey,
       ),
     ).toBe(first);
     expect(
       prepareSessionForkAttempt(
         first,
-        { workspaceId: "workspace-a", sessionId: "session-b" },
+        {
+          workspaceId: "workspace-a",
+          sessionId: "session-b",
+          visibility: "workspace",
+          workspaceSharedAcknowledged: true,
+        },
         createKey,
       ).idempotencyKey,
     ).toBe("operation-key-2");

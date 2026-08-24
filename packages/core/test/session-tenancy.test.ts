@@ -17,7 +17,7 @@ import type { AccessGrantAuthorization } from "../src/access";
 import { HTTPException } from "hono/http-exception";
 import { SessionAuthorizationDeniedError } from "../src/session-authorization";
 import {
-  forkManagedHumanSessionPrivate,
+  forkManagedHumanSession,
   getManagedHumanSessionCreateCapabilities,
   SessionTenancyManagedHumanRequiredError,
   updateManagedHumanSessionVisibility,
@@ -504,14 +504,18 @@ describe("managed-human session tenancy application service", () => {
       type: "session.visibility.changed",
     });
 
-    const forked = await forkManagedHumanSessionPrivate(
+    const forked = await forkManagedHumanSession(
       deps,
       authorization,
       grant.workspaceId,
       source.id,
-      { idempotencyKey: "fork-core-1" },
+      {
+        idempotencyKey: "fork-core-1",
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+      },
     );
-    expect(forked).toMatchObject({ visibility: "private", authorityEpoch: 1, replay: false });
+    expect(forked).toMatchObject({ visibility: "workspace", authorityEpoch: 1, replay: false });
     expect(bus.published[1]?.[0]).toMatchObject({
       id: forked.eventId,
       sessionId: forked.sessionId,
@@ -519,12 +523,16 @@ describe("managed-human session tenancy application service", () => {
       type: "session.created",
     });
 
-    const replay = await forkManagedHumanSessionPrivate(
+    const replay = await forkManagedHumanSession(
       deps,
       authorization,
       grant.workspaceId,
       source.id,
-      { idempotencyKey: "fork-core-1" },
+      {
+        idempotencyKey: "fork-core-1",
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
+      },
     );
     expect(replay).toMatchObject({
       replay: true,
@@ -545,7 +553,7 @@ describe("managed-human session tenancy application service", () => {
       subjectId,
     );
     expect(destination?.tenancy).toMatchObject({
-      visibility: "private",
+      visibility: "workspace",
       authorityEpoch: 1,
       ownedByCurrentUser: true,
       fork: { sourceVisibility: "private", sourceAuthorityEpoch: 2 },
@@ -590,13 +598,11 @@ describe("managed-human session tenancy application service", () => {
         ),
       ).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
       await expect(
-        forkManagedHumanSessionPrivate(
-          deps,
-          authorization,
-          authorization.grant.workspaceId,
-          sessionId,
-          { idempotencyKey: `denied-fork-${sessionId}` },
-        ),
+        forkManagedHumanSession(deps, authorization, authorization.grant.workspaceId, sessionId, {
+          idempotencyKey: `denied-fork-${sessionId}`,
+          visibility: "private",
+          workspaceSharedAcknowledged: false,
+        }),
       ).rejects.toBeInstanceOf(SessionTenancyManagedHumanRequiredError);
     }
   });
@@ -634,8 +640,10 @@ describe("managed-human session tenancy application service", () => {
       }),
     ).rejects.toMatchObject({ status: 403 } satisfies Partial<HTTPException>);
     await expect(
-      forkManagedHumanSessionPrivate(deps, authorization, workspaceId, crypto.randomUUID(), {
+      forkManagedHumanSession(deps, authorization, workspaceId, crypto.randomUUID(), {
         idempotencyKey: "missing-read-create",
+        visibility: "private",
+        workspaceSharedAcknowledged: false,
       }),
     ).rejects.toMatchObject({ status: 403 } satisfies Partial<HTTPException>);
   });
@@ -681,8 +689,10 @@ describe("managed-human session tenancy application service", () => {
         }),
       ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
       await expect(
-        forkManagedHumanSessionPrivate(deps, authorization, grant.workspaceId, sessionId, {
+        forkManagedHumanSession(deps, authorization, grant.workspaceId, sessionId, {
           idempotencyKey: `inactive-fork-${sessionId}`,
+          visibility: "private",
+          workspaceSharedAcknowledged: false,
         }),
       ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
     }

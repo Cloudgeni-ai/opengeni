@@ -301,7 +301,7 @@ describe("SDK / contracts parity", () => {
     );
   });
 
-  test("session visibility and private-fork request/response shapes stay in parity", () => {
+  test("session visibility and explicit fork request/response shapes stay in parity", () => {
     const visibilityRequest = (
       value: UpdateSessionVisibilityRequest,
     ): z.input<typeof ContractUpdateSessionVisibilityRequest> => value;

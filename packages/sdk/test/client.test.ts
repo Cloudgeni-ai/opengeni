@@ -196,6 +196,8 @@ describe("OpenGeniClient", () => {
     expect(
       await client.forkSession(WORKSPACE_ID, SESSION_ID, {
         idempotencyKey: "sdk-session-copy-1",
+        visibility: "workspace",
+        workspaceSharedAcknowledged: true,
       }),
     ).toEqual(forkResponse);
     expect(requests).toEqual([
@@ -211,7 +213,11 @@ describe("OpenGeniClient", () => {
       expect.objectContaining({
         method: "POST",
         url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/forks`,
-        body: JSON.stringify({ idempotencyKey: "sdk-session-copy-1" }),
+        body: JSON.stringify({
+          idempotencyKey: "sdk-session-copy-1",
+          visibility: "workspace",
+          workspaceSharedAcknowledged: true,
+        }),
       }),
     ]);
   });

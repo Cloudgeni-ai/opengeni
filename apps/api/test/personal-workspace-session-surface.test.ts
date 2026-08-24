@@ -359,7 +359,11 @@ async function requestTenancyOperation(
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify(
         operation === "fork"
-          ? { idempotencyKey: `matrix-fork-${suffix}` }
+          ? {
+              idempotencyKey: `matrix-fork-${suffix}`,
+              visibility: "private",
+              workspaceSharedAcknowledged: false,
+            }
           : {
               visibility: "private",
               expectedAuthorityEpoch: 1,
@@ -507,7 +511,7 @@ describe("managed-human session surface inside their own personal workspace", ()
     });
   }, 180_000);
 
-  test("PUT visibility and POST private fork activate only for the canonical owner cookie", async () => {
+  test("PUT visibility and POST explicit fork activate only for the canonical owner cookie", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
     await activateSessionTenancy(human);
@@ -550,19 +554,27 @@ describe("managed-human session surface inside their own personal workspace", ()
       {
         method: "POST",
         headers,
-        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+        body: JSON.stringify({
+          idempotencyKey: "api-personal-fork",
+          visibility: "workspace",
+          workspaceSharedAcknowledged: true,
+        }),
       },
     );
     expect(fork.status).toBe(201);
     const created = (await fork.json()) as { sessionId: string; eventId: string };
-    expect(created).toMatchObject({ visibility: "private", authorityEpoch: 1, replay: false });
+    expect(created).toMatchObject({ visibility: "workspace", authorityEpoch: 1, replay: false });
 
     const replay = await app.request(
       `http://x/v1/workspaces/${human.personalWorkspaceId}/sessions/${sessionId}/forks`,
       {
         method: "POST",
         headers,
-        body: JSON.stringify({ idempotencyKey: "api-personal-fork" }),
+        body: JSON.stringify({
+          idempotencyKey: "api-personal-fork",
+          visibility: "workspace",
+          workspaceSharedAcknowledged: true,
+        }),
       },
     );
     expect(replay.status).toBe(200);

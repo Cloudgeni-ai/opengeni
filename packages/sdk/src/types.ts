@@ -1204,6 +1204,8 @@ export type UpdateSessionVisibilityResponse = {
 
 export type ForkSessionRequest = {
   idempotencyKey: string;
+  visibility: SessionVisibility;
+  workspaceSharedAcknowledged: boolean;
 };
 
 export type ForkSessionResponse = {
@@ -1212,7 +1214,7 @@ export type ForkSessionResponse = {
   eventSequence: number;
   sessionId: string;
   workspaceId: string;
-  visibility: "private";
+  visibility: SessionVisibility;
   authorityEpoch: 1;
   copiedHistoryItemCount: number;
   replay: boolean;
@@ -3387,7 +3389,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-atomic-session-fork-visibility-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
