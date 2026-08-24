@@ -627,7 +627,7 @@ describe("generic lazy tool dispatch", () => {
     ]);
   });
 
-  test("does not join deferred preparation for an eager direct tool call", async () => {
+  test("joins deferred preparation before an eager direct tool call", async () => {
     let releasePreparation!: () => void;
     const preparation = new Promise<void>((resolve) => {
       releasePreparation = resolve;
@@ -661,20 +661,67 @@ describe("generic lazy tool dispatch", () => {
     ]);
 
     const running = runStreamed(agent, model, runtime);
+    await Bun.sleep(0);
+    expect(executions).toBe(0);
     const outcome = await Promise.race([
       running.then(() => "completed" as const),
-      Bun.sleep(500).then(() => "timed_out" as const),
+      Bun.sleep(100).then(() => "waiting_for_preparation" as const),
     ]);
-    releasePreparation();
+    expect(outcome).toBe("waiting_for_preparation");
 
-    expect(outcome).toBe("completed");
+    releasePreparation();
+    const result = await running;
+
+    expect(result.finalOutput).toBe("done");
     expect(executions).toBe(1);
     expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual([
       WEATHER_TOOL,
       "tool_search",
       "tool_invoke",
     ]);
-    await running;
+  });
+
+  test("propagates deferred preparation failure before an eager direct tool executes", async () => {
+    const preparationFailure = new Error("required MCP tools/list failed");
+    let rejectPreparation!: (error: Error) => void;
+    const preparation = new Promise<void>((_resolve, reject) => {
+      rejectPreparation = reject;
+    });
+    let executions = 0;
+    const agent = agentWith(
+      weatherTool({
+        execute: ({ city }) => {
+          executions += 1;
+          return `clear:${city}`;
+        },
+      }),
+    );
+    const runtime = installLazyToolRuntime(
+      agent,
+      "generic_dispatch",
+      new Set([SERVER_ID]),
+      preparation,
+      new Set(),
+    );
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "eager-direct-call-preparation-failure",
+          name: WEATHER_TOOL,
+          arguments: JSON.stringify({ city: "Oslo" }),
+        },
+      ],
+    ]);
+
+    const running = runStreamed(agent, model, runtime);
+    await Bun.sleep(0);
+    expect(executions).toBe(0);
+
+    rejectPreparation(preparationFailure);
+
+    await expect(running).rejects.toBe(preparationFailure);
+    expect(executions).toBe(0);
   });
 
   test("hides and searches first-party function tools without an MCP registry id", async () => {
