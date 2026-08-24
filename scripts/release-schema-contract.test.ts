@@ -164,9 +164,30 @@ describe("release schema contract", () => {
       "0328_session_background_commands.sql",
       "0329_slack_orchestration_delivery_events.sql",
       "0330_api_key_descriptions.sql",
+      "0333_atomic_session_fork_visibility.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
+    expect(completeSourceContract).toMatchObject({
+      fileCount: 340,
+      latestMigration: "0333_atomic_session_fork_visibility.sql",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0330_api_key_descriptions.sql",
+      ),
+    ).toMatchObject({
+      sha256: "7167987a841c839601069749768f37032c2890136e42128116954c4d92baad22",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0333_atomic_session_fork_visibility.sql",
+      ),
+    ).toMatchObject({
+      sha256: "108cf9bd2d555efdd73f27f1218f8ca456401b663276f790162f74d63a510f02",
+      deploymentMode: "rolling",
+    });
     const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
     const sourceContract =
       forwardMigrationPaths.length > 0

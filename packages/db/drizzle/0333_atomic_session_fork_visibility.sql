@@ -194,12 +194,21 @@ BEGIN
     item jsonb NOT NULL,
     item_codec_version integer,
     active boolean NOT NULL,
+    provider_artifact_invalidated_at timestamptz,
+    provider_artifact_invalidation_reason text,
+    provider_artifact_invalidated_by_attempt_id uuid,
     created_at timestamptz NOT NULL
   ) ON COMMIT DROP;
-  INSERT INTO opengeni_session_fork_history_spool (
-    position, item, item_codec_version, active, created_at
+  INSERT INTO pg_temp.opengeni_session_fork_history_spool (
+    position, item, item_codec_version, active,
+    provider_artifact_invalidated_at, provider_artifact_invalidation_reason,
+    provider_artifact_invalidated_by_attempt_id, created_at
   ) SELECT source_item.position, source_item.item,
-      source_item.item_codec_version, source_item.active, source_item.created_at
+      source_item.item_codec_version, source_item.active,
+      source_item.provider_artifact_invalidated_at,
+      source_item.provider_artifact_invalidation_reason,
+      source_item.provider_artifact_invalidated_by_attempt_id,
+      source_item.created_at
     FROM session_history_items source_item
     WHERE source_item.account_id = p_account_id
       AND source_item.workspace_id = p_source_workspace_id
@@ -293,8 +302,10 @@ BEGIN
     provider_artifact_invalidated_by_attempt_id, created_at
   ) SELECT p_account_id, p_source_workspace_id, destination_session_id, NULL,
       source_item.position, source_item.item, source_item.item_codec_version,
-      source_item.active, NULL, NULL, NULL, source_item.created_at
-    FROM opengeni_session_fork_history_spool source_item
+      source_item.active, source_item.provider_artifact_invalidated_at,
+      source_item.provider_artifact_invalidation_reason,
+      source_item.provider_artifact_invalidated_by_attempt_id, source_item.created_at
+    FROM pg_temp.opengeni_session_fork_history_spool source_item
     ORDER BY source_item.position;
 
   INSERT INTO session_events (
@@ -374,6 +385,76 @@ EXCEPTION WHEN OTHERS THEN
   RAISE;
 END
 $$;
+
+-- Keep the old private-only signature for exact rolling retries, but converge
+-- its implementation on the repaired atomic body. Private forks use the same
+-- version-1 request hash on both signatures, so an already-applied 0303 receipt
+-- replays unchanged while a not-yet-applied old request gets the corrected
+-- history-copy and security posture.
+CREATE OR REPLACE FUNCTION fork_session_content(
+  p_account_id uuid,
+  p_source_workspace_id uuid,
+  p_source_session_id uuid,
+  p_actor_subject_id text,
+  p_destination_workspace_id uuid,
+  p_destination_visibility text,
+  p_operation_key text,
+  p_canonical_request_hash text,
+  p_activation_version integer
+) RETURNS TABLE (
+  operation_id uuid,
+  event_id uuid,
+  event_sequence integer,
+  session_id uuid,
+  workspace_id uuid,
+  visibility text,
+  authority_epoch integer,
+  copied_history_item_count integer,
+  replay boolean
+)
+LANGUAGE sql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $$
+  SELECT * FROM fork_session_content(
+    p_account_id,
+    p_source_workspace_id,
+    p_source_session_id,
+    p_actor_subject_id,
+    p_destination_workspace_id,
+    p_destination_visibility,
+    false,
+    p_operation_key,
+    p_canonical_request_hash,
+    p_activation_version
+  )
+$$;
+
+-- Both overloads remain runtime-callable during this rolling expansion. Pin
+-- each SECURITY DEFINER body and their private nested quiescence helper to the
+-- exact migration target schema, with pg_temp last, so a caller-created
+-- temporary relation cannot shadow authority, activity, or receipt tables. The
+-- broad creation-time paths are replaced before this transaction can commit.
+DO $atomic_session_fork_search_path$
+DECLARE
+  target_schema text := current_schema();
+BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION %I.fork_session_content(uuid,uuid,uuid,text,uuid,text,text,text,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema, target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.assert_session_tenancy_quiescent(uuid,uuid,uuid,boolean) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema, target_schema
+  );
+END
+$atomic_session_fork_search_path$;
 
 REVOKE ALL ON FUNCTION fork_session_content(
   uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer

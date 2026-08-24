@@ -336,6 +336,13 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(migration).toContain("source_session.visibility = 'user_private'");
     expect(migration).toContain("p_destination_visibility, 1");
     expect(migration).toContain("'workspaceSharedAcknowledged'");
+    expect(migration).toContain("CREATE OR REPLACE FUNCTION fork_session_content(");
+    expect(migration).toContain("p_destination_visibility,\n    false,");
+    expect(migration.match(/SET search_path = pg_catalog, %I, pg_temp/gu)).toHaveLength(3);
+    expect(migration).toContain("provider_artifact_invalidated_at timestamptz");
+    expect(migration).toContain("source_item.provider_artifact_invalidated_at");
+    expect(migration).toContain("source_item.provider_artifact_invalidation_reason");
+    expect(migration).toContain("source_item.provider_artifact_invalidated_by_attempt_id");
     expect(migration).not.toContain("transition_session_visibility(");
     expect(migration).not.toContain("source_session.variable_set_id");
     expect(migration).not.toContain("source_session.rig_id");
@@ -575,6 +582,32 @@ describe("migration 0303 session tenancy product activation", () => {
     if (!shared || !client) return;
 
     const sharedSource = await sessionVisibilityFixture();
+    const invalidatedAt = new Date("2026-08-24T00:00:00.000Z");
+    const invalidatedByAttemptId = crypto.randomUUID();
+    await shared.admin`
+      insert into session_history_items (
+        account_id, workspace_id, session_id, position, item,
+        provider_artifact_invalidated_at, provider_artifact_invalidation_reason,
+        provider_artifact_invalidated_by_attempt_id
+      ) values
+        (
+          ${sharedSource.ownerGrant.accountId}, ${sharedSource.ownerGrant.workspaceId},
+          ${sharedSource.session.id}, 2,
+          ${shared.admin.json({
+            type: "reasoning",
+            encrypted_content: "rejected-reasoning-ciphertext",
+          })},
+          ${invalidatedAt}, 'encrypted_content_rejected', ${invalidatedByAttemptId}
+        ),
+        (
+          ${sharedSource.ownerGrant.accountId}, ${sharedSource.ownerGrant.workspaceId},
+          ${sharedSource.session.id}, 3,
+          ${shared.admin.json({
+            type: "compaction",
+            encrypted_content: "rejected-compaction-ciphertext",
+          })},
+          ${invalidatedAt}, 'encrypted_content_rejected', ${invalidatedByAttemptId}
+        )`;
     await shared.admin`
       insert into session_pins (account_id, workspace_id, subject_id, session_id)
       values (
@@ -594,9 +627,48 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(sharedFork).toMatchObject({
       visibility: "workspace_shared",
       authorityEpoch: 1,
-      copiedHistoryItemCount: 1,
+      copiedHistoryItemCount: 3,
       replay: false,
     });
+
+    const copiedInvalidations = await shared.admin<
+      Array<{
+        position: number;
+        type: string;
+        encryptedContent: string;
+        invalidatedAt: Date;
+        invalidationReason: string;
+        invalidatedByAttemptId: string;
+      }>
+    >`
+      select position::float8 as position,
+        item ->> 'type' as type,
+        item ->> 'encrypted_content' as "encryptedContent",
+        provider_artifact_invalidated_at as "invalidatedAt",
+        provider_artifact_invalidation_reason as "invalidationReason",
+        provider_artifact_invalidated_by_attempt_id as "invalidatedByAttemptId"
+      from session_history_items
+      where session_id = ${sharedFork.sessionId}
+        and provider_artifact_invalidated_at is not null
+      order by position`;
+    expect(Array.from(copiedInvalidations)).toEqual([
+      {
+        position: 2,
+        type: "reasoning",
+        encryptedContent: "rejected-reasoning-ciphertext",
+        invalidatedAt,
+        invalidationReason: "encrypted_content_rejected",
+        invalidatedByAttemptId,
+      },
+      {
+        position: 3,
+        type: "compaction",
+        encryptedContent: "rejected-compaction-ciphertext",
+        invalidatedAt,
+        invalidationReason: "encrypted_content_rejected",
+        invalidatedByAttemptId,
+      },
+    ]);
 
     const [sharedDestination] = await shared.admin<
       Array<{
