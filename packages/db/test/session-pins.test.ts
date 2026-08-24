@@ -2188,4 +2188,189 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(invisible).toEqual([]);
     expect(await getSessionForSubject(db, workspace.workspaceId, target.id, "user:one")).toBeNull();
   }, 60_000);
+
+  // A turn claim acknowledging a consumed child lifecycle notice creates
+  // `session_pins` rows without holding the personal-state fence these three
+  // mutations take, so each of them can now find a row where its own read saw
+  // none. That row is deliberately pin-neutral and archive-neutral (the exact
+  // absent-row projection), so the conflict path must be the same transition the
+  // insert performs. Seeding the row with the admin handle is the only way to
+  // reach these branches deterministically.
+  describe("acknowledgment row created outside the personal-state fence", () => {
+    /**
+     * Reproduce the exact race: hold the mutation inside a BEFORE INSERT barrier
+     * so its own read has already seen no row, insert the acknowledgment row the
+     * way a turn claim does (no personal-state fence, so nothing blocks it),
+     * then release. The mutation's insert therefore lands on the conflict path.
+     *
+     * The barrier's WHEN clause matches only the mutation's own insert shape, so
+     * the acknowledgment insert passes straight through it.
+     */
+    async function raceAcknowledgmentAgainstMutation<T>(
+      workspace: { accountId: string; workspaceId: string },
+      options: {
+        subjectId: string;
+        sessionId: string;
+        acknowledgedSequence: number;
+        barrierObjectId: number;
+        insertPredicate: string;
+        mutate: (handle: Database) => Promise<T>;
+      },
+    ): Promise<T> {
+      const barrier = postgres(shared!.adminUrl, { max: 1 });
+      const mutationClient = createDb(shared!.appUrl, { max: 1 });
+      const barrierClass = 81326031;
+      const triggerFunction = `sessionpin_test_ack_race_${options.barrierObjectId}`;
+      const triggerName = `sessionpin_test_ack_race_trigger_${options.barrierObjectId}`;
+      let mutationPromise: Promise<T> | null = null;
+      try {
+        await barrier.unsafe(`
+          create function ${triggerFunction}() returns trigger
+          language plpgsql as $$
+          begin
+            perform pg_advisory_xact_lock(${barrierClass}, ${options.barrierObjectId});
+            return new;
+          end
+          $$;
+          create trigger ${triggerName}
+            before insert on session_pins
+            for each row when (
+              new.workspace_id = '${workspace.workspaceId}'::uuid
+              and new.subject_id = '${options.subjectId}'
+              and ${options.insertPredicate}
+            ) execute function ${triggerFunction}();
+        `);
+        await barrier`select pg_advisory_lock(${barrierClass}, ${options.barrierObjectId})`;
+
+        mutationPromise = options.mutate(mutationClient.db);
+        await waitForAdvisoryWait(admin, barrierClass, options.barrierObjectId);
+
+        // The claim path takes no personal-state fence, so this lands while the
+        // mutation is parked mid-transaction with a stale absent-row read.
+        await admin`
+          insert into session_pins
+            (account_id, workspace_id, subject_id, session_id, pinned, pinned_at, version,
+             acknowledged_sequence, actively_working, attention_version, archived, archived_at,
+             archive_version)
+          values
+            (${workspace.accountId}, ${workspace.workspaceId}, ${options.subjectId},
+             ${options.sessionId}, false, null, 0, ${options.acknowledgedSequence}, false, 0,
+             false, null, 0)`;
+
+        await barrier`select pg_advisory_unlock(${barrierClass}, ${options.barrierObjectId})`;
+        return await mutationPromise;
+      } finally {
+        await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
+        await mutationPromise?.catch(() => undefined);
+        await barrier
+          .unsafe(`
+            drop trigger if exists ${triggerName} on session_pins;
+            drop function if exists ${triggerFunction}();
+          `)
+          .catch(() => undefined);
+        await barrier.end().catch(() => undefined);
+        await mutationClient.close().catch(() => undefined);
+      }
+    }
+
+    test("setSessionPin lands on the conflict path and preserves the read fence", async () => {
+      if (!available || !shared) return;
+      const workspace = await freshWorkspace();
+      const subjectId = "user:ack-then-pin";
+      await grantMember(workspace, subjectId);
+      const target = await session({ ...workspace, message: "child work" });
+
+      const pinned = await raceAcknowledgmentAgainstMutation(workspace, {
+        subjectId,
+        sessionId: target.id,
+        acknowledgedSequence: 4,
+        barrierObjectId: 11,
+        insertPredicate: "new.pinned",
+        mutate: (handle) =>
+          setSessionPin(handle, {
+            workspaceId: workspace.workspaceId,
+            subjectId,
+            sessionId: target.id,
+            pinned: true,
+            // The acknowledgment row is pin-neutral, so the absent-row
+            // projection this client held is still the truthful revision.
+            expectedVersion: 0,
+          }),
+      });
+      expect(pinned?.pinned).toBe(true);
+      expect(pinned?.pinVersion).toBe(1);
+      const [row] = await admin<
+        { acknowledged_sequence: number; attention_version: number; pinned: boolean }[]
+      >`
+        select acknowledged_sequence, attention_version, pinned from session_pins
+        where subject_id = ${subjectId} and session_id = ${target.id}`;
+      expect(row).toMatchObject({ pinned: true, acknowledged_sequence: 4, attention_version: 0 });
+    }, 60_000);
+
+    test("setSessionAttention lands on the conflict path without regressing the fence", async () => {
+      if (!available || !shared) return;
+      const workspace = await freshWorkspace();
+      const subjectId = "user:ack-then-attention";
+      await grantMember(workspace, subjectId);
+      const target = await session({ ...workspace, message: "child work" });
+
+      const marked = await raceAcknowledgmentAgainstMutation(workspace, {
+        subjectId,
+        sessionId: target.id,
+        // Ahead of anything this mutation could acknowledge.
+        acknowledgedSequence: 9_000,
+        barrierObjectId: 12,
+        insertPredicate: "new.attention_version = 1",
+        mutate: (handle) =>
+          setSessionAttention(handle, {
+            workspaceId: workspace.workspaceId,
+            subjectId,
+            sessionId: target.id,
+            activelyWorking: true,
+            expectedVersion: 0,
+          }),
+      });
+      expect(marked?.activelyWorking).toBe(true);
+      const [row] = await admin<{ acknowledged_sequence: number }[]>`
+        select acknowledged_sequence from session_pins
+        where subject_id = ${subjectId} and session_id = ${target.id}`;
+      expect(row?.acknowledged_sequence).toBe(9_000);
+    }, 60_000);
+
+    test("setSessionArchive lands on the conflict path and keeps the read fence", async () => {
+      if (!available || !shared) return;
+      const workspace = await freshWorkspace();
+      const subjectId = "user:ack-then-archive";
+      await grantMember(workspace, subjectId);
+      const target = await session({ ...workspace, message: "child work" });
+
+      const archived = await raceAcknowledgmentAgainstMutation(workspace, {
+        subjectId,
+        sessionId: target.id,
+        acknowledgedSequence: 6,
+        barrierObjectId: 13,
+        insertPredicate: "new.archived",
+        mutate: (handle) =>
+          setSessionArchive(handle, {
+            workspaceId: workspace.workspaceId,
+            subjectId,
+            sessionId: target.id,
+            archived: true,
+            expectedVersion: 0,
+          }),
+      });
+      expect(archived?.archived).toBe(true);
+      expect(archived?.archiveVersion).toBe(1);
+      const [row] = await admin<
+        { acknowledged_sequence: number; attention_version: number; archived: boolean }[]
+      >`
+        select acknowledged_sequence, attention_version, archived from session_pins
+        where subject_id = ${subjectId} and session_id = ${target.id}`;
+      expect(row).toMatchObject({
+        archived: true,
+        acknowledged_sequence: 6,
+        attention_version: 0,
+      });
+    }, 60_000);
+  });
 });
