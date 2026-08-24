@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import * as RouterPackage from "@tanstack/react-router";
 import { act, type ReactNode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -64,6 +65,14 @@ mock.module("@/context", () => ({
 mock.module("@/components/ui/confirm-dialog", () => ({
   ConfirmDialog: ({ open, title }: { open: boolean; title: ReactNode }) =>
     open ? <div data-testid="confirm-dialog">{title}</div> : null,
+}));
+
+// The manager view links to organization workspace access, and a real
+// `<Link>` needs a router this roster-focused render deliberately does not
+// mount.
+mock.module("@tanstack/react-router", () => ({
+  ...RouterPackage,
+  Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
 }));
 
 const { MembersSection } = await import("./workspace-settings");
