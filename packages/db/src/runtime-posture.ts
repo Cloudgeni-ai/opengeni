@@ -247,6 +247,9 @@ const VARIABLE_SET_AUTHORITY_ROUTINES = [
 ] as const;
 const SCOPED_COMPUTE_CAPABILITY_PREDICATE_ROUTINE = "scoped_compute_capability_active(text)";
 const SCOPED_COMPUTE_CAPABILITY_TABLE = "scoped_compute_capabilities";
+const CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE = "connection_tenancy_backfill_capabilities";
+const CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE =
+  "connection_tenancy_backfill_capability_active(uuid)";
 const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
   "create_scoped_rig(uuid, uuid, text, text, text, text, jsonb, boolean)",
   "list_scoped_rigs(uuid, uuid, uuid, text, text)",
@@ -377,6 +380,8 @@ const SESSION_TENANCY_ACTIVATED_ROUTINE = "session_tenancy_product_activated(uui
 const SESSION_TENANCY_ANY_ACTIVATION_ROUTINE = "session_tenancy_any_product_activation()";
 const SESSION_TENANCY_QUIESCENCE_ROUTINE =
   "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
+const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
+  "check_tenancy_backfill_activation_evidence(uuid)";
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
@@ -470,6 +475,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
+  TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
@@ -1549,7 +1555,8 @@ export async function inspectRuntimeDatabasePosture(
               ${VARIABLE_SET_CAPABILITY_TABLE},
               ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
-              ${SCOPED_COMPUTE_CAPABILITY_TABLE}
+              ${SCOPED_COMPUTE_CAPABILITY_TABLE},
+              ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE}
             )
         `),
       ).map((row) => ({
@@ -2741,6 +2748,62 @@ export function evaluateRuntimeDatabasePosture(
   if (posture.privateRoutines.length === 0) {
     violations.push("opengeni_private has no helper routines");
   }
+
+  const connectionBackfillCapabilityTables = posture.privateTables.filter(
+    (table) => table.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE,
+  );
+  const connectionBackfillCapabilityRoutines = posture.privateRoutines.filter(
+    (routine) => routine.name === CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE,
+  );
+  if (connectionBackfillCapabilityTables.length !== 1) {
+    violations.push(
+      `connection-tenancy backfill capability table ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE} is missing or ambiguous`,
+    );
+  }
+  if (connectionBackfillCapabilityRoutines.length !== 1) {
+    violations.push(
+      `connection-tenancy backfill capability predicate ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_PREDICATE_ROUTINE} is missing or ambiguous`,
+    );
+  }
+  if (
+    connectionBackfillCapabilityTables.length === 1 &&
+    connectionBackfillCapabilityRoutines.length === 1
+  ) {
+    const table = connectionBackfillCapabilityTables[0]!;
+    const routine = connectionBackfillCapabilityRoutines[0]!;
+    if (routine.owner !== table.owner) {
+      violations.push(
+        `connection-tenancy backfill capability predicate ${routine.name} owner ${routine.owner} does not match table owner ${table.owner}`,
+      );
+    }
+    if (!routine.securityDefiner) {
+      violations.push(
+        `connection-tenancy backfill capability predicate ${routine.name} is not SECURITY DEFINER`,
+      );
+    }
+    if (!routine.execute) {
+      violations.push(
+        `runtime role lacks connection-tenancy backfill capability predicate ${routine.name}`,
+      );
+    }
+    if (routine.publicExecute) {
+      violations.push(
+        `PUBLIC has forbidden connection-tenancy backfill capability predicate ${routine.name}`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", table.select],
+      ["INSERT", table.insert],
+      ["UPDATE", table.update],
+      ["DELETE", table.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${table.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
+    }
+  }
+
   for (const routine of posture.privateRoutines) {
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);

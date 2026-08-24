@@ -479,6 +479,14 @@ describe("embedded worker lifecycle contract", () => {
           can_update: false,
           can_delete: false,
         },
+        {
+          name: "connection_tenancy_backfill_capabilities",
+          owner: "opengeni_migrator",
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+        },
       ],
       [
         ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
@@ -527,6 +535,13 @@ describe("embedded worker lifecycle contract", () => {
         },
         {
           name: "document_migration_capability_active(text)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+        {
+          name: "connection_tenancy_backfill_capability_active(uuid)",
           owner: "opengeni_migrator",
           can_execute: true,
           public_execute: false,

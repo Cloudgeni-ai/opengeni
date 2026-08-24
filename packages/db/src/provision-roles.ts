@@ -670,6 +670,25 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0340's bounded connection convergence and repaired parity
+    -- seams also live in the data schema. Converge their exact grants for the
+    -- supported migrate-then-provision order.
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'classify_organization_connection_authority(uuid,text)',
+      'backfill_organization_connection_authority(uuid,integer,boolean)',
+      'check_organization_tenancy_parity(uuid,integer,integer)'
+    ] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature))
+        IS NOT NULL
+      THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)},
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to

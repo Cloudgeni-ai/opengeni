@@ -545,6 +545,10 @@ export const sessionTenancyActivations = pgTable(
     inventoryDigest: text("inventory_digest").notNull(),
     parityDigest: text("parity_digest").notNull(),
     activatedBy: text("activated_by").notNull(),
+    backfillReceiptIds: uuid("backfill_receipt_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
     activatedAt: timestamp("activated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -560,6 +564,10 @@ export const sessionTenancyActivations = pgTable(
     actorValid: check(
       "session_tenancy_activations_actor_check",
       sql`octet_length(${table.activatedBy}) between 1 and 256`,
+    ),
+    backfillReceiptsValid: check(
+      "session_tenancy_activation_backfill_receipts_check",
+      sql`cardinality(${table.backfillReceiptIds}) in (0, 5, 6)`,
     ),
   }),
 );

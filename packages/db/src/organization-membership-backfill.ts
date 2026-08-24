@@ -72,6 +72,11 @@ export type OrganizationMembershipBackfillUnresolvedReason =
 
 export type OrganizationMembershipBackfillCandidate = {
   subjectId: string;
+  /** Stable UUID of the exact authority/source row that made this subject a
+   *  backfill obligation. Existing anchors use their membership id; an
+   *  anchorless subject uses the first persisted workspace-membership id.
+   *  This is the content-free resource id written to migration 0300's ledger. */
+  evidenceResourceId: string;
   resolution: "provisionable" | "already_anchored" | "unresolved";
   reasonCode: OrganizationMembershipBackfillUnresolvedReason | null;
   organizationMembershipId: string | null;
@@ -137,12 +142,16 @@ export type OrganizationMembershipBackfillDrainReport = {
   counts: OrganizationMembershipBackfillCounts;
   unresolved: Array<{
     subjectId: string;
+    resourceId: string;
     reasonCode: OrganizationMembershipBackfillUnresolvedReason;
   }>;
   /** Claimed by a peer run during this walk. Not a failure and not skipped
    *  work: re-running the command from the start converges them. */
   contended: string[];
   failed: Array<{ subjectId: string; reasonCode: string }>;
+  /** Null when no run key was supplied or the walk was a dry run. */
+  receiptId: string | null;
+  receiptStatus: "completed" | "failed" | null;
 };
 
 export type OrganizationMembershipBackfillPage = {
@@ -238,13 +247,18 @@ export async function listOrganizationMembershipBackfillCandidates(
       // Population 1: humans with persisted workspace access in this
       // organization. Ordinary account-scoped application-role reads - no
       // widened visibility, no organization-tenancy table touched.
-      const accessRows = await rawRows<{ subject_id: string; owner_membership_id: string | null }>(
+      const accessRows = await rawRows<{
+        subject_id: string;
+        owner_membership_id: string | null;
+        evidence_membership_id: string;
+      }>(
         scopedDb,
         sql`
           select
             access.subject_id as subject_id,
             max(case when access.role = 'owner' then access.id::text else null end)
-              as owner_membership_id
+              as owner_membership_id,
+            min(access.id::text) as evidence_membership_id
           from workspace_memberships access
           inner join workspaces workspace
             on workspace.id = access.workspace_id
@@ -262,6 +276,9 @@ export async function listOrganizationMembershipBackfillCandidates(
       );
       const ownerMembershipBySubject = new Map<string, string | null>(
         accessRows.map((row) => [row.subject_id, row.owner_membership_id]),
+      );
+      const evidenceMembershipBySubject = new Map<string, string>(
+        accessRows.map((row) => [row.subject_id, row.evidence_membership_id]),
       );
 
       // Population 2: existing memberships that carry no personal workspace.
@@ -283,6 +300,9 @@ export async function listOrganizationMembershipBackfillCandidates(
       for (const row of pendingRows) {
         if (!ownerMembershipBySubject.has(row.subjectId)) {
           ownerMembershipBySubject.set(row.subjectId, null);
+        }
+        if (!evidenceMembershipBySubject.has(row.subjectId)) {
+          evidenceMembershipBySubject.set(row.subjectId, row.membershipId);
         }
       }
 
@@ -367,9 +387,15 @@ export async function listOrganizationMembershipBackfillCandidates(
 
       const candidates = subjectIds.map((subjectId): OrganizationMembershipBackfillCandidate => {
         const anchor = anchorBySubject.get(subjectId) ?? null;
+        const evidenceResourceId =
+          anchor?.membershipId ?? evidenceMembershipBySubject.get(subjectId);
+        if (!evidenceResourceId) {
+          throw new Error("Organization membership backfill candidate has no durable evidence row");
+        }
         if (anchor && (anchor.status === "suspended" || anchor.status === "revoked")) {
           return {
             subjectId,
+            evidenceResourceId,
             resolution: "unresolved",
             reasonCode: "membership_terminal_status",
             organizationMembershipId: anchor.membershipId,
@@ -379,6 +405,7 @@ export async function listOrganizationMembershipBackfillCandidates(
         if (anchor && anchor.personalWorkspaceId !== null) {
           return {
             subjectId,
+            evidenceResourceId,
             resolution: "already_anchored",
             reasonCode: null,
             organizationMembershipId: anchor.membershipId,
@@ -388,6 +415,7 @@ export async function listOrganizationMembershipBackfillCandidates(
         if (!knownUserIds.has(subjectUserId(subjectId))) {
           return {
             subjectId,
+            evidenceResourceId,
             resolution: "unresolved",
             reasonCode: "missing_login_identity",
             organizationMembershipId: anchor?.membershipId ?? null,
@@ -401,6 +429,7 @@ export async function listOrganizationMembershipBackfillCandidates(
         ) {
           return {
             subjectId,
+            evidenceResourceId,
             resolution: "unresolved",
             reasonCode: "organization_identity_mismatch",
             organizationMembershipId: anchor?.membershipId ?? null,
@@ -410,6 +439,7 @@ export async function listOrganizationMembershipBackfillCandidates(
         if (ownerMembershipBySubject.get(subjectId) == null) {
           return {
             subjectId,
+            evidenceResourceId,
             resolution: "unresolved",
             reasonCode: "missing_owner_workspace_membership",
             organizationMembershipId: anchor?.membershipId ?? null,
@@ -418,6 +448,7 @@ export async function listOrganizationMembershipBackfillCandidates(
         }
         return {
           subjectId,
+          evidenceResourceId,
           resolution: "provisionable",
           reasonCode: null,
           organizationMembershipId: anchor?.membershipId ?? null,
@@ -584,11 +615,18 @@ export async function drainOrganizationMembershipBackfill(
     dryRun: boolean;
     maxPasses?: number;
     afterSubjectId?: string | null;
+    /** Optional migration-0300 idempotency key. A non-dry walk settles one
+     *  durable organization_memberships receipt after the bounded walk. */
+    runKey?: string | null;
   },
 ): Promise<OrganizationMembershipBackfillDrainReport> {
   const maxPasses = input.maxPasses ?? 1000;
   if (!Number.isInteger(maxPasses) || maxPasses < 1) {
     throw new Error("Organization membership backfill maxPasses must be a positive integer");
+  }
+  const runKey = input.runKey ?? null;
+  if (runKey !== null && (runKey.trim().length === 0 || runKey.length > 200)) {
+    throw new Error("Organization membership backfill runKey must be 1..200 non-blank characters");
   }
   const counts: OrganizationMembershipBackfillCounts = {
     inspected: 0,
@@ -617,7 +655,15 @@ export async function drainOrganizationMembershipBackfill(
     }
     for (const result of report.results) {
       if (result.outcome === "unresolved") {
-        unresolved.push({ subjectId: result.subjectId, reasonCode: result.reasonCode });
+        const candidate = report.candidates.find((item) => item.subjectId === result.subjectId);
+        if (!candidate) {
+          throw new Error("Organization membership backfill result lost its evidence row");
+        }
+        unresolved.push({
+          subjectId: result.subjectId,
+          resourceId: candidate.evidenceResourceId,
+          reasonCode: result.reasonCode,
+        });
       } else if (result.outcome === "contended") {
         contended.push(result.subjectId);
       } else if (result.outcome === "failed") {
@@ -630,6 +676,48 @@ export async function drainOrganizationMembershipBackfill(
       break;
     }
   }
+  let receiptId: string | null = null;
+  let receiptStatus: "completed" | "failed" | null = null;
+  if (!input.dryRun && runKey !== null) {
+    receiptStatus =
+      assertCursor(input.afterSubjectId) === null &&
+      drained &&
+      counts.contended === 0 &&
+      counts.failed === 0
+        ? "completed"
+        : "failed";
+    receiptId = await withRlsContext(
+      db,
+      { accountId: input.organizationId, workspaceId: null },
+      async (scopedDb) => {
+        const [opened] = await rawRows<{ receipt_id: string }>(
+          scopedDb,
+          sql`select open_tenancy_backfill_receipt(
+            ${input.organizationId}, 'organization_memberships', ${runKey}
+          ) as receipt_id`,
+        );
+        if (!opened) throw new Error("Organization membership backfill receipt did not open");
+        for (const row of unresolved) {
+          await rawRows(
+            scopedDb,
+            sql`select record_tenancy_backfill_unresolved(
+              ${opened.receipt_id}::uuid, ${row.resourceId}::uuid, ${row.reasonCode}
+            )`,
+          );
+        }
+        await rawRows(
+          scopedDb,
+          sql`select complete_tenancy_backfill_receipt(
+            ${opened.receipt_id}::uuid,
+            ${counts.provisioned}::bigint,
+            ${counts.alreadyAnchored + counts.contended + counts.failed}::bigint,
+            ${receiptStatus}
+          )`,
+        );
+        return opened.receipt_id;
+      },
+    );
+  }
   return {
     organizationId: input.organizationId,
     dryRun: input.dryRun,
@@ -641,5 +729,7 @@ export async function drainOrganizationMembershipBackfill(
     unresolved,
     contended,
     failed,
+    receiptId,
+    receiptStatus,
   };
 }

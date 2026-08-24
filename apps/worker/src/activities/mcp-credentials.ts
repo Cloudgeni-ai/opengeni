@@ -4,6 +4,7 @@ import {
   buildConnectionTokenResolver,
   buildHostConnectionTokenResolver,
   resolveAcceptedConnectionUse,
+  sessionTenancyProductActivated,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -22,6 +23,8 @@ export function connectionTokenResolverForTurn(input: {
   attemptId: string;
   turn: SessionTurnForExecution;
   authorizeAcceptedUse?: typeof resolveAcceptedConnectionUse;
+  /** Test seam for the activation fence on pre-snapshot workspace refs. */
+  isSessionTenancyProductActivated?: typeof sessionTenancyProductActivated;
   /** Optional; used only for content-free compatibility-lane counters. */
   observability?: Observability | null | undefined;
 }): (request: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
@@ -80,6 +83,19 @@ export function connectionTokenResolverForTurn(input: {
     // legacy path - it cannot be authorized by exact identity, so it keeps the
     // unprivileged resolution the old short-circuit used.
     if (subjectScope === "workspace" && !request.connectionRef.connectionId) {
+      if (
+        await (input.isSessionTenancyProductActivated ?? sessionTenancyProductActivated)(
+          input.db,
+          input.workspaceId,
+        )
+      ) {
+        return {
+          status: "auth_needed",
+          reason: "missing_connection",
+          providerDomain: request.connectionRef.providerDomain,
+          ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        };
+      }
       // This lane writes no `connection_use_audit_facts` row, so this counter is
       // the only evidence it was taken. Lane name only - never the server,
       // provider domain, connection, or subject.

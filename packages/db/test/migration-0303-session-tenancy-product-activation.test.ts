@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { createHash } from "node:crypto";
 import { assertRuntimeDatabasePosture, createDb, nestedPostgresSqlState } from "../src";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -16,24 +17,243 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-async function account(): Promise<string> {
+const BACKFILL_FAMILIES = [
+  "organization_memberships",
+  "sessions",
+  "variable_sets",
+  "rigs",
+  "machines",
+  "connections",
+] as const;
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function reportDigest(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+async function settleBackfillEvidence(accountId: string): Promise<string[]> {
+  return await shared!.admin.begin(async (transaction) => {
+    await transaction`select set_config('opengeni.account_id', ${accountId}, true)`;
+    const receiptIds: string[] = [];
+    for (const family of BACKFILL_FAMILIES) {
+      const [opened] = await transaction<{ id: string }[]>`
+        select open_tenancy_backfill_receipt(
+          ${accountId}::uuid, ${family}, ${`activation-${family}-${crypto.randomUUID()}`}
+        ) as id`;
+      await transaction`
+        select complete_tenancy_backfill_receipt(${opened!.id}::uuid, 0, 0, 'completed')`;
+      receiptIds.push(opened!.id);
+    }
+    return receiptIds;
+  });
+}
+
+async function account(options?: { withEvidence?: boolean }): Promise<string> {
   const [row] = await shared!.admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('0303 activation') returning id`;
+  if (options?.withEvidence !== false) await settleBackfillEvidence(row!.id);
   return row!.id;
 }
 
-async function activate(accountId: string, inventory = "0".repeat(64)) {
+async function activationDigests(accountId: string): Promise<{
+  inventory: string;
+  parity: string;
+}> {
+  return await shared!.admin.begin(async (transaction) => {
+    await transaction`select set_config('opengeni.account_id', ${accountId}, true)`;
+    const [reports] = await transaction<{ inventory: unknown; parity: unknown }[]>`
+      select inventory_organization_tenancy(${accountId}::uuid) as inventory,
+        check_organization_tenancy_parity(${accountId}::uuid, 10, 30) as parity`;
+    return {
+      inventory: reportDigest(reports!.inventory),
+      parity: reportDigest(reports!.parity),
+    };
+  });
+}
+
+async function activate(accountId: string, inventory?: string) {
+  const digests = await activationDigests(accountId);
   return await shared!.admin<
     Array<{ accountId: string; activationVersion: number; replay: boolean }>
   >`
     select account_id as "accountId", activation_version as "activationVersion", replay
     from activate_session_tenancy_product(
-      ${accountId}::uuid, ${inventory}, ${"1".repeat(64)}, 'database-test',
+      ${accountId}::uuid, ${inventory ?? digests.inventory}, ${digests.parity}, 'database-test',
       ${shared!.admin.array(["opengeni_app"])}::text[]
     )`;
 }
 
 describe("migration 0303 session tenancy product activation", () => {
+  test("serializes the first canonical boundary against a greenfield setup transaction", async () => {
+    if (!shared) return;
+    const accountId = await account();
+    const digests = await activationDigests(accountId);
+    const barrier = postgres(shared.adminUrl, { max: 1, onnotice: () => undefined });
+    const activationClient = postgres(shared.adminUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
+    const provisioningClient = postgres(shared.adminUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
+    let releaseBarrier: () => void = () => {};
+    let barrierReady: () => void = () => {};
+    const releaseSignal = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    const barrierReadySignal = new Promise<void>((resolve) => {
+      barrierReady = resolve;
+    });
+    const barrierTransaction = barrier.begin(async (transaction) => {
+      await transaction`
+        select pg_advisory_xact_lock(
+          hashtextextended('tenancy-cutover-boundary-race-test', 0)
+        )`;
+      barrierReady();
+      await releaseSignal;
+    });
+    await barrierReadySignal;
+    await shared.admin`
+      create function tenancy_cutover_hold_activation_receipt_for_test()
+      returns trigger
+      language plpgsql
+      set search_path = pg_catalog, pg_temp
+      as $body$
+      begin
+        perform pg_catalog.pg_advisory_xact_lock(
+          pg_catalog.hashtextextended('tenancy-cutover-boundary-race-test', 0)
+        );
+        return new;
+      end
+      $body$`;
+    await shared.admin`
+      create trigger tenancy_cutover_hold_activation_receipt_for_test
+      before insert on session_tenancy_activations
+      for each row execute function tenancy_cutover_hold_activation_receipt_for_test()`;
+
+    let activationSettled = false;
+    let provisioningSettled = false;
+    let activationPromise: Promise<
+      postgres.RowList<Array<{ accountId: string; activationVersion: number; replay: boolean }>>
+    > | null = null;
+    let provisioningPromise: Promise<boolean> | null = null;
+    try {
+      activationPromise = activationClient<
+        Array<{ accountId: string; activationVersion: number; replay: boolean }>
+      >`
+        select account_id as "accountId", activation_version as "activationVersion", replay
+        from activate_session_tenancy_product(
+          ${accountId}::uuid, ${digests.inventory}, ${digests.parity}, 'boundary-race-test',
+          ARRAY['opengeni_app']::text[]
+        )`.then((rows) => {
+        activationSettled = true;
+        return rows;
+      });
+
+      let boundaryHeld = false;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const [probe] = await shared.admin<{ acquired: boolean }[]>`
+          select pg_try_advisory_xact_lock(
+            hashtextextended('session-tenancy-canonical-boundary:v1', 0)
+          ) as acquired`;
+        if (probe?.acquired === false) {
+          boundaryHeld = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(boundaryHeld).toBe(true);
+      expect(activationSettled).toBe(false);
+
+      let provisioningStarted: () => void = () => {};
+      const provisioningStartedSignal = new Promise<void>((resolve) => {
+        provisioningStarted = resolve;
+      });
+      provisioningPromise = provisioningClient
+        .begin(async (transaction) => {
+          const [organization] = await transaction<{ id: string }[]>`
+          insert into managed_accounts (name)
+          values ('greenfield boundary race') returning id`;
+          provisioningStarted();
+          await transaction`
+          insert into workspaces (account_id, name, external_source, external_id)
+          values (
+            ${organization!.id}, 'Personal workspace',
+            'opengeni:organization-membership',
+            ${`${organization!.id}:user:greenfield-boundary-race`}
+          )`;
+          await transaction`select lock_session_tenancy_activation_boundary()`;
+          const [boundary] = await transaction<{ activated: boolean }[]>`
+          select session_tenancy_any_product_activation() as activated`;
+          return boundary!.activated;
+        })
+        .then((activated) => {
+          provisioningSettled = true;
+          return activated;
+        });
+      await provisioningStartedSignal;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(provisioningSettled).toBe(false);
+
+      releaseBarrier();
+      expect(Array.from(await activationPromise)).toEqual([
+        { accountId, activationVersion: 1, replay: false },
+      ]);
+      expect(await provisioningPromise).toBe(true);
+    } finally {
+      releaseBarrier();
+      const pending: Promise<unknown>[] = [barrierTransaction];
+      if (activationPromise) pending.push(activationPromise);
+      if (provisioningPromise) pending.push(provisioningPromise);
+      await Promise.allSettled(pending);
+      await shared.admin`
+        drop trigger if exists tenancy_cutover_hold_activation_receipt_for_test
+        on session_tenancy_activations`;
+      await shared.admin`drop function if exists tenancy_cutover_hold_activation_receipt_for_test()`;
+      await Promise.all([barrier.end(), activationClient.end(), provisioningClient.end()]);
+    }
+  }, 180_000);
+
+  test("refuses a new activation until all six current receipt families are settled", async () => {
+    if (!shared) return;
+    const accountId = await account({ withEvidence: false });
+    let missingFailure: unknown;
+    try {
+      await activate(accountId);
+    } catch (error) {
+      missingFailure = error;
+    }
+    expect(nestedPostgresSqlState(missingFailure)).toBe("55000");
+    expect(String(missingFailure)).toContain("requires settled backfill evidence");
+
+    const receiptIds = await settleBackfillEvidence(accountId);
+    let changedEvidenceFailure: unknown;
+    try {
+      await activate(accountId, "0".repeat(64));
+    } catch (error) {
+      changedEvidenceFailure = error;
+    }
+    expect(nestedPostgresSqlState(changedEvidenceFailure)).toBe("40001");
+    expect(Array.from(await activate(accountId))).toEqual([
+      { accountId, activationVersion: 1, replay: false },
+    ]);
+    const [receipt] = await shared.admin<{ backfillReceiptIds: string[] }[]>`
+      select backfill_receipt_ids as "backfillReceiptIds"
+      from session_tenancy_activations where account_id = ${accountId}`;
+    expect(receipt?.backfillReceiptIds).toEqual(receiptIds);
+  });
+
   test("exposes the mandatory lifecycle signatures plus the rolling fork overload", async () => {
     if (!shared) return;
     const routines = await shared.admin<

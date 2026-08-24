@@ -392,6 +392,99 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     }
   }, 180_000);
 
+  test("0340 keeps activation evidence in the dedicated schema and owner-only", async () => {
+    if (!available) return;
+    const [routine] = await admin<
+      Array<{
+        securityDefiner: boolean;
+        appExecute: boolean;
+        publicExecute: boolean;
+        settings: string[] | null;
+        publicAbsent: boolean;
+      }>
+    >`
+      select procedure.prosecdef as "securityDefiner",
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1 from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.proconfig as settings,
+        to_regprocedure('public.check_tenancy_backfill_activation_evidence(uuid)') is null
+          as "publicAbsent"
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname = 'check_tenancy_backfill_activation_evidence'`;
+    expect(routine).toEqual({
+      securityDefiner: true,
+      appExecute: false,
+      publicExecute: false,
+      settings: [
+        `search_path=pg_catalog, ${SCHEMA}, opengeni_private, pg_temp`,
+        "statement_timeout=5min",
+      ],
+      publicAbsent: true,
+    });
+  });
+
+  test("0340 pins connection convergence and activation to the dedicated schema", async () => {
+    if (!available) return;
+    const routines = await admin<
+      Array<{ name: string; appExecute: boolean; settings: string[] | null }>
+    >`
+      select procedure.proname as name,
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        procedure.proconfig as settings
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = ${SCHEMA}
+        and procedure.proname in (
+          'classify_organization_connection_authority',
+          'backfill_organization_connection_authority',
+          'check_organization_tenancy_parity',
+          'lock_session_tenancy_activation_boundary',
+          'activate_session_tenancy_product'
+        )
+      order by procedure.proname`;
+    expect(Array.from(routines)).toEqual([
+      {
+        name: "activate_session_tenancy_product",
+        appExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, opengeni_private, public, pg_temp`],
+      },
+      {
+        name: "backfill_organization_connection_authority",
+        appExecute: true,
+        settings: [
+          `search_path=pg_catalog, ${SCHEMA}, opengeni_private, pg_temp`,
+          "statement_timeout=5min",
+        ],
+      },
+      {
+        name: "check_organization_tenancy_parity",
+        appExecute: true,
+        settings: [
+          `search_path=pg_catalog, ${SCHEMA}, opengeni_private, pg_temp`,
+          "statement_timeout=60s",
+        ],
+      },
+      {
+        name: "classify_organization_connection_authority",
+        appExecute: true,
+        settings: [
+          `search_path=pg_catalog, ${SCHEMA}, opengeni_private, pg_temp`,
+          "statement_timeout=5min",
+        ],
+      },
+      {
+        name: "lock_session_tenancy_activation_boundary",
+        appExecute: false,
+        settings: [`search_path=pg_catalog, ${SCHEMA}, pg_temp`],
+      },
+    ]);
+  });
+
   test("0323 pins every new definer routine to the dedicated schema", async () => {
     if (!available) return;
     const routines = await admin<

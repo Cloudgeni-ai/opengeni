@@ -1169,7 +1169,8 @@ the seam never returns identities, names, keys, or values, and it rejects a
 cross-organization request.
 
 The membership and personal-workspace half of the phase is the operator command
-`bun run db:backfill-organization-memberships --organization-id <uuid>`
+`bun run db:backfill-organization-memberships --organization-id <uuid>
+--run-key <unique-key>`
 (`--dry-run`, `--limit`, default 25, max 100, `--max-passes`, default 1000,
 `--after-subject-id`). It drains exactly two of those
 counts - `workspaceMemberSubjectsWithoutMembershipAnchor` (humans who held
@@ -1225,8 +1226,33 @@ reports `drained: false` and the `lastCursor` that `--after-subject-id`
 resumes. This is what makes repeated runs *converge*: a subject the driver
 cannot resolve stays in its population permanently, so a fixed `LIMIT n` window
 over an organization with more than `n` `user:`-kind subjects would return the
-same first `n` rows on every pass and never reach subject `n + 1` at all. Durable receipt/unresolved-ledger persistence is the separate backfill
-ledger slice; today the command's structured JSON report is the operator record.
+same first `n` rows on every pass and never reach subject `n + 1` at all.
+Migration 0340 connects the driver to the durable ledger. A non-dry walk with
+`--run-key` opens one `organization_memberships` receipt, records every refusal
+with the exact organization-membership id or source workspace-membership id
+that made it an obligation, and settles only a complete-from-the-start,
+drained, uncontended walk as `completed`. A partial/resumed, contended, or
+failed walk settles `failed`; use a fresh run key for the final evidence walk.
+Dry runs still write nothing. The four membership-specific reason codes are
+part of the fixed, content-free vocabulary; no subject or proposed owner is
+stored in the ledger.
+
+Migration 0340 also repairs the two seams that walk feeds on. Migration 0290
+gave `list_organization_membership_backfill_anchors` and
+`list_organization_memberships_without_personal_workspace` the
+`organization_membership_backfill` marker on the shared
+`organization_tenancy_lifecycle` policy; migration 0305 restated that policy's
+marker list to add `personal_resource_grant_management` and dropped 0290's
+entry. Both seams have returned `[]` ever since for a NON-superuser migration
+owner - measured on `acquireOwnerMigratedTestDatabase`, not inferred. Because
+they are SECURITY DEFINER owned by that role, even a superuser *caller* gets the
+owner's RLS, so only a superuser-migrated database (every prior test harness)
+hid it. The consequence was that an already-anchored subject read as
+provisionable and the memberships carrying no personal workspace - the actual
+target population - were invisible, so the walk could not converge them and its
+receipt counts were wrong. 0340 restores that visibility as its own narrow
+read-only policy, `organization_membership_backfill_read`, so the next migration
+to restate the shared list cannot delete it again.
 
 #### Variable Sets, Rigs, and Connected Machines need no data rewrite
 
@@ -1255,6 +1281,57 @@ key erased that origin deliberately.
 Migration 0256 remains the one sibling family with a genuine discriminator:
 `connections.subject_id` plus an active `organization_memberships` row. None of
 these three tables has a `subject_id`, so the same shape does not transfer.
+
+#### Connection authority convergence (migration 0340)
+
+Connections use that genuine discriminator through a separate bounded command:
+
+```bash
+bun run db:backfill-connection-authority --organization-id <uuid>
+bun run db:backfill-connection-authority --organization-id <uuid> --apply \
+  --limit 500 --max-batches 200 --run-key <fresh-key>
+```
+
+Dry-run is the default. Apply batches claim `legacy_user` rows with
+`FOR UPDATE SKIP LOCKED` and upgrade only a connection whose exact
+`subject_id` has one active membership in the same organization. The command
+never treats origin workspace, current workspace access, creator metadata, or
+provider identity as ownership. Rows without that proof stay byte-identical and
+the final full-population classifier records them unresolved. A fresh run key
+on a complete converged walk produces the sixth activation receipt,
+`connections`; a partial walk must resume without a run key and classify under
+a fresh key only after convergence.
+
+Migration 0340 also closes both ways this compatibility population could reopen.
+After an organization activates, `bind_connection_authority` refuses to mint a
+new personal connection without a live membership, surviving `legacy_user`
+rows are invisible to runtime reads, and the worker refuses a pre-snapshot
+workspace reference without an exact connection id before resolving any
+credential. Pre-activation behavior remains unchanged, so rollback is still
+permitted until the activation receipt is written.
+
+Both of those paths depend on one seam,
+`opengeni_private.bind_connection_owner_authority`, and it exists because
+`organization_memberships` and `organization_user_resource_authorities` are
+`FORCE ROW LEVEL SECURITY` and OpenGeni runs its SECURITY DEFINER routines as a
+NON-superuser owner without `BYPASSRLS`. Migration 0256's inline
+`SELECT ... FOR SHARE` plus authority `INSERT` therefore matched nothing on
+every real deployment: a personal connection whose subject *did* hold a live
+membership silently degraded to `legacy_user`, and 0340's convergence would
+have raised `42501 connection backfill membership authority is unavailable` on
+every deterministic candidate. The seam opens one read-only
+`connection_authority_binding` marker window - owner-only policies on two
+tables that carry zero runtime privileges - takes the row lock, mints the
+authority row, and restores the previous marker on every exit. The marker gates
+narrow dedicated policies rather than new entries in the shared
+`organization_tenancy_lifecycle` list, so a later migration restating that list
+cannot silently drop connection binding. Note the PostgreSQL rule that made
+this invisible: `SELECT ... FOR SHARE` is gated on the UPDATE/ALL policy
+`USING` clause as well as the SELECT one, so a capability policy declared only
+`FOR SELECT` leaves a row-locking lookup blind. See
+[`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) and the
+production-posture regression harness
+`packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`.
 
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>
@@ -1337,9 +1414,10 @@ repairable, and `--apply` repairs only those:
   `organization_memberships_personal_workspace_idx` makes that a 1:1 anchor)
   and the session's `created_by_subject_id` is that same membership's subject.
   Slice B provisions a personal workspace *without* a `workspace_memberships`
-  row, so 0225's second branch cannot reach these rows even today - the
-  population still grows until that derivation is extended, which is a phase F
-  decision and not part of this backfill.
+  row. Migration 0302 extended live derivation to the membership's exact
+  `personal_workspace_id`, so this is now a finite historical population;
+  migration 0340 makes parity count that pointer form as well as ordinary
+  workspace membership.
 - **Parent-inheritance closure.** An ownerless session whose same-workspace
   parent now has an owner pair: branch 1 of the live trigger replayed against
   durable parent data, which is also what makes the driver resumable.
@@ -1810,6 +1888,18 @@ is run:
    their `byScope` breakdown against the reviewed classification instead -
    `byScope` reports every authority distinction the schema can truthfully make,
    and any non-user-scoped total is derivable from it.
+   Migration 0340 additionally requires the newest receipt in each executable
+   phase-D family to be settled: `organization_memberships`, `sessions`,
+   `variable_sets`, `rigs`, `machines`, and `connections`. Produce them with one
+   complete membership walk, one resource-classification run, a converged
+   connection-authority run, and a final full session `--classify`, each with a
+   fresh `--run-key`. The four resource/connection receipts must have zero
+   unresolved rows and every resource/session/connection receipt must cover its
+   current full-family total. Membership and session unresolved rows are not
+   blindly treated as corruption: the inventory/parity gates above decide
+   whether their current residual populations are legitimate. The newest
+   receipt wins, so a later open/failed or partial run cannot hide behind an
+   older successful one.
 2. **Parity evidence.** The phase-E read-only shadow comparison shows the
    proposed effective scope equals the legacy effective scope for every compared
    read. No mismatch may be resolved by falling back to user authority.
@@ -1854,6 +1944,41 @@ migration remains inert with the default `false`; the drained activation
 command refuses to write a per-organization receipt unless the switch is true.
 Once any receipt exists, API/worker startup and readiness also require true.
 That startup interlock is forward-only posture, not a rollback mechanism.
+Migration 0340 preserves the activation command and database function
+signatures while adding the settled-backfill proof above. New activation rows
+bind the six exact receipt ids. Older activation rows retain their existing
+zero-receipt evidence and remain replayable only for their identical stored
+inventory/parity digests; the migration never invents historical evidence. The
+database recomputes inventory, parity, and receipt evidence while holding the
+complete source-table fence and rejects a stale or fabricated supplied digest
+with SQLSTATE `40001`.
+
+Migration 0340 additionally makes that receipt writable. Migration 0303 created
+`session_tenancy_activations` with FORCE ROW LEVEL SECURITY and a
+`FOR SELECT`-only policy and no INSERT policy at all, so under the documented
+non-superuser-owner posture the activation was denied `42501` on its own append
+after every gate had already passed - the cutover could not commit at all. The
+new `session_tenancy_activation_receipt_insert` policy re-opens exactly that one
+command for exactly the migration owner, gated on a
+`session_tenancy_activation` marker the function sets only around the append and
+restores on every exit, and fenced to the transaction's own organization. INSERT
+is the complete write set: the table is append-only, no `UPDATE` or `DELETE`
+writer exists anywhere in the tree, and activation is one-way. The runtime role
+keeps `SELECT` and nothing else.
+
+Migration 0340 also freezes the deployment-wide advisory boundary
+`session-tenancy-canonical-boundary:v1` behind the owner-only
+`lock_session_tenancy_activation_boundary()` seam. Operator activation keeps
+the organization advisory prefix, acquires every source-table
+`ACCESS EXCLUSIVE` lock, and only then takes this boundary immediately before
+its final evidence recompute and receipt write. A future greenfield provisioning
+transaction must do the inverse work order: write its complete organization
+graph first, take this same boundary last, and then inspect the already-committed
+version-1 witness. This ordering means a setup transaction either commits
+unactivated before the first boundary or waits and observes it afterward; taking
+the global boundary before the operator's source locks would introduce a
+RowExclusive/global-lock deadlock and is forbidden. Migration 0340 does not
+itself auto-activate new organizations.
 
 ### What an operator must not do
 

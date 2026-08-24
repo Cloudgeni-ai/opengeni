@@ -12,6 +12,7 @@ const REQUIRED_MIGRATIONS = [
   "0301_session_snapshot_and_pin_visibility.sql",
   "0302_personal_workspace_session_ownership.sql",
   "0303_session_tenancy_product_activation.sql",
+  "0340_tenancy_backfill_activation_evidence.sql",
 ] as const;
 
 function argument(name: string): string | null {
@@ -23,7 +24,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
       .join(",")}}`;
   }
@@ -71,6 +72,58 @@ const REQUIRED_PARITY_GATES = [
   "identity_active_binding_owned",
   "user_scoped_resource_live_anchor",
 ] as const;
+
+const REQUIRED_BACKFILL_RECEIPT_FAMILIES = [
+  "organization_memberships",
+  "sessions",
+  "variable_sets",
+  "rigs",
+  "machines",
+  "connections",
+] as const;
+
+export function assertSessionTenancyBackfillEvidence(evidence: unknown): void {
+  if (
+    evidence === null ||
+    typeof evidence !== "object" ||
+    numberAt(evidence, ["schemaVersion"]) !== 1
+  ) {
+    throw new Error("Session tenancy activation backfill evidence is structurally invalid");
+  }
+  const record = evidence as Record<string, unknown>;
+  const families = record.families;
+  const receiptIds = record.receiptIds;
+  const blockers = record.blockers;
+  if (
+    record.ready !== true ||
+    families === null ||
+    typeof families !== "object" ||
+    !Array.isArray(receiptIds) ||
+    receiptIds.length !== REQUIRED_BACKFILL_RECEIPT_FAMILIES.length ||
+    !Array.isArray(blockers)
+  ) {
+    throw new Error(
+      `Session tenancy activation backfill evidence is not settled: ${canonicalJson(
+        blockers ?? [],
+      )}`,
+    );
+  }
+  const familyRecord = families as Record<string, unknown>;
+  const missing = REQUIRED_BACKFILL_RECEIPT_FAMILIES.filter(
+    (family) =>
+      familyRecord[family] === null ||
+      typeof familyRecord[family] !== "object" ||
+      (familyRecord[family] as Record<string, unknown>).status !== "completed" ||
+      (familyRecord[family] as Record<string, unknown>).blocker !== null,
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `Session tenancy activation backfill evidence is not settled: ${missing
+        .map((family) => `family:${family}`)
+        .join(", ")}`,
+    );
+  }
+}
 
 export function assertSessionTenancyActivationEvidence(inventory: unknown, parity: unknown): void {
   if (
@@ -172,9 +225,14 @@ async function main(): Promise<void> {
       const [parityRow] = await transaction<{ report: unknown }[]>`
         select check_organization_tenancy_parity(${organizationId}::uuid, 10, 30) as report
       `;
+      const [backfillRow] = await transaction<{ report: unknown }[]>`
+        select check_tenancy_backfill_activation_evidence(${organizationId}::uuid) as report
+      `;
       const inventory = inventoryRow?.report;
       const parity = parityRow?.report;
+      const backfillEvidence = backfillRow?.report;
       assertSessionTenancyActivationEvidence(inventory, parity);
+      assertSessionTenancyBackfillEvidence(backfillEvidence);
       const inventoryDigest = digest(inventory);
       const parityDigest = digest(parity);
       const [activation] = await transaction<
@@ -193,7 +251,7 @@ async function main(): Promise<void> {
         )
       `;
       if (!activation) throw new Error("Session tenancy activation returned no receipt");
-      return { ...activation, inventoryDigest, parityDigest };
+      return { ...activation, inventoryDigest, parityDigest, backfillEvidence };
     });
     console.log(JSON.stringify(result, null, 2));
   } finally {
