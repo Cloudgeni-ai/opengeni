@@ -670,6 +670,10 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
     expect(overview.status).toBe(200);
     const overviewBody = (await overview.json()) as any;
     expect(overviewBody.accounts[connected.id].canRedeem).toBe(true);
+    expect(overviewBody.accounts[connected.id].redemptionAccess).toEqual({
+      ownership: "current_human",
+      canClaimUnownedViaReconnect: false,
+    });
     expect(overviewBody.accounts[connected.id].resetCredits).toMatchObject({
       detailState: "detailed",
       detailsComplete: true,
@@ -688,6 +692,70 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       { status: "available", actionable: true },
     ]);
     expect(provider.consumeBodies).toHaveLength(0);
+
+    const unownedProviderAccountId = `legacy-unowned-${crypto.randomUUID()}`;
+    const unowned = await upsertCodexSubscriptionCredential(client.db, {
+      accountId,
+      workspaceId,
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({
+          access_token: "legacy-token",
+          refresh_token: "legacy-refresh",
+          id_token: "legacy-id",
+        }),
+      ),
+      chatgptAccountId: unownedProviderAccountId,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
+      connectedBySubjectId: null,
+    });
+    const unownedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(unownedOverview.status).toBe(200);
+    expect(((await unownedOverview.json()) as any).accounts[unowned.id]).toMatchObject({
+      canRedeem: false,
+      canResumeRedemption: false,
+      redemptionAccess: {
+        ownership: "unowned",
+        canClaimUnownedViaReconnect: true,
+      },
+    });
+    const claimed = await upsertCodexSubscriptionCredential(client.db, {
+      accountId,
+      workspaceId,
+      credentialEncrypted: encryptEnvironmentValue(
+        key,
+        JSON.stringify({
+          access_token: "claimed-token",
+          refresh_token: "claimed-refresh",
+          id_token: "claimed-id",
+        }),
+      ),
+      chatgptAccountId: unownedProviderAccountId,
+      scopes: null,
+      planType: "pro",
+      isFedramp: false,
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+      lastRefreshAt: new Date(),
+      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+    });
+    expect(claimed).toMatchObject({ kind: "upserted", id: unowned.id, isNew: false });
+    const claimedOverview = await api.request(`/v1/workspaces/${workspaceId}/codex/overview`, {
+      headers: { cookie: OWNER_COOKIE },
+    });
+    expect(claimedOverview.status).toBe(200);
+    expect(((await claimedOverview.json()) as any).accounts[unowned.id]).toMatchObject({
+      canRedeem: true,
+      redemptionAccess: {
+        ownership: "current_human",
+        canClaimUnownedViaReconnect: false,
+      },
+    });
 
     const unhealthy = await upsertCodexSubscriptionCredential(client.db, {
       accountId,
@@ -765,7 +833,13 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       headers: { cookie: OTHER_COOKIE },
     });
     expect(otherOverview.status).toBe(200);
-    expect(((await otherOverview.json()) as any).accounts[connected.id].canRedeem).toBe(false);
+    expect(((await otherOverview.json()) as any).accounts[connected.id]).toMatchObject({
+      canRedeem: false,
+      redemptionAccess: {
+        ownership: "different_human",
+        canClaimUnownedViaReconnect: false,
+      },
+    });
     const otherPrepared = await prepare(
       api,
       workspaceId,

@@ -428,12 +428,14 @@ function ResetCreditInventory({
   busy,
   recoveryAttempts,
   onRedeem,
+  onReconnectSameAccount,
 }: {
   overview: CodexAccountOverview | undefined;
   now: number;
   busy: boolean;
   recoveryAttempts: RedemptionAttemptView[];
   onRedeem: (credit: CodexResetCredit, recovery?: RedemptionAttemptView) => void;
+  onReconnectSameAccount: () => void;
 }) {
   if (!overview) return null;
   const reset = overview.resetCredits;
@@ -450,6 +452,8 @@ function ResetCreditInventory({
   const hiddenRecoveries = recoveryAttempts.filter(
     (attempt) => !visibleCreditIds.has(attempt.creditId),
   );
+  const viewOnlyOwnership =
+    count !== null && count > 0 && !overview.canRedeem ? overview.redemptionAccess.ownership : null;
   return (
     <div className="grid min-w-0 gap-2 rounded-md border border-border/70 bg-surface/60 p-2.5">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -473,6 +477,37 @@ function ResetCreditInventory({
           ? ` Checked ${absoluteTimestamp(reset.fetchedAt)} (${relativeTimestamp(reset.fetchedAt, now)}).`
           : ""}
       </p>
+      {viewOnlyOwnership === "unowned" ? (
+        <div
+          className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded border border-status-waiting/30 bg-status-waiting/10 p-2"
+          role="status"
+        >
+          <p className="min-w-0 flex-1 text-2xs text-fg-muted">
+            This legacy connection has no recorded human owner, so its resets are view only.
+            Reconnect the same ChatGPT account while signed in as yourself to claim it safely.
+          </p>
+          {overview.redemptionAccess.canClaimUnownedViaReconnect ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              className="min-h-11 shrink-0"
+              disabled={busy}
+              onClick={onReconnectSameAccount}
+            >
+              <RefreshCwIcon className="size-3.5" /> Reconnect same account
+            </Button>
+          ) : null}
+        </div>
+      ) : viewOnlyOwnership === "different_human" ? (
+        <p
+          className="rounded border border-border/70 bg-surface-2/50 p-2 text-2xs text-fg-muted"
+          role="status"
+        >
+          This connection belongs to another person. Only that person can redeem its resets;
+          disconnecting it is the explicit ownership-reset boundary.
+        </p>
+      ) : null}
       {reset.credits.length > 0 ? (
         <div className="grid min-w-0 gap-1.5">
           {reset.credits.map((credit) => {
@@ -905,7 +940,7 @@ export function CodexSubscriptionsCard({
           if (!cancelled.current) {
             setPending(null);
             toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
-            await refreshAccounts();
+            await refreshUsage();
           }
           return;
         }
@@ -925,7 +960,7 @@ export function CodexSubscriptionsCard({
     } finally {
       setBusy(false);
     }
-  }, [client, workspaceId, refreshAccounts]);
+  }, [client, workspaceId, refreshUsage]);
 
   const activate = useCallback(
     async (accountId: string) => {
@@ -1490,6 +1525,7 @@ export function CodexSubscriptionsCard({
                       onRedeem={(credit, recovery) =>
                         void beginRedemption(account.id, credit, recovery)
                       }
+                      onReconnectSameAccount={() => void connect()}
                     />
                     {canManage ? (
                       <div className="flex flex-wrap items-center gap-2">

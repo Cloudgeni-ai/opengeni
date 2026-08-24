@@ -432,6 +432,7 @@ beforeAll(async () => {
     ["unsupported", "Unsupported account"],
     ["error", "Error account"],
     ["cached", "Cached account"],
+    ["unowned", "Unowned account"],
   ] as const) {
     const connected = await upsertCodexSubscriptionCredential(client.db, {
       accountId,
@@ -450,7 +451,7 @@ beforeAll(async () => {
       isFedramp: false,
       expiresAt: new Date(Date.now() + 60 * 60_000),
       lastRefreshAt: new Date(),
-      connectedBySubjectId: `user:${OWNER_USER_ID}`,
+      connectedBySubjectId: externalId === "unowned" ? null : `user:${OWNER_USER_ID}`,
       label,
     });
     if (externalId === "detailed") detailedCredentialId = connected.id;
@@ -566,6 +567,16 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     await accountCard("Cached account")
       .getByText(/OpenGeni cache · stale/)
       .waitFor();
+    await expandAccount("Unowned account");
+    const unownedCard = accountCard("Unowned account");
+    await unownedCard
+      .getByText(/no recorded human owner.+view only.+Reconnect the same ChatGPT account/s)
+      .waitFor();
+    expect(await unownedCard.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
+    const reconnectSameAccount = unownedCard.getByRole("button", {
+      name: "Reconnect same account",
+    });
+    expect((await reconnectSameAccount.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     expect(provider.maxActiveOverviewCalls).toBeLessThanOrEqual(4);
     await expandAccount("Detailed account");
     expect(await page.getByRole("button", { name: /^Redeem / }).count()).toBe(1);
@@ -615,6 +626,15 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       .count();
     releaseMobileAccountList();
     expect(initialMobileAccountCount).toBe(0);
+    const mobileUnowned = await expandAccountDetails(mobile, "Unowned account", "tap");
+    await mobileUnowned
+      .getByText(/no recorded human owner.+view only.+Reconnect the same ChatGPT account/s)
+      .waitFor();
+    expect(await mobileUnowned.getByRole("button", { name: /^Redeem / }).count()).toBe(0);
+    expect(
+      (await mobileUnowned.getByRole("button", { name: "Reconnect same account" }).boundingBox())
+        ?.height ?? 0,
+    ).toBeGreaterThanOrEqual(44);
     const mobileDetailed = await expandAccountDetails(mobile, "Detailed account", "tap");
     await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).waitFor();
     expect(

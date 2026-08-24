@@ -3204,6 +3204,12 @@ export type CodexAccountOverview = {
     credits: CodexResetCredit[];
   };
   canRedeem: boolean;
+  /** Secret-free reason redemption is owner-actionable or view-only. */
+  redemptionAccess: {
+    ownership: "current_human" | "unowned" | "different_human" | "managed_human_unavailable";
+    /** A direct managed-cookie admin may claim only an unowned same-provider row by reconnecting. */
+    canClaimUnownedViaReconnect: boolean;
+  };
   /** Owning managed-cookie human may replay durable completion without a healthy provider token. */
   canResumeRedemption: boolean;
   /** Durable owner-scoped ambiguity/completion discovery; never redemption authority for agents. */
