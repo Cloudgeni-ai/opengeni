@@ -400,7 +400,7 @@ describe("SessionTenancyControl", () => {
   });
 
   test("offers no private fork destination when the organization has not enabled private sessions", async () => {
-    // Migration 0334 fails a private fork into a shared workspace closed with
+    // Migration 0335 fails a private fork into a shared workspace closed with
     // SQLSTATE 55000 when the organization has not enabled private sessions, so
     // the dialog must not present a choice the database refuses. The same
     // `canForkPrivately={false}` state also covers "not answered yet".

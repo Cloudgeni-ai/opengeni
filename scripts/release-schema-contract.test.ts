@@ -167,13 +167,13 @@ describe("release schema contract", () => {
       "0331_managed_organization_creation.sql",
       "0332_organization_shared_workspace_control_plane.sql",
       "0333_session_turn_prompt_routing.sql",
-      "0334_atomic_session_fork_visibility.sql",
+      "0335_atomic_session_fork_visibility.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
     expect(completeSourceContract).toMatchObject({
-      fileCount: 343,
-      latestMigration: "0334_atomic_session_fork_visibility.sql",
+      fileCount: 344,
+      latestMigration: "0335_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -185,7 +185,7 @@ describe("release schema contract", () => {
     });
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0334_atomic_session_fork_visibility.sql",
+        (migration) => migration.path === "0335_atomic_session_fork_visibility.sql",
       ),
     ).toMatchObject({
       sha256: "75604a1d9cce1bf698184e87d4f0405493e200e06378938b2f10adbfaa565f2d",
@@ -628,9 +628,14 @@ describe("release schema contract", () => {
     };
     const releaseSchemaContractHash = (includesActivation: boolean): string | null => {
       if (migrations.has("0334_connected_machine_workspace_root.sql")) {
+        // Re-pinned: #1799 computed these against a tree that did not yet
+        // contain #1805's reconciliation, so protected main landed red at
+        // ca8aad33d. The aggregate covers the whole filtered migration set, not
+        // just the file a PR adds, so a pin goes stale the moment another
+        // migration merges first. Recomputed from origin/main.
         return includesActivation
-          ? "34e6f107db58c27e56d14558a98aa178e081753d1fa6f1c8547cd71947f82ca2"
-          : "12b765b2e7c99d847a85c67ea3a37fd0a5bdbd5cb1af5789120f1d7edb535331";
+          ? "3d058b3b8c05d2ebf84de1b1024c995ec131c3c4dcb973a0c42014bca1046e3f"
+          : "eab718bef0df92dd9c78feb9639c0098ec0bbce267de79146315091ce8289d98";
       }
       if (migrations.has("0333_session_turn_prompt_routing.sql")) {
         return includesActivation

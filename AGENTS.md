@@ -115,7 +115,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   workspace-owned/workspace-shared. Session visibility is now product-reachable
   for an activated organization: migration 0225 activated owner derivation, the
   capability-fenced direct-write trigger, and visibility-aware reads; 0303
-  activated the first public caller; and migration 0334 makes
+  activated the first public caller; and migration 0335 makes
   `fork_session_content` an atomic, idempotency-keyed fork into either
   visibility with `replay_applied_session_fork` recovering a committed
   destination before mutable source authorization is consulted. That boundary
@@ -127,7 +127,7 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   test deliberately. Migration 0323 adds a separate
   owner/admin organization setting (`organization_private_session_settings`)
   that, together with the 0303 readiness receipt, gates new Only-me creates in
-  shared workspaces; migration 0334 applies the same product decision to a
+  shared workspaces; migration 0335 applies the same product decision to a
   private fork destination in a shared workspace, after keyed replay so a
   committed fork still replays once an owner disables the setting. The setting
   grants no access. Owner derivation reads STATED

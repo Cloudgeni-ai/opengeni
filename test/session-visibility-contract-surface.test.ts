@@ -50,7 +50,7 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0225_session_visibility_fork_activation.sql",
   "packages/db/drizzle/0289_session_composer_policy_authority.sql",
   "packages/db/drizzle/0303_session_tenancy_product_activation.sql",
-  "packages/db/drizzle/0334_atomic_session_fork_visibility.sql",
+  "packages/db/drizzle/0335_atomic_session_fork_visibility.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",

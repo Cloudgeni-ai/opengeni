@@ -701,7 +701,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     }
   });
 
-  test("0334 fork overloads pin the dedicated schema ahead of caller TEMP shadows", async () => {
+  test("0335 fork overloads pin the dedicated schema ahead of caller TEMP shadows", async () => {
     if (!available) return;
     const routines = await admin<
       Array<{
