@@ -253,12 +253,7 @@ function dispatchFixture(
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({
-      method,
-      path: url.pathname,
-      query: url.searchParams,
-      body,
-    });
+    requests.push({ method, path: url.pathname, query: url.searchParams, body });
     const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
     if (method === "GET" && url.pathname === prefix) return response(repository());
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
@@ -935,7 +930,12 @@ function retainControllerFixture() {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    requests.push({
+      method,
+      path: url.pathname,
+      query: url.searchParams,
+      body,
+    });
     if (method === "POST" && url.pathname === `${prefix}/git/refs`) {
       refRetained = true;
       return response({ ref: body?.ref, object: { type: "commit", sha: body?.sha } }, 201);
@@ -2265,6 +2265,7 @@ function approvalFixture(
     historicalHeadChecks?: Array<Record<string, unknown>>;
     historicalSourceChecks?: Array<Record<string, unknown>>;
     sourceRun?: Record<string, unknown>;
+    otherSourceRuns?: Record<string, Record<string, unknown>>;
     sourceAttemptJobs?: Array<Record<string, unknown>>;
     releaseHeadRefSha?: string | null;
     release?: Record<string, unknown> | null;
@@ -2580,6 +2581,13 @@ function approvalFixture(
           head_repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         },
       );
+    const otherSourceRunMatch = url.pathname.match(
+      new RegExp(`^${prefix}/actions/runs/([1-9][0-9]*)$`),
+    );
+    if (method === "GET" && otherSourceRunMatch) {
+      const otherRun = options.otherSourceRuns?.[otherSourceRunMatch[1]];
+      if (otherRun) return response(otherRun);
+    }
     if (
       method === "GET" &&
       url.pathname === `${prefix}/actions/runs/${sourceCiRunId}/attempts/${sourceCiRunAttempt}/jobs`
@@ -3208,7 +3216,7 @@ describe("release approval provenance", () => {
     );
   });
 
-  test("rejects failed latest CI attempts and source checks from another workflow run", async () => {
+  test("rejects failed latest CI attempts", async () => {
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
@@ -3232,23 +3240,97 @@ describe("release approval provenance", () => {
         }).fetchImpl,
       }),
     ).rejects.toThrow("required source workflow did not complete successfully");
+  });
 
+  test("ignores same-name pull-request checks and binds the unique push CI run", async () => {
+    const pullRequestRunId = 999999;
+    const pullRequestCheckSuiteId = 999998;
+    const pullRequestChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map(
+      (name, index) => {
+        const jobId = 8050 + index;
+        return sourceCiCheck(name, 50 + index, {
+          id: jobId,
+          details_url:
+            `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+            `/actions/runs/${pullRequestRunId}/job/${jobId}`,
+          check_suite: { id: pullRequestCheckSuiteId },
+        });
+      },
+    );
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: approvalFixture({
+        historicalSourceChecks: pullRequestChecks,
+        otherSourceRuns: {
+          [pullRequestRunId]: {
+            id: pullRequestRunId,
+            run_attempt: 1,
+            status: "completed",
+            conclusion: "failure",
+            event: "pull_request",
+            path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+            head_sha: mergeSha,
+            head_branch: "main",
+            check_suite_id: pullRequestCheckSuiteId,
+            html_url:
+              `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+              `/actions/runs/${pullRequestRunId}`,
+            repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+            head_repository: {
+              full_name: RELEASE_AUTOMATION_CONTRACT.repository,
+            },
+          },
+        },
+      }).fetchImpl,
+      logger: { log() {} },
+    });
+
+    expect(
+      result.requiredSourceChecks.every((check) => check.workflowRunId === sourceCiRunId),
+    ).toBe(true);
+  });
+
+  test("rejects multiple push CI workflow runs on the source SHA", async () => {
+    const duplicateRunId = 999999;
+    const duplicateCheckSuiteId = 999998;
+    const duplicateChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => {
+      const jobId = 8050 + index;
+      return sourceCiCheck(name, 50 + index, {
+        id: jobId,
+        details_url:
+          `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+          `/actions/runs/${duplicateRunId}/job/${jobId}`,
+        check_suite: { id: duplicateCheckSuiteId },
+      });
+    });
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
         fetchImpl: approvalFixture({
-          historicalSourceChecks: [
-            sourceCiCheck(RELEASE_AUTOMATION_CONTRACT.checks.requiredSource[0], 50, {
-              id: 8050,
-              details_url:
+          historicalSourceChecks: duplicateChecks,
+          otherSourceRuns: {
+            [duplicateRunId]: {
+              id: duplicateRunId,
+              run_attempt: 1,
+              status: "completed",
+              conclusion: "success",
+              event: "push",
+              path: RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath,
+              head_sha: mergeSha,
+              head_branch: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+              check_suite_id: duplicateCheckSuiteId,
+              html_url:
                 `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
-                "/actions/runs/999999/job/8050",
-              check_suite: { id: 999999 },
-            }),
-          ],
+                `/actions/runs/${duplicateRunId}`,
+              repository: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+              head_repository: {
+                full_name: RELEASE_AUTOMATION_CONTRACT.repository,
+              },
+            },
+          },
         }).fetchImpl,
       }),
-    ).rejects.toThrow("required source checks do not share one workflow run");
+    ).rejects.toThrow("required source checks do not identify exactly one push CI workflow run");
   });
 
   test("requires the immutable reviewed-head evidence ref", async () => {

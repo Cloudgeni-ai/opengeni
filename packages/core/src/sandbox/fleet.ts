@@ -684,8 +684,8 @@ export type RunOnResult = {
 export type RunOnSelfhostedMachine = {
   workspaceId: string;
   agentId: string;
-  /** Exact live daemon. Optional only for in-memory protocol tests. */
-  connectionInstanceId?: string;
+  /** Exact live daemon pinned for this operation. */
+  connectionInstanceId: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
   /** Short request/reply deadline for read/write and other control operations. */
@@ -751,9 +751,7 @@ export async function executeRunOnSelfhostedMachine(
   const session = new SelfhostedSession({
     workspaceId: machine.workspaceId,
     agentId: machine.agentId,
-    ...(machine.connectionInstanceId !== undefined
-      ? { connectionInstanceId: machine.connectionInstanceId }
-      : {}),
+    connectionInstanceId: machine.connectionInstanceId,
     controlRpc: machine.controlRpc,
     relay: machine.relay,
     timeoutMs: machine.controlTimeoutMs,

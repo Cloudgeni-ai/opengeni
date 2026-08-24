@@ -1,5 +1,37 @@
 # @opengeni/sdk
 
+## 2.2.0
+
+### Minor Changes
+
+- 4be2055: Child lifecycle notices. `SessionSystemUpdateKind` gains `child_requires_action`, `child_requires_action_resolved`, `child_paused`, `child_waiting_capacity`, and `child_progress` with typed, bounded payload schemas (no subject ids, credentials, or raw tool arguments), plus `SESSION_SYSTEM_UPDATE_WAKE_CLASS` (`immediate` for every pre-existing kind and `child_requires_action`; `deferred` for the other four) and `CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS`. The first-party tool catalog gains `session_human_input_respond` (default selection, not goal-required). The SDK mirrors the new kinds and tool name.
+- e6ffdc7: Add the `backoff_pending` goal continuation reason (idle pacing between consecutive no-input continuations, `nextAttemptAt` at the pacing deadline) and the `SessionGoalResumedReason` / `SessionGoalResumedEventPayload` contracts for `goal.resumed` (`api` for the operator PATCH, `external_input` for the system resume of a `max_auto_continuations` pause). The React goal pill treats `backoff_pending` as ordinary scheduled work.
+- 0b3b8df: Add an explicit organization-owner-confirmed agent path for company-profile and
+  strategic-goal administration. The two-step MCP flow stages an immutable inactive
+  full-profile proposal, binds activation to the initiating human's exact
+  structured confirmation, revalidates current organization authority and profile
+  CAS in PostgreSQL under the canonical workspace/session lock order, and remains
+  independent of workspace learning mode. The manual `account:admin` route keeps
+  its admission contract, and the earlier proposal-only `company_profile_propose`
+  tool (`durable_learning` provenance) is retired in favor of this path.
+- bbd19e0: Add an owner/admin organization setting that enables Only-me chats in shared
+  workspaces for organizations holding the session-tenancy readiness receipt
+  (`GET`/`PATCH /v1/organizations/:organizationId/private-session-settings`,
+  `@opengeni/sdk/organization-private-session-settings`, and the organization
+  settings page). Already activated organizations are backfilled enabled.
+- 5d664d8: Surface why a goal is not pursuing and how long children have waited for a human. `Session.treeStats` gains optional `attentionSince` (earliest `requires_action` entry among the counted attention descendants), `Session` gains optional `requiresActionSince` on list and lineage reads, and the goal continuation projection gains optional `holdReason` for a `held_for_input` hold. `SessionChrome`'s goal pill spells out the pause reason ("Paused · cap" / "budget" / "by you" / "agent"), explains an idle-backoff check time and an agent `goal_wait` hold, and exports `sessionChromeGoalPillLabel` / `sessionChromeGoalPillExplanation`.
+
+### Patch Changes
+
+- Updated dependencies [4be2055]
+- Updated dependencies [de3f376]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [e91d89e]
+- Updated dependencies [5d664d8]
+  - @opengeni/contracts@2.2.0
+
 ## 2.1.1
 
 ### Patch Changes

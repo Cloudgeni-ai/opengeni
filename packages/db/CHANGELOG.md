@@ -1,5 +1,65 @@
 # @opengeni/db
 
+## 3.1.0
+
+### Minor Changes
+
+- 4be2055: Child lifecycle notices for parent sessions (rolling migration 0325 widens the `session_system_updates` / `session_system_update_outbox` kind checks and adds the `session_system_updates_pending_kind_source_idx` partial index). Behind the process-global flag installed by `configureChildLifecycleNotices`, the child's own lifecycle transactions enqueue one dedupe-keyed outbox row for the parent: `applySessionTurnSettlement` on a `requires_action` freeze (`child_requires_action`, bounded human-input previews plus approval ids) and on terminal cancellation of pending requests; `acceptSessionHumanInputResponse`, `acceptSessionApprovalDecision`, expiry, and subtree Cancel (`child_requires_action_resolved`); a direct `pause` in `mutateSessionControlInTransaction` (`child_paused`, never for a recursive ancestor pause or when the parent's own attempt issued it); `armCodexCapacityWait` / `armXaiCapacityWait` (`child_waiting_capacity`); `recordSessionGoalProgressWithEvent` (`child_progress`). Every producer takes the child-lifecycle lock prefix (the parent session row joins the UUID-ordered session lock) and the shared `parentOutboxAuthorityTx` authority resolution; the failed/idle terminal producers now route through the same `enqueueChildLifecycleNoticeOutboxTx` writer. `addSessionSystemUpdateWithSourceMutation` honors the kind's wake class (`deferred` kinds insert the pending row and event only, never wake or auto-resume a goal), applies producer-side supersession (a resolution supersedes the pending `child_requires_action` of the same exact child turn generation; a newer `child_progress` supersedes the older pending one) with a `system.update.cancelled` fact, and no child notice wakes a parent whose goal is not active. `materializeGoalContinuation` and `peekSessionWork` let only `immediate`-class pending input win against a current `goal_wait` hold. Outbox rows of every child-lifecycle kind are typed through `SessionSystemUpdateOutboxDelivery`.
+  Hardening for unknown kinds (any image from here on): `claimPendingSessionSystemUpdateOutbox` dead-letters one unparseable outbox row (`status = failed`, bounded `last_error`) and keeps delivering the rest, and the claim path marks a pending `session_system_updates` row whose kind or payload it cannot parse `failed` with a visible `system.update.cancelled{reason:"unrecognized_kind"}` instead of throwing into an endless re-peek. A delivered `child_terminal_result` supersedes that child's still-pending `child_progress` / `child_waiting_capacity` notices (`superseded_by_terminal`; a pending `child_requires_action` is left to its exact resolution because terminal delivery is unordered against notice creation); `failSessionWorkBeforeAttemptClaim` resolves the child's cancelled human-input rows for the parent; interaction-intervention expiry records `respondedByKind: system` and the REST routes record `api` for key principals. With the flag off, the only behavioural change is the widened lock set (the parent session row `FOR NO KEY UPDATE`) on requires_action settlement, goal progress, and capacity-wait arms.
+- de3f376: Bound and shape the durable text an agent authors on a user's behalf. The budget
+  follows the destination, on every agent surface that reaches it. A mandatory
+  workspace rule is composed verbatim into the prompt of every session it applies
+  to, so `remember`, `instruction_policy_propose`, and `task_note_promote_instruction_policy`
+  are all capped at 600 characters; the preference destination is capped at 1,200
+  across its three surfaces, because only its short descriptor is composed and the
+  content is retrieved on demand. Task-note promotion is checked in the database
+  layer, where the content is the note rather than a request field, and is rejected
+  rather than truncated before any evidence, claim, or proposal row is written.
+  `company_profile_propose`, the largest always-on surface, is capped for agents at
+  400 characters per scalar, 200 per list entry, and 4,096 UTF-8 bytes total. The
+  Knowledge lane keeps its 4,000-character retrieval-evidence ceiling, and every
+  human editor limit is unchanged so nothing a person already typed becomes
+  invalid. Tool descriptions now state the prompt cost and the authoring shape, and
+  the `remember` confirmation card names the character count and destination so a
+  human can judge the cost before saving. Existing stored revisions are never
+  rewritten.
+- e6ffdc7: Input-aware goal continuation pacing. `auto_continuations` now counts only consecutive synthesized continuations that consumed no external input: the claim that binds a goal turn to a batch carrying any other machine input resets it, and the latest-finished-turn reset orders by finish time so a human prompt queued after internal turns restarts the streak. A `max_auto_continuations` pause is pacing rather than intent and auto-resumes in the same commit as new external input from every producer (child results, scheduled occurrences, media results, Agent messages, Agent Steer, human/API Send/Steer) with `goal.resumed{actor:"system", reason:"external_input"}`; `user_pause`/`api`/`agent`/`limits` pauses are never auto-resumed. A late child result or child message can therefore revive a cap-paused parent. "Newest finished turn" is ordered by finish time in the hold, evaluator, backoff, and projection, so a human turn finishing after a `goal_wait` turn retires the hold; a hold whose deadline just passed is due now and skips the backoff once. `materializeGoalContinuation` accepts an optional `idleBackoff` policy and returns `deferred` (armed `goal_idle_backoff` workflow-wake row at the pacing deadline, ledger untouched) between consecutive no-input continuations; the goal projection reports `backoff_pending` with `nextAttemptAt`. No migration.
+- 0b3b8df: Add an explicit organization-owner-confirmed agent path for company-profile and
+  strategic-goal administration. The two-step MCP flow stages an immutable inactive
+  full-profile proposal, binds activation to the initiating human's exact
+  structured confirmation, revalidates current organization authority and profile
+  CAS in PostgreSQL under the canonical workspace/session lock order, and remains
+  independent of workspace learning mode. The manual `account:admin` route keeps
+  its admission contract, and the earlier proposal-only `company_profile_propose`
+  tool (`durable_learning` provenance) is retired in favor of this path.
+- bbd19e0: Add an owner/admin organization setting that enables Only-me chats in shared
+  workspaces for organizations holding the session-tenancy readiness receipt
+  (`GET`/`PATCH /v1/organizations/:organizationId/private-session-settings`,
+  `@opengeni/sdk/organization-private-session-settings`, and the organization
+  settings page). Already activated organizations are backfilled enabled.
+- 8e2361b: Slack first-task onboarding hint, frozen per interaction (rolling migration 0327 adds the nullable `slack_bot_user_links.first_task_hint_interaction_id` and `slack_interactions.first_task_hint`; no defaults, no backfill, and both tables keep their FORCE-RLS workspace-isolation posture). `resolveSlackInteractionFirstTaskHint` decides once whether an interaction's acknowledgement renders the hint and writes that boolean to the interaction row in the same transaction that claims the per-identity slot, so at most one interaction per Slack identity per installation is granted it. Because `slack_bot_post_operations` binds one operation id to a request digest over the message text, and acknowledgements are re-rendered on repair, later calls replay the frozen boolean and reproduce identical bytes; unlinking and relinking the Slack identity cannot flip an acknowledgement that already rendered. Failure raises rather than degrading to "no hint". `SlackInteraction` gains `firstTaskHint` and `SlackBotUserLink` gains `firstTaskHintInteractionId`; neither `getOrCreateSlackInteraction` nor `saveSlackBotUserLink` can write them, and claiming does not bump the link row's `updated_at`.
+- 5d664d8: Surface why a goal is not pursuing and how long children have waited for a human. `Session.treeStats` gains optional `attentionSince` (earliest `requires_action` entry among the counted attention descendants), `Session` gains optional `requiresActionSince` on list and lineage reads, and the goal continuation projection gains optional `holdReason` for a `held_for_input` hold. `SessionChrome`'s goal pill spells out the pause reason ("Paused · cap" / "budget" / "by you" / "agent"), explains an idle-backoff check time and an agent `goal_wait` hold, and exports `sessionChromeGoalPillLabel` / `sessionChromeGoalPillExplanation`.
+
+### Patch Changes
+
+- 1fc235b: Omit a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim) from `sessions_list` `includeLastMessage` previews and the MCP `session_events` monitoring read, so orchestrators do not mistake work the model never received for processed conversation. `queuedPromptCount` still reports waiting work, the exact stored row appears at its original sequence once the turn is claimed, and REST event pages, SSE, and forensic reads are unchanged. Rolling migration 0322 adds the partial index `session_turns_unclaimed_prompt_trigger_idx` (`workspace_id, session_id, trigger_event_id` where `started_at IS NULL`) that serves the unclaimed-turn probe.
+- a9cd9e7: Add the default-off first-party GitHub REST MCP bridge with separate workspace-App and personal-OAuth actors, exact accepted-repository authority, reviewed read/write tools, connector-policy defaults for writes, Codemode parity, bounded credential-free results, and no replay after ambiguous mutations.
+- acd38d1: Retire Browser and Desktop resources when their source task leaves the Connected Machine that owns their controller, stop retrying the terminal placement conflict, and let Desktop create one replacement on the task's current placement.
+- 45bffc3: Return empty personal-resource authority pages before session-tenancy activation while keeping mutations and runtime use activation-gated. Allow managed humans to read their personal Rig catalog without granting Rig administration.
+- Updated dependencies [4be2055]
+- Updated dependencies [4be2055]
+- Updated dependencies [de3f376]
+- Updated dependencies [a9cd9e7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [e91d89e]
+- Updated dependencies [5d664d8]
+  - @opengeni/config@0.19.0
+  - @opengeni/contracts@2.2.0
+  - @opengeni/codemode@0.4.12
+
 ## 3.0.1
 
 ### Patch Changes

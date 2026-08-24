@@ -50,7 +50,7 @@ export function canonicalControlResponse(): ControlResponse {
 
 /**
  * A richer `ControlRequest` exercising strings, a u32, an enum, repeated strings,
- * bytes, and a single-entry map (via the wrapped `ExecRequest`).
+ * bytes, and a single-entry map through replayable `OpStart` exec.
  */
 export function canonicalControlRequest(): ControlRequest {
   return {
@@ -58,14 +58,22 @@ export function canonicalControlRequest(): ControlRequest {
     epoch: 7,
     resourcePolicy: undefined,
     op: {
-      $case: "exec",
-      exec: {
-        command: ["echo", "hello"],
-        shell: false,
-        cwd: "/home/user/repo",
-        env: { OPENGENI_AGENT: "1" },
-        stdin: bytes("piped-input"),
-        timeoutMs: 5000,
+      $case: "opStart",
+      opStart: {
+        op: {
+          $case: "exec",
+          exec: {
+            command: ["echo", "hello"],
+            shell: false,
+            cwd: "/home/user/repo",
+            env: { OPENGENI_AGENT: "1" },
+            stdin: bytes("piped-input"),
+            timeoutMs: 5000,
+          },
+        },
+        windowBytes: "65536",
+        deadlineMs: "1800000000000",
+        originId: "session-abc",
       },
     },
   };

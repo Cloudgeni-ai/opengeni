@@ -172,6 +172,11 @@ import {
   type SessionDiscoveryAncestor,
 } from "@opengeni/db";
 import {
+  backgroundCommandActivityForSessions,
+  listSessionBackgroundCommands,
+  requestSessionBackgroundCommandCancellation,
+} from "@opengeni/db/session-background-commands";
+import {
   appendAndPublishEvents,
   boundSessionEventHttpPage,
   coalesceSessionEventDeltas,
@@ -649,12 +654,19 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     // to raw HTTP consumers without changing that response shape.
     c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
     const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
-    const decorate = (session: Session): Session =>
-      sessionWithEffectiveToolPolicy(
-        session,
+    const commandActivity = await backgroundCommandActivityForSessions(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionIds: [...page.pinned, ...page.sessions].map((session) => session.id),
+    });
+    const decorate = (session: Session): Session => {
+      const activity = commandActivity.get(session.id);
+      return sessionWithEffectiveToolPolicy(
+        { ...session, ...(activity ? { backgroundCommandActivity: activity } : {}) },
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
       );
+    };
     if (pageView) {
       return c.json({
         ...page,
@@ -766,6 +778,42 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
   });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/background-commands", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const commands = await listSessionBackgroundCommands(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+    });
+    return c.json({ commands });
+  });
+
+  app.delete(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/background-commands/:commandId",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      const commandId = c.req.param("commandId");
+      if (!z.string().uuid().safeParse(commandId).success) {
+        throw new HTTPException(404, { message: "background command not found" });
+      }
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const result = await requestSessionBackgroundCommandCancellation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        commandId,
+        subjectId: grant.subjectId,
+      });
+      if (!result.command) {
+        throw new HTTPException(404, { message: "background command not found" });
+      }
+      return c.json(result);
+    },
+  );
 
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/visibility", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -1770,6 +1818,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       case "active_video_generations":
         throw new HTTPException(409, {
           message: "wait for active video generations to finish before deleting this workstream",
+        });
+      case "active_background_commands":
+        throw new HTTPException(409, {
+          message: "pause or cancel this workstream's background commands before deleting it",
         });
       case "live_sandboxes":
         throw new HTTPException(409, {
@@ -4071,6 +4123,10 @@ export function sessionAuthorizationOperationForHttp(
     return "session.mcp.approval_policy.write";
   }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
+  if (suffix === "/background-commands" && verb === "GET") return "session.read";
+  if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
+    return "session.control";
+  }
   if (suffix === "/codex-account" && verb === "POST") {
     return "session.codex_account.write";
   }

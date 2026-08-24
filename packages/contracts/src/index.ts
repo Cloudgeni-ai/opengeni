@@ -2077,6 +2077,48 @@ export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   channelPolicy: { mode: "bot_member" },
 } as const satisfies WorkspaceSlackReactionSummonSettings;
 
+/**
+ * Per-workspace switches for the two Slack orchestration notices: a pointer
+ * card when a child worker of a Slack-originated session blocks on human input
+ * or a tool approval, and a one-line notice when that session's goal pauses for
+ * budget or the continuation cap.
+ *
+ * Both are OFF unless this workspace explicitly turned them on. An unsolicited
+ * Slack post is worse than a missed one, and the in-app rail and priority feed
+ * already surface a blocked child, so an absent, malformed, or partially
+ * invalid setting resolves to both disabled - see
+ * `resolveWorkspaceSlackOrchestrationNoticeSettings`.
+ *
+ * Deliberately not `.strict()`: this is a KNOWN key of the stored settings bag,
+ * so rejecting it rejects the whole bag and silently reverts memoryEnabled,
+ * agentHumanInputEnabled, codexCompactionDefault, voiceInput, and the Slack
+ * reaction shortcut to their defaults too. An unknown key here is a notice a
+ * newer release added, and a rollback must not cost five unrelated settings.
+ * An invalid VALUE still fails the bag, and therefore fails closed to silence.
+ */
+export const WorkspaceSlackOrchestrationNoticeSettings = z.object({
+  childRequiresAction: z.boolean().optional(),
+  goalPaused: z.boolean().optional(),
+});
+export type WorkspaceSlackOrchestrationNoticeSettings = z.infer<
+  typeof WorkspaceSlackOrchestrationNoticeSettings
+>;
+
+/**
+ * The resolved answer: every notice is an explicit boolean, never absent.
+ * Spelled out rather than derived with `Required<>`, which would keep the
+ * `| undefined` that the optional zod fields carry into their inferred type.
+ */
+export type ResolvedWorkspaceSlackOrchestrationNoticeSettings = {
+  childRequiresAction: boolean;
+  goalPaused: boolean;
+};
+
+export const DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS = {
+  childRequiresAction: false,
+  goalPaused: false,
+} as const satisfies ResolvedWorkspaceSlackOrchestrationNoticeSettings;
+
 // Memory V1's standing prompt block is retired, but the enum deliberately still
 // ACCEPTS `legacy_standing`. `.passthrough()` only preserves unknown keys - it
 // does not rescue a known key holding a value the enum rejects - so collapsing
@@ -2127,6 +2169,11 @@ export const WorkspaceSettingsSchema = z
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
+    // Optional Slack orchestration notices (blocked child worker, paused goal).
+    // BOTH DEFAULT OFF: absent, malformed, or partially invalid settings fail
+    // closed to disabled via resolveWorkspaceSlackOrchestrationNoticeSettings,
+    // because an unsolicited Slack post is worse than a missed one.
+    slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -2218,6 +2265,30 @@ export function resolveWorkspaceSlackReactionSummonSettings(
     : { ...configured, channelPolicy: { mode: "bot_member" } };
 }
 
+/**
+ * Resolve the two Slack orchestration notice switches, failing closed.
+ *
+ * Off is the product decision, not a placeholder: the in-app rail and priority
+ * feed already surface a blocked child worker and a paused goal, so a missed
+ * Slack post costs a delay while an unsolicited one costs the thread's
+ * credibility. Absent settings, a settings bag this schema rejects, and a
+ * partially invalid notice object therefore all resolve to both disabled -
+ * only an explicit `true` on a valid bag turns a notice on.
+ */
+export function resolveWorkspaceSlackOrchestrationNoticeSettings(
+  settings: unknown,
+): ResolvedWorkspaceSlackOrchestrationNoticeSettings {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  const configured = parsed.success ? parsed.data.slackOrchestrationNotices : undefined;
+  return {
+    childRequiresAction:
+      configured?.childRequiresAction ??
+      DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS.childRequiresAction,
+    goalPaused:
+      configured?.goalPaused ?? DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS.goalPaused,
+  };
+}
+
 export function workspaceSlackReactionChannelAllowed(
   settings: WorkspaceSlackReactionSummonSettings,
   channelId: string,
@@ -2244,6 +2315,7 @@ export const UpdateWorkspaceSettingsRequest = z
     codexCompactionDefault: CodexCompactionMode.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
+    slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -6643,6 +6715,15 @@ export const EffectiveSessionControl = z.object({
       quiescencePendingCount: z.number().int().nonnegative(),
     })
     .nullable(),
+  /** Independent command-cancellation settlement. Session pause/turn state is
+   *  intentionally not overloaded with process lifecycle. */
+  backgroundCommandSettlement: z
+    .object({
+      state: z.literal("stopping"),
+      commandCount: z.number().int().positive(),
+    })
+    .nullable()
+    .optional(),
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
@@ -11094,11 +11175,59 @@ export const UninstallPluginResult = z
   .strict();
 export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
+export const SessionBackgroundCommandState = z.enum(["running", "stopping", "exited", "lost"]);
+export type SessionBackgroundCommandState = z.infer<typeof SessionBackgroundCommandState>;
+
+export const SessionBackgroundCommandProvider = z.enum(["managed", "connected_machine"]);
+export type SessionBackgroundCommandProvider = z.infer<typeof SessionBackgroundCommandProvider>;
+
+export const SessionBackgroundCommandActivity = z
+  .object({
+    state: z.enum(["running", "stopping"]),
+    count: z.number().int().positive(),
+  })
+  .strict();
+export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
+
+export const SessionBackgroundCommand = z
+  .object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    provider: SessionBackgroundCommandProvider,
+    state: SessionBackgroundCommandState,
+    commandPreview: z.string().max(512),
+    cancelRequestedAt: z.string().nullable(),
+    exitCode: z.number().int().nullable(),
+    settlementReason: z.string().nullable(),
+    startedAt: z.string(),
+    settledAt: z.string().nullable(),
+    updatedAt: z.string(),
+  })
+  .strict();
+export type SessionBackgroundCommand = z.infer<typeof SessionBackgroundCommand>;
+
+export const SessionBackgroundCommandListResponse = z
+  .object({ commands: z.array(SessionBackgroundCommand).max(1000) })
+  .strict();
+export type SessionBackgroundCommandListResponse = z.infer<
+  typeof SessionBackgroundCommandListResponse
+>;
+
+export const CancelSessionBackgroundCommandResult = z
+  .object({ command: SessionBackgroundCommand, accepted: z.boolean() })
+  .strict();
+export type CancelSessionBackgroundCommandResult = z.infer<
+  typeof CancelSessionBackgroundCommandResult
+>;
+
 export const Session = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
   accountId: z.string().uuid(),
   status: SessionStatus,
+  /** Additive list projection. Detail reads may omit it. */
+  backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
@@ -11418,6 +11547,8 @@ export const SessionEventType = z.enum([
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "session.command.backgrounded",
+  "session.command.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -11622,6 +11753,7 @@ export const SESSION_EVENT_RAW_DELTA_TYPES = [
 export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
+    "session.command.backgrounded",
     "session.requiresAction",
     "session.humanInput.requested",
     "user.pause",
@@ -11669,6 +11801,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "recording.available",
     "recording.failed",
     "terminal.pty.exited",
+    "session.command.finished",
   ],
   failure: [
     "session.event.envelope_omitted",

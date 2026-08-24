@@ -7,6 +7,7 @@ import {
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
   evaluateSlackTaskPolicy,
+  resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
   SlackReactionChannelListResponse,
   SlackUserLinkAccessMutationRequest,
@@ -15,6 +16,8 @@ import {
   type FileResourceRef,
   type FirstPartyMcpToolName,
   type HumanInputQuestion,
+  type ResolvedWorkspaceSlackOrchestrationNoticeSettings,
+  type ChildRequiresActionPayload,
   type SessionAuthorizationListScope,
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
@@ -49,6 +52,8 @@ import {
   getSession,
   getSessionEvent,
   getSessionHumanInputRequest,
+  childRequiresActionResolutionExists,
+  getSessionSystemUpdateById,
   getSlackBotPostOperation,
   getSlackBotUserLink,
   getSlackInteractionActionHandle,
@@ -131,6 +136,13 @@ export const SLACK_DELIVERY_EVENT_TYPES = [
   "turn.failed",
   "turn.cancelled",
   "session.status.changed",
+  // Orchestration surfacing. Both are filtered again inside the pump: the
+  // workspace must have opted in (both notices default off), and then only a
+  // `child_requires_action` notice and a `limits` / `max_auto_continuations`
+  // goal pause reach Slack, so the thread stays quiet for the deferred child
+  // lifecycle kinds and for human/API/agent pauses the human already made.
+  "system.update.pending",
+  "goal.paused",
 ] as const;
 
 const MAX_SLACK_TEXT_CHARS = 3_500;
@@ -152,6 +164,23 @@ const SLACK_INTERACTION_BOT_SUBJECT_ID = "service:slack-interaction";
 const SLACK_ACTION_TTL_MS = 7 * 24 * 60 * 60_000;
 const MAX_SLACK_APPROVALS_PER_CARD = 8;
 const MAX_SLACK_ACTIONS_PER_CARD = 20;
+/** Blocked-worker cards are pointers, so the question preview stays short. */
+const MAX_SLACK_CHILD_DETAIL_CHARS = 240;
+const SLACK_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+/**
+ * Goal pause reasons the Slack thread announces. `user_pause`, `api`, `agent`,
+ * and `no_progress` are deliberately absent.
+ *
+ * A Map, not a plain object: this lookup is the sole gate of a two-reason
+ * invariant, and a plain object indexed by a payload-derived string answers
+ * `constructor` (and every other prototype key) with a truthy value that would
+ * sail past the `if (!headline)` guard. No payload reaches it with such a
+ * reason today; the gate should not depend on that staying true.
+ */
+const SLACK_GOAL_PAUSED_HEADLINES = new Map<string, string>([
+  ["limits", "Goal paused (budget)"],
+  ["max_auto_continuations", "Goal paused (continuation cap)"],
+]);
 /**
  * Slack delivery restrictions are durable session-level authority, not
  * attacker-adjacent user-message context. Migration 0240 backfills this exact
@@ -3182,6 +3211,133 @@ async function slackHumanInputCard(
   return { text, blocks, operationId };
 }
 
+/**
+ * A child of a Slack-originated session is never itself mapped to a Slack
+ * thread, so the parent's bounded `child_requires_action` notice is the only
+ * path that can tell the human that a worker they started is blocked. The card
+ * is a pointer, not a second question card: one bounded preview of the first
+ * question (or the waiting approval count) plus the child link. The child's own
+ * OpenGeni card remains the place the human actually answers.
+ *
+ * Every deferred child lifecycle kind (`child_progress`,
+ * `child_waiting_capacity`, `child_requires_action_resolved`, `child_paused`)
+ * returns null here so Slack stays quiet, and so does every non-child machine
+ * input that shares the `system.update.pending` event type.
+ *
+ * The caller has already proven that this workspace turned the notice on. The
+ * card defaults off per workspace because the in-app rail and priority feed
+ * already surface a blocked child.
+ */
+/**
+ * The exact durable notice behind one `system.update.pending` event, or null
+ * when it no longer describes a blocked worker.
+ *
+ * Slack delivery runs behind the session: a widened retry window, a replica
+ * claim, or simply a later page can reach this event after the child already
+ * got its answer. Two facts have to agree before a card is worth posting.
+ *
+ * A resolution supersedes a still-`pending` notice in the same commit, so
+ * `superseded` (and an explicitly `cancelled` notice) is already a "no longer
+ * blocked" fact. But a notice the parent's turn has claimed is `delivered` and
+ * keeps that state forever, so state alone is not enough - the resolution row
+ * for that exact (child, turn, generation) boundary is checked as well, on the
+ * parent's own rows. A re-freeze is a new generation and a new notice.
+ *
+ * Every read is wrapped: a malformed or unreadable durable row is not a
+ * delivery failure. Throwing would burn a delivery attempt and, after
+ * MAX_DELIVERY_ATTEMPTS, close this interaction's whole delivery over one
+ * notice nobody could have posted anyway. Silence is the correct outcome, and
+ * it is the same outcome every other unpostable notice already takes.
+ */
+async function resolveSlackBlockedChildNotice(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  sessionId: string,
+  updateId: string,
+): Promise<ChildRequiresActionPayload | null> {
+  try {
+    const update = await getSessionSystemUpdateById(
+      deps.db,
+      interaction.workspaceId,
+      sessionId,
+      updateId,
+    );
+    if (!update || update.payload.type !== "child_requires_action") return null;
+    if (update.state === "superseded" || update.state === "cancelled") return null;
+    const resolved = await childRequiresActionResolutionExists(
+      deps.db,
+      interaction.workspaceId,
+      sessionId,
+      {
+        childSessionId: update.payload.childSessionId,
+        childTurnId: update.payload.childTurnId,
+        childTurnGeneration: update.payload.childTurnGeneration,
+      },
+    );
+    return resolved ? null : update.payload;
+  } catch {
+    return null;
+  }
+}
+
+async function slackChildRequiresActionCard(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  event: SessionEvent,
+  mention: string,
+): Promise<{ text: string } | null> {
+  const sessionId = interaction.sessionId;
+  if (!sessionId) return null;
+  const preview = record(event.payload);
+  if (boundedString(preview?.kind, 64) !== "child_requires_action") return null;
+  const updateId = boundedString(preview?.updateId, 64);
+  if (!updateId || !SLACK_UUID_PATTERN.test(updateId)) return null;
+  // The bounded event preview is lossy by construction. Resolve the exact
+  // durable notice under the ordinary workspace scope; the child session is
+  // never read, only linked.
+  const notice = await resolveSlackBlockedChildNotice(deps, interaction, sessionId, updateId);
+  if (!notice) return null;
+  const questions = notice.requests.filter((request) => request.kind === "human_input");
+  const approvals = notice.requests.filter((request) => request.kind === "approval");
+  const first = questions[0];
+  const detail = first
+    ? `${boundedSlackChildDetail(first.firstQuestion)}${
+        first.questionCount > 1 ? ` (+${first.questionCount - 1} more)` : ""
+      }`
+    : approvals.length > 0
+      ? `${approvals.length} tool approval${approvals.length > 1 ? "s are" : " is"} waiting for a human.`
+      : "";
+  const link = slackSessionUrl(deps, interaction.workspaceId, notice.childSessionId);
+  const lines = [`${mention}A worker you started needs input.`];
+  if (detail) lines.push(`> ${detail}`);
+  if (link) lines.push(`<${link}|Open in OpenGeni>`);
+  return { text: boundedOutput(lines.join("\n")) };
+}
+
+/**
+ * A goal that paused because it ran out of budget or hit the continuation cap
+ * stops making progress with nobody watching, so the Slack thread gets one
+ * bounded line. A `user_pause` / `api` / `agent` pause is a decision the human
+ * or their agent already made, and `no_progress` is not a stop the human must
+ * act on, so none of them post. `goal.resumed` never posts.
+ *
+ * The caller has already proven that this workspace turned the notice on; it
+ * defaults off per workspace.
+ */
+function slackGoalPausedText(
+  deps: ApiRouteDeps,
+  interaction: SlackInteraction,
+  event: SessionEvent,
+  mention: string,
+): string | null {
+  if (!interaction.sessionId) return null;
+  const reason = boundedString(record(event.payload)?.reason, 64);
+  const headline = reason ? SLACK_GOAL_PAUSED_HEADLINES.get(reason) : undefined;
+  if (!headline) return null;
+  const link = slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId);
+  return boundedOutput(`${mention}${headline}.${link ? ` <${link}|Open in OpenGeni>` : ""}`);
+}
+
 async function deliverSlackSessionEvents(
   deps: ApiRouteDeps,
   interaction: SlackInteraction,
@@ -3209,6 +3365,54 @@ async function deliverSlackSessionEvents(
     sessionId: interaction.sessionId,
   });
   const requester = await validatedSlackRequester(deps, interaction);
+  // Both orchestration notices are per-workspace and OFF unless this workspace
+  // turned them on. Resolved lazily so an ordinary page of turn/progress events
+  // costs no extra workspace read, and memoized so one page resolves once. A
+  // disabled notice takes the same "nothing to post for this event" path as an
+  // undeliverable one: no post operation, no progress slot, and the delivery
+  // cursor still advances past the event exactly as it would have.
+  let orchestrationNotices: ResolvedWorkspaceSlackOrchestrationNoticeSettings | null = null;
+  const orchestrationNoticeEnabled = async (
+    notice: keyof ResolvedWorkspaceSlackOrchestrationNoticeSettings,
+  ): Promise<boolean> => {
+    orchestrationNotices ??= resolveWorkspaceSlackOrchestrationNoticeSettings(
+      (await getWorkspace(deps.db, interaction.workspaceId))?.settings,
+    );
+    return orchestrationNotices[notice];
+  };
+  /**
+   * Post one orchestration notice through the SAME durable per-interaction slot
+   * budget as assistant progress, so an orchestration that fans out to many
+   * blocked children cannot turn one Slack task into an unbounded feed. That
+   * budget is deliberately shared rather than a second private allowance: the
+   * ceiling worth enforcing is the total number of posts the human did not ask
+   * for, not a per-category one, and this whole feature exists because an
+   * unsolicited post is worse than a missed one. Beyond the cap the notice goes
+   * silent exactly like a fourth progress message.
+   *
+   * The slot is claimed only once a card is actually going to be posted, so a
+   * skipped, stale, or already-resolved notice never burns one. Claims are
+   * durable and keyed on the session event sequence, so a reaper retry, a
+   * replica claim, or a replayed page reuses the same slot and the same post
+   * operation instead of posting twice or consuming a second slot. The claimed
+   * row never becomes terminal-coalescing evidence: that lookup only joins
+   * `agent.message.completed` events.
+   */
+  const postUnsolicitedNotice = async (event: SessionEvent, text: string, kind: string) => {
+    const slot = await claimSlackInteractionProgressDelivery(deps.db, {
+      accountId: interaction.accountId,
+      workspaceId: interaction.workspaceId,
+      interactionId: interaction.id,
+      claimHolderId,
+      sessionEventSequence: event.sequence,
+      maxProgress: MAX_PROGRESS_MESSAGES,
+    });
+    if (slot.kind === "not_owned") {
+      throw new Error("Slack orchestration notice lost its durable interaction claim");
+    }
+    if (slot.kind !== "claimed") return;
+    await postDelivery(client, interaction, event, text, kind, slot.delivery.operationId);
+  };
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
   let latestAssistantText = "";
@@ -3336,6 +3540,16 @@ async function deliverSlackSessionEvents(
           card.blocks,
         );
       }
+    } else if (event.type === "system.update.pending") {
+      const card = (await orchestrationNoticeEnabled("childRequiresAction"))
+        ? await slackChildRequiresActionCard(deps, interaction, event, requester.mention)
+        : null;
+      if (card) await postUnsolicitedNotice(event, card.text, "child-blocked");
+    } else if (event.type === "goal.paused") {
+      const paused = (await orchestrationNoticeEnabled("goalPaused"))
+        ? slackGoalPausedText(deps, interaction, event, requester.mention)
+        : null;
+      if (paused) await postUnsolicitedNotice(event, paused, "goal-paused");
     } else if (event.type === "turn.completed") {
       const payloadOutput = safePayloadText(event.payload, "output");
       const hasPublishableOutput = payloadOutput.trim().length > 0;
@@ -4061,6 +4275,14 @@ function boundedText(value: unknown): string | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
   return trimmed.slice(0, MAX_SLACK_INPUT_CHARS);
+}
+
+/** Single-line, character-bounded preview for a blocked-worker pointer card. */
+function boundedSlackChildDetail(value: string) {
+  const collapsed = value.replace(/\s+/gu, " ").trim();
+  return collapsed.length <= MAX_SLACK_CHILD_DETAIL_CHARS
+    ? collapsed
+    : `${collapsed.slice(0, MAX_SLACK_CHILD_DETAIL_CHARS - 1)}…`;
 }
 
 function boundedOutput(value: string) {

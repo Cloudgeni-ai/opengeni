@@ -1009,7 +1009,7 @@ const SettingsSchema = z.object({
   // runner must ALSO advertise Capabilities.op_stream. Streaming is the default
   // because it is the only transport that can keep a command alive without an
   // arbitrary request/reply wall while still supporting replay and cancellation.
-  // Older runners remain usable when an explicit positive exec timeout is set.
+  // Exec fails closed when the deployment or runner does not provide op-stream.
   // EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true).
   agentOpStreamEnabled: EnvBoolean.default(true),

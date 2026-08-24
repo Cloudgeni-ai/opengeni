@@ -767,6 +767,15 @@ pub(crate) struct PreparedOpCgroup {
     handle: OpCgroupHandle,
 }
 
+#[cfg(target_os = "linux")]
+impl PreparedOpCgroup {
+    /// Kernel-owned recursive death switch used by the exec anchor when the
+    /// runner process disappears without running Rust destructors.
+    pub(crate) fn kill_file_path(&self) -> Option<PathBuf> {
+        self.handle.dir.as_ref().map(|dir| dir.join("cgroup.kill"))
+    }
+}
+
 /// A handle to one placed `op-<n>` leaf, responsible for removing it once the op's
 /// process tree is reaped.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

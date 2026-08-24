@@ -25,6 +25,10 @@ import {
   mirrorSessionRealtimeContextInTransaction,
   renderRealtimeHumanInputResponseContext,
 } from "./session-realtime-mirror";
+import {
+  requestSessionBackgroundCommandCancellationsInTransaction,
+  requestWorkspaceBackgroundCommandCancellationsInTransaction,
+} from "./session-background-commands";
 
 type SessionEventInsertWithPayload = typeof schema.sessionEvents.$inferInsert & {
   payload: unknown;
@@ -93,6 +97,10 @@ export type EffectiveSessionControl = {
     attemptCount: number;
     interruptionPendingCount: number;
     quiescencePendingCount: number;
+  } | null;
+  backgroundCommandSettlement: {
+    state: "stopping";
+    commandCount: number;
   } | null;
 };
 
@@ -1140,6 +1148,7 @@ function projectEffectiveControl(
   targetId: string,
   rows: AncestryRow[],
   settlementAttempts: SettlementAttemptCounts,
+  stoppingBackgroundCommandCount: number,
 ): EffectiveSessionControl {
   assertCompleteAncestry(targetId, rows);
   const workspaceRevision = asSafeRevision(workspace.revision, "workspace control revision")!;
@@ -1273,7 +1282,47 @@ function projectEffectiveControl(
           },
     settlement:
       settlementAttempts.attemptCount > 0 ? { state: "stopping", ...settlementAttempts } : null,
+    backgroundCommandSettlement:
+      stoppingBackgroundCommandCount > 0
+        ? { state: "stopping", commandCount: stoppingBackgroundCommandCount }
+        : null,
   };
+}
+
+async function stoppingBackgroundCommandCounts(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Map<string, number>> {
+  const rows = await db.execute<{ sessionId: string; commandCount: number | string }>(sql`
+    with recursive targets(id) as (values ${targetValues(sessionIds)}),
+    command_ancestry(command_id, ancestor_id, depth, path) as (
+      select command.id, command.session_id, 0::integer, array[command.session_id]::uuid[]
+      from ${schema.sessionBackgroundCommands} command
+      where command.workspace_id = ${workspaceId}
+        and command.state = 'stopping'
+      union all
+      select ancestry.command_id, current.parent_session_id,
+        ancestry.depth + 1, ancestry.path || current.parent_session_id
+      from command_ancestry ancestry
+      join ${schema.sessions} current
+        on current.workspace_id = ${workspaceId}
+       and current.id = ancestry.ancestor_id
+      where current.parent_session_id is not null
+        and not current.parent_session_id = any(ancestry.path)
+        and ancestry.depth < ${SESSION_ANCESTRY_LIMIT}
+    )
+    select target.id as "sessionId", count(distinct ancestry.command_id)::integer as "commandCount"
+    from targets target
+    join command_ancestry ancestry on ancestry.ancestor_id = target.id
+    group by target.id
+  `);
+  return new Map(
+    rows.map((row: { sessionId: string; commandCount: number | string }) => [
+      row.sessionId,
+      Number(row.commandCount),
+    ]),
+  );
 }
 
 async function settlementAttemptCounts(
@@ -1398,6 +1447,7 @@ export async function evaluateSessionControls(
     options.workspaceControl ??
     (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
   const stopping = await settlementAttemptCounts(db, workspaceId, uniqueIds);
+  const stoppingCommands = await stoppingBackgroundCommandCounts(db, workspaceId, uniqueIds);
   const result = new Map<string, EffectiveSessionControl>();
   if (uniqueIds.length <= TARGET_PATH_PROJECTION_LIMIT) {
     // PostgreSQL's direct target-path plan is substantially faster for the
@@ -1417,6 +1467,7 @@ export async function evaluateSessionControls(
           sessionId,
           ancestryByTarget.get(sessionId) ?? [],
           stopping.get(sessionId) ?? NO_SETTLEMENT_ATTEMPTS,
+          stoppingCommands.get(sessionId) ?? 0,
         ),
       );
     }
@@ -1435,6 +1486,7 @@ export async function evaluateSessionControls(
         sessionId,
         ancestryRowsForTarget(sessionId, ancestry),
         stopping.get(sessionId) ?? NO_SETTLEMENT_ATTEMPTS,
+        stoppingCommands.get(sessionId) ?? 0,
       ),
     );
   }
@@ -2168,6 +2220,7 @@ export type SessionControlMutationResult = {
   sessionControlEventId: string;
   workspaceControlEventId: string;
   interruptionCount: number;
+  backgroundCommandCount: number;
   wakeCount: number;
   cancelledSessionCount: number;
   cancelledTurnCount: number;
@@ -2933,6 +2986,7 @@ export async function mutateSessionControlInTransaction(
       sessionControlEventId,
       workspaceControlEventId,
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
+      backgroundCommandCount: Number(reserved.receipt.result.backgroundCommandCount ?? 0),
       wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
       cancelledSessionCount: Number(reserved.receipt.result.cancelledSessionCount ?? 0),
       cancelledTurnCount: Number(reserved.receipt.result.cancelledTurnCount ?? 0),
@@ -3014,6 +3068,14 @@ export async function mutateSessionControlInTransaction(
     input.actor.type === "agent_attempt"
       ? `attempt:${input.actor.attemptId}`
       : input.actor.subjectId;
+  const backgroundCommandCount =
+    input.action === "pause" || input.action === "cancel"
+      ? await requestSessionBackgroundCommandCancellationsInTransaction(db, {
+          workspaceId: input.workspaceId,
+          rootSessionIds: [input.sessionId],
+          subjectId: actor,
+        })
+      : 0;
   const workspaceControlEventId = await insertWorkspaceControlEventInTransaction(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -3163,6 +3225,7 @@ export async function mutateSessionControlInTransaction(
     controlRevision: revision,
     result: {
       interruptionCount,
+      backgroundCommandCount,
       wakeCount,
       eventId: controlEvent.id,
       workspaceControlEventId,
@@ -3180,6 +3243,7 @@ export async function mutateSessionControlInTransaction(
     sessionControlEventId: controlEvent.id,
     workspaceControlEventId,
     interruptionCount,
+    backgroundCommandCount,
     wakeCount,
     cancelledSessionCount: cancellation.cancelledSessionCount,
     cancelledTurnCount: cancellation.cancelledTurnCount,
@@ -3282,6 +3346,7 @@ export type WorkspaceControlMutationResult = {
   workspaceControlEventId: string;
   workspaceState: EffectiveControlState;
   interruptionCount: number;
+  backgroundCommandCount: number;
   wakeCount: number;
   replay: boolean;
 };
@@ -3332,6 +3397,7 @@ export async function mutateWorkspaceControlInTransaction(
       workspaceControlEventId,
       workspaceState: input.action === "pause" ? "paused" : "active",
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
+      backgroundCommandCount: Number(reserved.receipt.result.backgroundCommandCount ?? 0),
       wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
       replay: true,
     };
@@ -3345,6 +3411,13 @@ export async function mutateWorkspaceControlInTransaction(
     input.actor.type === "agent_attempt"
       ? `attempt:${input.actor.attemptId}`
       : input.actor.subjectId;
+  const backgroundCommandCount =
+    input.action === "pause"
+      ? await requestWorkspaceBackgroundCommandCancellationsInTransaction(db, {
+          workspaceId: input.workspaceId,
+          subjectId: actor,
+        })
+      : 0;
   const [updated] = await db
     .update(schema.workspaceInferenceControls)
     .set({
@@ -3397,7 +3470,7 @@ export async function mutateWorkspaceControlInTransaction(
         });
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: revision,
-    result: { interruptionCount, wakeCount, workspaceControlEventId },
+    result: { interruptionCount, backgroundCommandCount, wakeCount, workspaceControlEventId },
   });
   return {
     receipt,
@@ -3405,6 +3478,7 @@ export async function mutateWorkspaceControlInTransaction(
     workspaceControlEventId,
     workspaceState: input.action === "pause" ? "paused" : "active",
     interruptionCount,
+    backgroundCommandCount,
     wakeCount,
     replay: false,
   };

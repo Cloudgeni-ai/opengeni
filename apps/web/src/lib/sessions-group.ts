@@ -40,6 +40,7 @@ function hasActiveEffectiveControl(session: Session): boolean {
 }
 
 function isEffectivelyRunning(session: Session): boolean {
+  if (session.backgroundCommandActivity) return true;
   return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
 }
 
@@ -220,11 +221,12 @@ function ownRailStatusCounts(
       session.status === "requires_action" ? (session.requiresActionSince ?? null) : null,
     failed: session.status === "failed" ? 1 : 0,
     active:
-      hasActiveEffectiveControl(session) &&
-      (session.status === "running" ||
-        session.status === "queued" ||
-        session.status === "recovering" ||
-        session.status === "waiting_capacity")
+      session.backgroundCommandActivity ||
+      (hasActiveEffectiveControl(session) &&
+        (session.status === "running" ||
+          session.status === "queued" ||
+          session.status === "recovering" ||
+          session.status === "waiting_capacity"))
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,

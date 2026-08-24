@@ -56,6 +56,14 @@ pages for one exact resource kind, include the opaque resource/origin identity,
 and return only grants targeting the route workspace. Resource kind derives the
 only accepted action (`connection.use`, `document.read`, `variable_set.use`,
 `rig.use`, or `connected_machine.use`) and its exact product permission gate.
+For a canonical managed human with that permission, an organization without
+the version-1 activation receipt has exactly zero usable personal authorities,
+so discovery returns an empty page. Issue, revoke, and runtime use remain
+activation-gated; the empty discovery answer does not activate the product or
+weaken any mutation fence.
+The managed personal-workspace projection includes `rigs:use`, allowing its
+owner to discover and propose changes to personal Rigs without granting the
+administrative `rigs:manage` capability.
 
 Public issuance supports `session` and `always`. Session grants are authorized
 through the ordinary session authorization seam after all target-free

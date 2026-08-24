@@ -1635,16 +1635,39 @@ async function verifySuccessfulSourceChecks(api, checks, names, sha) {
     allIdentities.push(...identities);
   }
 
-  const runIds = new Set(allIdentities.map((identity) => identity.runId));
-  invariant(runIds.size === 1, "required source checks do not share one workflow run");
-  const checkSuiteIds = new Set(allIdentities.map((identity) => identity.checkSuiteId));
-  invariant(checkSuiteIds.size === 1, "required source checks do not share one check suite");
-  const runId = allIdentities[0].runId;
-  const checkSuiteId = allIdentities[0].checkSuiteId;
-  const run = record(
-    await api.get(repositoryPath(`/actions/runs/${runId}`)),
-    "required source workflow run",
+  // A main -> production PR may legitimately run the same aggregate check
+  // names against the exact source SHA. Treat those provider-owned checks as
+  // unrelated evidence: release admission is bound only to the unique CI run
+  // triggered by the source commit's push to protected main.
+  const observedRunIds = [...new Set(allIdentities.map((identity) => identity.runId))];
+  const observedRuns = await Promise.all(
+    observedRunIds.map(async (runId) => ({
+      runId,
+      run: record(
+        await api.get(repositoryPath(`/actions/runs/${runId}`)),
+        "observed source workflow run",
+      ),
+    })),
   );
+  const authoritativeRuns = observedRuns.filter(
+    ({ runId, run }) =>
+      run.id === runId &&
+      run.event === "push" &&
+      run.path === RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath &&
+      run.head_branch === RELEASE_AUTOMATION_CONTRACT.defaultBranch &&
+      run.head_sha === sha &&
+      run.repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+      run.head_repository?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+  );
+  invariant(
+    authoritativeRuns.length === 1,
+    "required source checks do not identify exactly one push CI workflow run",
+  );
+  const { runId, run } = authoritativeRuns[0];
+  const authoritativeIdentities = allIdentities.filter((identity) => identity.runId === runId);
+  const checkSuiteIds = new Set(authoritativeIdentities.map((identity) => identity.checkSuiteId));
+  invariant(checkSuiteIds.size === 1, "required source checks do not share one check suite");
+  const checkSuiteId = authoritativeIdentities[0].checkSuiteId;
   invariant(run.id === runId, "required source workflow run ID changed");
   invariant(
     run.check_suite_id === checkSuiteId,

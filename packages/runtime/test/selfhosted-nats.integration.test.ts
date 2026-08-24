@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
-  type ControlRpc,
+  createMockSelfhostedOpStream,
   MockAgentResponder,
   SandboxChannelAService,
   SelfhostedSandboxClient,
@@ -16,13 +16,23 @@ import {
 
 const WS = "22222222-2222-2222-2222-222222222222";
 const AGENT = "agent-int";
+const CONNECTION_INSTANCE = "connection-int";
 const RELAY = { host: "relay.test", port: 443, tls: true } as const;
 
-function buildClient(rpc: ControlRpc): SelfhostedSandboxClient {
+function buildClient(responder: MockAgentResponder): SelfhostedSandboxClient {
+  const stream = createMockSelfhostedOpStream({
+    responder,
+    workspaceId: WS,
+    agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
+  });
   return new SelfhostedSandboxClient({
     workspaceId: WS,
     relay: RELAY,
-    controlRpcFactory: () => rpc,
+    controlRpcFactory: () => stream.controlRpc,
+    agentId: AGENT,
+    connectionInstanceId: CONNECTION_INSTANCE,
+    opStream: stream.opStream,
   });
 }
 
@@ -47,7 +57,7 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
 
     // The mock observed the request fan-out addressed to the agent subject.
     const subjects = new Set(mock.requests.map((r) => r.subject));
-    expect([...subjects]).toEqual([`agent.${WS}.${AGENT}.rpc`]);
+    expect([...subjects]).toEqual([`agent.${WS}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`]);
 
     // Serialize back to the persistable envelope — {agentId} ONLY.
     expect(await session.serializeSessionState()).toEqual({ agentId: AGENT });

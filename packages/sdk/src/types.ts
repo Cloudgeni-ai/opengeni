@@ -1218,11 +1218,41 @@ export type ForkSessionResponse = {
   replay: boolean;
 };
 
+export type SessionBackgroundCommandActivity = {
+  state: "running" | "stopping";
+  count: number;
+};
+
+export type SessionBackgroundCommand = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  provider: "managed" | "connected_machine";
+  state: "running" | "stopping" | "exited" | "lost";
+  commandPreview: string;
+  cancelRequestedAt: string | null;
+  exitCode: number | null;
+  settlementReason: string | null;
+  startedAt: string;
+  settledAt: string | null;
+  updatedAt: string;
+};
+
+export type SessionBackgroundCommandListResponse = {
+  commands: SessionBackgroundCommand[];
+};
+
+export type CancelSessionBackgroundCommandResult = {
+  command: SessionBackgroundCommand;
+  accepted: boolean;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
   accountId: string;
   status: SessionStatus;
+  backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1639,6 +1669,8 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "session.command.backgrounded",
+  "session.command.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -3790,6 +3822,8 @@ export type WorkspaceSettings = {
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
+  /** Slack orchestration notices; both default off when absent or invalid. */
+  slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
 };
 
@@ -3807,6 +3841,17 @@ export type WorkspaceSlackReactionSummonSettings = {
   enabled: boolean;
   emoji: "genie";
   channelPolicy: { mode: "bot_member" } | { mode: "allowlist"; channelIds: string[] };
+};
+
+/**
+ * Per-workspace switches for the two Slack orchestration notices. Both are off
+ * unless the workspace explicitly turned them on.
+ */
+export type WorkspaceSlackOrchestrationNoticeSettings = {
+  /** Post a pointer card when a child worker blocks on input or an approval. */
+  childRequiresAction?: boolean | undefined;
+  /** Post one line when a goal pauses for budget or the continuation cap. */
+  goalPaused?: boolean | undefined;
 };
 
 export type SlackReactionChannel = {
@@ -3835,6 +3880,7 @@ export type UpdateWorkspaceSettingsRequest = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
+  slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
 };
 
@@ -4147,6 +4193,7 @@ export type EffectiveSessionControl = {
     interruptionPendingCount: number;
     quiescencePendingCount: number;
   } | null;
+  backgroundCommandSettlement?: { state: "stopping"; commandCount: number } | null | undefined;
 };
 
 export type SessionCommandReceipt = {
