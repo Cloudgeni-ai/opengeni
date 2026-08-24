@@ -43,7 +43,11 @@ import {
 } from "react";
 
 import { useRail } from "@/components/rail/rail-context";
-import { RailTrailingMetadata, SessionRowContent } from "@/components/rail/session-row-content";
+import {
+  RailTrailingMetadata,
+  SessionRowContent,
+  sessionRowAccessibleName,
+} from "@/components/rail/session-row-content";
 export { RailTrailingMetadata } from "@/components/rail/session-row-content";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -114,6 +118,7 @@ import {
   channelRailSections,
   filterSessionsForBrowse,
   groupSessionsForBrowse,
+  projectRailSessions,
   groupSessionsForRail,
   mergeSessionForRail,
   relativeTimeLabel,
@@ -129,6 +134,7 @@ import {
   type SessionBrowseDateRange,
   type SessionBrowseGroupBy,
 } from "@/lib/sessions-group";
+import { railRowCreator } from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
@@ -631,29 +637,31 @@ export function SessionList() {
   // permission to move this scroll container.
   const rowRevealIntent = useRef<string | null>(activeSessionId);
 
-  // Search results are deliberately flat: a partial match set is not a tree.
-  // Normal navigation contains only true roots, lazily loaded children, and
-  // the active lineage. The helper builds all three projections together so
-  // explicit nested pins never disappear into an ancestor shortcut.
-  const railSections = useMemo(
-    () =>
-      buildPinnedRailSections(
-        hierarchyMode
-          ? browseSessions
-          : browseSessions.map((session) => ({ ...session, parentSessionId: null })),
-      ),
+  // Search results and browse groupings are deliberately flat: a partial match
+  // set is not a tree, and a browse bucket is a list. Normal navigation instead
+  // carries only true roots, lazily loaded children, and the active lineage.
+  // Both flat consumers read the SAME normalized rows, so a session rendered as
+  // a top-level row never still claims a parent that is nowhere on screen.
+  const projectedSessions = useMemo(
+    () => projectRailSessions(browseSessions, hierarchyMode),
     [browseSessions, hierarchyMode],
+  );
+  // The helper builds all three projections together so explicit nested pins
+  // never disappear into an ancestor shortcut.
+  const railSections = useMemo(
+    () => buildPinnedRailSections(projectedSessions),
+    [projectedSessions],
   );
   const forest = useMemo(
     () =>
       browseGroupBy === "activity"
         ? railSections.ordinary
         : groupSessionsForBrowse(
-            browseSessions.filter((session) => !session.pinned),
+            projectedSessions.filter((session) => !session.pinned),
             browseGroupBy,
             { creatorLabels },
           ),
-    [browseGroupBy, browseSessions, creatorLabels, railSections.ordinary],
+    [browseGroupBy, projectedSessions, creatorLabels, railSections.ordinary],
   );
   const pinnedNodes = railSections.pinned;
   // The hierarchy rail always has the same shape: unfiled Recents first, then
@@ -2289,6 +2297,7 @@ function SessionRow(props: {
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
+  const creator = railRowCreator(props.session);
   const stateLabel = sessionStateLabel(props.session);
   const descendantLabel = sessionDescendantLabel(props.session);
   const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
@@ -2365,6 +2374,7 @@ function SessionRow(props: {
           summary={props.aggregateStatus}
           scheduled={Boolean(scheduledTaskIdOf(props.session))}
           relativeTime={rail.isMobile ? undefined : relativeTime}
+          creator={creator}
         />
       </div>
     );
@@ -2387,11 +2397,14 @@ function SessionRow(props: {
             data-session-row={props.session.id}
             tabIndex={props.focused ? 0 : -1}
             aria-current={props.active ? "page" : undefined}
-            aria-label={`Open ${title}. ${stateLabel}${
-              props.session.pinned ? ". Pinned" : ""
-            }. ${props.aggregateStatus.label}${
-              hasChildren ? `. ${childCountAria.replace("descendant", "spawned")}` : ""
-            }`}
+            aria-label={sessionRowAccessibleName({
+              title,
+              stateLabel,
+              pinned: Boolean(props.session.pinned),
+              statusLabel: props.aggregateStatus.label,
+              spawnedLabel: hasChildren ? childCountAria.replace("descendant", "spawned") : null,
+              creator,
+            })}
             onFocus={props.onFocus}
             onClick={(event) => {
               if (isModifiedNavigationClick(event)) return;
@@ -2411,6 +2424,7 @@ function SessionRow(props: {
               summary={props.aggregateStatus}
               scheduled={Boolean(scheduledTaskIdOf(props.session))}
               relativeTime={rail.isMobile ? undefined : relativeTime}
+              creator={creator}
             />
           </Link>
           <RowActionsMenu
