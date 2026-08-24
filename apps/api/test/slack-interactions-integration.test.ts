@@ -4444,6 +4444,30 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(conflicted!.status).toBe("pending");
     expect(conflicted!.last_error_code).not.toBeNull();
     expect(value.slack.posts.filter((post) => post.channel === channelId)).toHaveLength(1);
+
+    // Undo the deliberate corruption. `claim_slack_interaction_inbox` claims the
+    // next due row with no workspace or account scope and this file shares one
+    // database, so a row left pending with a future `retry_at` would later be
+    // claimed by an unrelated test's drain and burn its iterations. Restoring
+    // the frozen fact and the identity claim also puts the render back in
+    // agreement with the completed post operation's digest.
+    await shared!.admin`
+      delete from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}
+        and provider_event_id = ${mention.eventId}`;
+    await shared!.admin`
+      update slack_interactions set first_task_hint = true where id = ${route!.id}`;
+    await shared!.admin`
+      update slack_bot_user_links
+      set first_task_hint_interaction_id = ${route!.id}
+      where workspace_id = ${value.owner.workspaceId}
+        and slack_user_id = ${value.ownerSlackUserId}`;
+    const [residue] = await shared!.admin<{ unsettled: number }[]>`
+      select count(*)::int as unsettled
+      from slack_interaction_inbox
+      where workspace_id = ${value.owner.workspaceId}
+        and status <> 'processed'`;
+    expect(residue!.unsettled).toBe(0);
   }, 60_000);
 
   test("a transient hint-resolution failure never binds a hint-less acknowledgement", async () => {
@@ -4549,15 +4573,19 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const acknowledgement = value.slack.posts.at(-1)!;
     expect(acknowledgement.text).toContain("First time here:");
 
-    const pressStatus = async (messageTimestamp: string, actionTs: string) => {
+    // Select the handle by the exact message it was rendered on. The Slack post
+    // ledger stores the operation id as the client message id, so a post's
+    // `clientMessageId` is precisely the `message_operation_id` its buttons
+    // carry; ordering by recency would silently press the wrong card.
+    const pressStatus = async (post: SlackPost, actionTs: string) => {
       const [handle] = await shared!.admin<{ id: string }[]>`
         select id
         from slack_interaction_action_handles
         where workspace_id = ${value.owner.workspaceId}
           and action_kind = 'session_status'
           and status = 'pending'
-        order by created_at desc
-        limit 1`;
+          and message_operation_id = ${post.clientMessageId}::uuid`;
+      expect(handle?.id).toBeTruthy();
       expect(
         (
           await value.app.request(
@@ -4569,7 +4597,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
                   team: { id: value.teamId },
                   user: { id: value.ownerSlackUserId },
                   channel: { id: channelId },
-                  message: { ts: messageTimestamp, thread_ts: rootTimestamp },
+                  message: { ts: post.timestamp, thread_ts: rootTimestamp },
                   actions: [
                     {
                       action_id: "opengeni.session.status",
@@ -4590,7 +4618,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     // The click replaces the acknowledgement in place. Without the carry the
     // only copy of the hint this Slack identity ever sees would be destroyed by
     // the very button the hint invites them to press.
-    await pressStatus(acknowledgement.timestamp, "1768000000.000002");
+    await pressStatus(acknowledgement, "1768000000.000002");
     expect(acknowledgement.text).toContain("OpenGeni task status:");
     expect(acknowledgement.text).toContain("First time here:");
 
@@ -4599,7 +4627,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const controlCard = value.slack.posts.at(-1)!;
     expect(controlCard.text).toContain("OpenGeni task controls");
     expect(controlCard.text).not.toContain("First time here:");
-    await pressStatus(controlCard.timestamp, "1768000000.000003");
+    await pressStatus(controlCard, "1768000000.000003");
     expect(controlCard.text).toContain("OpenGeni task status:");
     expect(controlCard.text).not.toContain("First time here:");
   }, 60_000);

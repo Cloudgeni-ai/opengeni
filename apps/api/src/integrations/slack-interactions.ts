@@ -1734,6 +1734,14 @@ async function acknowledgeSlackSession(
  * Rendering is a pure function of the configured command plus the frozen
  * `firstTaskHint` fact, so every re-render of the same acknowledgement produces
  * the same bytes for the digest-bound post ledger.
+ *
+ * Note the one remaining input that is not frozen: the text embeds
+ * `settings.slackCommand`. Changing that setting between an acknowledgement
+ * post and a later repair of the same interaction would diverge the digest and
+ * conflict its post operation. The command is deployment configuration that
+ * must already match the registered Slack slash command, so it does not change
+ * under a live installation; a deployment that does rename it should drain
+ * in-flight Slack interactions first.
  */
 function slackFirstTaskHintText(deps: ApiRouteDeps): string {
   const command = deps.settings.slackCommand;

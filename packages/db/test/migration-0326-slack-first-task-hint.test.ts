@@ -256,6 +256,36 @@ describe("migration 0326 Slack first-task hint", () => {
     ).rejects.toThrow("durable interaction row");
   });
 
+  test("concurrent resolvers of one interaction all replay the same decision", async () => {
+    if (!available) return;
+    // The replica race the acknowledgement path actually runs into: two API
+    // instances repairing the same acknowledgement at once. They must agree, or
+    // the digest-bound post ledger rejects the loser's render.
+    const target = await installation(`same-${Date.now()}`);
+    await target.link("U_SAME", "user:hint-same");
+    const interaction = await target.interaction("U_SAME", "D_SAME");
+    const identity = {
+      workspaceId: target.workspaceId,
+      connectionId: target.connectionId,
+      slackUserId: "U_SAME",
+    };
+    const outcomes = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        resolveSlackInteractionFirstTaskHint(db, { ...identity, interactionId: interaction.id }),
+      ),
+    );
+    expect(outcomes).toEqual([true, true, true, true, true, true]);
+
+    // Exactly one claim happened: the identity's slot points at this
+    // interaction, and the next interaction for that identity gets nothing.
+    const link = await getSlackBotUserLink(db, target.workspaceId, target.connectionId, "U_SAME");
+    expect(link?.firstTaskHintInteractionId).toBe(interaction.id);
+    const next = await target.interaction("U_SAME", "D_SAME_NEXT");
+    expect(
+      await resolveSlackInteractionFirstTaskHint(db, { ...identity, interactionId: next.id }),
+    ).toBe(false);
+  });
+
   test("concurrent resolvers of distinct interactions elect a single winner", async () => {
     if (!available) return;
     const target = await installation(`race-${Date.now()}`);
