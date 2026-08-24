@@ -285,7 +285,7 @@ describe("Slack access-link browser acceptance", () => {
       expect(state.requestStatus).toBe("cancelled");
       expect(new URL(page.url()).hash).toBe("");
       await page.reload({ waitUntil: "networkidle" });
-      await expectText(page.locator("main"), "Slack link unavailable");
+      await expectText(page.locator("main"), "Set up your OpenGeni workspace");
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toHaveLength(1);
       expect(await page.getByRole("button", { name: "Cancel" }).count()).toBe(0);
