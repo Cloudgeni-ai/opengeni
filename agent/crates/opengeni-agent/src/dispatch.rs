@@ -175,17 +175,10 @@ async fn dispatch_future<P: Platform>(
         }
 
         // --- platform-backed Channel-A ops -----------------------------------
-        // NOTE: `exec` (large stdout/stderr) and `fs_read` (a big file) produce
-        // UNBOUNDED replies that can exceed the transport's max payload — the same
-        // latent wall the screenshot hit. They are NOT bounded here; the generic
-        // wire-seam backstop in `supervisor::handle_message` converts any such
-        // oversized reply into a structured `PayloadTooLarge` error rather than a
-        // silent publish failure + caller timeout. If a future need arises to stream
-        // or chunk these bodies, bound them at the op like the screenshot does.
-        Op::Exec(mut req) => {
-            crate::codemode::expose_native_client(&mut req);
-            result(request_id, platform.exec(&req).await, RespResult::Exec)
-        }
+        // NOTE: `fs_read` can produce a reply larger than the transport's max
+        // payload. The generic wire-seam backstop in `supervisor::handle_message`
+        // converts an oversized reply into a structured `PayloadTooLarge` error
+        // rather than a silent publish failure + caller timeout.
         Op::FsRead(req) => result(request_id, platform.fs_read(&req).await, RespResult::FsRead),
         Op::FsWrite(req) => result(
             request_id,
@@ -601,7 +594,7 @@ mod tests {
     /// so the dispatch table can be exercised without touching the real host.
     #[derive(Default)]
     struct FakePlatform {
-        fail_exec: bool,
+        fail_fs_read: bool,
         desktop: Arc<FakeDesktop>,
     }
 
@@ -628,12 +621,6 @@ mod tests {
             None
         }
         async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse> {
-            if self.fail_exec {
-                return Err(PlatformError::NotFound(format!(
-                    "no such program: {:?}",
-                    req.command
-                )));
-            }
             Ok(v1::ExecResponse {
                 exit_code: 0,
                 stdout: prost::bytes::Bytes::from(format!("ran {:?}", req.command).into_bytes()),
@@ -643,6 +630,9 @@ mod tests {
             })
         }
         async fn fs_read(&self, _req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
+            if self.fail_fs_read {
+                return Err(PlatformError::NotFound("no such file".to_string()));
+            }
             Ok(v1::FsReadResponse {
                 content: prost::bytes::Bytes::from_static(b"file-bytes"),
                 total_size: 10,
@@ -710,40 +700,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exec_request_round_trips_to_exec_response() {
-        let platform = Arc::new(FakePlatform::default());
-        let req = request(
-            5,
-            Op::Exec(v1::ExecRequest {
-                command: vec!["ls".to_string()],
-                ..Default::default()
-            }),
-        );
-        let resp = dispatch(req, &platform, &ctx()).await;
-        assert_eq!(resp.request_id, "req-1");
-        assert!(resp.error.is_none());
-        match resp.result {
-            Some(RespResult::Exec(e)) => {
-                assert_eq!(e.exit_code, 0);
-                assert!(String::from_utf8_lossy(&e.stdout).contains("ls"));
-            }
-            other => panic!("expected Exec result, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn handler_error_maps_to_agent_error_not_panic() {
         let platform = Arc::new(FakePlatform {
-            fail_exec: true,
+            fail_fs_read: true,
             ..Default::default()
         });
-        let req = request(
-            5,
-            Op::Exec(v1::ExecRequest {
-                command: vec!["nope".to_string()],
-                ..Default::default()
-            }),
-        );
+        let req = request(5, Op::FsRead(v1::FsReadRequest::default()));
         let resp = dispatch(req, &platform, &ctx()).await;
         assert!(resp.result.is_none());
         let err = resp.error.expect("error present");
@@ -766,13 +728,7 @@ mod tests {
     async fn stale_epoch_is_fenced() {
         let platform = Arc::new(FakePlatform::default());
         // ctx epoch is 5; an op resolved against epoch 4 is stale.
-        let req = request(
-            4,
-            Op::Exec(v1::ExecRequest {
-                command: vec!["ls".to_string()],
-                ..Default::default()
-            }),
-        );
+        let req = request(4, Op::FsList(v1::FsListRequest::default()));
         let resp = dispatch(req, &platform, &ctx()).await;
         let err = resp.error.expect("fenced error");
         assert_eq!(err.code, ErrorCode::Fenced as i32);

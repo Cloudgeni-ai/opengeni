@@ -426,26 +426,26 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 280],
+            [FORCE_RLS_TABLES, 281],
             [NON_RLS_RUNTIME_TABLES, 12],
-            [RUNTIME_FULL_DML_TABLES, 144],
+            [RUNTIME_FULL_DML_TABLES, 145],
             [RUNTIME_READ_ONLY_TABLES, 19],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
             [PROTECTED_NO_DIRECT_DML_TABLES, 51],
-            [RUNTIME_DML_TABLES, 241],
+            [RUNTIME_DML_TABLES, 242],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 195],
+            [FORCE_RLS_TABLES, 196],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 112],
+            [RUNTIME_FULL_DML_TABLES, 113],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 28],
-            [RUNTIME_DML_TABLES, 178],
+            [RUNTIME_DML_TABLES, 179],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
@@ -458,7 +458,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 292 : 206;
+      const tableCount = hasCurrentMainActivityLedger ? 293 : 207;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -519,15 +519,15 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 216],
+      [FORCE_RLS_TABLES, 217],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 133],
+      [RUNTIME_FULL_DML_TABLES, 134],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
       [PROTECTED_NO_DIRECT_DML_TABLES, 25],
-      [RUNTIME_DML_TABLES, 207],
+      [RUNTIME_DML_TABLES, 208],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -536,8 +536,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(232);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(227);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(233);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(228);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",

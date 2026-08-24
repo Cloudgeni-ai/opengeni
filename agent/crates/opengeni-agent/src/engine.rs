@@ -44,8 +44,8 @@ use tracing::{info, warn};
 
 use crate::job::{run_job, JobCommand, JobConfig, JobEnd, JobExit, JobHooks, JobParams};
 
-/// The admission-fairness origin for legacy request/reply work (legacy
-/// requests carry no session identity; they share one fairness domain).
+/// The admission-fairness origin for request/reply Git work, which carries no
+/// session identity and therefore shares one fairness domain.
 pub const LEGACY_ORIGIN: &str = "legacy";
 
 /// Builds the process-internal operation identity. The wire id remains unchanged;

@@ -307,6 +307,8 @@ import type {
   ForkSessionRequest,
   ForkSessionResponse,
   Session,
+  SessionBackgroundCommandListResponse,
+  CancelSessionBackgroundCommandResult,
   SessionListResponse,
   SessionTenancyCreateCapabilities,
   AgentTopologyPageResponse,
@@ -997,6 +999,27 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
       sessionListQuery(options),
+    );
+  }
+
+  async listSessionBackgroundCommands(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionBackgroundCommandListResponse> {
+    return await this.requestJson<SessionBackgroundCommandListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-commands`,
+    );
+  }
+
+  async cancelSessionBackgroundCommand(
+    workspaceId: string,
+    sessionId: string,
+    commandId: string,
+  ): Promise<CancelSessionBackgroundCommandResult> {
+    return await this.requestJson<CancelSessionBackgroundCommandResult>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-commands/${commandId}`,
     );
   }
 

@@ -501,6 +501,40 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     await admin`delete from video_generation_operations where id = ${videoOperationId}`;
 
+    // A Connected Machine command may execute from this workspace while its
+    // owning session lives in another workspace. The origin FK serializes a
+    // racing adoption with deletion; active authority blocks, while terminal
+    // history is pruned by the final successful deletion instead of wedging the
+    // source workspace forever.
+    const remoteSessionId = crypto.randomUUID();
+    const remoteCommandId = crypto.randomUUID();
+    await seedSession({
+      accountId,
+      workspaceId: siblingWorkspaceId,
+      groupId: remoteSessionId,
+      sessionId: remoteSessionId,
+      status: "idle",
+      initialMessage: "cross-workspace background command",
+    });
+    await admin`
+      insert into session_background_commands (
+        id, account_id, workspace_id, session_id, provider, state,
+        control_workspace_id, enrollment_id, connection_instance_id, op_id,
+        command_preview
+      ) values (
+        ${remoteCommandId}, ${accountId}, ${siblingWorkspaceId}, ${remoteSessionId},
+        'connected_machine', 'running', ${workspaceId}, ${crypto.randomUUID()},
+        'workspace-delete-launch', 'workspace-delete-op', 'sleep 60'
+      )`;
+    expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
+      status: "active_background_commands",
+    });
+    await admin`
+      update session_background_commands set
+        state = 'exited', exit_code = 0, settlement_reason = 'provider_exit',
+        settled_at = now(), updated_at = now()
+      where id = ${remoteCommandId}`;
+
     // Aggregate counters are projections. A raw ownership receipt must still
     // fence deletion even if those counters are corrupt/stale at zero.
     const rawHolderId = crypto.randomUUID();
@@ -513,6 +547,11 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(await deleteWorkspaceIfQuiescent(db, { accountId, workspaceId })).toEqual({
       status: "live_sandboxes",
     });
+    const [commandBeforeSuccessfulDelete] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_background_commands
+      where id = ${remoteCommandId}`;
+    expect(commandBeforeSuccessfulDelete?.count).toBe(1);
     await admin`
       delete from sandbox_lease_holders
       where lease_id = ${warming.lease.id} and holder_id = ${rawHolderId}`;
@@ -568,8 +607,11 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       select count(*)::int as count from workspaces where id = ${workspaceId}`;
     const [scheduleCount] = await admin<{ count: number }[]>`
       select count(*)::int as count from scheduled_tasks where workspace_id = ${workspaceId}`;
+    const [commandCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_background_commands where id = ${remoteCommandId}`;
     expect(workspaceCount?.count).toBe(0);
     expect(scheduleCount?.count).toBe(0);
+    expect(commandCount?.count).toBe(0);
 
     // The receipt intentionally survives the workspace FK cascade. A stale
     // process cannot settle it; a failed exact owner releases it, and another

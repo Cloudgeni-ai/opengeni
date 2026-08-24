@@ -22,8 +22,8 @@
 //     `has_display` track reality (both directions), which the desktop-capability
 //     gate (packages/runtime capabilities.ts) keys off.
 //     refreshEnrollmentOpStream — reconcile `enrollments.op_stream` to the LIVE
-//     runner capability the Hello reports, leaving legacy request/reply exec as the
-//     fallback unless the runner advertises the streaming engine.
+//     runner capability the Hello reports. Exec is unavailable unless the runner
+//     advertises the streaming engine.
 //
 // Both consumers are BEST-EFFORT and fail-soft: a decode/DB error for one message
 // is logged + swallowed (the bus subscription already swallows handler throws) so

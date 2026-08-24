@@ -1218,11 +1218,41 @@ export type ForkSessionResponse = {
   replay: boolean;
 };
 
+export type SessionBackgroundCommandActivity = {
+  state: "running" | "stopping";
+  count: number;
+};
+
+export type SessionBackgroundCommand = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  provider: "managed" | "connected_machine";
+  state: "running" | "stopping" | "exited" | "lost";
+  commandPreview: string;
+  cancelRequestedAt: string | null;
+  exitCode: number | null;
+  settlementReason: string | null;
+  startedAt: string;
+  settledAt: string | null;
+  updatedAt: string;
+};
+
+export type SessionBackgroundCommandListResponse = {
+  commands: SessionBackgroundCommand[];
+};
+
+export type CancelSessionBackgroundCommandResult = {
+  command: SessionBackgroundCommand;
+  accepted: boolean;
+};
+
 export type Session = {
   id: string;
   workspaceId: string;
   accountId: string;
   status: SessionStatus;
+  backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1639,6 +1669,8 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "session.command.backgrounded",
+  "session.command.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -4151,6 +4183,7 @@ export type EffectiveSessionControl = {
     interruptionPendingCount: number;
     quiescencePendingCount: number;
   } | null;
+  backgroundCommandSettlement?: { state: "stopping"; commandCount: number } | null | undefined;
 };
 
 export type SessionCommandReceipt = {

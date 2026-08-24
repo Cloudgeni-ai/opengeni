@@ -2,20 +2,24 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { and, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  adoptConnectedMachineSessionBackgroundCommand,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   evaluateSessionControl,
+  initializeSessionStartAtomically,
   listWorkspaceControlEvents,
   markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
+  SessionBackgroundCommandAdoptionFencedError,
   SessionCommandIdempotencyError,
   SessionControlInvariantError,
   settleSessionAttemptInterruptions,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
 } from "../src/index";
+import { listSessionBackgroundCommands } from "../src/session-background-commands";
 import * as schema from "../src/schema";
 
 let shared: SharedTestDatabase;
@@ -71,6 +75,27 @@ async function fixture() {
   return { grant, root, child };
 }
 
+async function claimAttempt(fixtureValue: Awaited<ReturnType<typeof fixture>>, sessionId: string) {
+  await initializeSessionStartAtomically(client.db, {
+    accountId: fixtureValue.grant.accountId,
+    workspaceId: fixtureValue.grant.workspaceId!,
+    sessionId,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, fixtureValue.grant.workspaceId!, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error(`could not claim fixture: ${claimed.reason}`);
+  return { attemptId, turn: claimed.turn };
+}
+
 async function control(
   fixtureValue: Awaited<ReturnType<typeof fixture>>,
   sessionId: string,
@@ -92,6 +117,88 @@ async function control(
 }
 
 describe("recursive session control algebra", () => {
+  test("Pause atomically stops adopted commands in the selected subtree; Resume never revives them", async () => {
+    const value = await fixture();
+    for (const [index, sessionId] of [value.root.id, value.child.id].entries()) {
+      const attempt = await claimAttempt(value, sessionId);
+      await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId,
+        turnId: attempt.turn.id,
+        executionGeneration: attempt.turn.executionGeneration,
+        attemptId: attempt.attemptId,
+        commandId: crypto.randomUUID(),
+        controlWorkspaceId: value.grant.workspaceId!,
+        enrollmentId: crypto.randomUUID(),
+        connectionInstanceId: `launch-instance-${index}`,
+        opId: `background-op-${index}`,
+        command: "sleep 60",
+      });
+    }
+
+    const paused = await control(value, value.root.id, "pause");
+    expect(paused.backgroundCommandCount).toBe(2);
+    expect(paused.control.backgroundCommandSettlement).toEqual({
+      state: "stopping",
+      commandCount: 2,
+    });
+    for (const sessionId of [value.root.id, value.child.id]) {
+      const commands = await listSessionBackgroundCommands(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId,
+      });
+      expect(commands).toHaveLength(1);
+      expect(commands[0]).toMatchObject({ state: "stopping" });
+    }
+
+    const resumed = await control(value, value.root.id, "resume");
+    expect(resumed.backgroundCommandCount).toBe(0);
+    expect(resumed.control).toMatchObject({
+      state: "active",
+      backgroundCommandSettlement: { state: "stopping", commandCount: 2 },
+    });
+    for (const sessionId of [value.root.id, value.child.id]) {
+      const commands = await listSessionBackgroundCommands(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId,
+      });
+      expect(commands[0]).toMatchObject({ state: "stopping" });
+    }
+  });
+
+  test("Pause committed before adoption fences the stale launching attempt", async () => {
+    const value = await fixture();
+    const attempt = await claimAttempt(value, value.child.id);
+    await control(value, value.root.id, "pause");
+
+    await expect(
+      adoptConnectedMachineSessionBackgroundCommand(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.child.id,
+        turnId: attempt.turn.id,
+        executionGeneration: attempt.turn.executionGeneration,
+        attemptId: attempt.attemptId,
+        commandId: crypto.randomUUID(),
+        controlWorkspaceId: value.grant.workspaceId!,
+        enrollmentId: crypto.randomUUID(),
+        connectionInstanceId: "launch-instance-after-pause",
+        opId: "background-op-after-pause",
+        command: "sleep 60",
+      }),
+    ).rejects.toBeInstanceOf(SessionBackgroundCommandAdoptionFencedError);
+    expect(
+      await listSessionBackgroundCommands(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.child.id,
+      }),
+    ).toHaveLength(0);
+  });
+
   test("a descendant Resume crosses an ancestor Pause and a later ancestor Pause wins", async () => {
     const value = await fixture();
     expect(

@@ -35,6 +35,7 @@ export default defineConfig({
     "editable-artifact-durable-export": "src/editable-artifact-durable-export.ts",
     "video-generation": "src/video-generation.ts",
     "session-tenancy": "src/session-tenancy.ts",
+    "session-background-commands": "src/session-background-commands.ts",
   },
   format: ["esm"],
   target: "es2022",

@@ -16,6 +16,7 @@
 
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
+  adoptConnectedMachineSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
   getRetainedProcess,
@@ -35,6 +36,10 @@ import {
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
+import {
+  settleConnectedMachineSessionBackgroundCommand,
+  settleSessionBackgroundCommandForRetainedProcess,
+} from "@opengeni/db/session-background-commands";
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
@@ -508,6 +513,10 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
+          backgroundCommand: {
+            commandId: retainedProcess.id,
+            command: op,
+          },
           owner: {
             kind: "turn",
             turnId: fence.turnId,
@@ -672,6 +681,15 @@ function settleRetainedProcessForTurn(
       reason: proof.reason,
       idleGraceMs: services.settings.sandboxIdleGraceMs,
     });
+    await settleSessionBackgroundCommandForRetainedProcess(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      retainedProcessId: process.id,
+      outcome: proof.outcome,
+      exitCode: proof.exitCode,
+      reason: proof.reason,
+    });
   };
 }
 
@@ -706,6 +724,8 @@ export function wrapTurnBoxWithRouting(
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
+  const backgroundCommandAccountId = ids.workspaceMutationFence?.accountId;
+  const backgroundCommandAttempt = ids.workspaceMutationFence;
   const beforeMutation = beforePersistableHomeMutation(services, ids, ids.homeLease);
   const afterMutation = afterPersistableHomeMutation(services, ids, ids.homeLease);
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
@@ -749,6 +769,42 @@ export function wrapTurnBoxWithRouting(
     // deadlines the machine-primary establish path uses (short control, long exec).
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
+    ...(backgroundCommandAccountId && backgroundCommandAttempt
+      ? {
+          selfhostedAdoptBackgroundCommand: async (command) => {
+            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
+              accountId: backgroundCommandAccountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              turnId: backgroundCommandAttempt.turnId,
+              executionGeneration: backgroundCommandAttempt.executionGeneration,
+              attemptId: backgroundCommandAttempt.attemptId,
+              commandId: crypto.randomUUID(),
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+              command: command.command,
+            });
+            return { commandId: adopted.id };
+          },
+          selfhostedSettleBackgroundCommand: async (command) => {
+            await settleConnectedMachineSessionBackgroundCommand(db, {
+              accountId: backgroundCommandAccountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              commandId: command.commandId,
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+              outcome: command.outcome,
+              exitCode: command.exitCode,
+              reason: command.reason,
+            });
+          },
+        }
+      : {}),
     // The turn's declared environment → a selfhosted swap target's manifest, so the
     // SDK's per-turn manifest-env delta is empty (no "cannot change manifest
     // environment variables" throw when the turn pins to a vm). Mirrors the group
@@ -902,6 +958,8 @@ export function wrapLazyTurnBoxWithRouting(
   },
 ): EstablishedSandboxSession {
   const { db, settings, bus, onOp } = services;
+  const backgroundCommandAccountId = ids.workspaceMutationFence?.accountId;
+  const backgroundCommandAttempt = ids.workspaceMutationFence;
   const beforeMutation = beforePersistableHomeMutation(services, ids, args.homeLeaseIdentity);
   const afterMutation = afterPersistableHomeMutation(services, ids, args.homeLeaseIdentity);
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
@@ -955,6 +1013,42 @@ export function wrapLazyTurnBoxWithRouting(
     relay: relayConfigFromSettings(settings),
     ...selfhostedResolverTimeouts(settings),
     ...(onOp !== undefined ? { selfhostedOnOp: onOp } : {}),
+    ...(backgroundCommandAccountId && backgroundCommandAttempt
+      ? {
+          selfhostedAdoptBackgroundCommand: async (command) => {
+            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
+              accountId: backgroundCommandAccountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              turnId: backgroundCommandAttempt.turnId,
+              executionGeneration: backgroundCommandAttempt.executionGeneration,
+              attemptId: backgroundCommandAttempt.attemptId,
+              commandId: crypto.randomUUID(),
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+              command: command.command,
+            });
+            return { commandId: adopted.id };
+          },
+          selfhostedSettleBackgroundCommand: async (command) => {
+            await settleConnectedMachineSessionBackgroundCommand(db, {
+              accountId: backgroundCommandAccountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+              commandId: command.commandId,
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+              outcome: command.outcome,
+              exitCode: command.exitCode,
+              reason: command.reason,
+            });
+          },
+        }
+      : {}),
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
     ...(ids.transientExecEnvironment !== undefined
       ? { transientExecEnvironment: ids.transientExecEnvironment }
@@ -1063,10 +1157,19 @@ export function wrapLazyTurnBoxWithRouting(
 }
 
 export type SelfhostedTurnSessionArgs = {
+  accountId: string;
   /** Authorization/session workspace. */
   workspaceId: string;
+  sessionId: string;
   /** Physical machine-origin workspace used in control-plane routing. */
   controlWorkspaceId?: string;
+  /** Exact launching attempt required before a live Connected Machine command
+   * can transfer into session ownership. Omitted by non-turn/test callers,
+   * which therefore cannot yield a durable background command. */
+  backgroundCommandAttempt?: Pick<
+    NonNullable<RoutingWiringIds["workspaceMutationFence"]>,
+    "turnId" | "executionGeneration" | "attemptId"
+  >;
   /** The target machine's enrollment id == the agent subject id. */
   agentId: string;
   /** Exact daemon process currently leased for the enrollment. */
@@ -1239,11 +1342,47 @@ export async function establishSelfhostedTurnSession(
           );
       return connectionBindingFor(services, enrollment);
     },
+    ...(args.backgroundCommandAttempt
+      ? {
+          adoptBackgroundCommand: async (command) => {
+            const adopted = await adoptConnectedMachineSessionBackgroundCommand(db, {
+              accountId: args.accountId,
+              workspaceId: args.workspaceId,
+              sessionId: args.sessionId,
+              turnId: args.backgroundCommandAttempt!.turnId,
+              executionGeneration: args.backgroundCommandAttempt!.executionGeneration,
+              attemptId: args.backgroundCommandAttempt!.attemptId,
+              commandId: crypto.randomUUID(),
+              controlWorkspaceId: command.controlWorkspaceId,
+              enrollmentId: command.enrollmentId,
+              connectionInstanceId: command.connectionInstanceId,
+              opId: command.opId,
+              command: command.command,
+            });
+            return { commandId: adopted.id };
+          },
+        }
+      : {}),
+    settleBackgroundCommand: async (command) => {
+      await settleConnectedMachineSessionBackgroundCommand(db, {
+        accountId: args.accountId,
+        workspaceId: args.workspaceId,
+        sessionId: args.sessionId,
+        commandId: command.commandId,
+        controlWorkspaceId: command.controlWorkspaceId,
+        enrollmentId: command.enrollmentId,
+        connectionInstanceId: command.connectionInstanceId,
+        opId: command.opId,
+        outcome: command.outcome,
+        exitCode: command.exitCode,
+        reason: command.reason,
+      });
+    },
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),
     // The streaming exec transport — present iff the machine advertised the
-    // capability AND the server flag is on. It is required when execTimeoutMs=0;
-    // legacy request/reply remains available only for explicitly bounded exec.
+    // capability AND the server flag is on. Connected Machine exec fails closed
+    // when it is absent; there is no request/reply downgrade.
     ...(opStream !== undefined ? { opStream } : {}),
   });
   return {

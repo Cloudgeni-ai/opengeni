@@ -35,7 +35,8 @@ export type SelfhostedUnavailableReason = Extract<
 /**
  * The selfhosted control-plane transport seam. ONE method: `request` — send a
  * `ControlRequest` to the agent addressed by subject and await its
- * `ControlResponse`. The subject is `subjectFor(workspaceId, agentId)`.
+ * `ControlResponse`. The subject is
+ * `subjectFor(workspaceId, agentId, connectionInstanceId)`.
  *
  * The CONTRACT every implementor MUST honour (the M3 ruling): a
  * no-responder / request-timeout is NOT an exception that means "not found" — it
@@ -53,18 +54,16 @@ export interface ControlRpc {
   ): Promise<ControlResponse>;
 }
 
-/** The control-plane RPC subject for an enrolled agent. Production always supplies
- * the exact claimed daemon instance; the legacy shape remains only for isolated
- * compatibility tests and callers that do not route a live machine. */
+/** The control-plane RPC subject for one exact claimed daemon instance. */
 export function subjectFor(
   workspaceId: string,
   agentId: string,
-  connectionInstanceId?: string,
+  connectionInstanceId: string,
 ): string {
-  const prefix = `agent.${workspaceId}.${agentId}`;
-  return connectionInstanceId
-    ? `${prefix}.connection.${connectionInstanceId}.rpc`
-    : `${prefix}.rpc`;
+  if (typeof connectionInstanceId !== "string" || connectionInstanceId.trim().length === 0) {
+    throw new Error("Connected Machine RPC requires an exact connection instance");
+  }
+  return `agent.${workspaceId}.${agentId}.connection.${connectionInstanceId}.rpc`;
 }
 
 // ── The runtime error taxonomy for a selfhosted control op ────────────────────

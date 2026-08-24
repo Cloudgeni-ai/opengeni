@@ -174,7 +174,7 @@ pub struct JobParams {
 #[derive(Debug, Clone, PartialEq)]
 pub enum JobOutcome {
     /// The child exited on its own; `-1` when killed by an un-caught signal
-    /// (mirrors the legacy one-shot exec mapping).
+    /// (mirrors the one-shot `ExecResponse` mapping).
     Exited {
         /// The child's exit code.
         exit_code: i32,
@@ -416,7 +416,7 @@ struct Pump {
     child: ContainedExec,
     child_done: bool,
     /// The child's exit code once `child_done` (`-1` for signal deaths,
-    /// mirroring the legacy one-shot exec).
+    /// mirroring one-shot exec response semantics).
     child_code: i32,
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,

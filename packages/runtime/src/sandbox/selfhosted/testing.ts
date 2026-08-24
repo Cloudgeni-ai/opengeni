@@ -1,8 +1,8 @@
 // `MockAgentResponder` — an in-process `ControlRpc` test double standing in for
 // a real enrolled agent over NATS (the live NATS transport is M4). It answers
-// the op table (ping / exec / fs.read / fs.write / fs.list / fs.stat / git /
-// metrics / desktopEnsure) against an in-memory virtual filesystem + a pluggable
-// exec handler, so the `SelfhostedSession` surface and the mocked-NATS
+// the request/reply op table (ping / fs.read / fs.write / fs.list / fs.stat /
+// git / metrics / desktopEnsure) against an in-memory virtual filesystem, so
+// the non-exec `SelfhostedSession` surface and mocked-NATS
 // integration tests run with zero broker.
 //
 // It is shipped from the runtime package (a testing util, not test-only-private)
@@ -27,8 +27,7 @@ import type { ControlRpc } from "./control-rpc";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** A pluggable exec handler — given an ExecRequest, return an ExecResponse (or
- *  throw to surface a synthesized error). Defaults to a trivial echo. */
+/** Test-only command behavior consumed by an op-stream fake runner. */
 export type MockExecHandler = (req: ExecRequest) => ExecResponse | Promise<ExecResponse>;
 
 export interface MockAgentResponderOptions {
@@ -43,16 +42,18 @@ export interface MockAgentResponderOptions {
   draining?: boolean;
   /** Seed files (path → string|Uint8Array) into the virtual filesystem. */
   files?: Record<string, string | Uint8Array>;
-  /** A custom exec handler; defaults to an echo of argv. */
+  /** Command behavior for an op-stream test harness. This responder never
+   *  exposes request/reply exec itself. */
   exec?: MockExecHandler;
-  /** The hostname the mock reports (so PTY/exec `$HOSTNAME`-style asserts work). */
+  /** The hostname the mock reports (so PTY `$HOSTNAME`-style asserts work). */
   hostname?: string;
 }
 
 /**
  * An in-process `ControlRpc` answering the agent op table against an in-memory
- * virtual filesystem. Drive a `SelfhostedSession` with this to test exec /
- * readFile / writeFile / list / stat round-trips without any NATS.
+ * virtual filesystem. Drive a `SelfhostedSession` with this to test readFile /
+ * writeFile / list / stat round-trips without any NATS. Exec tests use the
+ * op-stream fake runner from `op-testing.ts`.
  */
 export class MockAgentResponder implements ControlRpc {
   private online: boolean;
@@ -90,6 +91,11 @@ export class MockAgentResponder implements ControlRpc {
     return bytes ? decoder.decode(bytes) : undefined;
   }
 
+  /** Produce the command result used by an op-stream test runner. */
+  async runExec(req: ExecRequest): Promise<ExecResponse> {
+    return await this.execHandler(req);
+  }
+
   async request(
     subject: string,
     req: ControlRequest,
@@ -125,10 +131,6 @@ export class MockAgentResponder implements ControlRpc {
           $case: "ping",
           ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
         });
-      case "exec": {
-        const res = await this.execHandler(op.exec);
-        return ok(req.requestId, { $case: "exec", exec: res });
-      }
       case "fsRead": {
         const bytes = this.files.get(normalize(op.fsRead.path));
         if (!bytes) {
@@ -278,8 +280,6 @@ export class MockAgentResponder implements ControlRpc {
 }
 
 function defaultEcho(req: ExecRequest, hostname: string): ExecResponse {
-  // A trivial deterministic exec: echo the joined argv; if argv mentions
-  // HOSTNAME, emit the mock hostname so terminal-style asserts work.
   const joined = req.command.join(" ");
   const stdout = /hostname|HOSTNAME/.test(joined) ? hostname : joined;
   return {

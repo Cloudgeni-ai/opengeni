@@ -6681,6 +6681,15 @@ export const EffectiveSessionControl = z.object({
       quiescencePendingCount: z.number().int().nonnegative(),
     })
     .nullable(),
+  /** Independent command-cancellation settlement. Session pause/turn state is
+   *  intentionally not overloaded with process lifecycle. */
+  backgroundCommandSettlement: z
+    .object({
+      state: z.literal("stopping"),
+      commandCount: z.number().int().positive(),
+    })
+    .nullable()
+    .optional(),
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
@@ -11132,11 +11141,59 @@ export const UninstallPluginResult = z
   .strict();
 export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
+export const SessionBackgroundCommandState = z.enum(["running", "stopping", "exited", "lost"]);
+export type SessionBackgroundCommandState = z.infer<typeof SessionBackgroundCommandState>;
+
+export const SessionBackgroundCommandProvider = z.enum(["managed", "connected_machine"]);
+export type SessionBackgroundCommandProvider = z.infer<typeof SessionBackgroundCommandProvider>;
+
+export const SessionBackgroundCommandActivity = z
+  .object({
+    state: z.enum(["running", "stopping"]),
+    count: z.number().int().positive(),
+  })
+  .strict();
+export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
+
+export const SessionBackgroundCommand = z
+  .object({
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    provider: SessionBackgroundCommandProvider,
+    state: SessionBackgroundCommandState,
+    commandPreview: z.string().max(512),
+    cancelRequestedAt: z.string().nullable(),
+    exitCode: z.number().int().nullable(),
+    settlementReason: z.string().nullable(),
+    startedAt: z.string(),
+    settledAt: z.string().nullable(),
+    updatedAt: z.string(),
+  })
+  .strict();
+export type SessionBackgroundCommand = z.infer<typeof SessionBackgroundCommand>;
+
+export const SessionBackgroundCommandListResponse = z
+  .object({ commands: z.array(SessionBackgroundCommand).max(1000) })
+  .strict();
+export type SessionBackgroundCommandListResponse = z.infer<
+  typeof SessionBackgroundCommandListResponse
+>;
+
+export const CancelSessionBackgroundCommandResult = z
+  .object({ command: SessionBackgroundCommand, accepted: z.boolean() })
+  .strict();
+export type CancelSessionBackgroundCommandResult = z.infer<
+  typeof CancelSessionBackgroundCommandResult
+>;
+
 export const Session = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
   accountId: z.string().uuid(),
   status: SessionStatus,
+  /** Additive list projection. Detail reads may omit it. */
+  backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
@@ -11456,6 +11513,8 @@ export const SessionEventType = z.enum([
   "sandbox.operation.started",
   "sandbox.operation.completed",
   "sandbox.operation.failed",
+  "session.command.backgrounded",
+  "session.command.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -11660,6 +11719,7 @@ export const SESSION_EVENT_RAW_DELTA_TYPES = [
 export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
+    "session.command.backgrounded",
     "session.requiresAction",
     "session.humanInput.requested",
     "user.pause",
@@ -11707,6 +11767,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "recording.available",
     "recording.failed",
     "terminal.pty.exited",
+    "session.command.finished",
   ],
   failure: [
     "session.event.envelope_omitted",

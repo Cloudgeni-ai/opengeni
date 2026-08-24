@@ -404,6 +404,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "wait for the workspace's active video generations to finish before deleting it",
       });
     }
+    if (deleted.status === "active_background_commands") {
+      throw new HTTPException(409, {
+        message: "pause or cancel the workspace's background commands before deleting it",
+      });
+    }
     if (deleted.status === "live_sandboxes") {
       throw new HTTPException(409, {
         message: "wait for the workspace's active sandboxes to finish draining before deleting it",
