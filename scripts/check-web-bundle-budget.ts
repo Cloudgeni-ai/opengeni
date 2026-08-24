@@ -158,9 +158,15 @@ const budgets = {
   // bytes. Gzip stays comfortably under its existing envelope; advance only
   // the raw aggregate to its next whole KiB above one KiB of headroom. Every
   // other cap, including gzip, stays fixed.
-  directSessionRaw: 2088 * kib,
-  directSessionGzip: 581 * kib,
-  directSessionFiles: 19,
+  // Capability bundle defaults add bounded UI to the direct-session shared
+  // graph. Dedicated composer-launch and route-aware workspace-settings groups
+  // isolate the accidental settings/startup fanout; the exact clean macOS/arm64
+  // build measures 2,150,624 raw / 600,784 gzip bytes across 24 files. Advance
+  // only those three direct-session envelopes; initial, per-file, lazy-chunk,
+  // and CSS caps remain unchanged.
+  directSessionRaw: 2102 * kib,
+  directSessionGzip: 589 * kib,
+  directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 31 * kib,
