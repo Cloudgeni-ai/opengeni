@@ -72,10 +72,13 @@ export type MintedRunGitCredentials = {
   expiresAt: GitTokenExpiries;
 };
 
-export type GitHubTokenMintAuthorization = (selection: {
+export type GitHubTokenMintSelection = {
+  credentialBindingId: string;
   installationId: number;
   repositoryIds: number[];
-}) => Promise<void>;
+  repositoryRefs: GitCredentialRepositoryRef[];
+};
+export type GitHubTokenMintAuthorization = (selection: GitHubTokenMintSelection) => Promise<void>;
 
 export {
   CODEMODE_TOKEN_TTL_SECONDS,
@@ -445,8 +448,10 @@ async function mintRunGitTokensWithIdentity(
       // the current workspace binding before every host-brokered or built-in
       // GitHub installation-token mint.
       await options.authorizeGitHubTokenMint?.({
+        credentialBindingId: selection.credentialBindingId,
         installationId: selection.installationId,
         repositoryIds: selection.repositoryIds,
+        repositoryRefs: selection.repositoryRefs,
       });
     }
     const gitCredentials = credentialsForSelection(options, selection);
@@ -775,6 +780,25 @@ export function gitHubTokenMintSelections(
     .map(({ installationId, repositoryIds }) => ({
       installationId,
       repositoryIds,
+    }));
+}
+
+/** Exact binding-aware selections used by authorization immediately before mint. */
+export function gitHubTokenAuthorizationSelections(
+  resources: ResourceRef[],
+): GitHubTokenMintSelection[] {
+  return gitCredentialSelections(resources)
+    .filter(
+      (candidate) =>
+        candidate.provider === "github" &&
+        candidate.installationId > 0 &&
+        candidate.repositoryIds.length > 0,
+    )
+    .map(({ credentialBindingId, installationId, repositoryIds, repositoryRefs }) => ({
+      credentialBindingId,
+      installationId,
+      repositoryIds,
+      repositoryRefs,
     }));
 }
 
