@@ -61,6 +61,7 @@ describe("managed self-context surfaces", () => {
     expect(organizationAdminSource).toContain(
       "Create shared workspaces, then choose which organization members can use each one.",
     );
+    expect(organizationAdminSource).toContain("Personal workspaces stay private.");
     expect(organizationSource).toContain("<OrganizationPeopleSection");
     expect(organizationSource).toContain("<OrganizationRetentionSection");
   });
