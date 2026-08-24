@@ -1,5 +1,25 @@
 # @opengeni/config
 
+## 0.19.0
+
+### Minor Changes
+
+- 4be2055: Add `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` (default `false`): produce child lifecycle notices (`child_requires_action`, its resolution, `child_paused`, `child_waiting_capacity`, `child_progress`) for parent sessions. Rolling hazard: a worker from before these kinds existed throws on an unknown `session_system_updates` kind, so enable only once the whole fleet runs an image that understands them. The deployment contract carries it as a valueEnv passthrough (`CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV`).
+  Once the flag has produced rows, a pre-notice image must never restart while any new-kind row is still pending in `session_system_updates` or `session_system_update_outbox`; turning the flag back off stops production but does not drain already committed rows.
+- e6ffdc7: Add `OPENGENI_GOAL_IDLE_BACKOFF_MS` (comma-separated pacing delays before the n-th consecutive no-input goal continuation, default `3000,30000,120000,300000`) and `OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS` (default `600000`), validated at boot. This is pacing, never a cap: any new input wakes the session immediately.
+
+### Patch Changes
+
+- a9cd9e7: Add the default-off first-party GitHub REST MCP bridge with separate workspace-App and personal-OAuth actors, exact accepted-repository authority, reviewed read/write tools, connector-policy defaults for writes, Codemode parity, bounded credential-free results, and no replay after ambiguous mutations.
+- Updated dependencies [4be2055]
+- Updated dependencies [de3f376]
+- Updated dependencies [e6ffdc7]
+- Updated dependencies [0b3b8df]
+- Updated dependencies [bbd19e0]
+- Updated dependencies [e91d89e]
+- Updated dependencies [5d664d8]
+  - @opengeni/contracts@2.2.0
+
 ## 0.18.1
 
 ### Patch Changes
