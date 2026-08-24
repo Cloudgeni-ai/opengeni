@@ -88,6 +88,7 @@ export function providerRecoveryResult(input: {
       ? (providerDelay ?? PROVIDER_BACKPRESSURE_DELAY_MS)
       : input.failureCode === "provider_unavailable" ||
           input.failureCode === "upstream_connectivity_unavailable" ||
+          input.failureCode === "mcp_transport_timeout" ||
           input.failureCode === "mcp_transport_unavailable"
         ? Math.max(
             providerDelay ?? 0,

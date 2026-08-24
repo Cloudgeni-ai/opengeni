@@ -4940,17 +4940,25 @@ describe("transient provider error classifier", () => {
   });
 
   test("provider recovery backs off connectivity failures and honors rate-limit hints", () => {
-    expect(
-      [1, 2, 3, 4, 5].map((attemptNumber) =>
-        providerRecoveryResult({ failureCode: "provider_unavailable", attemptNumber }),
-      ),
-    ).toEqual([
+    const expectedConnectivityBackoff = [
       { status: "recovering", continueDelayMs: 2_000 },
       { status: "recovering", continueDelayMs: 5_000 },
       { status: "recovering", continueDelayMs: 15_000 },
       { status: "recovering", continueDelayMs: 30_000 },
       { status: "recovering", continueDelayMs: 60_000 },
-    ]);
+    ];
+    for (const failureCode of [
+      "provider_unavailable",
+      "upstream_connectivity_unavailable",
+      "mcp_transport_timeout",
+      "mcp_transport_unavailable",
+    ]) {
+      expect(
+        [1, 2, 3, 4, 5].map((attemptNumber) =>
+          providerRecoveryResult({ failureCode, attemptNumber }),
+        ),
+      ).toEqual(expectedConnectivityBackoff);
+    }
     const exhausted = providerRecoveryResult({
       failureCode: "provider_unavailable",
       attemptNumber: MAX_AUTOMATIC_PROVIDER_RECOVERIES + 1,
