@@ -172,8 +172,21 @@ const budgets = {
   // any workspace. The sign-in and onboarding surfaces remain lazy; the merged
   // macOS/arm64 graph measures 2,165,667 raw / 604,766 gzip bytes. Advance only
   // the raw aggregate to the next whole KiB above one KiB of headroom.
-  directSessionRaw: 2116 * kib,
-  directSessionGzip: 591 * kib,
+  // Restoring the rail creator monogram on root rows adds the shared chip
+  // component and the accessible-name composition. The same macOS/arm64
+  // production build measures merged main at 2,165,667 raw / 604,766 gzip bytes
+  // and this change at 2,166,852 raw / 605,187 gzip bytes, clearing both
+  // envelopes. Advance those two aggregates: raw to the next whole KiB above
+  // one KiB of headroom, gzip above the observed 1.5-KiB Linux/x64 skew. Every
+  // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
+  // Atomic personal Connected Machine attachment adds its authority catalog,
+  // create-time consent, and accepted-turn intent to the direct session graph.
+  // The merged macOS/arm64 production build measures 2,169,981 raw bytes.
+  // Advance only that aggregate to the next whole KiB above one KiB of
+  // headroom; gzip, file-count, initial, per-file, lazy-chunk, and CSS caps stay
+  // fixed.
+  directSessionRaw: 2121 * kib,
+  directSessionGzip: 593 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

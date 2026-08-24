@@ -3,6 +3,7 @@ import {
   type OpenGeniApiError,
   type PersonalResourceAttachmentIntent,
   type Rig,
+  type ResourceAuthorityScope,
   type Session,
   type UserResourceAuthoritySummary,
   type VariableSet,
@@ -39,7 +40,9 @@ export type PersonalResourceCatalog = Readonly<{
 
 export type FixedPersonalResources = Readonly<{
   variableSetId: string | null;
+  variableSetScope?: ResourceAuthorityScope | null | undefined;
   rigId: string | null;
+  rigScope?: ResourceAuthorityScope | null | undefined;
   connectedMachine: Readonly<{ enrollmentId: string; name: string }> | null;
 }>;
 

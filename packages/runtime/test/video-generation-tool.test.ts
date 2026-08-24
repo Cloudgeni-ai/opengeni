@@ -83,6 +83,7 @@ describe("video generation runtime surface", () => {
       {
         humanInputEnabled: false,
         activeSandboxBackend: "selfhosted",
+        sandboxWorkspaceRoot: "/srv/project",
         videoGeneration: {
           capabilities: async () => capabilities,
           execute: async (_input, context) => ({

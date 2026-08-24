@@ -1204,6 +1204,8 @@ export type UpdateSessionVisibilityResponse = {
 
 export type ForkSessionRequest = {
   idempotencyKey: string;
+  visibility: SessionVisibility;
+  workspaceSharedAcknowledged: boolean;
 };
 
 export type ForkSessionResponse = {
@@ -1212,7 +1214,7 @@ export type ForkSessionResponse = {
   eventSequence: number;
   sessionId: string;
   workspaceId: string;
-  visibility: "private";
+  visibility: SessionVisibility;
   authorityEpoch: 1;
   copiedHistoryItemCount: number;
   replay: boolean;
@@ -3204,6 +3206,12 @@ export type CodexAccountOverview = {
     credits: CodexResetCredit[];
   };
   canRedeem: boolean;
+  /** Secret-free reason redemption is owner-actionable or view-only. */
+  redemptionAccess: {
+    ownership: "current_human" | "unowned" | "different_human" | "managed_human_unavailable";
+    /** A direct managed-cookie admin may claim only an unowned same-provider row by reconnecting. */
+    canClaimUnownedViaReconnect: boolean;
+  };
   /** Owning managed-cookie human may replay durable completion without a healthy provider token. */
   canResumeRedemption: boolean;
   /** Durable owner-scoped ambiguity/completion discovery; never redemption authority for agents. */
@@ -3387,7 +3395,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-atomic-session-fork-visibility-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -6962,7 +6970,10 @@ export type UserMessageEventInput = {
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
     latencyMode?: LatencyMode | undefined;
+    controlEtag?: string | undefined;
+    expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };

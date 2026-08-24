@@ -50,9 +50,8 @@ export type ManagedSandboxTarget = {
   backend: SandboxBackend | "";
 };
 
-/** The working folder on a connected machine. PR-1 ships `root` (the agent's
- *  launch dir → no `workingDir` sent) and `path` (a free-form host path → sent as
- *  Stage A's `workingDir`). A named Project (D4) is a future third variant. */
+/** The working folder on a connected machine. `root` selects the reported
+ * launch root; `path` is absolute or relative to it. */
 export type MachineFolder = { kind: "root" } | { kind: "path"; path: string };
 
 /** A user-owned enrolled machine the platform attaches to (no clone, no teardown,
@@ -477,9 +476,8 @@ export function sessionDraftFromNewSessionDraftOptions(
   };
 }
 
-/** The machine's per-session working directory, or `null` for its default
- *  workspace_root (the agent's launch dir). A blank custom path normalizes to
- *  `null` (omitted ⇒ byte-identical to today). */
+/** The requested machine directory, or null for the reported launch root. The
+ * server resolves relative values to one effective absolute path. */
 function workingDirFromFolder(folder: MachineFolder): string | null {
   return folder.kind === "path" ? folder.path.trim() || null : null;
 }

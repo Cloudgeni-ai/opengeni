@@ -1,7 +1,13 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
-import { ActiveBackendUnresolvableError } from "@opengeni/runtime";
-import { isHomeSandboxTurnTransitionError } from "../src/activities/agent-turn/errors";
+import {
+  ActiveBackendUnresolvableError,
+  RoutingWorkspaceRootChangedError,
+} from "@opengeni/runtime";
+import {
+  isHomeSandboxTurnTransitionError,
+  sandboxRouteTransitionCode,
+} from "../src/activities/agent-turn/errors";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 
 describe("Connected Machine to managed-home turn transition", () => {
@@ -33,6 +39,11 @@ describe("Connected Machine to managed-home turn transition", () => {
         new Error("ActiveBackendUnresolvableError: home_unavailable_this_turn"),
       ),
     ).toBe(false);
+    expect(
+      sandboxRouteTransitionCode(
+        new RoutingWorkspaceRootChangedError("/workspace", "/home/user/project"),
+      ),
+    ).toBe("workspace_root_changed_this_turn");
     expect(
       isHomeSandboxTurnTransitionError(
         new ActiveBackendUnresolvableError("stale_pointer", "sandbox row disappeared"),
@@ -118,7 +129,7 @@ describe("Connected Machine to managed-home turn transition", () => {
         turnId: "turn-1",
         triggerEventId: "trigger-1",
         attemptId: "attempt-1",
-        reason: "sandbox_home_route_transition",
+        reason: "sandbox_route_transition",
         detail: {
           code: "home_unavailable_this_turn",
           effectiveBoundary: "next_attempt",

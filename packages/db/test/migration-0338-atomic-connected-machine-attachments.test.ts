@@ -7,15 +7,15 @@ import { provisionRoles } from "../src/provision-roles";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-describe("migration 0333 atomic Connected Machine attachments", () => {
+describe("migration 0338 atomic Connected Machine attachments", () => {
   let blank: BlankTestDatabase | null = null;
   let admin: postgres.Sql | null = null;
   let app: postgres.Sql | null = null;
 
   beforeAll(async () => {
-    blank = await acquireBlankTestDatabase("migration-0333-atomic-connected-machine");
+    blank = await acquireBlankTestDatabase("migration-0338-atomic-connected-machine");
     if (!blank) {
-      if (requireRealDatabase) throw new Error("[migration-0333] PostgreSQL is required");
+      if (requireRealDatabase) throw new Error("[migration-0338] PostgreSQL is required");
       return;
     }
     await migrate(blank.databaseUrl);
@@ -35,15 +35,22 @@ describe("migration 0333 atomic Connected Machine attachments", () => {
 
   test("declares a drained protocol extension and recovery-stable machine admission", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0333_atomic_connected_machine_attachments.sql", import.meta.url),
+      new URL("../drizzle/0338_atomic_connected_machine_attachments.sql", import.meta.url),
     ).text();
+    const migratorSource = await Bun.file(new URL("../src/migrate.ts", import.meta.url)).text();
     expect(source).toStartWith("-- deployment-mode: maintenance");
     expect(source).toContain("requires all configured OpenGeni application database sessions");
     expect(source).toContain("'connected_machine.use', 'session_active_sandbox'");
     expect(source).toContain("resource_count BETWEEN 1 AND 28");
     expect(source).toContain("zz_session_attempt_personal_machine_admission_v1");
     expect(source).toContain("snapshot.resource_kind = 'connected_machine'");
+    expect(source).toContain("ALTER TABLE enrollments NO FORCE ROW LEVEL SECURITY");
+    expect(source).toContain("ALTER TABLE enrollments FORCE ROW LEVEL SECURITY");
     expect(source).not.toContain("CREATE TEMP");
+    expect(migratorSource).toContain(
+      'ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql"',
+    );
+    expect(migratorSource).toContain("!applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION)");
   });
 
   test("attaches a selected personal machine once and reuses it on turn recovery", async () => {
@@ -73,7 +80,7 @@ describe("migration 0333 atomic Connected Machine attachments", () => {
     await admin`
       insert into session_tenancy_activations (
         account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (${accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'migration-0333')`;
+      ) values (${accountId}, 1, ${"a".repeat(64)}, ${"b".repeat(64)}, 'migration-0338')`;
 
     const [machine] = await app.begin(async (sql) => {
       await sql`select set_config('opengeni.account_id', ${accountId}, true)`;

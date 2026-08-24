@@ -1827,6 +1827,326 @@ export const slackInstallationBindings = pgTable(
   }),
 );
 
+/**
+ * Per-channel Slack workspace routing within one organization.
+ *
+ * HOME tenancy (`accountId`/`workspaceId`) is the installation binding's own
+ * workspace: it owns the bot credential every provider call is fenced on. The
+ * TARGET (`targetAccountId`/`targetWorkspaceId`) is where the session, its
+ * grant, and its events live. `slack_channel_routes_same_account_check` keeps
+ * both sides in one organization; cross-organization routing is out of scope.
+ *
+ * The row is the durable ask-once memory: once a human picks in the Slack
+ * picker, or an admin sets it in the web sheet, later messages in that channel
+ * never ask again.
+ */
+export const slackChannelRoutes = pgTable(
+  "slack_channel_routes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    targetAccountId: uuid("target_account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    targetWorkspaceId: uuid("target_workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    decidedBySubjectId: text("decided_by_subject_id").notNull(),
+    decidedBySlackUserId: text("decided_by_slack_user_id").notNull(),
+    source: text("source").$type<"picker" | "admin">().notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    channel: unique("slack_channel_routes_channel_uq").on(table.connectionId, table.slackChannelId),
+    workspaceAccount: foreignKey({
+      name: "slack_channel_routes_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    targetWorkspaceAccount: foreignKey({
+      name: "slack_channel_routes_target_workspace_account_fk",
+      columns: [table.targetWorkspaceId, table.targetAccountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    target: index("slack_channel_routes_target_idx").on(table.targetWorkspaceId, table.slackTeamId),
+    sameAccount: check(
+      "slack_channel_routes_same_account_check",
+      sql`${table.targetAccountId} = ${table.accountId}`,
+    ),
+    bounded: check(
+      "slack_channel_routes_bounds_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackChannelId}) between 1 and 64
+        and octet_length(${table.decidedBySubjectId}) between 1 and 1024
+        and octet_length(${table.decidedBySlackUserId}) between 1 and 64
+        and ${table.source} in ('picker', 'admin')
+        and ${table.version} > 0`,
+    ),
+  }),
+);
+
+/**
+ * Per-Slack-human direct-message workspace routing, same HOME/TARGET split as
+ * {@link slackChannelRoutes}. Absent a row, a DM derives that human's own
+ * personal workspace from their active organization membership pointer; the
+ * workspace id is never accepted from a Slack payload or from this table.
+ */
+export const slackUserDmRoutes = pgTable(
+  "slack_user_dm_routes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    targetAccountId: uuid("target_account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    targetWorkspaceId: uuid("target_workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    decidedBySubjectId: text("decided_by_subject_id").notNull(),
+    decidedBySlackUserId: text("decided_by_slack_user_id").notNull(),
+    source: text("source").$type<"picker" | "admin">().notNull(),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    user: unique("slack_user_dm_routes_user_uq").on(table.connectionId, table.slackUserId),
+    workspaceAccount: foreignKey({
+      name: "slack_user_dm_routes_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    targetWorkspaceAccount: foreignKey({
+      name: "slack_user_dm_routes_target_workspace_account_fk",
+      columns: [table.targetWorkspaceId, table.targetAccountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    target: index("slack_user_dm_routes_target_idx").on(table.targetWorkspaceId, table.slackTeamId),
+    sameAccount: check(
+      "slack_user_dm_routes_same_account_check",
+      sql`${table.targetAccountId} = ${table.accountId}`,
+    ),
+    bounded: check(
+      "slack_user_dm_routes_bounds_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackUserId}) between 1 and 64
+        and octet_length(${table.decidedBySubjectId}) between 1 and 1024
+        and octet_length(${table.decidedBySlackUserId}) between 1 and 64
+        and ${table.source} in ('picker', 'admin')
+        and ${table.version} > 0`,
+    ),
+  }),
+);
+
+/**
+ * The pending first-use Slack workspace picker.
+ *
+ * `slack_interaction_action_handles` cannot carry it: that table's `sessionId`
+ * is NOT NULL and composite-FK'd to an existing `slack_interactions` row, while
+ * a picker exists BEFORE any session.
+ *
+ * `inboxId` deliberately carries no foreign key. The `awaiting_choice` inbox row
+ * is settled `processed` before the human answers - the answer arrives as its
+ * own `block_action` inbox row - so this column is provenance, not a live edge.
+ *
+ * `requestText` mirrors the inbox's exact 12000 byte bound so a prompt can
+ * always carry the originating row's text losslessly, and `providerEventId` is
+ * the ORIGINAL event so the answer can re-materialize it under the inbox's own
+ * `(connection_id, provider_event_id)` dedupe unique. That is also what makes a
+ * double-click unable to create two sessions.
+ */
+export const slackRoutePrompts = pgTable(
+  "slack_route_prompts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    inboxId: uuid("inbox_id").notNull(),
+    slackTeamId: text("slack_team_id").notNull(),
+    slackUserId: text("slack_user_id").notNull(),
+    slackChannelId: text("slack_channel_id").notNull(),
+    slackMessageTs: text("slack_message_ts").notNull(),
+    providerEventId: text("provider_event_id").notNull(),
+    triggerKind: text("trigger_kind")
+      .$type<
+        | "app_mention"
+        | "dm"
+        | "reaction"
+        | "slash_command"
+        | "message_shortcut"
+        | "thread_reply"
+        | "block_action"
+      >()
+      .notNull(),
+    requestText: text("request_text").notNull(),
+    hasFiles: boolean("has_files").notNull().default(false),
+    slackThreadTs: text("slack_thread_ts"),
+    messageOperationId: uuid("message_operation_id").notNull(),
+    status: text("status")
+      .$type<"pending" | "answered" | "expired" | "cancelled">()
+      .notNull()
+      .default("pending"),
+    answeredTargetAccountId: uuid("answered_target_account_id"),
+    answeredTargetWorkspaceId: uuid("answered_target_workspace_id"),
+    answeredBySubjectId: text("answered_by_subject_id"),
+    answeredAt: timestamp("answered_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    inbox: unique("slack_route_prompts_inbox_uq").on(table.connectionId, table.inboxId),
+    providerEvent: unique("slack_route_prompts_event_uq").on(
+      table.connectionId,
+      table.providerEventId,
+    ),
+    tenantIdentity: unique("slack_route_prompts_identity_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceAccount: foreignKey({
+      name: "slack_route_prompts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    pending: index("slack_route_prompts_pending_idx")
+      .on(table.expiresAt, table.id)
+      .where(sql`${table.status} = 'pending'`),
+    statusValid: check(
+      "slack_route_prompts_status_check",
+      sql`${table.status} in ('pending', 'answered', 'expired', 'cancelled')`,
+    ),
+    triggerValid: check(
+      "slack_route_prompts_trigger_check",
+      sql`${table.triggerKind} in (
+        'app_mention', 'dm', 'reaction', 'slash_command',
+        'message_shortcut', 'thread_reply', 'block_action'
+      )`,
+    ),
+    answerConsistent: check(
+      "slack_route_prompts_answer_check",
+      sql`(${table.status} = 'answered') = (${table.answeredTargetWorkspaceId} is not null)
+        and (${table.answeredTargetAccountId} is null) = (${table.answeredTargetWorkspaceId} is null)
+        and (${table.answeredTargetAccountId} is null
+          or ${table.answeredTargetAccountId} = ${table.accountId})
+        and (${table.answeredTargetWorkspaceId} is null) = (${table.answeredAt} is null)`,
+    ),
+    bounded: check(
+      "slack_route_prompts_bounds_check",
+      sql`octet_length(${table.slackTeamId}) between 1 and 64
+        and octet_length(${table.slackUserId}) between 1 and 64
+        and octet_length(${table.slackChannelId}) between 1 and 64
+        and octet_length(${table.slackMessageTs}) between 1 and 64
+        and octet_length(${table.providerEventId}) between 1 and 256
+        and octet_length(${table.requestText}) between 1 and 12000
+        and (${table.slackThreadTs} is null
+          or octet_length(${table.slackThreadTs}) between 1 and 64)
+        and (${table.answeredBySubjectId} is null
+          or octet_length(${table.answeredBySubjectId}) between 1 and 1024)`,
+    ),
+  }),
+);
+
+/**
+ * One row per workspace offered by a {@link slackRoutePrompts} card. The row id
+ * is the Slack button `value`, so it must be a UUID: the block-action normalizer
+ * already requires that shape, which is why the picker uses buttons rather than
+ * a `static_select` (whose `selected_option.value` the normalizer never reads).
+ *
+ * These rows are a snapshot taken at prompt time and are NEVER authority. The
+ * answer path re-authorizes the chosen workspace live.
+ */
+export const slackRoutePromptOptions = pgTable(
+  "slack_route_prompt_options",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    promptId: uuid("prompt_id").notNull(),
+    candidateAccountId: uuid("candidate_account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    candidateWorkspaceId: uuid("candidate_workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    candidateLabel: text("candidate_label").notNull(),
+    position: integer("position").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "slack_route_prompt_options_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    promptIdentity: foreignKey({
+      name: "slack_route_prompt_options_prompt_fk",
+      columns: [table.accountId, table.workspaceId, table.promptId],
+      foreignColumns: [
+        slackRoutePrompts.accountId,
+        slackRoutePrompts.workspaceId,
+        slackRoutePrompts.id,
+      ],
+    }).onDelete("cascade"),
+    candidateWorkspaceAccount: foreignKey({
+      name: "slack_route_prompt_options_candidate_workspace_account_fk",
+      columns: [table.candidateWorkspaceId, table.candidateAccountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    promptWorkspace: unique("slack_route_prompt_options_prompt_workspace_uq").on(
+      table.promptId,
+      table.candidateWorkspaceId,
+    ),
+    promptPosition: unique("slack_route_prompt_options_prompt_position_uq").on(
+      table.promptId,
+      table.position,
+    ),
+    sameAccount: check(
+      "slack_route_prompt_options_same_account_check",
+      sql`${table.candidateAccountId} = ${table.accountId}`,
+    ),
+    bounded: check(
+      "slack_route_prompt_options_bounds_check",
+      sql`octet_length(${table.candidateLabel}) between 1 and 128
+        and ${table.position} >= 0`,
+    ),
+  }),
+);
+
 export const connectionDisconnectOperations = pgTable(
   "connection_disconnect_operations",
   {
@@ -2158,6 +2478,21 @@ export const slackInteractionInbox = pgTable(
     retryAt: timestamp("retry_at", { withTimezone: true }),
     lastErrorCode: text("last_error_code"),
     reactionContextCheckpoint: jsonb("reaction_context_checkpoint").$type<unknown>(),
+    // Workspace routing decision, persisted on the claimed row so a retry after
+    // a crash re-uses the same decision rather than re-asking. `accountId` and
+    // `workspaceId` above stay HOME (the installation's credential tenancy) and
+    // stay NOT NULL: `workspace_rls_visible` is strict equality, so a NULL
+    // workspace would make an un-routed row invisible to every tenant including
+    // its own. NULL `routeState` means "legacy / never routed" and is exactly
+    // pre-routing behaviour.
+    routeState: text("route_state").$type<"resolved" | "awaiting_choice" | "denied">(),
+    // Deliberately no foreign key: an inbox row is short-lived and
+    // definer-claimed, so a runtime re-check degrades to "ask again" while an FK
+    // would hard-fail on a workspace deleted mid-flight.
+    targetAccountId: uuid("target_account_id"),
+    targetWorkspaceId: uuid("target_workspace_id"),
+    routePromptId: uuid("route_prompt_id"),
+    routePromptExpiresAt: timestamp("route_prompt_expires_at", { withTimezone: true }),
     processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2286,6 +2621,12 @@ export const slackInteractions = pgTable(
     // Frozen once: whether this interaction's acknowledgement renders the
     // one-time onboarding hint. NULL means the decision has not been resolved.
     firstTaskHint: boolean("first_task_hint"),
+    // The routed workspace's display name, frozen when the interaction binds.
+    // A live lookup at post time would be wrong: a workspace rename between the
+    // original post and a reconciliation makes `reconcilePostMessage`'s
+    // byte-compare raise `post_reconciliation_mismatch`. NULL means no
+    // per-message workspace line.
+    routedWorkspaceLabel: text("routed_workspace_label"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
@@ -3409,13 +3750,10 @@ export const sessions = pgTable(
     // sandbox. integer (NOT bigint) — the lease-epoch spike: int8 reads back as a
     // JS string and breaks the strict fence; int4 returns a number.
     activeEpoch: integer("active_epoch").notNull().default(0),
-    // The session's WORKING DIRECTORY — the path/cwd base the (selfhosted) box's
-    // agent/terminal/file-dock operate under. A launch-workspace_root-relative
-    // subdir or an absolute machine path; surfaced alongside the active-sandbox
-    // pointer (readActiveSandbox) and written through the epoch-fenced
-    // setActiveSandbox CAS, NOT the row INSERT. NULL (the default) ⇒ today's
-    // behavior exactly — the agent substitutes its workspace_root for an empty cwd,
-    // so an unset working_dir is a byte-identical no-op. Create-time only (Stage A).
+    // The session's effective absolute Connected Machine root. New attaches
+    // resolve an optional relative request against the persisted Hello root and
+    // write the result through the epoch-fenced setActiveSandbox CAS. Legacy
+    // rows may still be null/relative and are resolved at establishment.
     workingDir: text("working_dir"),
     variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, {
       onDelete: "set null",
@@ -5474,6 +5812,12 @@ export const sessionTurns = pgTable(
     temporalWorkflowId: text("temporal_workflow_id").notNull(),
     status: text("status").notNull(),
     source: text("source").notNull().default("user"),
+    // Immutable user-facing admission intent. Physical execution still uses
+    // status=queued until a worker claims the row; this field keeps that
+    // implementation queue distinct from prompts genuinely waiting behind
+    // other work. Null is reserved for rolling/legacy writers and non-human
+    // turns, and is projected conservatively as visible queue work.
+    promptRouting: text("prompt_routing"),
     position: bigint("position", { mode: "number" }).notNull(),
     prompt: losslessText("prompt").notNull(),
     promptCodecVersion: losslessCodecVersion("prompt_codec_version"),
@@ -9159,6 +9503,9 @@ export const enrollments = pgTable(
     }),
     os: text("os", { enum: enrollmentOsValues }).notNull().default("linux"),
     arch: text("arch").notNull().default("x86_64"),
+    // Exact absolute launch root reported by the authoritative runner Hello.
+    // Null means no current runner has supplied a usable root yet.
+    workspaceRoot: text("workspace_root"),
     // Heartbeat liveness cursor. Null until the first connect.
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     // Clean going-offline marker (migration 0049). Set when the machine announces a

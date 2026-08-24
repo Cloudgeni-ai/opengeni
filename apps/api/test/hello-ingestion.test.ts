@@ -205,6 +205,7 @@ function helloPayload(
     agentVersion?: string;
     binarySha256?: string;
     updateChannel?: "stable" | "beta";
+    workspaceRoot?: string;
     completedUpdate?: {
       operationId: string;
       targetVersion: string;
@@ -219,6 +220,7 @@ function helloPayload(
       agentVersion: opts.agentVersion ?? "",
       binarySha256: opts.binarySha256 ?? "",
       updateChannel: opts.updateChannel ?? "",
+      workspaceRoot: opts.workspaceRoot ?? "",
       completedUpdateOperationId: opts.completedUpdate?.operationId ?? "",
       completedUpdateTargetVersion: opts.completedUpdate?.targetVersion ?? "",
       completedUpdateBinarySha256: opts.completedUpdate?.binarySha256 ?? "",
@@ -490,7 +492,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     expect(after?.wentOfflineAt).not.toBeNull();
   });
 
-  test("a Hello persists exact build identity, channel, and negotiated capabilities", async () => {
+  test("a Hello persists exact build identity, workspace root, channel, and negotiated capabilities", async () => {
     if (!available) return;
     const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
     const digest = "ab".repeat(32);
@@ -502,6 +504,7 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
         agentVersion: "0.1.15",
         binarySha256: digest,
         updateChannel: "beta",
+        workspaceRoot: "/srv/agent/repo/./packages/..",
         desktop: true,
         opStream: true,
         operationResourcePolicy: true,
@@ -514,12 +517,29 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
     expect(after?.agentVersion).toBe("0.1.15");
     expect(after?.agentBinarySha256).toBe(digest);
     expect(after?.agentUpdateChannel).toBe("beta");
+    expect(after?.workspaceRoot).toBe("/srv/agent/repo");
     expect(after?.agentCapabilities).toMatchObject({
       desktop: true,
       opStream: true,
       operationResourcePolicy: true,
       operationCpuQuota: true,
     });
+  });
+
+  test("an invalid Hello root is ignored without replacing stored runtime truth", async () => {
+    if (!available) return;
+    const { workspaceId, enrollment, connectionInstanceId } = await seedEnrollment(false);
+    const warnings: unknown[] = [];
+
+    await handleHelloPayload(
+      db,
+      { warn: (message, fields) => warnings.push({ message, fields }) },
+      helloPayload(enrollment.id, workspaceId, { workspaceRoot: "relative/root" }),
+      helloSubject(workspaceId, enrollment.id, connectionInstanceId),
+    );
+
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.workspaceRoot).toBeNull();
+    expect(warnings.some((warning) => JSON.stringify(warning).includes("invalid"))).toBe(true);
   });
 
   test("restarting is provisional; only exact successor version+digest completes update", async () => {

@@ -14,15 +14,28 @@ import { join } from "node:path";
 // write guard, and the restrictive `session_visibility_isolation` policies) is
 // ACTIVE for organizations carrying the durable activation receipt. The first
 // public caller is deliberately narrow: one core application service reached
-// by the two HTTP routes and the framework-neutral SDK. Worker, MCP, runtime,
-// React, web UI, cross-workspace, attachment, and personal-grant callers remain
-// forbidden.
+// by the two HTTP routes and the framework-neutral SDK, with the activation-
+// gated web control using only that SDK boundary. Worker, MCP, runtime, React,
+// cross-workspace, attachment, and personal-grant callers remain forbidden.
 // ---------------------------------------------------------------------------
 
 const repo = join(import.meta.dir, "..");
 
-const SQL_ENTRY_POINTS = ["transition_session_visibility", "fork_session_content"] as const;
-const ADAPTER_ENTRY_POINTS = ["transitionSessionVisibility", "forkSessionContent"] as const;
+const SQL_ENTRY_POINTS = [
+  "transition_session_visibility",
+  "fork_session_content",
+  // `replay_applied_session_fork` answers a fork's committed destination
+  // WITHOUT consulting mutable source-session authorization. That is exactly
+  // why it must stay pinned to the same narrow boundary as the two lifecycle
+  // functions: it is granted to `opengeni_app`, so any new importer would
+  // otherwise pass every guard in the tree.
+  "replay_applied_session_fork",
+] as const;
+const ADAPTER_ENTRY_POINTS = [
+  "transitionSessionVisibility",
+  "forkSessionContent",
+  "replayAppliedSessionFork",
+] as const;
 const AUTHORIZATION_OPERATIONS = ["session.visibility.write", "session.fork.create"] as const;
 const ADAPTER_CALLER_ALLOWLIST = new Set(["packages/core/src/application/session-tenancy.ts"]);
 const AUTHORIZATION_CALLER_ALLOWLIST = new Set([
@@ -37,6 +50,7 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0225_session_visibility_fork_activation.sql",
   "packages/db/drizzle/0289_session_composer_policy_authority.sql",
   "packages/db/drizzle/0303_session_tenancy_product_activation.sql",
+  "packages/db/drizzle/0336_atomic_session_fork_visibility.sql",
   "packages/db/src/session-tenancy.ts",
   "packages/db/src/provision-roles.ts",
   "packages/db/src/runtime-posture.ts",
@@ -103,8 +117,9 @@ describe("session visibility and fork product activation stays on its exact publ
       expect(posture).toContain(marker);
     }
     expect(adapter).toContain("const SESSION_TENANCY_ACTIVATION_VERSION = 1");
-    // One probe plus the exact version supplied to both lifecycle functions.
-    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(3);
+    // One probe plus the exact version supplied to both lifecycle functions
+    // and the exact applied-fork receipt recovery capability.
+    expect(adapter.match(/\$\{SESSION_TENANCY_ACTIVATION_VERSION\}/gu)).toHaveLength(4);
   });
 
   test("the sole later-migration direct caller supplies the durable receipt and exact version", async () => {
@@ -146,7 +161,7 @@ describe("session visibility and fork product activation stays on its exact publ
 
   test("the decision stays recorded next to the tenancy activation phases", async () => {
     const doc = await readFile(join(repo, "docs/organization-tenancy.md"), "utf8");
-    expect(doc).toContain("## Session-visibility and private-fork public activation");
+    expect(doc).toContain("## Session-visibility and fork public activation");
     expect(doc).toContain("transition_session_visibility");
     expect(doc).toContain("fork_session_content");
     expect(doc).toContain("session_list_snapshots");

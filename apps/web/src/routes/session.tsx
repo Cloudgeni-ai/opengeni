@@ -119,7 +119,10 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
-import { usePersonalResourceAttachment } from "@/lib/use-personal-resource-attachment";
+import {
+  useFixedResourceScopes,
+  usePersonalResourceAttachment,
+} from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -1307,6 +1310,14 @@ function SessionChatPane(props: {
   const composerPolicyValidRef = useRef(false);
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
+  const [fixedVariableSetScope, fixedRigScope] = useFixedResourceScopes(
+    context.client,
+    workspace?.id ?? null,
+    props.session.variableSetId,
+    props.session.rigId,
+    fixedResourceCatalogEnabled,
+  );
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -1318,7 +1329,9 @@ function SessionChatPane(props: {
     enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
       variableSetId: props.session.variableSetId,
+      variableSetScope: fixedVariableSetScope,
       rigId: props.session.rigId,
+      rigScope: fixedRigScope,
       connectedMachine: null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),

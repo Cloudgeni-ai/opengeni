@@ -1,6 +1,9 @@
 diff --git a/node_modules/.bun/@openai+agents-core@0.14.3+933c5e7db4cd33c2/node_modules/@openai/agents-core/.bun-tag-1a92431e4f62cd51 b/.bun-tag-1a92431e4f62cd51
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/.bun/@openai+agents-core@0.14.3+933c5e7db4cd33c2/node_modules/@openai/agents-core/.bun-tag-2da6ec976600e880 b/.bun-tag-2da6ec976600e880
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/.bun/@openai+agents-core@0.14.3+933c5e7db4cd33c2/node_modules/@openai/agents-core/.bun-tag-7c21d377cb19cf3e b/.bun-tag-7c21d377cb19cf3e
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -1537,3 +1540,293 @@ index 34dc1b761aee009ea97f2a26529f7246c44d018e..4ff195c2cfe634b56b942a675491b1f2
          if (resolved.type === 'not_found') {
              if (toolNotFoundBehavior !== 'return_error_to_model') {
                  throwFunctionToolNotFound(resolved.toolName, agent);
+diff --git a/dist/sandbox/manifest.js b/dist/sandbox/manifest.js
+index c7f81e3d0e9bdc08c475371c1cd6ccd508722a69..ba577c045f4fc776fe72382b4cae41f658e3c096 100644
+--- a/dist/sandbox/manifest.js
++++ b/dist/sandbox/manifest.js
+@@ -415,14 +415,30 @@ function normalizeRoot(root) {
+     if ((0, posixPath_1.hasBackslashPathSeparator)(root)) {
+         throw new Error(`Manifest root "${root}" must use "/" separators.`);
+     }
+-    if (!trimmed.startsWith('/')) {
++    if (!trimmed.startsWith('/') && !isWindowsDriveAbsolutePath(trimmed)) {
+         throw new Error(`Manifest root "${root}" must be absolute.`);
+     }
+     if ((0, posixPath_1.hasParentPathSegment)(root)) {
+         throw new Error(`Manifest root "${root}" must not contain parent segments.`);
+     }
++    if (isWindowsDriveAbsolutePath(trimmed)) {
++        const normalized = (0, posixPath_1.normalizePosixPath)(trimmed.slice(3));
++        return normalized === '.' ? trimmed.slice(0, 3) : `${trimmed.slice(0, 3)}${normalized}`;
++    }
++    if (isWindowsUncAbsolutePath(trimmed)) {
++        const segments = trimmed.slice(2).split('/').filter(Boolean);
++        const prefix = `//${segments[0]}/${segments[1]}`;
++        const normalized = (0, posixPath_1.normalizePosixPath)(segments.slice(2).join('/'));
++        return normalized === '.' ? prefix : `${prefix}/${normalized}`;
++    }
+     return (0, posixPath_1.normalizePosixPath)(root);
+ }
++function isWindowsDriveAbsolutePath(path) {
++    return /^[A-Za-z]:\//u.test(path);
++}
++function isWindowsUncAbsolutePath(path) {
++    return /^\/\/[^/]+\/[^/]+(?:\/|$)/u.test(path);
++}
+ function joinAbsolutePath(root, relativePath) {
+     const normalizedRoot = normalizeRoot(root);
+     const normalizedRelativePath = normalizeRelativePath(relativePath);
+diff --git a/dist/sandbox/manifest.mjs b/dist/sandbox/manifest.mjs
+index 37b655b60d16747b5b2aa72b0f827e7b05604a92..4938c08c6239dee1ac6714fe919fddc54c8133c4 100644
+--- a/dist/sandbox/manifest.mjs
++++ b/dist/sandbox/manifest.mjs
+@@ -402,14 +402,30 @@ function normalizeRoot(root) {
+     if (hasBackslashPathSeparator(root)) {
+         throw new Error(`Manifest root "${root}" must use "/" separators.`);
+     }
+-    if (!trimmed.startsWith('/')) {
++    if (!trimmed.startsWith('/') && !isWindowsDriveAbsolutePath(trimmed)) {
+         throw new Error(`Manifest root "${root}" must be absolute.`);
+     }
+     if (hasParentPathSegment(root)) {
+         throw new Error(`Manifest root "${root}" must not contain parent segments.`);
+     }
++    if (isWindowsDriveAbsolutePath(trimmed)) {
++        const normalized = normalizePosixPath(trimmed.slice(3));
++        return normalized === '.' ? trimmed.slice(0, 3) : `${trimmed.slice(0, 3)}${normalized}`;
++    }
++    if (isWindowsUncAbsolutePath(trimmed)) {
++        const segments = trimmed.slice(2).split('/').filter(Boolean);
++        const prefix = `//${segments[0]}/${segments[1]}`;
++        const normalized = normalizePosixPath(segments.slice(2).join('/'));
++        return normalized === '.' ? prefix : `${prefix}/${normalized}`;
++    }
+     return normalizePosixPath(root);
+ }
++function isWindowsDriveAbsolutePath(path) {
++    return /^[A-Za-z]:\//u.test(path);
++}
++function isWindowsUncAbsolutePath(path) {
++    return /^\/\/[^/]+\/[^/]+(?:\/|$)/u.test(path);
++}
+ function joinAbsolutePath(root, relativePath) {
+     const normalizedRoot = normalizeRoot(root);
+     const normalizedRelativePath = normalizeRelativePath(relativePath);
+diff --git a/dist/sandbox/workspacePaths.js b/dist/sandbox/workspacePaths.js
+index 30fb71f0d5b40c0361d1bbbf0caa80bf3b3e2a34..711435ff36469ea29f71ccae93ab309b2989c680 100644
+--- a/dist/sandbox/workspacePaths.js
++++ b/dist/sandbox/workspacePaths.js
+@@ -7,19 +7,23 @@ const pathGrants_1 = require("./pathGrants.js");
+ const posixPath_1 = require("./shared/posixPath.js");
+ class WorkspacePathPolicy {
+     root;
++    windows;
+     extraPathGrants;
+     constructor(options) {
+         if ((0, posixPath_1.hasParentPathSegment)(options.root)) {
+             throw new errors_1.UserError('Sandbox workspace root must not contain parent segments.');
+         }
+-        if ((0, posixPath_1.hasBackslashPathSeparator)(options.root)) {
++        const portableRoot = options.root.replaceAll('\\', '/');
++        const windows = isWindowsAbsolutePath(portableRoot);
++        if (!windows && (0, posixPath_1.hasBackslashPathSeparator)(options.root)) {
+             throw new errors_1.UserError(`Sandbox path "${options.root}" must use "/" separators.`);
+         }
+-        const root = (0, posixPath_1.normalizePosixPath)(options.root);
+-        if (!root.startsWith('/')) {
++        const root = normalizePortablePath(portableRoot, windows);
++        if (!root.startsWith('/') && !isWindowsDriveAbsolutePath(root)) {
+             throw new errors_1.UserError('Sandbox workspace root must be absolute.');
+         }
+         this.root = root;
++        this.windows = windows;
+         this.extraPathGrants = (options.extraPathGrants ?? [])
+             .map((grant) => (0, pathGrants_1.normalizePathGrant)(grant))
+             .sort((left, right) => right.path.length - left.path.length);
+@@ -27,12 +31,13 @@ class WorkspacePathPolicy {
+     resolve(path, options = {}) {
+         const originalPath = path ?? '';
+         const trimmed = originalPath.trim();
++        const portablePath = this.windows ? trimmed.replaceAll('\\', '/') : trimmed;
+         const normalizedPath = trimmed.length === 0
+             ? this.root
+-            : trimmed.startsWith('/')
+-                ? normalizeSandboxPath(trimmed, originalPath)
+-                : joinPosixPath(this.root, normalizeSandboxPath(trimmed, originalPath));
+-        const workspaceRelativePath = (0, posixPath_1.relativePosixPathWithinRoot)(this.root, normalizedPath);
++            : isPortableAbsolutePath(portablePath)
++                ? normalizeSandboxPath(portablePath, originalPath, this.windows)
++                : joinPortablePath(this.root, normalizeSandboxPath(portablePath, originalPath, this.windows), this.windows);
++        const workspaceRelativePath = relativePortablePathWithinRoot(this.root, normalizedPath, this.windows);
+         if (workspaceRelativePath !== null) {
+             return {
+                 path: normalizedPath,
+@@ -56,19 +61,53 @@ class WorkspacePathPolicy {
+     }
+ }
+ exports.WorkspacePathPolicy = WorkspacePathPolicy;
+-function joinPosixPath(root, relativePath) {
++function joinPortablePath(root, relativePath, windows) {
+     if (!relativePath) {
+-        return (0, posixPath_1.normalizePosixPath)(root);
++        return normalizePortablePath(root, windows);
+     }
+-    return (0, posixPath_1.normalizePosixPath)(`${root.replace(/\/+$/u, '')}/${relativePath}`);
++    return normalizePortablePath(`${root.replace(/\/+$/u, '')}/${relativePath}`, windows);
+ }
+-function normalizeSandboxPath(path, originalPath) {
+-    if ((0, posixPath_1.hasBackslashPathSeparator)(path)) {
++function normalizeSandboxPath(path, originalPath, windows) {
++    if (!windows && (0, posixPath_1.hasBackslashPathSeparator)(path)) {
+         throw new errors_1.UserError(`Sandbox path "${originalPath}" must use "/" separators.`);
+     }
+     if ((0, posixPath_1.hasEscapingParentPathSegment)(path)) {
+         throw new errors_2.SandboxInvalidManifestPathError(`Sandbox path "${originalPath}" must not escape root.`);
+     }
++    return normalizePortablePath(path, windows);
++}
++function isWindowsDriveAbsolutePath(path) {
++    return /^[A-Za-z]:\//u.test(path);
++}
++function isWindowsUncAbsolutePath(path) {
++    return /^\/\/[^/]+\/[^/]+(?:\/|$)/u.test(path);
++}
++function isWindowsAbsolutePath(path) {
++    return isWindowsDriveAbsolutePath(path) || isWindowsUncAbsolutePath(path);
++}
++function isPortableAbsolutePath(path) {
++    return path.startsWith('/') || isWindowsAbsolutePath(path);
++}
++function normalizePortablePath(path, windows) {
++    if (!windows) return (0, posixPath_1.normalizePosixPath)(path);
++    if (isWindowsDriveAbsolutePath(path)) {
++        const normalized = (0, posixPath_1.normalizePosixPath)(path.slice(3));
++        return normalized === '.' ? path.slice(0, 3) : `${path.slice(0, 3)}${normalized}`;
++    }
++    if (isWindowsUncAbsolutePath(path)) {
++        const segments = path.slice(2).split('/').filter(Boolean);
++        const prefix = `//${segments[0]}/${segments[1]}`;
++        const normalized = (0, posixPath_1.normalizePosixPath)(segments.slice(2).join('/'));
++        return normalized === '.' ? prefix : `${prefix}/${normalized}`;
++    }
+     return (0, posixPath_1.normalizePosixPath)(path);
+ }
++function relativePortablePathWithinRoot(root, path, windows) {
++    if (!windows) return (0, posixPath_1.relativePosixPathWithinRoot)(root, path);
++    const rootKey = root.toLowerCase();
++    const pathKey = path.toLowerCase();
++    if (pathKey === rootKey) return '';
++    const prefix = rootKey.endsWith('/') ? rootKey : `${rootKey}/`;
++    return pathKey.startsWith(prefix) ? path.slice(prefix.length) : null;
++}
+ //# sourceMappingURL=workspacePaths.js.map
+\ No newline at end of file
+diff --git a/dist/sandbox/workspacePaths.mjs b/dist/sandbox/workspacePaths.mjs
+index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f68703c330ef 100644
+--- a/dist/sandbox/workspacePaths.mjs
++++ b/dist/sandbox/workspacePaths.mjs
+@@ -4,19 +4,23 @@ import { normalizePathGrant, } from "./pathGrants.mjs";
+ import { hasBackslashPathSeparator, hasEscapingParentPathSegment, hasParentPathSegment, isUnderPosixPath, normalizePosixPath, relativePosixPathWithinRoot, } from "./shared/posixPath.mjs";
+ export class WorkspacePathPolicy {
+     root;
++    windows;
+     extraPathGrants;
+     constructor(options) {
+         if (hasParentPathSegment(options.root)) {
+             throw new UserError('Sandbox workspace root must not contain parent segments.');
+         }
+-        if (hasBackslashPathSeparator(options.root)) {
++        const portableRoot = options.root.replaceAll('\\', '/');
++        const windows = isWindowsAbsolutePath(portableRoot);
++        if (!windows && hasBackslashPathSeparator(options.root)) {
+             throw new UserError(`Sandbox path "${options.root}" must use "/" separators.`);
+         }
+-        const root = normalizePosixPath(options.root);
+-        if (!root.startsWith('/')) {
++        const root = normalizePortablePath(portableRoot, windows);
++        if (!root.startsWith('/') && !isWindowsDriveAbsolutePath(root)) {
+             throw new UserError('Sandbox workspace root must be absolute.');
+         }
+         this.root = root;
++        this.windows = windows;
+         this.extraPathGrants = (options.extraPathGrants ?? [])
+             .map((grant) => normalizePathGrant(grant))
+             .sort((left, right) => right.path.length - left.path.length);
+@@ -24,12 +28,13 @@ export class WorkspacePathPolicy {
+     resolve(path, options = {}) {
+         const originalPath = path ?? '';
+         const trimmed = originalPath.trim();
++        const portablePath = this.windows ? trimmed.replaceAll('\\', '/') : trimmed;
+         const normalizedPath = trimmed.length === 0
+             ? this.root
+-            : trimmed.startsWith('/')
+-                ? normalizeSandboxPath(trimmed, originalPath)
+-                : joinPosixPath(this.root, normalizeSandboxPath(trimmed, originalPath));
+-        const workspaceRelativePath = relativePosixPathWithinRoot(this.root, normalizedPath);
++            : isPortableAbsolutePath(portablePath)
++                ? normalizeSandboxPath(portablePath, originalPath, this.windows)
++                : joinPortablePath(this.root, normalizeSandboxPath(portablePath, originalPath, this.windows), this.windows);
++        const workspaceRelativePath = relativePortablePathWithinRoot(this.root, normalizedPath, this.windows);
+         if (workspaceRelativePath !== null) {
+             return {
+                 path: normalizedPath,
+@@ -52,19 +57,53 @@ export class WorkspacePathPolicy {
+         return this.extraPathGrants.find((grant) => isUnderPosixPath(path, grant.path));
+     }
+ }
+-function joinPosixPath(root, relativePath) {
++function joinPortablePath(root, relativePath, windows) {
+     if (!relativePath) {
+-        return normalizePosixPath(root);
++        return normalizePortablePath(root, windows);
+     }
+-    return normalizePosixPath(`${root.replace(/\/+$/u, '')}/${relativePath}`);
++    return normalizePortablePath(`${root.replace(/\/+$/u, '')}/${relativePath}`, windows);
+ }
+-function normalizeSandboxPath(path, originalPath) {
+-    if (hasBackslashPathSeparator(path)) {
++function normalizeSandboxPath(path, originalPath, windows) {
++    if (!windows && hasBackslashPathSeparator(path)) {
+         throw new UserError(`Sandbox path "${originalPath}" must use "/" separators.`);
+     }
+     if (hasEscapingParentPathSegment(path)) {
+         throw new SandboxInvalidManifestPathError(`Sandbox path "${originalPath}" must not escape root.`);
+     }
++    return normalizePortablePath(path, windows);
++}
++function isWindowsDriveAbsolutePath(path) {
++    return /^[A-Za-z]:\//u.test(path);
++}
++function isWindowsUncAbsolutePath(path) {
++    return /^\/\/[^/]+\/[^/]+(?:\/|$)/u.test(path);
++}
++function isWindowsAbsolutePath(path) {
++    return isWindowsDriveAbsolutePath(path) || isWindowsUncAbsolutePath(path);
++}
++function isPortableAbsolutePath(path) {
++    return path.startsWith('/') || isWindowsAbsolutePath(path);
++}
++function normalizePortablePath(path, windows) {
++    if (!windows) return normalizePosixPath(path);
++    if (isWindowsDriveAbsolutePath(path)) {
++        const normalized = normalizePosixPath(path.slice(3));
++        return normalized === '.' ? path.slice(0, 3) : `${path.slice(0, 3)}${normalized}`;
++    }
++    if (isWindowsUncAbsolutePath(path)) {
++        const segments = path.slice(2).split('/').filter(Boolean);
++        const prefix = `//${segments[0]}/${segments[1]}`;
++        const normalized = normalizePosixPath(segments.slice(2).join('/'));
++        return normalized === '.' ? prefix : `${prefix}/${normalized}`;
++    }
+     return normalizePosixPath(path);
+ }
++function relativePortablePathWithinRoot(root, path, windows) {
++    if (!windows) return relativePosixPathWithinRoot(root, path);
++    const rootKey = root.toLowerCase();
++    const pathKey = path.toLowerCase();
++    if (pathKey === rootKey) return '';
++    const prefix = rootKey.endsWith('/') ? rootKey : `${rootKey}/`;
++    return pathKey.startsWith(prefix) ? path.slice(prefix.length) : null;
++}
+ //# sourceMappingURL=workspacePaths.mjs.map
+\ No newline at end of file

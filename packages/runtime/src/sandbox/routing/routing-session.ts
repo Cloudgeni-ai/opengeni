@@ -30,6 +30,7 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import { CAPABILITY_DESCRIPTORS, type SandboxBackend } from "@opengeni/contracts";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
+import { connectedMachineWorkspaceRootsEqual } from "../selfhosted/workspace-path";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import {
   ChannelAPartialMutationError,
@@ -365,6 +366,24 @@ export class RoutingBackendRecoveryRequiredError extends Error {
   }
 }
 
+/** The stable session object was bound to one filesystem root, then the active
+ * route resolved to another. Continuing would reinterpret already-built tool
+ * paths on a different machine filesystem, so the caller must start a fresh
+ * attempt/request against the new route. */
+export class RoutingWorkspaceRootChangedError extends Error {
+  readonly name = "RoutingWorkspaceRootChangedError";
+  readonly retryable = true;
+
+  constructor(
+    public readonly expectedWorkspaceRoot: string,
+    public readonly actualWorkspaceRoot: string,
+  ) {
+    super(
+      `Active sandbox workspace root changed from "${expectedWorkspaceRoot}" to "${actualWorkspaceRoot}"; continue in a fresh attempt`,
+    );
+  }
+}
+
 /** A mutating provider call was admitted but could not be settled against the
  * exact route that admitted it. The provider may have applied the effect, so the
  * proxy rejects the output and explicitly forbids an automatic replay. */
@@ -445,6 +464,11 @@ function isFenceError(error: unknown): boolean {
     error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
   const haystack = `${name} ${message}`.toLowerCase();
   return haystack.includes("fenced") || (haystack.includes("epoch") && haystack.includes("super"));
+}
+
+function workspaceRootForBackend(session: RoutableBackendSession | undefined): string | null {
+  const state = session?.state as { manifest?: { root?: unknown } } | undefined;
+  return typeof state?.manifest?.root === "string" ? state.manifest.root : null;
 }
 
 function positiveProviderSessionId(value: unknown): number | null {
@@ -569,6 +593,7 @@ function structuredExecResultFromBanner(result: string): {
 export class RoutingSandboxSession implements RoutableBackendSession {
   private readonly deps: RoutingSandboxSessionDeps;
   private readonly maxFenceRetries: number;
+  private readonly boundWorkspaceRoot: string | null;
   // The resolved-backend cache. Keyed by the FULL pointer tuple
   // `(activeEpoch, activeSandboxId)` — NOT the epoch alone. A swap bumps the epoch,
   // but a pointer can also change its target id WITHOUT an epoch bump: the
@@ -616,6 +641,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   constructor(deps: RoutingSandboxSessionDeps) {
     this.deps = deps;
     this.maxFenceRetries = deps.maxFenceRetries ?? 3;
+    this.boundWorkspaceRoot = workspaceRootForBackend(deps.defaultResolved?.session);
     this.rememberOpStreamBackend(deps.defaultResolved?.session);
 
     // Conditionally expose the native-desktop surface. Presence = the computer-use
@@ -726,6 +752,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       ...resolved,
       activeEpoch: pointer.activeEpoch,
     };
+    const resolvedWorkspaceRoot = workspaceRootForBackend(routed.session);
+    if (
+      this.boundWorkspaceRoot !== null &&
+      resolvedWorkspaceRoot !== null &&
+      !connectedMachineWorkspaceRootsEqual(resolvedWorkspaceRoot, this.boundWorkspaceRoot)
+    ) {
+      throw new RoutingWorkspaceRootChangedError(this.boundWorkspaceRoot, resolvedWorkspaceRoot);
+    }
     this.rememberOpStreamBackend(routed.session);
     this.cachedEpoch = pointer.activeEpoch;
     this.cachedSandboxId = pointer.activeSandboxId;
@@ -1577,7 +1611,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * teaching the renderer or host about provider-specific filesystem layouts. */
   async fileSystemRoot(): Promise<string> {
     const backend = await this.resolve();
-    if (backend.kind === "selfhosted") return "/";
+    // Channel A speaks workspace-relative paths. The SelfhostedSession resolves
+    // those against its exact host-native root, which also keeps the dock's
+    // portable path validation independent of Windows drive/UNC syntax.
+    if (backend.kind === "selfhosted") return ".";
     const state = backend.session.state as { manifest?: { root?: unknown } } | undefined;
     const manifestRoot = state?.manifest?.root;
     if (typeof manifestRoot === "string" && manifestRoot.startsWith("/")) {

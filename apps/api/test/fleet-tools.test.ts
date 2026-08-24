@@ -226,7 +226,11 @@ async function seedFleet(
   ).toBe(true);
   // Stamp lastSeenAt recent so a probe-miss would be "reconnecting", but our online
   // responder makes the probe succeed → online.
-  await admin`update enrollments set last_seen_at = now() where id = ${enrollment.id}`;
+  await admin`
+    update enrollments
+    set last_seen_at = now(), workspace_root = '/home/user/project'
+    where id = ${enrollment.id}
+  `;
   const sandbox = await createSandbox(db, {
     accountId,
     workspaceId,
@@ -359,7 +363,11 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
         })
       ).updated,
     ).toBe(true);
-    await admin`update enrollments set last_seen_at = now() where id = ${machine.enrollmentId}`;
+    await admin`
+      update enrollments
+      set last_seen_at = now(), workspace_root = '/home/user/project'
+      where id = ${machine.enrollmentId}
+    `;
     const session = await createSession(db, {
       accountId: account!.id,
       workspaceId: targetWorkspace!.id,
@@ -649,6 +657,9 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(swap.swapped).toBe(true);
     expect(swap.activeSandboxId).toBe(sandbox.id);
     expect(swap.activeEpoch).toBe(before.activeEpoch + 1);
+    expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.workingDir).toBe(
+      "/home/user/project",
+    );
 
     // The pointer is persisted; a list now marks the machine active (single-active).
     const list = await listFleet(services, ctx);
@@ -661,6 +672,38 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(back.swapped).toBe(true);
     expect(back.activeSandboxId).toBeNull();
     expect(back.activeEpoch).toBe(swap.activeEpoch + 1);
+  }, 60_000);
+
+  test("machine cwd is stored as an effective absolute root and reset on a fresh attach", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet();
+
+    const configured = await swapActiveSandbox(services, ctx, sandbox.id, "packages/runtime");
+    expect(configured.swapped).toBe(true);
+    expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.workingDir).toBe(
+      "/home/user/project/packages/runtime",
+    );
+
+    expect((await swapActiveSandbox(services, ctx, "session")).swapped).toBe(true);
+    expect((await swapActiveSandbox(services, ctx, sandbox.id)).swapped).toBe(true);
+    expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.workingDir).toBe(
+      "/home/user/project",
+    );
+  }, 60_000);
+
+  test("ambiguous tilde cwd is rejected before the route pointer changes", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet();
+    const before = await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId);
+
+    const rejected = await swapActiveSandbox(services, ctx, sandbox.id, "~/project");
+    expect(rejected).toMatchObject({
+      swapped: false,
+      code: "invalid_working_directory",
+      activeSandboxId: before?.activeSandboxId ?? null,
+      activeEpoch: before?.activeEpoch ?? 0,
+    });
+    expect(await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId)).toEqual(before);
   }, 60_000);
 
   test("same-target attach is a readiness repair that advances the route epoch or fails typed", async () => {

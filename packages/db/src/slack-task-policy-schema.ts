@@ -114,6 +114,11 @@ export const slackSharedTaskOrigins = pgTable(
     sourceThreadTs: text("source_thread_ts").notNull(),
     initiatingSlackUserId: text("initiating_slack_user_id").notNull(),
     policyRevisionId: uuid("policy_revision_id").notNull(),
+    // The Slack task policy is a home fact and the interaction is a routed one,
+    // so the frozen revision carries its own tenancy pair. Null on rows written
+    // before Slack workspace routing, where the two were always equal.
+    policyAccountId: uuid("policy_account_id"),
+    policyWorkspaceId: uuid("policy_workspace_id"),
     policyHash: text("policy_hash").notNull(),
     policyActivationVersion: bigint("policy_activation_version", { mode: "number" }).notNull(),
     publicationMode: text("publication_mode")

@@ -63,6 +63,7 @@ import {
 } from "../op-correlation";
 import { OpStreamExecClient, type OpStreamJournal } from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
+import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
 
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
@@ -71,64 +72,6 @@ const encoder = new TextEncoder();
 const SELFHOSTED_FS_READ_CHUNK_BYTES = 512 * 1024;
 const SELFHOSTED_PLACEMENT_PRIVATE_PREFIX = "/tmp/opengeni-private/";
 const SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES = 128 * 1024;
-
-/**
- * The SDK's VIRTUAL sandbox root. The `@openai/agents` agent loop presents the
- * sandbox to the model rooted at this path — it equals `state.manifest.root`,
- * which is held at "/workspace" to match the Modal createManifest root for the
- * provided-session root-delta guard (`validateProvidedSessionManifestUpdate`).
- *
- * On a bring-your-own machine this path DOES NOT EXIST: the machine's real root
- * is the agent's `workspace_root` (reported in Hello, e.g. "/home/user/repo").
- * The Rust agent's `resolve_cwd` maps an EMPTY cwd / a RELATIVE path onto its
- * `workspace_root`, but takes an ABSOLUTE path AS-IS. So a virtual-root-anchored
- * path the SDK hands us ("/workspace" or "/workspace/sub", e.g. an exec workdir
- * or a model-relative file the SDK resolved against the manifest root) would hit
- * the machine as a literal absolute "/workspace/…" → `current_dir`/open ENOENT
- * (the live-swap exec crash: `spawn hostname: No such file or directory`).
- *
- * `toMachinePath` rewrites the virtual frame onto the machine's: the root itself
- * → the session `workingDir` (empty by default ⇒ "", so the agent substitutes its
- * workspace_root); a child → `workingDir`-rooted remainder (the agent joins it onto
- * workspace_root). A genuine machine-ABSOLUTE path the model/agent chose ("/tmp/x"),
- * or a real path echoed back by `listDir`, passes through UNTOUCHED. This is the
- * SOLE adapter rule between the SDK's virtual space and the machine's real
- * filesystem; it is applied at every NATS path/cwd boundary below (exec cwd, fs
- * read/write/list/stat, the editor's delete, the terminal's pty cwd). The
- * per-session `workingDir` (default "" ⇒ a byte-identical no-op) is the base.
- */
-const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
-
-/**
- * `workingDir` is the session's per-session working directory — the frame's BASE.
- * It is the launch-workspace_root-relative subdir (or an absolute machine path)
- * the agent/terminal/dock operate under. An EMPTY `workingDir` (the default) makes
- * this byte-identical to before: `base === ""`, so every branch returns the
- * original value (empty/virtual → "", virtual-child → its remainder, a relative or
- * absolute path → itself). A trailing slash on `workingDir` is stripped so a join
- * never doubles; relative stays relative and absolute stays absolute otherwise.
- */
-function toMachinePath(p: string | undefined, workingDir: string): string {
-  const base = workingDir.replace(/\/$/, "");
-  if (!p || p === SELFHOSTED_VIRTUAL_ROOT) return base;
-  if (p.startsWith(`${SELFHOSTED_VIRTUAL_ROOT}/`)) {
-    const rel = p.slice(SELFHOSTED_VIRTUAL_ROOT.length + 1);
-    return base ? `${base}/${rel}` : rel;
-  }
-  // An ABSOLUTE machine path — a genuine path the model/agent chose ("/tmp/x") or
-  // a real path echoed back by `listDir` — points anywhere and passes through
-  // UNTOUCHED (the agent's `resolve_cwd` takes an absolute path as-is).
-  if (p.startsWith("/")) return p;
-  // A BARE-RELATIVE path is the structural Channel-A surface's frame: the file dock
-  // joins fs read/list/git sub-paths under an EMPTY workspaceRoot (yielding a bare
-  // relative), and a model-supplied relative exec workdir is bare too. Root it under
-  // the session working dir so those reads/stats stay in the SAME frame as the dock's
-  // working-dir-rooted listing/exec (which run with cwd = workingDir). The SDK agent
-  // loop never emits a bare-relative path — it anchors everything at the manifest
-  // root ("/workspace/…") — so this only re-homes the structural surface. With an
-  // empty workingDir it is a no-op (base === "" ⇒ returns the path unchanged).
-  return base ? `${base}/${p}` : p;
-}
 
 /**
  * Builds the exact argv for an explicitly selected shell.
@@ -319,6 +262,10 @@ export interface SelfhostedOperationAdmission {
    * originate in a different same-organization workspace than the session. */
   workspaceId?: string;
   connectionInstanceId: string;
+  /** Effective absolute workspace root for this exact live connection and
+   * session configuration. A reconnect that changes it cannot continue inside
+   * the current turn attempt. */
+  workspaceRoot: string;
   opStream?: SelfhostedOpStreamDeps;
   operationResourcePolicy: {
     memoryMaxBytes: number | null;
@@ -343,6 +290,9 @@ export interface SelfhostedSessionDeps {
   connectionInstanceId: string;
   controlRpc: ControlRpc;
   relay: SelfhostedRelayConfig;
+  /** Effective absolute host-native workspace root. This is the persisted Hello
+   * root, optionally resolved with the session's configured relative cwd. */
+  workspaceRoot: string;
   /** Stable identity for the session's interactive terminal. Repeated stream
    *  capability mints carrying this value reattach the existing PTY/channel
    *  instead of spawning a replacement shell. Omitted preserves explicit
@@ -375,8 +325,9 @@ export interface SelfhostedSessionDeps {
   /** Exact live CPU enforcement capability paired with the same snapshot. */
   operationCpuQuotaSupported?: boolean;
   /** Re-read immediately before every provider operation. It must return
-   * connection identity, policy revision, capabilities, op-stream state, and
-   * any caller-owned live authority from one authoritative snapshot. */
+   * connection identity, effective workspace root, policy revision,
+   * capabilities, op-stream state, and any caller-owned live authority from one
+   * authoritative snapshot. */
   resolveOperationAdmission?: () => Promise<SelfhostedOperationAdmission | null>;
   /** Durable session ownership transfer for model-facing exec that outlives its
    * bounded wait. Omitted for one-off/Channel-A callers, which remain terminal. */
@@ -423,14 +374,22 @@ export interface SelfhostedSessionDeps {
    * every exec so worker-side bearer renewal is visible without reconnecting.
    */
   transientExecEnvironment?: () => Readonly<Record<string, string>>;
-  /**
-   * The session's working directory — the BASE every path/cwd is rooted under (see
-   * `toMachinePath` / SELFHOSTED_VIRTUAL_ROOT). A launch-workspace_root-relative
-   * subdir (resolved under workspace_root by the agent's `resolve_cwd`) or an
-   * absolute machine path. Omitted/empty (the default) ⇒ "" ⇒ today's behavior
-   * exactly (an empty cwd lets the agent substitute its workspace_root).
-   */
-  workingDir?: string;
+}
+
+/** A live reconnect changed the effective host root after this session was
+ * bound. No filesystem operation is dispatched under stale path authority. */
+export class SelfhostedWorkspaceRootChangedError extends Error {
+  readonly name = "SelfhostedWorkspaceRootChangedError";
+  readonly retryable = true;
+
+  constructor(
+    public readonly expectedWorkspaceRoot: string,
+    public readonly actualWorkspaceRoot: string,
+  ) {
+    super(
+      `Connected Machine workspace root changed from "${expectedWorkspaceRoot}" to "${actualWorkspaceRoot}"; continue in a fresh turn attempt`,
+    );
+  }
 }
 
 /** The Channel-A `exec` result shape (a structural superset of the SDK's). */
@@ -494,9 +453,8 @@ export class SelfhostedSession {
   private readonly opStreamClients = new Map<string, OpStreamExecClient>();
   private readonly inFlightOpStreamClients = new Map<string, OpStreamExecClient>();
   private readonly defaultOpStreamClient: OpStreamExecClient | undefined;
-  /** The session working directory — the path/cwd base every op is rooted under
-   *  (see `toMachinePath`). "" by default ⇒ today's workspace_root behavior. */
-  private readonly workingDir: string;
+  /** Exact host-native root bound for this session/attempt. */
+  readonly workspaceRoot: string;
   private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
   private readonly resourcePolicy: OperationResourcePolicy | undefined;
   private readonly resourcePolicySupported: boolean;
@@ -548,6 +506,13 @@ export class SelfhostedSession {
   };
 
   constructor(deps: SelfhostedSessionDeps) {
+    if (typeof deps.workspaceRoot !== "string" || deps.workspaceRoot.length === 0) {
+      throw new TypeError("Connected Machine workspaceRoot is required");
+    }
+    const workspaceRoot = resolveConnectedMachinePath(deps.workspaceRoot, undefined);
+    if (workspaceRoot !== deps.workspaceRoot) {
+      throw new TypeError("Connected Machine workspaceRoot must be a normalized absolute path");
+    }
     this.workspaceId = deps.workspaceId;
     this.controlWorkspaceId = deps.controlWorkspaceId ?? deps.workspaceId;
     this.agentId = deps.agentId;
@@ -560,7 +525,7 @@ export class SelfhostedSession {
     this.retryClock = deps.retryClock ?? defaultSelfhostedRetryClock;
     this.onOp = deps.onOp;
     this.subject = subjectFor(this.controlWorkspaceId, deps.agentId, deps.connectionInstanceId);
-    this.workingDir = deps.workingDir ?? "";
+    this.workspaceRoot = workspaceRoot;
     this.transientExecEnvironment = deps.transientExecEnvironment;
     this.resourcePolicy = normalizeOperationResourcePolicy(deps.operationResourcePolicy);
     this.resourcePolicySupported = deps.operationResourcePolicySupported === true;
@@ -583,13 +548,8 @@ export class SelfhostedSession {
             opStream: deps.opStream,
           })
         : undefined;
-    // A valid Manifest mirroring the Modal create-manifest shape (sandbox/index.ts
-    // `createManifest`: `new Manifest({ root: "/workspace", environment })`). `root`
-    // is "/workspace" to match `buildManifest`'s declared root (the root-delta guard
-    // in validateProvidedSessionManifestUpdate). This is the VIRTUAL root the SDK
-    // presents to the model; `toMachinePath` (see SELFHOSTED_VIRTUAL_ROOT) rewrites
-    // it onto the machine's real `workspace_root` at every exec/fs NATS boundary,
-    // so the manifest never needs to carry the machine's true root. `environment`
+    // A valid Manifest whose root is the machine's actual effective root. There
+    // is no virtual /workspace alias and no path translation layer. `environment`
     // is the run's declared
     // sandbox environment — the SAME object the worker turn threads into the agent's
     // TARGET manifest — so the SDK's per-turn provided-session delta
@@ -601,7 +561,7 @@ export class SelfhostedSession {
       agentId: deps.agentId,
       instanceId: deps.agentId,
       manifest: new Manifest({
-        root: "/workspace",
+        root: deps.workspaceRoot,
         entries: {},
         environment: deps.environment ?? {},
       }),
@@ -685,6 +645,9 @@ export class SelfhostedSession {
         retryable: false,
         agentOffline: true,
       });
+    }
+    if (!connectedMachineWorkspaceRootsEqual(resolved.workspaceRoot, this.workspaceRoot)) {
+      throw new SelfhostedWorkspaceRootChangedError(this.workspaceRoot, resolved.workspaceRoot);
     }
     const resourcePolicy = normalizeOperationResourcePolicy(resolved.operationResourcePolicy);
     if (commandPolicy) {
@@ -949,11 +912,10 @@ export class SelfhostedSession {
         ? explicitShellArgv(requestedShell, args.cmd, args.login === true)
         : [args.cmd],
       shell: !requestedShell,
-      // Rewrite a virtual-root cwd ("/workspace[/…]") onto the machine's frame —
-      // an absolute "/workspace" would ENOENT on a real machine (see
-      // SELFHOSTED_VIRTUAL_ROOT). Empty → the session workingDir (itself "" by
-      // default ⇒ the agent runs in its workspace_root).
-      cwd: toMachinePath(args.workdir, this.workingDir),
+      // Relative paths resolve from the exact host root, while absolute paths
+      // retain their literal machine meaning. In particular, "/workspace" is
+      // sent as the real absolute path "/workspace".
+      cwd: resolveConnectedMachinePath(this.workspaceRoot, args.workdir),
       // The machine owns its ambient shell environment and ordinary credentials.
       // Only attempt-local values explicitly supplied by the worker cross here;
       // snapshot now so a later renewal cannot mutate an in-flight request.
@@ -1259,17 +1221,16 @@ export class SelfhostedSession {
       await this.writeFile({ path, content, createParents: true });
     };
     const deletePath = async (path: string): Promise<void> => {
-      // No fs-delete op in the proto; remove via the shell (the machine's own rm).
-      // The path arg is embedded in the command, and this.exec runs it with the
-      // DEFAULT cwd = the session workingDir. So target the path RELATIVE to that
-      // cwd: strip the virtual root to its bare remainder (toMachinePath with an
-      // EMPTY base) — prefixing workingDir here too would DOUBLE it (the cwd is
-      // already workingDir). A non-virtual absolute path passes through and rm
-      // uses it as-is; an empty workingDir is byte-identical to before.
-      await this.exec({
-        cmd: `rm -rf -- ${shellQuote(toMachinePath(path, ""))}`,
-        ...(runAs ? { runAs } : {}),
+      const result = await this.call({
+        $case: "fsRemove",
+        fsRemove: {
+          path: resolveConnectedMachinePath(this.workspaceRoot, path),
+          recursive: true,
+        },
       });
+      if (result.$case !== "fsRemove") {
+        throw new Error(`selfhosted deleteFile: unexpected result ${result.$case}`);
+      }
     };
     return {
       async createFile(operation) {
@@ -1298,7 +1259,7 @@ export class SelfhostedSession {
 
   /** Channel-A `readFile`: read a file off the machine (binary-safe). */
   async readFile(args: { path: string; runAs?: string; maxBytes?: number }): Promise<Uint8Array> {
-    const path = toMachinePath(args.path, this.workingDir);
+    const path = resolveConnectedMachinePath(this.workspaceRoot, args.path);
     const requestedBytes = args.maxBytes ?? Number.POSITIVE_INFINITY;
     const chunks: Uint8Array[] = [];
     let offset = 0;
@@ -1343,7 +1304,7 @@ export class SelfhostedSession {
     const result = await this.call({
       $case: "fsWrite",
       fsWrite: {
-        path: toMachinePath(args.path, this.workingDir),
+        path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
         content,
         createParents: args.createParents ?? true,
         append: args.append ?? false,
@@ -1414,7 +1375,7 @@ export class SelfhostedSession {
     const result = await this.call({
       $case: "fsList",
       fsList: {
-        path: toMachinePath(args.path, this.workingDir),
+        path: resolveConnectedMachinePath(this.workspaceRoot, args.path),
         recursive: args.recursive ?? false,
       },
     });
@@ -1428,7 +1389,7 @@ export class SelfhostedSession {
   async statFile(args: { path: string }): Promise<{ exists: boolean }> {
     const result = await this.call({
       $case: "fsStat",
-      fsStat: { path: toMachinePath(args.path, this.workingDir) },
+      fsStat: { path: resolveConnectedMachinePath(this.workspaceRoot, args.path) },
     });
     if (result.$case !== "fsStat") {
       throw new Error(`selfhosted statFile: unexpected result ${result.$case}`);
@@ -1603,12 +1564,10 @@ export class SelfhostedSession {
       // the relay channel. Display-INDEPENDENT — works on a headless machine.
       const result = await this.call({
         $case: "ptyOpen",
-        // Open the terminal in the session workingDir (default "" ⇒ the agent's
-        // workspace_root, byte-identical to before). A relative workingDir resolves
-        // under workspace_root; an absolute one is used as-is by the agent.
+        // Open the terminal in the exact host-native root bound to this session.
         ptyOpen: {
           command: [],
-          cwd: this.workingDir,
+          cwd: this.workspaceRoot,
           env: {},
           cols: 0,
           rows: 0,
@@ -1695,7 +1654,7 @@ export class SelfhostedSandboxClient {
   private readonly execTimeoutMs: number | undefined;
   private readonly environment: Record<string, string> | undefined;
   private readonly transientExecEnvironment: (() => Readonly<Record<string, string>>) | undefined;
-  private readonly workingDir: string | undefined;
+  private readonly workspaceRoot: string;
   private readonly operationResourcePolicy: SelfhostedOperationResourcePolicy | undefined;
   private readonly operationResourcePolicySupported: boolean | undefined;
   private readonly operationCpuQuotaSupported: boolean | undefined;
@@ -1718,6 +1677,8 @@ export class SelfhostedSandboxClient {
     relay: SelfhostedRelayConfig;
     /** Lazily build the ControlRpc (defaults to NatsControlRpc in the provider). */
     controlRpcFactory: () => ControlRpc;
+    /** Exact effective host-native root threaded into every bound session. */
+    workspaceRoot: string;
     /** The agentId a bare create()/resume() (no state) binds to. Optional: the
      *  resume path supplies it via deserializeSessionState. */
     agentId?: string;
@@ -1746,10 +1707,6 @@ export class SelfhostedSandboxClient {
     environment?: Record<string, string>;
     /** Attempt-local child-process environment; never persisted or manifested. */
     transientExecEnvironment?: () => Readonly<Record<string, string>>;
-    /** The session working directory threaded into every bound session (the path/
-     *  cwd base; see SelfhostedSessionDeps.workingDir). Omitted/empty ⇒ the default
-     *  workspace_root behavior. */
-    workingDir?: string;
     /** The per-op observer threaded into every bound session (out-of-band telemetry). */
     onOp?: SelfhostedOpObserver;
     /** The op-stream exec transport threaded into every bound session (present
@@ -1760,6 +1717,7 @@ export class SelfhostedSandboxClient {
     this.controlWorkspaceId = opts.controlWorkspaceId;
     this.relay = opts.relay;
     this.controlRpcFactory = opts.controlRpcFactory;
+    this.workspaceRoot = opts.workspaceRoot;
     this.defaultAgentId = opts.agentId;
     this.connectionInstanceId = opts.connectionInstanceId;
     this.terminalScopeId = opts.terminalScopeId;
@@ -1774,7 +1732,6 @@ export class SelfhostedSandboxClient {
     this.settleBackgroundCommand = opts.settleBackgroundCommand;
     this.environment = opts.environment;
     this.transientExecEnvironment = opts.transientExecEnvironment;
-    this.workingDir = opts.workingDir;
     this.onOp = opts.onOp;
     this.opStream = opts.opStream;
   }
@@ -1796,6 +1753,7 @@ export class SelfhostedSandboxClient {
       connectionInstanceId: this.requireConnectionInstanceId(),
       controlRpc: this.controlRpc(),
       relay: this.relay,
+      workspaceRoot: this.workspaceRoot,
       ...(this.terminalScopeId !== undefined ? { terminalScopeId: this.terminalScopeId } : {}),
       ...(this.epoch !== undefined ? { epoch: this.epoch } : {}),
       ...(this.timeoutMs !== undefined ? { timeoutMs: this.timeoutMs } : {}),
@@ -1824,7 +1782,6 @@ export class SelfhostedSandboxClient {
       ...(this.transientExecEnvironment !== undefined
         ? { transientExecEnvironment: this.transientExecEnvironment }
         : {}),
-      ...(this.workingDir !== undefined ? { workingDir: this.workingDir } : {}),
       ...(this.onOp !== undefined ? { onOp: this.onOp } : {}),
       ...(this.opStream !== undefined ? { opStream: this.opStream } : {}),
     });
@@ -1907,6 +1864,8 @@ export interface SelfhostedSessionBuild {
   terminalScopeId?: string;
   /** Lazily build the live ControlRpc (the request-scoped NATS connection). */
   controlRpcFactory: () => ControlRpc;
+  /** Exact effective host-native root for this session. */
+  workspaceRoot: string;
   /** The lease/active epoch the session is fenced under (echoed on every op). */
   epoch: number;
   /** The run's declared sandbox environment → the session manifest.environment
@@ -1914,8 +1873,6 @@ export interface SelfhostedSessionBuild {
   environment?: Record<string, string>;
   /** Attempt-local child-process values; see SelfhostedSessionDeps. */
   transientExecEnvironment?: () => Readonly<Record<string, string>>;
-  /** The session working directory (the path/cwd base). Null/absent ⇒ workspace_root. */
-  workingDir?: string | null;
   /** The control-op timeout (ping/fs/desktop/pty). Absent ⇒ the 30s default. */
   timeoutMs?: number;
   /** The exec process deadline, distinct from `timeoutMs`. 0 = none; absence
@@ -1964,6 +1921,7 @@ export async function buildSelfhostedBackendSession(
       : {}),
     relay: deps.relay,
     controlRpcFactory: deps.controlRpcFactory,
+    workspaceRoot: deps.workspaceRoot,
     agentId: deps.agentId,
     connectionInstanceId: deps.connectionInstanceId,
     epoch: deps.epoch,
@@ -1995,7 +1953,6 @@ export async function buildSelfhostedBackendSession(
     ...(deps.transientExecEnvironment !== undefined
       ? { transientExecEnvironment: deps.transientExecEnvironment }
       : {}),
-    ...(deps.workingDir ? { workingDir: deps.workingDir } : {}),
     ...(deps.opStream !== undefined ? { opStream: deps.opStream } : {}),
   });
   const session = await client.resume({ agentId: deps.agentId });
@@ -2074,12 +2031,6 @@ function execRequiresOpStream(cause?: OpStreamUnavailableError): SelfhostedContr
 
 function channelKey(workspaceId: string, agentId: string, port: number): string {
   return `${workspaceId}:${agentId}:${port}`;
-}
-
-/** Single-quote a string for POSIX shell (the editor's delete uses the machine's
- *  own `rm`). Mirrors the standard `'…'` quoting with `'\''` escaping. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Detect an image media type from magic bytes (with a path-extension fallback),

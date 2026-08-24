@@ -393,6 +393,14 @@ describe("release image workflow contract", () => {
     }
     expect(candidate).toContain("docker/setup-qemu-action@");
     expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
+    expect(
+      candidate.match(/org\.opencontainers\.image\.revision=\$\{\{ inputs\.source_sha \}\}/g),
+    ).toHaveLength(7);
+    expect(
+      candidate.match(
+        /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
+      ),
+    ).toHaveLength(7);
     expect(candidate).toContain(
       "candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}",
     );
@@ -624,6 +632,12 @@ describe("release image workflow contract", () => {
     ).toHaveLength(7);
     expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
+    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(7);
+    expect(
+      images.match(
+        /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
+      ),
+    ).toHaveLength(7);
     expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
     expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
     expect(images).toContain("Write exact-main-SHA canary receipt");
@@ -1130,37 +1144,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "ff721f475726ef45a1773b40b1132ee3789ad3a67a6bdd58064c86f9de93d86f",
+        fingerprint: "fd47898c1119624dbafa8e62926cbbfbb950f541e41167765257f9ba01247cd6",
       },
       {
         jobName: "worker-web-images",
         name: "Build worker image",
-        fingerprint: "202cdfa7dcdb4824d205b25f6e4fcf28c35f41af9c9d1888eb30af761526483d",
+        fingerprint: "30caf29d97ddcbc7262219ff597c0febd8d99771e8a5d76c656fc3ba3189f9ba",
       },
       {
         jobName: "worker-web-images",
         name: "Build web image",
-        fingerprint: "9125d43f534c6574db87755be185c22bd923910c5d25c6f015e0e6f5c521c9b9",
+        fingerprint: "80eb5b15cc4d529a9b3b8cb3582f19465b34a288791f4233d734ebb7f1010e05",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "8ce52cc968f445d0c83b3ee89cc47cfa1c290646599c137a47fe868e2d784728",
+        fingerprint: "41973667fdf57ab9af89ba5d7aa497dd74378f559e26de644131f5a18e1ce849",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "6e4fa54094e7d208f8f1f9e58ae7c3f1d3601765493cb9f8a86128a861b86693",
+        fingerprint: "d9653c9b324d2bf40c226c54784492d740d6000465f0aeb8571218d226d7f394",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "f1728ec3218f2d0d2c3ac1697277eaf7f231c30ed11fdfb9d0513db194d319ad",
+        fingerprint: "146554993b13ba0e9cbb9776ffdeb4006c7ba98f81ca05f46d8f3abbf5fa67b1",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "05a2dc33ab504335251581afec4aca6282ca11e11c72612722a5a48e256e314d",
+        fingerprint: "de1ae66fe410cd78f9965fe23e5d80d5506d1132c68cfec7a4c5c93e103fcd7d",
       },
     ]);
 

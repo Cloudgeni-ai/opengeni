@@ -277,7 +277,9 @@ describe("Variable Sets credential-autofill boundaries", () => {
   });
 
   test("keeps the managed sign-in fields on their credential autocomplete tokens", async () => {
-    const authSource = await Bun.file(`${import.meta.dir}/../context.tsx`).text();
+    const authSource = await Bun.file(
+      `${import.meta.dir}/../components/managed-auth-panel.tsx`,
+    ).text();
 
     expect(authSource).toContain('autoComplete="email"');
     expect(authSource).toContain(

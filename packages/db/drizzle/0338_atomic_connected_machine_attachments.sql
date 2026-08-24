@@ -2,7 +2,7 @@
 -- Extend accepted-turn personal-resource attachments to the selected user-owned
 -- Connected Machine. The attachment summary and protocol-v1 attempt snapshot
 -- now admit a third resource kind, so every API/control/turn worker must be
--- stopped before this cutover and no pre-0333 worker may restart afterwards.
+-- stopped before this cutover and no pre-0338 worker may restart afterwards.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -16,14 +16,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0333 atomic Connected Machine attachment requires an explicit application database role list'
+      '0338 atomic Connected Machine attachment requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0333 atomic Connected Machine attachment received a malformed application database role list'
+      '0338 atomic Connected Machine attachment received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -42,7 +42,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0333 atomic Connected Machine attachment received an invalid application database role list'
+      '0338 atomic Connected Machine attachment received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -54,7 +54,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0333 atomic Connected Machine attachment requires all configured OpenGeni application database sessions to be stopped'
+      '0338 atomic Connected Machine attachment requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -66,6 +66,8 @@ LOCK TABLE session_turn_attempts IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE turn_personal_resource_attachment_receipts IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE turn_personal_resource_snapshots IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE session_attempt_personal_resource_snapshots IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE enrollments IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE sandboxes IN ACCESS EXCLUSIVE MODE;
 
 DO $atomic_connected_machine_writer_drain_after_lock$
 DECLARE
@@ -82,7 +84,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0333 atomic Connected Machine attachment requires all configured OpenGeni application database sessions to be stopped'
+      '0338 atomic Connected Machine attachment requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -131,6 +133,13 @@ ALTER TABLE session_attempt_personal_resource_snapshots
     OR (resource_kind = 'connected_machine' AND action = 'connected_machine.use')
   );
 
+-- The source-patch block contains the replacement function's enrollment and
+-- sandbox reads. The production migrator is a NON-superuser/NOBYPASSRLS owner,
+-- so make those references owner-visible inside this exact transaction-local
+-- window. A failure rolls the complete migration back, including FORCE state.
+ALTER TABLE enrollments NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE sandboxes NO FORCE ROW LEVEL SECURITY;
+
 -- The 0306 function is long and security-sensitive. Patch only its four exact,
 -- previously shipped source fragments and abort if any expected fragment is
 -- absent. Recreating the signature explicitly preserves the hardened search
@@ -178,7 +187,7 @@ BEGIN
   WITH selected AS ($new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0333 could not extend the atomic attachment lock set'
+    RAISE EXCEPTION '0338 could not extend the atomic attachment lock set'
       USING ERRCODE = '55000';
   END IF;
 
@@ -208,7 +217,7 @@ BEGIN
   ), grouped AS ($new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0333 could not extend the atomic attachment closure'
+    RAISE EXCEPTION '0338 could not extend the atomic attachment closure'
       USING ERRCODE = '55000';
   END IF;
 
@@ -219,7 +228,7 @@ BEGIN
     'no personal Variable Set, Rig, or Connected Machine is selected by this session'
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0333 could not update the empty attachment diagnostic'
+    RAISE EXCEPTION '0338 could not update the empty attachment diagnostic'
       USING ERRCODE = '55000';
   END IF;
   function_source := replace(
@@ -232,7 +241,7 @@ BEGIN
   IF function_source NOT LIKE '%IF selected_count > 28 THEN%'
     OR function_source LIKE '%IF selected_count > 27 THEN%'
   THEN
-    RAISE EXCEPTION '0333 could not update the attachment bound'
+    RAISE EXCEPTION '0338 could not update the attachment bound'
       USING ERRCODE = '55000';
   END IF;
 
@@ -251,11 +260,14 @@ BEGIN
 END
 $extend_atomic_attachment_function$;
 
+ALTER TABLE enrollments FORCE ROW LEVEL SECURITY;
+ALTER TABLE sandboxes FORCE ROW LEVEL SECURITY;
+
 -- Protocol-v1 attachment admission runs before this alphabetically-later
 -- trigger and has already validated/copy-frozen the complete accepted-turn
 -- snapshot. Reuse that exact machine row, including a consumed `once` grant,
 -- instead of selecting mutable grant state again. Version-0 turns keep the
--- pre-0333 trigger unchanged.
+-- pre-0338 trigger unchanged.
 CREATE FUNCTION admit_session_attempt_personal_machine_v1() RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER

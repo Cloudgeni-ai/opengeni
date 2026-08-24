@@ -168,6 +168,7 @@ async function resolveSelfhostedConnection(
       : undefined;
   return {
     connectionInstanceId: enrollment.connectionInstanceId,
+    workspaceRoot: enrollment.workspaceRoot,
     ...(opStream ? { opStream } : {}),
     operationResourcePolicy: enrollment.operationPolicy,
     operationResourcePolicySupported: enrollment.agentCapabilities.operationResourcePolicy === true,
