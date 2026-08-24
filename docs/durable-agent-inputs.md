@@ -116,6 +116,85 @@ first-party `session_human_input_respond` tool (`sessions:control`,
 denied to every agent attempt and remain a human decision. See
 [`agent-session-authority.md`](agent-session-authority.md).
 
+## Consuming a child notice acknowledges that child
+
+A parent turn consuming a child's lifecycle update also acknowledges that child
+for the turn's initiating human, exactly as if they had viewed it. The claim
+transaction that marks the batch `delivered` and writes its
+`session_history_items` row advances that human's `session_pins`
+`acknowledged_sequence` on every child the batch reports on, to the child's
+`last_sequence` at that instant. The claim commits or rolls back with the
+acknowledgment, so a recovered or retried claim cannot leave the two out of
+step.
+
+The mechanism is keyed only on "a claimed turn consumed a child lifecycle
+update, and that turn has a frozen initiating human". There is no
+orchestrator-, goal-, or depth-specific rule, and every level of a nested chain
+behaves identically. It applies to all six child lifecycle kinds, which share
+the `childSessionId` field; several notices for one child in a single batch
+produce one acknowledgment. A turn whose frozen principal is purely a service
+(an ordinary machine-input turn with no goal continuation, schedule, xAI-user,
+or private-owner authority behind it) has no human to acknowledge for and
+writes nothing.
+
+Read state is per viewer, so this only ever changes the rail for that one
+human; another member still sees the child unread. It only ever removes noise:
+`unread` is nothing but `sessions.last_sequence > acknowledged_sequence`, so a
+child that emits one more event goes unread again with no special handling, and
+the `failed` and `requires_action` rail indicators are derived from
+`sessions.status`, rank above unread, and are untouched. The fence is monotone:
+a human who has already read further, or a racing claim that observed a later
+sequence, is never regressed.
+
+Monotonicity has one consequence worth stating plainly: an explicit mark-unread
+is **not** sticky against a later consumption. Marking a child unread, then
+letting that child work and report again, leaves it acknowledged after the
+parent's next claim. That follows from the premise that consumption is the read
+signal, and the mark still holds until the parent consumes a newer notice, but
+mark-unread is therefore not a durable personal to-do flag on a child of an
+active orchestrator. Making it sticky would need a durable explicit-unread
+marker the acknowledgment respects; there is deliberately no such marker.
+
+The acknowledgment never touches `attention_version`. That revision orders
+explicit human attention mutations against each other, and this writer emits no
+event, NATS invalidation, or sequence advance a browser could observe. Bumping
+it would silently stale the revision the rail holds and turn the human's next
+mark-read click into a 409 with no way for the page to know why.
+
+The write is deliberately lightweight and is one statement per claim.
+
+- It honours the `session-personal-state` advisory fence with
+  `pg_try_advisory_xact_lock_shared` and skips the acknowledgment when the fence
+  is unavailable. Workspace membership removal takes that fence *exclusively* and
+  *before* the workspace/session lock prefix the claim already holds, so blocking
+  on it here would invert the canonical order; a non-blocking probe cannot.
+  Honouring it is what keeps this from being the "racing pin writer recreates
+  personal rows after cleanup" hole migration 0278 exists to close, and losing
+  the probe is a clean no-op: the child stays unread, exactly as it does today.
+  The probe is *shared* rather than exclusive because `listSessionsForSubject`
+  holds the shared counterpart for its whole rail-list transaction, and that list
+  refreshes on focus, online, and visibilitychange. An exclusive probe fails
+  against a held shared lock, so it would drop acknowledgments precisely while
+  the human is looking at the rail, and since `child_terminal_result` is
+  typically a child's last notice, a drop there would leave exactly the permanent
+  unread dot this mechanism exists to remove. Shared still conflicts with
+  removal's exclusive hold, and acknowledgment writers need no mutual exclusion
+  against each other because the upsert is monotone and row-locked.
+- It takes no child turn/attempt lock and no explicit child session lock.
+  `session_pins` does carry two foreign keys to `sessions`, so each inserted row
+  takes `FOR KEY SHARE` on the child's session row. That is compatible rather
+  than an inversion: `FOR KEY SHARE` conflicts only with `FOR UPDATE`, and every
+  canonical session writer takes `FOR NO KEY UPDATE`.
+- One `INSERT ... SELECT ... ORDER BY id` covers every child in the batch, so
+  rows lock in the same UUID order the rest of the session writers use and the
+  index order migration 0278 deletes in.
+- The insert is fenced on `parent_session_id`, so a payload field can never
+  decide whose personal state is mutated on an unrelated session.
+
+The other `session_pins` writers tolerate a row appearing between their read and
+their write; the acknowledgment row is pin-neutral and archive-neutral, so their
+conflict path is the same transition as their insert.
+
 ## Queue and timeline
 
 The human prompt queue and pending machine inputs remain distinct canonical
