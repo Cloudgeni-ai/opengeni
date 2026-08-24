@@ -167,6 +167,7 @@ describe("release schema contract", () => {
       "0331_managed_organization_creation.sql",
       "0332_organization_shared_workspace_control_plane.sql",
       "0333_session_turn_prompt_routing.sql",
+      "0333_slack_workspace_routing.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

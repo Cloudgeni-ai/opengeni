@@ -428,6 +428,8 @@ export * from "./managed-human-provisioning";
 export * from "./organization-membership-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
+export * from "./slack-routing";
+import { personalWorkspaceIdForSubject } from "./slack-routing";
 export * from "./workspace-membership-permissions";
 export * from "./video-generation";
 export * from "./user-resource-authority";
@@ -18468,6 +18470,69 @@ export async function namedSubjectHasLiveWorkspaceAuthority(
       }
     },
   );
+}
+
+/**
+ * The ONLY place a Slack request may reach a managed human's personal
+ * workspace. Returns the grant a routed Slack target may act under, or null.
+ *
+ * A Slack webhook has no caller subject: `subjectId` is read out of band from a
+ * durable `slack_bot_user_links` row, whose only writers sit behind a verified
+ * managed-human cookie or a `members:manage` grant. That is why this uses
+ * {@link namedSubjectHasLiveWorkspaceAuthority} rather than the in-scope
+ * variant - the subject was authenticated elsewhere, and this seam is naming
+ * it, not proving it. Callers must therefore never pass a subject taken from a
+ * Slack payload; pass only `link.subjectId`.
+ *
+ * Ordinary membership first, then a derived-and-fenced pointer path (the same
+ * shape as `requirePersonalGitHubCallbackGrant`):
+ *
+ * - `getWorkspaceGrant` is a bare `workspace_memberships` join and is NOT
+ *   widened here, because `accessGrantAuthorization` calls it for every
+ *   principal kind including API keys and delegated bearers; widening it would
+ *   hand a bearer principal personal-workspace access.
+ * - The pointer path accepts only the subject's OWN `personalWorkspaceId` from
+ *   an ACTIVE membership in exactly `targetAccountId`, then re-checks live
+ *   authority. The workspace id is never taken from a route row or a Slack
+ *   payload - it must equal the pointer.
+ * - No Slack branch is ever added to `canonicalManagedCookieContexts`: that
+ *   `WeakSet` has exactly one writer, the Better Auth cookie branch of
+ *   `resolveAccessContext`, and a Slack-signed webhook can never be in it.
+ *
+ * Slack sessions stay `workspace_shared`: this grant is passed as an ordinary
+ * grant, and `createSessionForRequest` is still called WITHOUT its
+ * `authorization` argument, so Slack privacy remains
+ * `slack_interactions.visibility`.
+ */
+export async function resolveSlackTargetAuthority(
+  db: Database,
+  input: { subjectId: string; targetAccountId: string; targetWorkspaceId: string },
+): Promise<AccessGrant | null> {
+  const grant = await getWorkspaceGrant(db, input.subjectId, input.targetWorkspaceId, {
+    principalKind: "human_session",
+  });
+  if (grant && grant.accountId === input.targetAccountId) return grant;
+
+  const personalWorkspaceId = await personalWorkspaceIdForSubject(db, {
+    accountId: input.targetAccountId,
+    subjectId: input.subjectId,
+  });
+  if (!personalWorkspaceId || personalWorkspaceId !== input.targetWorkspaceId) return null;
+
+  const live = await namedSubjectHasLiveWorkspaceAuthority(db, {
+    accountId: input.targetAccountId,
+    workspaceId: input.targetWorkspaceId,
+    subjectId: input.subjectId,
+  });
+  if (!live) return null;
+
+  return {
+    workspaceId: input.targetWorkspaceId,
+    accountId: input.targetAccountId,
+    subjectId: input.subjectId,
+    permissions: managedPersonalWorkspacePermissions,
+    principalKind: "human_session",
+  };
 }
 
 /**
