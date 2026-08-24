@@ -57,7 +57,7 @@ import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
-import { useRigs, useVariableSets, type WorkspaceTab } from "@opengeni/react";
+import type { WorkspaceTab } from "@opengeni/react";
 import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
 import type {
@@ -119,7 +119,10 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
-import { usePersonalResourceAttachment } from "@/lib/use-personal-resource-attachment";
+import {
+  useFixedResourceScopes,
+  usePersonalResourceAttachment,
+} from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -1308,12 +1311,13 @@ function SessionChatPane(props: {
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
   const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
-  const variableSets = useVariableSets({ enabled: fixedResourceCatalogEnabled });
-  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
-  const selectedVariableSet = variableSets.variableSets.find(
-    (candidate) => candidate.id === props.session.variableSetId,
+  const [fixedVariableSetScope, fixedRigScope] = useFixedResourceScopes(
+    context.client,
+    workspace?.id ?? null,
+    props.session.variableSetId,
+    props.session.rigId,
+    fixedResourceCatalogEnabled,
   );
-  const selectedRig = rigs.rigs.find((candidate) => candidate.id === props.session.rigId);
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -1325,9 +1329,9 @@ function SessionChatPane(props: {
     enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
       variableSetId: props.session.variableSetId,
-      variableSetScope: selectedVariableSet?.scope ?? null,
+      variableSetScope: fixedVariableSetScope,
       rigId: props.session.rigId,
-      rigScope: selectedRig?.scope ?? null,
+      rigScope: fixedRigScope,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,

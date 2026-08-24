@@ -60,6 +60,55 @@ export type PersonalResourceAttachmentController = Readonly<{
   ) => void;
 }>;
 
+/**
+ * Resolve the ordinary catalog scope for an already-fixed session resource
+ * without importing the broad @opengeni/react root into the direct-session
+ * route. Failure stays unknown: only a positive `user` classification may turn
+ * the optional Personal catalog into submission UI.
+ */
+export function useFixedResourceScopes(
+  client: OpenGeniCoreClient,
+  workspaceId: string | null,
+  variableSetId: string | null,
+  rigId: string | null,
+  enabled = true,
+): readonly [ResourceAuthorityScope | null, ResourceAuthorityScope | null] {
+  const identity =
+    !enabled || workspaceId === null || (variableSetId === null && rigId === null)
+      ? null
+      : [workspaceId, variableSetId ?? "", rigId ?? ""].join(":");
+  const [resolved, setResolved] = useState<
+    readonly [string, ResourceAuthorityScope | null, ResourceAuthorityScope | null] | null
+  >(null);
+
+  useEffect(() => {
+    if (identity === null || workspaceId === null) return;
+    let current = true;
+    void Promise.all([
+      variableSetId
+        ? client
+            .getVariableSet(workspaceId, variableSetId)
+            .then((resource) => resource.scope)
+            .catch(() => null)
+        : null,
+      rigId
+        ? client
+            .getRig(workspaceId, rigId)
+            .then((resource) => resource.scope)
+            .catch(() => null)
+        : null,
+    ]).then(([variableSetScope, rigScope]) => {
+      if (!current) return;
+      setResolved([identity, variableSetScope, rigScope]);
+    });
+    return () => {
+      current = false;
+    };
+  }, [client, identity, rigId, variableSetId, workspaceId]);
+
+  return resolved?.[0] === identity ? [resolved[1], resolved[2]] : [null, null];
+}
+
 export function usePersonalResourceAttachment(input: {
   client: OpenGeniCoreClient;
   authMode: string;
