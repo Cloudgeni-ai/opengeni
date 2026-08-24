@@ -2,6 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type ResourceRef } from "@opengeni/contracts";
+import {
+  personalGitHubRepositoryResources,
+  validateGitHubRepositorySelection,
+} from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { sql as drizzleSql } from "drizzle-orm";
 import postgres from "postgres";
@@ -149,6 +154,16 @@ async function sessionVisibilityFixture() {
         credentialBindingId: crypto.randomUUID(),
         connectionId: crypto.randomUUID(),
         installationId: crypto.randomUUID(),
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/example/private-personal-resource.git",
+        ref: "main",
+        provider: "github",
+        connectionType: "github_personal",
+        credentialBindingId: crypto.randomUUID(),
+        access: "read",
+        repositoryId: "424242",
       },
     ],
     metadata: {},
@@ -345,6 +360,20 @@ describe("migration 0303 session tenancy product activation", () => {
     expect(migration).toContain("source_item.provider_artifact_invalidated_at");
     expect(migration).toContain("source_item.provider_artifact_invalidation_reason");
     expect(migration).toContain("source_item.provider_artifact_invalidated_by_attempt_id");
+    expect(migration).toContain(
+      "- 'provider' - 'connectionType' - 'credentialBindingId' - 'access'",
+    );
+    expect(migration).toContain("- 'githubInstallationId' - 'githubRepositoryId'");
+    const appliedReceipt = migration.indexOf(
+      "SELECT receipt.* INTO receipt_row FROM session_command_receipts receipt",
+    );
+    const sourceLock = migration.indexOf(
+      "SELECT session.* INTO source_session FROM sessions session",
+    );
+    const newReceipt = migration.indexOf("INSERT INTO session_command_receipts");
+    expect(appliedReceipt).toBeGreaterThan(0);
+    expect(appliedReceipt).toBeLessThan(sourceLock);
+    expect(newReceipt).toBeGreaterThan(sourceLock);
     expect(migration).not.toContain("transition_session_visibility(");
     expect(migration).not.toContain("source_session.variable_set_id");
     expect(migration).not.toContain("source_session.rig_id");
@@ -733,7 +762,21 @@ describe("migration 0303 session tenancy product activation", () => {
         uri: "https://example.test/durable-resource.git",
         ref: "main",
       },
+      {
+        kind: "repository",
+        uri: "https://github.com/example/private-personal-resource.git",
+        ref: "main",
+      },
     ]);
+    const forkedResources = sharedDestination!.resources as ResourceRef[];
+    expect(personalGitHubRepositoryResources(forkedResources)).toEqual([]);
+    await expect(
+      validateGitHubRepositorySelection(
+        client.db,
+        sharedSource.ownerGrant.workspaceId,
+        forkedResources,
+      ),
+    ).resolves.toBeUndefined();
 
     const privateSource = await sessionVisibilityFixture();
     await transitionSessionVisibility(client.db, {
@@ -794,6 +837,7 @@ describe("migration 0303 session tenancy product activation", () => {
   test("lets a workspace member fork a shared source into fresh private authority", async () => {
     if (!shared || !client) return;
     const value = await sessionVisibilityFixture();
+    const memberForkOperationKey = `member-private-fork:${crypto.randomUUID()}`;
 
     const memberFork = await forkSessionContent(client.db, {
       sourceWorkspaceId: value.ownerGrant.workspaceId,
@@ -802,7 +846,7 @@ describe("migration 0303 session tenancy product activation", () => {
       destinationWorkspaceId: value.ownerGrant.workspaceId,
       destinationVisibility: "user_private",
       workspaceSharedAcknowledged: false,
-      operationKey: `member-private-fork:${crypto.randomUUID()}`,
+      operationKey: memberForkOperationKey,
     });
     expect(memberFork).toMatchObject({
       visibility: "user_private",
@@ -854,6 +898,30 @@ describe("migration 0303 session tenancy product activation", () => {
       id: memberFork.sessionId,
       tenancy: { visibility: "private", ownedByCurrentUser: true },
     });
+
+    expect(
+      await forkSessionContent(client.db, {
+        sourceWorkspaceId: value.ownerGrant.workspaceId,
+        sourceSessionId: value.session.id,
+        actorSubjectId: value.otherSubjectId,
+        destinationWorkspaceId: value.ownerGrant.workspaceId,
+        destinationVisibility: "user_private",
+        workspaceSharedAcknowledged: false,
+        operationKey: memberForkOperationKey,
+      }),
+    ).toEqual({ ...memberFork, replay: true });
+
+    await expect(
+      forkSessionContent(client.db, {
+        sourceWorkspaceId: value.ownerGrant.workspaceId,
+        sourceSessionId: value.session.id,
+        actorSubjectId: value.otherSubjectId,
+        destinationWorkspaceId: value.ownerGrant.workspaceId,
+        destinationVisibility: "workspace_shared",
+        workspaceSharedAcknowledged: true,
+        operationKey: memberForkOperationKey,
+      }),
+    ).rejects.toBeInstanceOf(SessionTenancyConflictError);
 
     await expect(
       forkSessionContent(client.db, {

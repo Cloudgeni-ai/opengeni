@@ -124,6 +124,33 @@ BEGIN
   ) THEN RAISE EXCEPTION 'session fork requires active workspace authority'
     USING ERRCODE = '42501'; END IF;
 
+  -- Resolve an already-applied receipt before inspecting mutable source state.
+  -- The same still-authorized workspace actor can therefore recover the exact
+  -- destination after a lost response even if the source owner later makes the
+  -- source private. A new key still reaches the current source authorization
+  -- check below and is denied.
+  SELECT receipt.* INTO receipt_row FROM session_command_receipts receipt
+  WHERE receipt.workspace_id = p_source_workspace_id
+    AND receipt.actor_type = 'human' AND receipt.actor_subject_id = p_actor_subject_id
+    AND receipt.actor_attempt_id IS NULL AND receipt.action = 'session.fork'
+    AND receipt.target_session_id = p_source_session_id
+    AND receipt.target_turn_id IS NULL AND receipt.operation_key = p_operation_key
+    AND receipt.result ->> 'status' = 'applied';
+  IF receipt_row.canonical_request_hash <> p_canonical_request_hash THEN
+    RAISE EXCEPTION 'session fork idempotency conflict' USING ERRCODE = '23505';
+  END IF;
+  IF receipt_row.result ->> 'status' = 'applied' THEN
+    operation_id := receipt_row.id;
+    event_id := nullif(receipt_row.result ->> 'eventId', '')::uuid;
+    event_sequence := (receipt_row.result ->> 'eventSequence')::integer;
+    session_id := (receipt_row.result ->> 'sessionId')::uuid;
+    workspace_id := (receipt_row.result ->> 'workspaceId')::uuid;
+    visibility := receipt_row.result ->> 'visibility'; authority_epoch := 1;
+    copied_history_item_count :=
+      (receipt_row.result ->> 'copiedHistoryItemCount')::integer;
+    replay := true; RETURN NEXT; RETURN;
+  END IF;
+
   SELECT session.* INTO source_session FROM sessions session
   WHERE session.account_id = p_account_id
     AND session.workspace_id = p_source_workspace_id
@@ -142,8 +169,6 @@ BEGIN
   THEN RAISE EXCEPTION 'session fork source session is private'
     USING ERRCODE = '42501'; END IF;
 
-  -- Resolve the durable operation receipt before inspecting mutable source
-  -- state. Exact retries remain stable even if the source changes later.
   INSERT INTO session_command_receipts (
     account_id, workspace_id, actor_type, actor_subject_id, action,
     target_session_id, operation_key, canonical_request_hash
@@ -186,9 +211,15 @@ BEGIN
   );
 
   SELECT coalesce(jsonb_agg(
-    resource.value
-      - 'credentialBindingId' - 'connectionId' - 'installationId'
-      - 'projectId' - 'githubInstallationId'
+    CASE WHEN resource.value ->> 'connectionType' = 'github_personal'
+      THEN resource.value
+        - 'provider' - 'connectionType' - 'credentialBindingId' - 'access'
+        - 'repositoryId' - 'installationId' - 'projectId' - 'connectionId'
+        - 'githubInstallationId' - 'githubRepositoryId'
+      ELSE resource.value
+        - 'credentialBindingId' - 'connectionId' - 'installationId'
+        - 'projectId' - 'githubInstallationId'
+    END
     ORDER BY resource.ordinality
   ), '[]'::jsonb) INTO destination_resources
   FROM jsonb_array_elements(source_session.resources)
