@@ -166,6 +166,7 @@ describe("release schema contract", () => {
       "0330_api_key_descriptions.sql",
       "0331_managed_organization_creation.sql",
       "0332_organization_shared_workspace_control_plane.sql",
+      "0333_session_turn_prompt_routing.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -199,6 +200,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "6de1a4fc6f0dc0e67852cef996b6d0e01326d180c67d188cb7fcb9c704bc5cdd",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0333_session_turn_prompt_routing.sql",
+      ),
+    ).toMatchObject({
+      sha256: "3eab54938c65c4db7af9ae3421045e6f44af01a27b06129093a58f1ae22ea05c",
       deploymentMode: "rolling",
     });
     expect(
