@@ -6962,7 +6962,10 @@ export type UserMessageEventInput = {
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
     latencyMode?: LatencyMode | undefined;
+    controlEtag?: string | undefined;
+    expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };

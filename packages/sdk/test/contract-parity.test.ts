@@ -666,7 +666,12 @@ describe("SDK / contracts parity", () => {
     const message: ClientSessionEventInput = {
       type: "user.message",
       clientEventId: "ce-1",
-      payload: { text: "hello" },
+      payload: {
+        text: "hello",
+        controlEtag: "control-1",
+        expectedDraftRevision: 3,
+        connectionAuthorities: [],
+      },
     };
     const approval: ClientSessionEventInput = {
       type: "user.approvalDecision",

@@ -170,6 +170,7 @@ import type {
   WorkspaceModelCatalogResponse,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
+  UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
   ConnectionMetadata,
@@ -410,7 +411,6 @@ import type {
   PtyWriteRequest,
   PtyResizeRequest,
   PtyCloseRequest,
-  ToolRef,
   TranscribeAudioResponse,
   TranscriptionRecordingListResponse,
   TranscriptionRecordingResponse,
@@ -570,23 +570,18 @@ export type OpenGeniRequestOptions = {
   timeoutMs?: number | undefined;
 };
 
-export type SendMessageInput = {
-  text: string;
-  annotations?: SubmittedTimelineAnnotation[];
-  /** Model-visible application context attached to this exact user message; omitted by standard timeline rendering. */
-  modelContext?: string;
-  resources?: ResourceRef[];
-  tools?: ToolRef[];
-  model?: string;
-  reasoningEffort?: ReasoningEffort;
-  latencyMode?: LatencyMode;
+/** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
+export type SendMessageInput = UserMessageEventInput["payload"] & {
   clientEventId?: string;
-  controlEtag?: string;
-  expectedDraftRevision?: number;
-  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
-  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
+
+function assertNoMessageTools(input: object): void {
+  if (Object.prototype.hasOwnProperty.call(input, "tools")) {
+    throw new TypeError(
+      "Message-level tools are not supported; update the session tool policy before sending.",
+    );
+  }
+}
 
 export type SteerMessageResult = {
   /** The accepted `user.message` event. */
@@ -1732,6 +1727,7 @@ export class OpenGeniClient {
     message: string | SendMessageInput,
   ): Promise<SessionEvent> {
     const input = typeof message === "string" ? { text: message } : message;
+    assertNoMessageTools(input);
     const { clientEventId, ...payload } = input;
     return await this.sendEvent(workspaceId, sessionId, {
       type: "user.message",
@@ -2199,6 +2195,7 @@ export class OpenGeniClient {
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
     const input = typeof message === "string" ? { text: message } : message;
+    assertNoMessageTools(input);
     return await this.requestSessionCommand<SteerMessageResult>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/steer`,
