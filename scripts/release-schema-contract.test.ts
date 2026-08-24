@@ -187,6 +187,22 @@ describe("release schema contract", () => {
     ).toMatchObject({ deploymentMode: "maintenance" });
     expect(
       completeSourceContract.migrations.find(
+        (migration) => migration.path === "0331_managed_organization_creation.sql",
+      ),
+    ).toMatchObject({
+      sha256: "62912af210c1db18c7b58de8ad2c233f2fc6759a6ef4509c8e6352d75dd0641f",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0332_organization_shared_workspace_control_plane.sql",
+      ),
+    ).toMatchObject({
+      sha256: "6de1a4fc6f0dc0e67852cef996b6d0e01326d180c67d188cb7fcb9c704bc5cdd",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
         (migration) => migration.path === "0238_supergrok_realtime_model.sql",
       ),
     ).toMatchObject({
