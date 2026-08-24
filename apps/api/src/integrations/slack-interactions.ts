@@ -73,6 +73,7 @@ import {
   releaseSlackInteractionInbox,
   requestSlackUserLinkWorkspaceAccess,
   resolveSlackInstallationRoute,
+  resolveSlackInteractionFirstTaskHint,
   saveSlackInteractionInboxReactionCheckpoint,
   saveSlackSharedTaskOrigin,
   settleSlackInteractionInbox,
@@ -114,6 +115,7 @@ import {
 import {
   buildSlackAppHomeAccessBlocks,
   buildSlackAppHomeBlocks,
+  escapeSlackMrkdwn,
   isSlackAppHomeLinkAction,
   slackAppHomeOpenedEvent,
 } from "./slack-app-home";
@@ -423,6 +425,12 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       throw new HTTPException(403, {
         message: "Slack installation unavailable",
       });
+    // `<command> info` is a read-only ephemeral explainer. It never reaches the
+    // durable inbox, never verifies channel membership, and never creates a
+    // session, so it is safe anywhere the command is available.
+    if (isSlackInfoCommand(entry.text)) {
+      return c.json(await slackInfoCommandResponse(deps, installation, entry));
+    }
     const client = await createOpenGeniSlackBotInteractionClient(deps, {
       accountId: installation.accountId,
       workspaceId: installation.workspaceId,
@@ -1661,11 +1669,26 @@ async function acknowledgeSlackSession(
     !directMessageShortcut && interaction.visibility === "private" && entry.triggerKind !== "dm";
   const privateBotDm = directMessageShortcut || privateHandoff;
   const operationId = deterministicUuid(`slack-ack:${interaction.id}`);
-  const text = directMessageShortcut
-    ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this bot-DM thread to continue, or reply \`stop\` to stop. The source DM was not opened to the bot or made workspace-visible.`
+  // The acknowledgement carries exactly one session link plus the Status/Stop
+  // buttons. The how-to prose it used to repeat forever now rides along once,
+  // on this Slack identity's first accepted task in this installation.
+  const started = directMessageShortcut
+    ? `OpenGeni started a private task from the selected DM message. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} The source DM was not opened to the bot or made workspace-visible.`
     : privateHandoff
-      ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this bot-DM thread to continue, or reply \`stop\` to stop. Results stay private unless a separate authorized publication is approved.`
-      : `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Reply in this thread to continue, or reply \`stop\` to stop. Start a new top-level DM or invoke /opengeni again for a new session.`;
+      ? `OpenGeni started a private task from the selected Slack conversation. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)} Results stay private unless a separate authorized publication is approved.`
+      : `OpenGeni started this task. ${openSessionText(deps, entry.workspaceId, interaction.sessionId)}`;
+  // The post ledger binds this fixed operation id to a digest over the message
+  // text, and this function re-runs on every acknowledgement repair. Resolving
+  // the hint freezes it durably before the post, so a repair renders identical
+  // bytes; a failure here raises into the retryable inbox path rather than
+  // binding the ledger to a hint-less acknowledgement it can never revise.
+  const showHint = await resolveSlackInteractionFirstTaskHint(deps.db, {
+    workspaceId: entry.workspaceId,
+    connectionId: entry.connectionId,
+    slackUserId: entry.slackUserId,
+    interactionId: interaction.id,
+  });
+  const text = `${started}${showHint ? slackFirstTaskHintText(deps) : ""}`;
   const controls = await controlActionBlocks(deps, interaction, {
     messageOperationId: operationId,
     sessionEventSequence: 0,
@@ -1702,6 +1725,27 @@ async function acknowledgeSlackSession(
     });
     if (!rekeyed) throw new Error("Slack acknowledgement could not rekey its durable route");
   }
+}
+
+/**
+ * The one-time onboarding sentence shown on a Slack identity's first
+ * acknowledged task in one installation.
+ *
+ * Rendering is a pure function of the configured command plus the frozen
+ * `firstTaskHint` fact, so every re-render of the same acknowledgement produces
+ * the same bytes for the digest-bound post ledger.
+ *
+ * Note the one remaining input that is not frozen: the text embeds
+ * `settings.slackCommand`. Changing that setting between an acknowledgement
+ * post and a later repair of the same interaction would diverge the digest and
+ * conflict its post operation. The command is deployment configuration that
+ * must already match the registered Slack slash command, so it does not change
+ * under a live installation; a deployment that does rename it should drain
+ * in-flight Slack interactions first.
+ */
+function slackFirstTaskHintText(deps: ApiRouteDeps): string {
+  const command = deps.settings.slackCommand;
+  return `\n\nFirst time here: reply in this thread to continue this task, or reply \`stop\` to stop it. Start a new top-level DM or run \`${command}\` again for a new task. Run \`${command} info\` any time for the full summary.`;
 }
 
 async function processSlackReactionInboxEntry(
@@ -2460,12 +2504,24 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     sessionId: handle.sessionId,
   });
   const outcome = await executeSlackAction(deps, grant, interaction, handle);
+  // A control click replaces the message it was pressed on. When that message
+  // is this interaction's acknowledgement and this interaction won the one-time
+  // onboarding hint, the update carries the hint forward: otherwise pressing
+  // Status would permanently destroy the only copy of prose a Slack identity is
+  // ever shown. The handle's message operation identifies the acknowledgement
+  // exactly, independent of route rekeying. Later control cards have their own
+  // operation ids, so the hint still appears on exactly one message.
+  const acknowledgementOperationId = deterministicUuid(`slack-ack:${interaction.id}`);
+  const updateText =
+    interaction.firstTaskHint === true && handle.messageOperationId === acknowledgementOperationId
+      ? `${outcome.text}${slackFirstTaskHintText(deps)}`
+      : outcome.text;
   await client.updateMessage({
     operationId: deterministicUuid(`slack-action-update:${handle.id}:${outcome.result}`),
     channelId: entry.slackChannelId,
     timestamp: entry.slackMessageTs,
-    text: outcome.text,
-    blocks: [{ type: "section", text: { type: "mrkdwn", text: outcome.text } }],
+    text: updateText,
+    blocks: [{ type: "section", text: { type: "mrkdwn", text: updateText } }],
   });
   await settleSlackInteractionActionHandles(deps.db, {
     accountId: entry.accountId,
@@ -2644,9 +2700,20 @@ async function executeSlackAction(
   }
   const session = await getSession(deps.db, grant.workspaceId, handle.sessionId);
   if (!session) throw new SlackInteractionPermanentError("slack_action_session_missing");
+  // The result post no longer advertises recurrence. The Status card is where
+  // the requester finds it, and only while this exact requester still holds
+  // schedule authority in this workspace. The deep link and the schedules
+  // authority behind it are unchanged: the browser rechecks both.
+  const recurring =
+    hasPermission(grant.permissions, "sessions:read") &&
+    hasPermission(grant.permissions, "scheduled_tasks:manage")
+      ? makeRecurringText(deps, grant.workspaceId, handle.sessionId)
+      : null;
   return {
     result: "status",
-    text: `${mention}OpenGeni task status: *${session.status.replaceAll("_", " ")}*.`,
+    text: `${mention}OpenGeni task status: *${session.status.replaceAll("_", " ")}*.${
+      recurring ? `\n\n${recurring}` : ""
+    }`,
     ...(session.status === "cancelled" || session.status === "failed"
       ? {}
       : { controlState: "active" as const }),
@@ -2778,29 +2845,17 @@ async function validatedSlackRequester(
   >,
 ) {
   if (!interaction.initiatingSlackUserId) {
-    return { authorized: false, canSchedule: false, mention: "" };
+    return { authorized: false, mention: "" };
   }
-  const [link, grant] = await Promise.all([
-    getSlackBotUserLink(
-      deps.db,
-      interaction.workspaceId,
-      interaction.connectionId,
-      interaction.initiatingSlackUserId,
-    ),
-    getWorkspaceGrant(deps.db, interaction.owningSubjectId, interaction.workspaceId, {
-      principalKind: "human_session",
-    }),
-  ]);
+  const link = await getSlackBotUserLink(
+    deps.db,
+    interaction.workspaceId,
+    interaction.connectionId,
+    interaction.initiatingSlackUserId,
+  );
   const authorized = link?.subjectId === interaction.owningSubjectId;
-  const canSchedule =
-    authorized &&
-    grant?.accountId === interaction.accountId &&
-    hasPermission(grant.permissions, "sessions:read") &&
-    hasPermission(grant.permissions, "sessions:control") &&
-    hasPermission(grant.permissions, "scheduled_tasks:manage");
   return {
     authorized,
-    canSchedule,
     mention: authorized ? slackRequesterMention(interaction) : "",
   };
 }
@@ -3286,9 +3341,6 @@ async function deliverSlackSessionEvents(
       const hasPublishableOutput = payloadOutput.trim().length > 0;
       const output = hasPublishableOutput ? payloadOutput : latestAssistantText;
       const normalizedOutput = output.trim();
-      const recurringLink = requester.canSchedule
-        ? `\n\n${makeRecurringText(deps, interaction.workspaceId, interaction.sessionId)}`
-        : "";
       const existingProgress = progressEvidence.find(
         (delivery) =>
           slackDeliveryTextsCoalesce(boundedOutput(delivery.text).trim(), normalizedOutput) &&
@@ -3323,10 +3375,9 @@ async function deliverSlackSessionEvents(
           existingProgress.operationId,
         );
         if (posted?.slackChannelId && posted.slackMessageTimestamp) {
-          const text = boundedOutputWithSuffix(
-            `${requester.mention}${existingProgress.text}`,
-            recurringLink,
-          );
+          // The result is the result. Continuation prose and the recurring
+          // action live on the control/Status card and `<command> info`.
+          const text = boundedOutput(`${requester.mention}${existingProgress.text}`);
           await client.updateMessage({
             operationId: deterministicUuid(
               `slack-terminal-update:${interaction.id}:${event.sequence}`,
@@ -3354,10 +3405,8 @@ async function deliverSlackSessionEvents(
         const operationId = deterministicUuid(
           `slack-delivery:${interaction.id}:${event.sequence}:final`,
         );
-        const finalSuffix = `\n\nReply in this thread to continue.${recurringLink}`;
-        const text = boundedOutputWithSuffix(
+        const text = boundedOutput(
           `${requester.mention}${output || "OpenGeni finished this task."}`,
-          finalSuffix,
         );
         const publicationBlocks = hasPublishableOutput
           ? await slackSharedResultPublicationBlocks(
@@ -3636,6 +3685,116 @@ function formatQuestions(questions: HumanInputQuestion[]) {
     .join("\n");
 }
 
+export function isSlackInfoCommand(text: string): boolean {
+  return text.trim().toLowerCase() === "info";
+}
+
+type SlackSlashResponse = {
+  response_type: "ephemeral";
+  text: string;
+  unfurl_links: false;
+  unfurl_media: false;
+  blocks?: SlackMessageBlock[];
+};
+
+/**
+ * The ephemeral `<command> info` card.
+ *
+ * It is a projection of what the caller can already do, not an action: no
+ * session, no durable inbox row, no provider post. It re-proves the exact
+ * Slack identity link plus live workspace grants before any
+ * workspace-identifying text is echoed, so an unlinked or access-revoked
+ * identity receives the ordinary connect view instead.
+ */
+async function slackInfoCommandResponse(
+  deps: ApiRouteDeps,
+  installation: SlackInstallationRoute,
+  entry: NormalizedSlackInteraction,
+): Promise<SlackSlashResponse> {
+  const identity = {
+    workspaceId: installation.workspaceId,
+    connectionId: installation.connectionId,
+    slackTeamId: entry.slackTeamId,
+    slackUserId: entry.slackUserId,
+  };
+  const link = await getSlackBotUserLink(
+    deps.db,
+    installation.workspaceId,
+    installation.connectionId,
+    entry.slackUserId,
+  );
+  const grant = link
+    ? await getWorkspaceGrant(deps.db, link.subjectId, installation.workspaceId, {
+        principalKind: "human_session",
+      })
+    : null;
+  if (
+    !grant ||
+    grant.accountId !== installation.accountId ||
+    !hasPermission(grant.permissions, "sessions:read")
+  ) {
+    return ephemeralSlackResponse(
+      link
+        ? `Your Slack identity is linked, but it does not currently have access to this OpenGeni workspace. Request access: ${linkUrl(deps, identity)}. No session was created.`
+        : `Link your Slack identity to OpenGeni before starting work: ${linkUrl(deps, identity)}. No session was created.`,
+    );
+  }
+  const workspace = await getWorkspace(deps.db, installation.workspaceId);
+  const command = deps.settings.slackCommand;
+  const botMention = slackBotMention(installation.botUserId);
+  // Every line is gated on the grant that actually authorizes it, so the card
+  // stays a projection of what this caller can do rather than a generic manual.
+  const canControl = hasPermission(grant.permissions, "sessions:control");
+  const canCreate = hasPermission(grant.permissions, "sessions:create");
+  const schedules = hasPermission(grant.permissions, "scheduled_tasks:manage")
+    ? slackSchedulesUrl(deps, installation.workspaceId)
+    : null;
+  const workspaceUrl = slackWorkspaceUrl(deps, installation.workspaceId);
+  const workspaceName = (workspace?.name ?? "").trim().slice(0, 120);
+  const destination = workspaceName
+    ? `the *${escapeSlackMrkdwn(workspaceName)}* workspace`
+    : "your OpenGeni workspace";
+  const lines = [
+    "*Working with OpenGeni in Slack*",
+    "",
+    ...(canControl
+      ? [
+          "• *Continue a task:* reply in its Slack thread.",
+          "• *Stop a task:* press *Stop* on its card, or reply `stop` in its thread.",
+        ]
+      : []),
+    ...(canCreate
+      ? [
+          `• *Start a new task:* mention ${botMention} in a channel, run \`${command} <task>\`, or send a new top-level direct message.`,
+        ]
+      : []),
+    ...(schedules
+      ? [
+          `• *Make a result recurring:* press *Status* on the task card and open *Make recurring*, or open <${schedules}|Schedules>.`,
+        ]
+      : []),
+    `• *Where work lands:* ${destination}${workspaceUrl ? ` (<${workspaceUrl}|open OpenGeni>)` : ""}.`,
+  ];
+  const text = lines.join("\n");
+  return ephemeralSlackResponse(text, [
+    { type: "section", text: { type: "mrkdwn", text } },
+  ] as SlackMessageBlock[]);
+}
+
+function ephemeralSlackResponse(text: string, blocks?: SlackMessageBlock[]): SlackSlashResponse {
+  return {
+    response_type: "ephemeral",
+    text,
+    unfurl_links: false,
+    unfurl_media: false,
+    ...(blocks ? { blocks } : {}),
+  };
+}
+
+function slackBotMention(botUserId: string | null): string {
+  return botUserId && /^[UWB][A-Z0-9]{1,63}$/.test(botUserId) ? `<@${botUserId}>` : "@OpenGeni";
+}
+
 function openSessionText(deps: ApiRouteDeps, workspaceId: string, sessionId: string) {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
   if (!base) throw new Error("Slack session acknowledgement requires an absolute web base URL");
@@ -3706,15 +3865,32 @@ function slackAppHomeLinkUrl(
   return url.toString();
 }
 
-function makeRecurringText(deps: ApiRouteDeps, workspaceId: string, sessionId: string) {
-  const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
-  if (!base) throw new Error("Slack recurring action requires an absolute web base URL");
-  const url = new URL(`/workspaces/${workspaceId}/schedules`, base);
+function makeRecurringText(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  sessionId: string,
+): string | null {
+  // Unchanged deep-link contract: the schedules editor plus the exact source
+  // session UUID, and nothing copied out of Slack. A deployment without an
+  // absolute web base URL simply omits the action instead of failing a card.
+  const base = slackSchedulesUrl(deps, workspaceId);
+  if (!base) return null;
+  const url = new URL(base);
   url.searchParams.set("sourceSessionId", sessionId);
   return `<${url.toString()}|Make recurring>`;
 }
 
-function linkUrl(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
+function slackSchedulesUrl(deps: ApiRouteDeps, workspaceId: string): string | null {
+  return safeSlackActionUrl(deps, `/workspaces/${encodeURIComponent(workspaceId)}/schedules`);
+}
+
+function linkUrl(
+  deps: ApiRouteDeps,
+  entry: Pick<
+    SlackInteractionInboxEntry,
+    "workspaceId" | "connectionId" | "slackTeamId" | "slackUserId"
+  >,
+) {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
   const signingSecret = deps.settings.slackSigningSecret;
   if (!base || !signingSecret) return "OpenGeni Settings → Integrations → Slack";
@@ -3891,13 +4067,6 @@ function boundedOutput(value: string) {
   return value.length <= MAX_SLACK_TEXT_CHARS
     ? value
     : `${value.slice(0, MAX_SLACK_TEXT_CHARS - 20)}\n… output truncated`;
-}
-
-function boundedOutputWithSuffix(value: string, suffix: string) {
-  const maxValueChars = Math.max(0, MAX_SLACK_TEXT_CHARS - suffix.length);
-  if (value.length <= maxValueChars) return `${value}${suffix}`;
-  const truncation = "\n… output truncated";
-  return `${value.slice(0, Math.max(0, maxValueChars - truncation.length))}${truncation}${suffix}`;
 }
 
 function safePayloadText(payload: unknown, field: string) {

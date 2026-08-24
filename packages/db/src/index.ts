@@ -9205,6 +9205,11 @@ export type SlackBotUserLink = {
   slackUserId: string;
   subjectId: string;
   linkedBySubjectId: string;
+  /**
+   * The exact Slack interaction id that durably claimed this identity's
+   * one-time onboarding hint, or `null` when the hint has not been shown.
+   */
+  firstTaskHintInteractionId: string | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -9287,6 +9292,11 @@ export type SlackInteraction = {
   deliveryRetryAt: Date | null;
   deliveryLastErrorCode: string | null;
   ackSlackMessageTs: string | null;
+  /**
+   * Frozen once: whether this interaction's acknowledgement renders the
+   * one-time onboarding hint. `null` means the decision is unresolved.
+   */
+  firstTaskHint: boolean | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -9362,7 +9372,9 @@ export async function resolveSlackInstallationRoute(
 
 export async function saveSlackBotUserLink(
   db: Database,
-  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt">,
+  // The one-time onboarding hint claim is deliberately not writable here: a
+  // re-link of the same Slack identity keeps whatever was already shown.
+  input: Omit<SlackBotUserLink, "id" | "createdAt" | "updatedAt" | "firstTaskHintInteractionId">,
 ): Promise<SlackBotUserLink> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -9404,6 +9416,78 @@ export async function getSlackBotUserLink(
       )
       .limit(1);
     return row ? mapSlackBotUserLink(row) : null;
+  });
+}
+
+/**
+ * Resolve, exactly once, whether one Slack interaction's acknowledgement
+ * renders the one-time onboarding hint, and freeze that answer on the
+ * interaction row.
+ *
+ * `slack_bot_post_operations` binds one operation id to one request digest that
+ * covers the message text, so an acknowledgement re-rendered after a crash, a
+ * lost provider response, or a replica race must produce the same bytes or the
+ * ledger rejects it. Rendering therefore reads a frozen fact instead of asking
+ * a mutable question: the first call decides, every later call replays the
+ * stored decision, and unlinking plus relinking the Slack identity cannot flip
+ * an acknowledgement that was already rendered.
+ *
+ * The frozen decision and the per-identity claim commit in one transaction, so
+ * at most one interaction per Slack identity per installation is granted the
+ * hint. Failure raises instead of degrading to "no hint": a caller must never
+ * bind a post operation to text that depends on an unresolved answer.
+ */
+export async function resolveSlackInteractionFirstTaskHint(
+  db: Database,
+  input: {
+    workspaceId: string;
+    connectionId: string;
+    slackUserId: string;
+    interactionId: string;
+  },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    // Interaction row first, then the identity link: one lock order for every
+    // concurrent resolver of the same interaction.
+    const [frozen] = await scopedDb
+      .select({ firstTaskHint: schema.slackInteractions.firstTaskHint })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.id, input.interactionId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!frozen) throw new Error("Slack first-task hint requires a durable interaction row");
+    if (frozen.firstTaskHint !== null) return frozen.firstTaskHint;
+
+    const claimed = await scopedDb
+      .update(schema.slackBotUserLinks)
+      .set({ firstTaskHintInteractionId: input.interactionId })
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, input.workspaceId),
+          eq(schema.slackBotUserLinks.connectionId, input.connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, input.slackUserId),
+          isNull(schema.slackBotUserLinks.firstTaskHintInteractionId),
+        ),
+      )
+      .returning({ id: schema.slackBotUserLinks.id });
+    const granted = claimed.length > 0;
+
+    await scopedDb
+      .update(schema.slackInteractions)
+      .set({ firstTaskHint: granted, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.id, input.interactionId),
+          isNull(schema.slackInteractions.firstTaskHint),
+        ),
+      );
+    return granted;
   });
 }
 
@@ -9768,6 +9852,8 @@ export async function getOrCreateSlackInteraction(
     | "deliveryRetryAt"
     | "deliveryLastErrorCode"
     | "ackSlackMessageTs"
+    // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
+    | "firstTaskHint"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
@@ -10704,6 +10790,7 @@ function mapSlackInteraction(
       "delivery_last_error_code",
     ),
     ackSlackMessageTs: slackRowNullableString(row, "ackSlackMessageTs", "ack_slack_message_ts"),
+    firstTaskHint: slackRowNullableBoolean(row, "firstTaskHint", "first_task_hint"),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
@@ -10775,6 +10862,16 @@ function slackRowBoolean(
   const value = slackRowValue(row, camelKey, snakeKey);
   if (typeof value !== "boolean") throw new Error(`Slack row malformed ${snakeKey}`);
   return value;
+}
+
+function slackRowNullableBoolean(
+  row: Record<string, unknown>,
+  camelKey: string,
+  snakeKey: string,
+): boolean | null {
+  const value = slackRowValue(row, camelKey, snakeKey);
+  if (value === null || value === undefined) return null;
+  return slackRowBoolean(row, camelKey, snakeKey);
 }
 
 function slackRowNullableString(

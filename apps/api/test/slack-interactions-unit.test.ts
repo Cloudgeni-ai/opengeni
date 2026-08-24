@@ -9,6 +9,7 @@ import { requireAccessKey } from "../src/http/auth";
 import { authorizeSlackSharedImageRead } from "../src/integrations/slack-bot";
 import {
   registerSlackInteractionRoutes,
+  isSlackInfoCommand,
   normalizedBlockActionInteraction,
   slackDeliveryTextsCoalesce,
   slackEventInboxEntry,
@@ -587,5 +588,20 @@ describe("Slack event classification and safe projection", () => {
       prompt.indexOf("Bounded surrounding thread context:"),
     );
     expect(prompt).toContain("bounded Slack context limit");
+  });
+  test("only the exact `info` argument selects the ephemeral card", () => {
+    for (const text of ["info", " info ", "INFO", "Info"]) {
+      expect(isSlackInfoCommand(text)).toBe(true);
+    }
+    for (const text of [
+      "information",
+      "info please",
+      "help",
+      "give me info",
+      "",
+      "run the info job",
+    ]) {
+      expect(isSlackInfoCommand(text)).toBe(false);
+    }
   });
 });

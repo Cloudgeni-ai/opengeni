@@ -1925,6 +1925,9 @@ export const slackBotUserLinks = pgTable(
     slackUserId: text("slack_user_id").notNull(),
     subjectId: text("subject_id").notNull(),
     linkedBySubjectId: text("linked_by_subject_id").notNull(),
+    // The exact interaction id that won this identity's one-time onboarding
+    // hint. NULL means the hint has not been shown yet.
+    firstTaskHintInteractionId: uuid("first_task_hint_interaction_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2275,6 +2278,9 @@ export const slackInteractions = pgTable(
     deliveryRetryAt: timestamp("delivery_retry_at", { withTimezone: true }),
     deliveryLastErrorCode: text("delivery_last_error_code"),
     ackSlackMessageTs: text("ack_slack_message_ts"),
+    // Frozen once: whether this interaction's acknowledgement renders the
+    // one-time onboarding hint. NULL means the decision has not been resolved.
+    firstTaskHint: boolean("first_task_hint"),
     progressCount: integer("progress_count").notNull().default(0),
     terminalDeliveryState: text("terminal_delivery_state")
       .$type<"open" | "completed" | "failed" | "cancelled" | "blocked">()
