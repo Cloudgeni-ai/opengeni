@@ -254,6 +254,12 @@ BEGIN
   RAISE EXCEPTION 'document migration receipts are immutable' USING ERRCODE = '55000';
 END
 $body$;
+-- House pattern for an `opengeni_private` trigger function: it is invoked by the
+-- trigger, never called directly, so leaving it PUBLIC-executable widens the
+-- grant surface for no reason. `0333_session_turn_prompt_routing.sql` revokes
+-- its equivalent the same way, and the dedicated editable-artifact materializer
+-- role's grant enumeration pins exactly this.
+REVOKE ALL ON FUNCTION opengeni_private.reject_document_migration_receipt_mutation() FROM PUBLIC;
 
 CREATE TRIGGER document_authority_reclassifications_immutable
 BEFORE UPDATE OR DELETE ON document_authority_reclassifications
