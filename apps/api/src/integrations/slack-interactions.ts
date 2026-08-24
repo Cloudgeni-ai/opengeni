@@ -7,6 +7,7 @@ import {
   ListSlackUserLinkAccessRequestsResponse,
   PrepareSlackUserLinkAccessRequest,
   evaluateSlackTaskPolicy,
+  resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
   SlackReactionChannelListResponse,
   SlackUserLinkAccessMutationRequest,
@@ -15,6 +16,7 @@ import {
   type FileResourceRef,
   type FirstPartyMcpToolName,
   type HumanInputQuestion,
+  type ResolvedWorkspaceSlackOrchestrationNoticeSettings,
   type SessionAuthorizationListScope,
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
@@ -132,7 +134,8 @@ export const SLACK_DELIVERY_EVENT_TYPES = [
   "turn.failed",
   "turn.cancelled",
   "session.status.changed",
-  // Orchestration surfacing. Both are filtered again inside the pump: only a
+  // Orchestration surfacing. Both are filtered again inside the pump: the
+  // workspace must have opted in (both notices default off), and then only a
   // `child_requires_action` notice and a `limits` / `max_auto_continuations`
   // goal pause reach Slack, so the thread stays quiet for the deferred child
   // lifecycle kinds and for human/API/agent pauses the human already made.
@@ -3212,6 +3215,10 @@ async function slackHumanInputCard(
  * `child_waiting_capacity`, `child_requires_action_resolved`, `child_paused`)
  * returns null here so Slack stays quiet, and so does every non-child machine
  * input that shares the `system.update.pending` event type.
+ *
+ * The caller has already proven that this workspace turned the notice on. The
+ * card defaults off per workspace because the in-app rail and priority feed
+ * already surface a blocked child.
  */
 async function slackChildRequiresActionCard(
   deps: ApiRouteDeps,
@@ -3264,6 +3271,9 @@ async function slackChildRequiresActionCard(
  * bounded line. A `user_pause` / `api` / `agent` pause is a decision the human
  * or their agent already made, and `no_progress` is not a stop the human must
  * act on, so none of them post. `goal.resumed` never posts.
+ *
+ * The caller has already proven that this workspace turned the notice on; it
+ * defaults off per workspace.
  */
 function slackGoalPausedText(
   deps: ApiRouteDeps,
@@ -3306,6 +3316,21 @@ async function deliverSlackSessionEvents(
     sessionId: interaction.sessionId,
   });
   const requester = await validatedSlackRequester(deps, interaction);
+  // Both orchestration notices are per-workspace and OFF unless this workspace
+  // turned them on. Resolved lazily so an ordinary page of turn/progress events
+  // costs no extra workspace read, and memoized so one page resolves once. A
+  // disabled notice takes the same "nothing to post for this event" path as an
+  // undeliverable one: no post operation, no progress slot, and the delivery
+  // cursor still advances past the event exactly as it would have.
+  let orchestrationNotices: ResolvedWorkspaceSlackOrchestrationNoticeSettings | null = null;
+  const orchestrationNoticeEnabled = async (
+    notice: keyof ResolvedWorkspaceSlackOrchestrationNoticeSettings,
+  ): Promise<boolean> => {
+    orchestrationNotices ??= resolveWorkspaceSlackOrchestrationNoticeSettings(
+      (await getWorkspace(deps.db, interaction.workspaceId))?.settings,
+    );
+    return orchestrationNotices[notice];
+  };
   let lastSequence = interaction.lastDeliveredSessionEventSequence;
   let terminal: Exclude<SlackInteraction["terminalDeliveryState"], "open"> | null = null;
   let latestAssistantText = "";
@@ -3434,7 +3459,9 @@ async function deliverSlackSessionEvents(
         );
       }
     } else if (event.type === "system.update.pending") {
-      const card = await slackChildRequiresActionCard(deps, interaction, event, requester.mention);
+      const card = (await orchestrationNoticeEnabled("childRequiresAction"))
+        ? await slackChildRequiresActionCard(deps, interaction, event, requester.mention)
+        : null;
       if (card) {
         await postDelivery(
           client,
@@ -3446,7 +3473,9 @@ async function deliverSlackSessionEvents(
         );
       }
     } else if (event.type === "goal.paused") {
-      const paused = slackGoalPausedText(deps, interaction, event, requester.mention);
+      const paused = (await orchestrationNoticeEnabled("goalPaused"))
+        ? slackGoalPausedText(deps, interaction, event, requester.mention)
+        : null;
       if (paused) {
         await postDelivery(
           client,

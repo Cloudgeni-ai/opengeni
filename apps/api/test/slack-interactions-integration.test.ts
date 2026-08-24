@@ -8,6 +8,7 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   type Permission,
+  type WorkspaceSlackOrchestrationNoticeSettings,
   type WorkspaceSlackReactionSummonSettings,
 } from "@opengeni/contracts";
 import {
@@ -627,6 +628,8 @@ async function fixture(
     externalOwnerTeamId?: string;
     guestOwner?: boolean;
     slackReactionSummon?: WorkspaceSlackReactionSummonSettings;
+    /** Omitted keeps the shipped default: both orchestration notices off. */
+    slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings;
     slackCommand?: string;
   } = {},
 ) {
@@ -706,9 +709,12 @@ async function fixture(
     client.db,
     connectionInput as Parameters<typeof createConnection>[1],
   );
-  if (options.slackReactionSummon) {
+  if (options.slackReactionSummon || options.slackOrchestrationNotices) {
     await updateWorkspaceSettings(client.db, owner.workspaceId, {
-      slackReactionSummon: options.slackReactionSummon,
+      ...(options.slackReactionSummon ? { slackReactionSummon: options.slackReactionSummon } : {}),
+      ...(options.slackOrchestrationNotices
+        ? { slackOrchestrationNotices: options.slackOrchestrationNotices }
+        : {}),
     });
   }
   await saveSlackBotUserLink(client.db, {
@@ -6718,7 +6724,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
   test("posts one bounded pointer card when a worker the human started needs input", async () => {
     if (!available) return;
-    const value = await fixture();
+    const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
     await postEvent(value.app, {
       teamId: value.teamId,
       eventId: `E_CHILD_BLOCKED_${crypto.randomUUID()}`,
@@ -6804,7 +6810,9 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
   test("stays quiet for deferred child lifecycle notices", async () => {
     if (!available) return;
-    const value = await fixture();
+    // The workspace opted in, so silence here is the notice-kind filter rather
+    // than the per-workspace switch.
+    const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
     await postEvent(value.app, {
       teamId: value.teamId,
       eventId: `E_CHILD_QUIET_${crypto.randomUUID()}`,
@@ -6894,7 +6902,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
 
   test("posts one bounded line when a goal pauses for budget or the continuation cap", async () => {
     if (!available) return;
-    const value = await fixture();
+    const value = await fixture({ slackOrchestrationNotices: { goalPaused: true } });
     await postEvent(value.app, {
       teamId: value.teamId,
       eventId: `E_GOAL_PAUSED_${crypto.randomUUID()}`,
@@ -6944,5 +6952,131 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     ]);
     await drainAll(value.deps);
     expect(value.slack.posts.slice(postsBefore)).toHaveLength(2);
+  }, 60_000);
+
+  test("keeps both orchestration notices silent until the workspace turns them on", async () => {
+    if (!available) return;
+    // No slackOrchestrationNotices option: the shipped default for every
+    // workspace is both notices off. An unsolicited Slack post is worse than a
+    // missed one, and the in-app rail and priority feed already carry this.
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_NOTICES_OFF_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_NOTICES_OFF",
+        ts: "1773000000.000001",
+        text: "Run some work quietly",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const goalId = crypto.randomUUID();
+    const postOperationCount = async () => {
+      const [row] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count
+        from slack_bot_post_operations
+        where workspace_id = ${value.owner.workspaceId}
+          and target_id = 'D_NOTICES_OFF'`;
+      return row?.count ?? 0;
+    };
+    const addBlockedChild = async () => {
+      const childSessionId = crypto.randomUUID();
+      const childTurnId = crypto.randomUUID();
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action",
+        classification: "action_required",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:1`,
+        summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+        payload: {
+          type: "child_requires_action",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration: 1,
+          requests: [
+            {
+              kind: "human_input",
+              requestId: crypto.randomUUID(),
+              questionCount: 1,
+              firstQuestion: "Which environment should I deploy to?",
+              allowSkip: false,
+              expiresAt: null,
+            },
+          ],
+          truncated: false,
+        },
+      });
+      expect(added.added).toBe(true);
+      return childSessionId;
+    };
+    const operationsBefore = await postOperationCount();
+
+    await addBlockedChild();
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "limits" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(0);
+    // Silence takes the ordinary "nothing to post for this event" path: the
+    // delivery cursor still advanced past both events, no post operation was
+    // reserved, and the interaction stays open rather than stuck or retrying.
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(await postOperationCount()).toBe(operationsBefore);
+    const [cursor] = await shared!.admin<
+      { last_delivered_session_event_sequence: number; delivery_retry_at: Date | null }[]
+    >`
+      select last_delivered_session_event_sequence, delivery_retry_at
+      from slack_interactions
+      where id = ${route!.id}`;
+    const [pending] = await shared!.admin<{ sequence: number }[]>`
+      select max(sequence)::int as sequence
+      from session_events
+      where session_id = ${route!.session_id}
+        and type in ('system.update.pending', 'goal.paused')`;
+    expect(cursor?.last_delivered_session_event_sequence).toBe(pending!.sequence);
+    expect(cursor?.delivery_retry_at).toBeNull();
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "open",
+    });
+
+    // The switch owns only the two orchestration notices; every pre-existing
+    // card type keeps posting exactly as before.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "Still working on it" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      "Still working on it",
+    ]);
+
+    // Turning both on posts exactly one message for each new notice.
+    await updateWorkspaceSettings(client.db, value.owner.workspaceId, {
+      slackOrchestrationNotices: { childRequiresAction: true, goalPaused: true },
+    });
+    const childSessionId = await addBlockedChild();
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "goal.paused",
+        payload: { goalId, actor: "system", reason: "max_auto_continuations" },
+      },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      "Still working on it",
+      [
+        "A worker you started needs input.",
+        "> Which environment should I deploy to?",
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+      ].join("\n"),
+      `Goal paused (continuation cap). <https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in OpenGeni>`,
+    ]);
   }, 60_000);
 });
