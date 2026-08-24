@@ -164,13 +164,22 @@ mark-read click into a 409 with no way for the page to know why.
 The write is deliberately lightweight and is one statement per claim.
 
 - It honours the `session-personal-state` advisory fence with
-  `pg_try_advisory_xact_lock` and skips the acknowledgment when the fence is
-  already held. Workspace membership removal takes that fence *before* the
-  workspace/session lock prefix the claim already holds, so blocking on it here
-  would invert the canonical order; a non-blocking probe cannot. Honouring it is
-  what keeps this from being the "racing pin writer recreates personal rows
-  after cleanup" hole migration 0278 exists to close, and losing the probe is a
-  clean no-op: the child stays unread, exactly as it does today.
+  `pg_try_advisory_xact_lock_shared` and skips the acknowledgment when the fence
+  is unavailable. Workspace membership removal takes that fence *exclusively* and
+  *before* the workspace/session lock prefix the claim already holds, so blocking
+  on it here would invert the canonical order; a non-blocking probe cannot.
+  Honouring it is what keeps this from being the "racing pin writer recreates
+  personal rows after cleanup" hole migration 0278 exists to close, and losing
+  the probe is a clean no-op: the child stays unread, exactly as it does today.
+  The probe is *shared* rather than exclusive because `listSessionsForSubject`
+  holds the shared counterpart for its whole rail-list transaction, and that list
+  refreshes on focus, online, and visibilitychange. An exclusive probe fails
+  against a held shared lock, so it would drop acknowledgments precisely while
+  the human is looking at the rail, and since `child_terminal_result` is
+  typically a child's last notice, a drop there would leave exactly the permanent
+  unread dot this mechanism exists to remove. Shared still conflicts with
+  removal's exclusive hold, and acknowledgment writers need no mutual exclusion
+  against each other because the upsert is monotone and row-locked.
 - It takes no child turn/attempt lock and no explicit child session lock.
   `session_pins` does carry two foreign keys to `sessions`, so each inserted row
   takes `FOR KEY SHARE` on the child's session row. That is compatible rather

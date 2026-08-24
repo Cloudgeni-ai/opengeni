@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
@@ -583,6 +584,82 @@ describe("child read acknowledgment on parent consumption", () => {
       grant.subjectId,
     );
     expect(afterSecondConsumption?.unread).toBe(false);
+  });
+
+  /**
+   * The acknowledgment probes the `session-personal-state` fence shared rather
+   * than exclusive. `listSessionsForSubject` holds the shared counterpart for its
+   * whole rail-list transaction, so an exclusive probe would drop the
+   * acknowledgment precisely while the human is looking at the rail; membership
+   * removal's exclusive hold must still block it.
+   */
+  async function withPersonalStateFenceHeld<T>(
+    grant: Grant,
+    mode: "shared" | "exclusive",
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const holder = postgres(shared.adminUrl, { max: 1 });
+    const key = `session-personal-state:${grant.workspaceId}:${grant.subjectId}`;
+    const acquire =
+      mode === "shared"
+        ? holder`select pg_advisory_lock_shared(hashtextextended(${key}, 0))`
+        : holder`select pg_advisory_lock(hashtextextended(${key}, 0))`;
+    await acquire;
+    try {
+      return await run();
+    } finally {
+      await holder`select pg_advisory_unlock_all()`.catch(() => undefined);
+      await holder.end().catch(() => undefined);
+    }
+  }
+
+  test("a concurrent shared personal-state holder does not block the acknowledgment", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleIdle(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+
+    const childSequence = await lastSequence(child.session.id);
+    // Exactly what the rail list holds while the human has it open; it refreshes
+    // on focus, online, and visibilitychange, so this is the common case.
+    const claimed = await withPersonalStateFenceHeld(grant, "shared", () =>
+      claim(grant, parent.session.id),
+    );
+    expect(claimed.action).toBe("claimed");
+    expect(await pinRow(grant.subjectId, child.session.id)).toMatchObject({
+      acknowledged_sequence: childSequence,
+    });
+  });
+
+  test("an exclusive personal-state holder makes the acknowledgment a clean no-op", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleIdle(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+
+    // Membership removal (migration 0278) holds this exclusively before it takes
+    // the workspace/session prefix. The acknowledgment must yield, so it cannot
+    // recreate a removed member's personal row after the cleanup DELETE.
+    const claimed = await withPersonalStateFenceHeld(grant, "exclusive", () =>
+      claim(grant, parent.session.id),
+    );
+    // Skipping is a clean no-op: the turn is still claimed and the batch is still
+    // delivered, the child simply stays unread.
+    expect(claimed.action).toBe("claimed");
+    expect(await pinRowCount(child.session.id)).toBe(0);
+    const seen = await getSessionForSubject(
+      client.db,
+      grant.workspaceId,
+      child.session.id,
+      grant.subjectId,
+    );
+    expect(seen?.unread).toBe(true);
   });
 
   test("a notice naming a session that is not this parent's child acknowledges nothing", async () => {

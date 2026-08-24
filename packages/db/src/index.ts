@@ -55079,14 +55079,18 @@ function consumedChildLifecycleSessionIds(
  * Lock discipline: the claim transaction already owns the canonical workspace →
  * session → turn → attempt prefix for the PARENT.
  *
- * - It takes the `session-personal-state` fence with `pg_try_advisory_xact_lock`
- *   and SKIPS the acknowledgment when the fence is already held. Membership
- *   removal (migration 0278) takes that fence BEFORE the workspace/session
- *   prefix, so blocking on it here would invert the canonical order; a
- *   non-blocking probe cannot. Honouring the fence is what keeps this from being
- *   the "racing pin writer recreates personal rows after cleanup" hole 0278
- *   exists to close, and losing the probe is a clean no-op rather than a partial
- *   write - the child simply stays unread, which is today's behaviour.
+ * - It takes the `session-personal-state` fence with
+ *   `pg_try_advisory_xact_lock_shared` and SKIPS the acknowledgment when the
+ *   fence is unavailable. Membership removal (migration 0278) takes that fence
+ *   EXCLUSIVELY and BEFORE the workspace/session prefix, so blocking on it here
+ *   would invert the canonical order; a non-blocking probe cannot. Honouring the
+ *   fence is what keeps this from being the "racing pin writer recreates personal
+ *   rows after cleanup" hole 0278 exists to close, and losing the probe is a
+ *   clean no-op rather than a partial write - the child simply stays unread,
+ *   which is today's behaviour. Shared rather than exclusive because
+ *   `listSessionsForSubject` holds the shared counterpart for its whole
+ *   rail-list transaction; see the acquisition site for why exclusive would drop
+ *   acknowledgments exactly when the human is watching the rail.
  * - It takes no child turn/attempt lock and no explicit child session lock.
  *   `session_pins` does carry two foreign keys to `sessions`, so each inserted
  *   row does take `FOR KEY SHARE` on the child's session row. That is safe
@@ -55122,9 +55126,19 @@ async function acknowledgeConsumedChildLifecycleNotices(
 ): Promise<void> {
   const subjectId = input.subjectId?.trim();
   if (!subjectId || input.childSessionIds.length === 0) return;
+  // SHARED, not exclusive. `listSessionsForSubject` holds the shared counterpart
+  // of this fence for its whole rail-list transaction, and that list refreshes on
+  // focus, online, and visibilitychange. An exclusive probe fails against a held
+  // shared lock, so it would drop acknowledgments precisely while the human is
+  // looking at the rail, and because `child_terminal_result` is typically a
+  // child's LAST notice, a drop there leaves exactly the permanent blue dot this
+  // exists to remove. Shared still conflicts with membership removal's exclusive
+  // hold, which is the invariant the fence is here for, and acknowledgment
+  // writers need no mutual exclusion against each other: the upsert is monotone
+  // and row-locked.
   const [fence] = await rawRows<{ acquired: boolean }>(
     tx,
-    sql`select pg_try_advisory_xact_lock(
+    sql`select pg_try_advisory_xact_lock_shared(
       hashtextextended(${sessionPersonalStateLockKey(input.workspaceId, subjectId)}, 0)
     ) as acquired`,
   );
