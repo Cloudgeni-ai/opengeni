@@ -89,7 +89,7 @@ exactly like an ordinary caller, so a definer that reads a tenancy table needs a
 policy branch it can actually satisfy - a capability row, or one of the
 `opengeni.organization_tenancy_lifecycle` markers the authority tables already
 gate on (`0263`'s `assert_active_managed_human_organization_membership` is the
-worked example, and `0338`'s
+worked example, and `0339`'s
 `opengeni_private.bind_connection_owner_authority` is the newer one).
 
 One PostgreSQL rule makes this class especially easy to miss: **`SELECT ... FOR
@@ -126,7 +126,7 @@ writer/command table, not in the source-scanning
 `scripts/check-migration-rls-backfills.ts`, which strips `CREATE FUNCTION`
 bodies by design and structurally cannot see any of them.
 
-`packages/db/test/migration-0338-owner-migrated-tenancy-cutover.test.ts` is the
+`packages/db/test/migration-0339-owner-migrated-tenancy-cutover.test.ts` is the
 regression harness for the runtime half, the way
 `migration-0296-force-rls-backfill-repair.test.ts` is for the migration half.
 

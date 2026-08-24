@@ -82,8 +82,8 @@ function rig() {
 
 function fixedResource(kind: ResourceKind, scope?: ResourceAuthorityScope | null) {
   return kind === "variable_set"
-    ? { variableSetId, variableSetScope: scope, rigId: null }
-    : { variableSetId: null, rigId, rigScope: scope };
+    ? { variableSetId, variableSetScope: scope, rigId: null, connectedMachine: null }
+    : { variableSetId: null, rigId, rigScope: scope, connectedMachine: null };
 }
 
 function authorityPage(active: boolean, kind: ResourceKind) {
@@ -201,7 +201,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: "user:owner",
           managedSelfContext: current.managedSelfContext,
           workspace,
-          fixed: { variableSetId: null, rigId: null },
+          fixed: { variableSetId: null, rigId: null, connectedMachine: null },
           personalWorkspaceTarget: false,
         }),
       undefined,
@@ -242,7 +242,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: `user:${principal}`,
           managedSelfContext: principal === "shared-user" ? null : current.managedSelfContext,
           workspace,
-          fixed: { variableSetId, rigId: null },
+          fixed: { variableSetId, rigId: null, connectedMachine: null },
           personalWorkspaceTarget: false,
         });
       },
@@ -280,7 +280,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: "user:owner",
           managedSelfContext: current.managedSelfContext,
           workspace,
-          fixed: { variableSetId, rigId: null },
+          fixed: { variableSetId, rigId: null, connectedMachine: null },
           personalWorkspaceTarget: false,
         }),
       undefined,
@@ -330,7 +330,7 @@ describe("usePersonalResourceAttachment", () => {
               fork: null,
             },
           },
-          fixed: { variableSetId, rigId: null },
+          fixed: { variableSetId, rigId: null, connectedMachine: null },
           personalWorkspaceTarget: false,
           onReloadSession: async () => {
             sessionReloads += 1;
@@ -360,6 +360,71 @@ describe("usePersonalResourceAttachment", () => {
     expect(hook.result.current.intent).toBeUndefined();
     expect(hook.result.current.requiresDecision).toBe(true);
     expect(hook.result.current.notice).toContain("Session authority changed");
+    await hook.unmount();
+  });
+
+  test("a selected personal Connected Machine requires and produces an attachment decision", async () => {
+    const enrollmentId = "99999999-9999-4999-8999-999999999999";
+    const client = {
+      listVariableSets: async () => [],
+      listRigs: async () => [],
+      listUserResourceAuthorities: async (
+        _workspaceId: string,
+        options: { resourceKind: string },
+      ) => ({
+        scope: "user" as const,
+        authorities:
+          options.resourceKind === "connected_machine"
+            ? [
+                {
+                  authorityId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                  resourceKind: "connected_machine" as const,
+                  resourceId: enrollmentId,
+                  originWorkspaceId: workspaceId,
+                  generation: 1,
+                  status: "active" as const,
+                  grants: [],
+                },
+              ]
+            : [],
+        nextCursor: null,
+      }),
+    } as unknown as OpenGeniCoreClient;
+    const current = identity("owner");
+    const hook = await renderHook(
+      () =>
+        usePersonalResourceAttachment({
+          client,
+          authMode: "managedSession",
+          authSession: current.authSession,
+          accessSubjectId: "user:owner",
+          managedSelfContext: current.managedSelfContext,
+          workspace,
+          fixed: {
+            variableSetId: null,
+            rigId: null,
+            connectedMachine: { enrollmentId, name: "Owner Mac" },
+          },
+          personalWorkspaceTarget: false,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.selected.connectedMachines).toEqual([
+      { enrollmentId, name: "Owner Mac" },
+    ]);
+    expect(hook.result.current.requiresDecision).toBe(true);
+    expect(hook.result.current.intent).toBeUndefined();
+
+    await actRun(() => hook.result.current.setMode("once"));
+    expect(hook.result.current.requiresDecision).toBe(true);
+    await actRun(() => hook.result.current.setAcknowledged(true));
+    expect(hook.result.current.requiresDecision).toBe(false);
+    expect(hook.result.current.intent).toMatchObject({
+      mode: "once",
+      workspaceSharedAcknowledged: true,
+    });
     await hook.unmount();
   });
 
@@ -623,7 +688,7 @@ describe("usePersonalResourceAttachment", () => {
           accessSubjectId: "user:owner",
           managedSelfContext: current.managedSelfContext,
           workspace,
-          fixed: { variableSetId, rigId: null },
+          fixed: { variableSetId, rigId: null, connectedMachine: null },
           personalWorkspaceTarget: false,
           enabled,
         }),

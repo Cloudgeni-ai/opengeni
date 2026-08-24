@@ -294,7 +294,7 @@ afterAll(async () => {
 });
 
 describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNER role", () => {
-  test("0338 keeps activation evidence in the dedicated schema and owner-only", async () => {
+  test("0339 keeps activation evidence in the dedicated schema and owner-only", async () => {
     if (!available) return;
     const [routine] = await admin<
       Array<{
@@ -330,7 +330,7 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     });
   });
 
-  test("0338 pins connection convergence and activation to the dedicated schema", async () => {
+  test("0339 pins connection convergence and activation to the dedicated schema", async () => {
     if (!available) return;
     const routines = await admin<
       Array<{ name: string; appExecute: boolean; settings: string[] | null }>

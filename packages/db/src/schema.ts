@@ -5939,7 +5939,7 @@ export const sessionTurns = pgTable(
   }),
 );
 
-/** Immutable logical-turn receipt for atomic personal Variable Set/Rig issuance. */
+/** Immutable logical-turn receipt for atomic personal-resource issuance. */
 export const turnPersonalResourceAttachmentReceipts = pgTable(
   "turn_personal_resource_attachment_receipts",
   {
@@ -5974,7 +5974,7 @@ export const turnPersonalResourceAttachmentReceipts = pgTable(
       sql`${table.sessionAuthorityEpoch} > 0
         and octet_length(${table.initiatingHumanSubjectId}) between 1 and 512
         and ${table.membershipAuthorizationRevision} > 0
-        and ${table.resourceCount} between 1 and 27
+        and ${table.resourceCount} between 1 and 28
         and ${table.grantMode} in ('once', 'session', 'always')
         and ${table.sessionVisibility} in ('user_private', 'workspace_shared')
         and ${table.sharedOutputWarningVersion} = 1
@@ -6030,7 +6030,10 @@ export const turnPersonalResourceSnapshots = pgTable(
           and ${table.resourceVersionId} is null)
         or (${table.resourceKind} = 'rig'
           and ${table.action} = 'rig.use'
-          and ${table.resourceVersionId} is not null)`,
+          and ${table.resourceVersionId} is not null)
+        or (${table.resourceKind} = 'connected_machine'
+          and ${table.action} = 'connected_machine.use'
+          and ${table.resourceVersionId} is null)`,
     ),
     generations: check(
       "turn_personal_resource_snapshots_generation_chk",

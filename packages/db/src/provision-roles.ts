@@ -670,7 +670,7 @@ BEGIN
         ${literal(role)}
       );
     END IF;
-    -- Migration 0338's bounded connection convergence and repaired parity
+    -- Migration 0339's bounded connection convergence and repaired parity
     -- seams also live in the data schema. Converge their exact grants for the
     -- supported migrate-then-provision order.
     FOREACH routine_signature IN ARRAY ARRAY[

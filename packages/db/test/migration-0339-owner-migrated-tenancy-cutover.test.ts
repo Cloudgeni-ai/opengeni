@@ -1,7 +1,7 @@
-// Migration 0338 under the PRODUCTION database posture.
+// Migration 0339 under the PRODUCTION database posture.
 //
 // `acquireSharedTestDatabase` hands out the container superuser, for whom
-// `FORCE ROW LEVEL SECURITY` never engages, so every existing 0338 test drives
+// `FORCE ROW LEVEL SECURITY` never engages, so every existing 0339 test drives
 // the classify -> backfill -> activate chain through a principal that cannot
 // observe this defect class at all. OpenGeni migrates and runs its SECURITY
 // DEFINER routines as a NON-superuser owner without `BYPASSRLS`
@@ -69,10 +69,10 @@ let owned: OwnerMigratedTestDatabase | null = null;
 let owner: postgres.Sql | null = null;
 
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("migration-0338-owner-cutover");
+  owned = await acquireOwnerMigratedTestDatabase("migration-0339-owner-cutover");
   if (!owned) {
     if (requireRealDatabase) {
-      throw new Error("[migration-0338-owner] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is absent");
+      throw new Error("[migration-0339-owner] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is absent");
     }
     return;
   }
@@ -85,7 +85,7 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
+describe("migration 0339 under a NOSUPERUSER NOBYPASSRLS migration owner", () => {
   test("mints, converges, and activates the connection lane through the real posture", async () => {
     if (!owned || !owner) return;
     const { admin, ownerRole } = owned;
@@ -121,7 +121,7 @@ describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
 
     await admin`
       insert into managed_accounts (id, name, external_source, external_id)
-      values (${accountId}, 'ope-204 owner cutover', 'better-auth:user', ${accountId})`;
+      values (${accountId}, 'tenancy cutover owner cutover', 'better-auth:user', ${accountId})`;
     for (const [workspaceId, name] of [
       [sharedWorkspaceId, "shared"],
       [anchoredPersonalWorkspaceId, "anchored personal"],
@@ -129,7 +129,7 @@ describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
     ] as const) {
       await admin`
         insert into workspaces (id, account_id, name)
-        values (${workspaceId}, ${accountId}, ${`ope-204 ${name}`})`;
+        values (${workspaceId}, ${accountId}, ${`tenancy cutover ${name}`})`;
       await admin`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspaceId}, ${accountId})`;
@@ -271,7 +271,7 @@ describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
     // The activation must actually COMMIT its receipt under this posture.
     // Migration 0303 gave `session_tenancy_activations` FORCE RLS with a
     // `FOR SELECT`-only policy and no INSERT policy at all, so this write was
-    // denied `42501` after every gate had already passed; 0338 re-opens exactly
+    // denied `42501` after every gate had already passed; 0339 re-opens exactly
     // that one command behind an owner-only marker.
     const receiptIds: string[] = evidence.receiptIds;
     const activation = await runInAccount(async (tx) => {
@@ -294,7 +294,7 @@ describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
         select account_id as "accountId", activation_version as "activationVersion", replay
         from activate_session_tenancy_product(
           ${accountId}::uuid, ${digest(inventoryRow!.report)}, ${digest(parity)},
-          'ope-204 owner-migrated test', ${["opengeni_app"]}::text[]
+          'tenancy cutover owner-migrated test', ${["opengeni_app"]}::text[]
         )`;
       return row!;
     });
@@ -308,7 +308,7 @@ describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
       from session_tenancy_activations where account_id = ${accountId}`;
     expect(receipt).toEqual({
       receipts: receiptIds,
-      activatedBy: "ope-204 owner-migrated test",
+      activatedBy: "tenancy cutover owner-migrated test",
       version: 1,
     });
 
@@ -327,7 +327,7 @@ describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
       const [row] = await tx<Array<{ replay: boolean }>>`
         select replay from activate_session_tenancy_product(
           ${accountId}::uuid, ${digest(inventoryRow!.report)}, ${digest(parityRow!.report)},
-          'ope-204 owner-migrated test', ${["opengeni_app"]}::text[]
+          'tenancy cutover owner-migrated test', ${["opengeni_app"]}::text[]
         )`;
       return row!.replay;
     });
@@ -366,10 +366,10 @@ describe("migration 0338 under a NOSUPERUSER NOBYPASSRLS migration owner", () =>
     const pendingSubject = `user:pending-${crypto.randomUUID()}`;
     await admin`
       insert into managed_accounts (id, name, external_source, external_id)
-      values (${accountId}, 'ope-204 membership seams', 'better-auth:user', ${accountId})`;
+      values (${accountId}, 'tenancy cutover membership seams', 'better-auth:user', ${accountId})`;
     await admin`
       insert into workspaces (id, account_id, name)
-      values (${anchoredWorkspaceId}, ${accountId}, 'ope-204 anchored personal')`;
+      values (${anchoredWorkspaceId}, ${accountId}, 'tenancy cutover anchored personal')`;
     const [anchored] = await admin<Array<{ id: string }>>`
       insert into organization_memberships (
         account_id, subject_id, status, personal_workspace_id

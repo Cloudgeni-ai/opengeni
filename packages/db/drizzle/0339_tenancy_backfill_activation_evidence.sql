@@ -192,7 +192,7 @@ $organization_membership_backfill_read_policy$;
 -- routines as a NON-superuser owner without BYPASSRLS, so the owner is
 -- policy-bound too. 0256's inline `SELECT ... FOR SHARE` plus authority INSERT
 -- therefore could not work on any production deployment: the mint path silently
--- degraded every personal connection to `legacy_user`, and 0338's backfill
+-- degraded every personal connection to `legacy_user`, and 0339's backfill
 -- verification would have raised `42501` on every deterministic candidate.
 -- Opening the reviewed marker window for exactly this binding is 0263's
 -- `assert_active_managed_human_organization_membership` pattern, restored on
@@ -752,11 +752,11 @@ CREATE TRIGGER sandbox_retained_processes_tenancy_writer_fence
 -- stated session authority is an ordinary workspace-membership row OR the
 -- active membership's own personal_workspace_id pointer (0302).
 ALTER FUNCTION check_organization_tenancy_parity(uuid, integer, integer)
-  RENAME TO check_organization_tenancy_parity_pre_0338;
-ALTER FUNCTION check_organization_tenancy_parity_pre_0338(uuid, integer, integer)
+  RENAME TO check_organization_tenancy_parity_pre_0339;
+ALTER FUNCTION check_organization_tenancy_parity_pre_0339(uuid, integer, integer)
   SET SCHEMA opengeni_private;
 REVOKE ALL ON FUNCTION
-  opengeni_private.check_organization_tenancy_parity_pre_0338(uuid, integer, integer)
+  opengeni_private.check_organization_tenancy_parity_pre_0339(uuid, integer, integer)
   FROM PUBLIC;
 
 CREATE FUNCTION check_organization_tenancy_parity(
@@ -772,7 +772,7 @@ DECLARE
   result jsonb;
   attributable_count integer;
 BEGIN
-  result := opengeni_private.check_organization_tenancy_parity_pre_0338(
+  result := opengeni_private.check_organization_tenancy_parity_pre_0339(
     p_organization_id, p_evidence_limit, p_observation_window_days
   );
   INSERT INTO opengeni_private.organization_tenancy_parity_capabilities (
@@ -1335,7 +1335,7 @@ BEGIN
       data_schema
     );
     REVOKE ALL ON FUNCTION
-      opengeni_private.check_organization_tenancy_parity_pre_0338(uuid,integer,integer)
+      opengeni_private.check_organization_tenancy_parity_pre_0339(uuid,integer,integer)
       FROM opengeni_app;
   END IF;
 END

@@ -118,29 +118,29 @@ describe("migration 0303 session tenancy product activation", () => {
     const barrierTransaction = barrier.begin(async (transaction) => {
       await transaction`
         select pg_advisory_xact_lock(
-          hashtextextended('ope-204-boundary-race-test', 0)
+          hashtextextended('tenancy-cutover-boundary-race-test', 0)
         )`;
       barrierReady();
       await releaseSignal;
     });
     await barrierReadySignal;
     await shared.admin`
-      create function ope_204_hold_activation_receipt_for_test()
+      create function tenancy_cutover_hold_activation_receipt_for_test()
       returns trigger
       language plpgsql
       set search_path = pg_catalog, pg_temp
       as $body$
       begin
         perform pg_catalog.pg_advisory_xact_lock(
-          pg_catalog.hashtextextended('ope-204-boundary-race-test', 0)
+          pg_catalog.hashtextextended('tenancy-cutover-boundary-race-test', 0)
         );
         return new;
       end
       $body$`;
     await shared.admin`
-      create trigger ope_204_hold_activation_receipt_for_test
+      create trigger tenancy_cutover_hold_activation_receipt_for_test
       before insert on session_tenancy_activations
-      for each row execute function ope_204_hold_activation_receipt_for_test()`;
+      for each row execute function tenancy_cutover_hold_activation_receipt_for_test()`;
 
     let activationSettled = false;
     let provisioningSettled = false;
@@ -184,14 +184,14 @@ describe("migration 0303 session tenancy product activation", () => {
         .begin(async (transaction) => {
           const [organization] = await transaction<{ id: string }[]>`
           insert into managed_accounts (name)
-          values ('OPE-304 boundary race') returning id`;
+          values ('greenfield boundary race') returning id`;
           provisioningStarted();
           await transaction`
           insert into workspaces (account_id, name, external_source, external_id)
           values (
             ${organization!.id}, 'Personal workspace',
             'opengeni:organization-membership',
-            ${`${organization!.id}:user:ope-304-boundary-race`}
+            ${`${organization!.id}:user:greenfield-boundary-race`}
           )`;
           await transaction`select lock_session_tenancy_activation_boundary()`;
           const [boundary] = await transaction<{ activated: boolean }[]>`
@@ -218,9 +218,9 @@ describe("migration 0303 session tenancy product activation", () => {
       if (provisioningPromise) pending.push(provisioningPromise);
       await Promise.allSettled(pending);
       await shared.admin`
-        drop trigger if exists ope_204_hold_activation_receipt_for_test
+        drop trigger if exists tenancy_cutover_hold_activation_receipt_for_test
         on session_tenancy_activations`;
-      await shared.admin`drop function if exists ope_204_hold_activation_receipt_for_test()`;
+      await shared.admin`drop function if exists tenancy_cutover_hold_activation_receipt_for_test()`;
       await Promise.all([barrier.end(), activationClient.end(), provisioningClient.end()]);
     }
   }, 180_000);

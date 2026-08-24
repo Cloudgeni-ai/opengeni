@@ -1,4 +1,4 @@
-// Organization-tenancy phase-D connection convergence (migration 0338).
+// Organization-tenancy phase-D connection convergence (migration 0339).
 //
 //   # report the next bounded deterministic batch (default, no writes)
 //   bun run db:backfill-connection-authority --organization-id <uuid>
