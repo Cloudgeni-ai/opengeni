@@ -12,7 +12,7 @@ const REQUIRED_MIGRATIONS = [
   "0301_session_snapshot_and_pin_visibility.sql",
   "0302_personal_workspace_session_ownership.sql",
   "0303_session_tenancy_product_activation.sql",
-  "0339_tenancy_backfill_activation_evidence.sql",
+  "0340_tenancy_backfill_activation_evidence.sql",
 ] as const;
 
 function argument(name: string): string | null {

@@ -8,18 +8,18 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0339-tenancy-backfill-evidence");
-  if (!shared && requireRealDatabase) throw new Error("migration 0339 requires PostgreSQL");
+  shared = await acquireSharedTestDatabase("migration-0340-tenancy-backfill-evidence");
+  if (!shared && requireRealDatabase) throw new Error("migration 0340 requires PostgreSQL");
 }, 180_000);
 
 afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0339 tenancy backfill activation evidence", () => {
+describe("migration 0340 tenancy backfill activation evidence", () => {
   test("is rolling, preserves the activation signature, and binds six receipt ids", async () => {
     const source = await readFile(
-      new URL("../drizzle/0339_tenancy_backfill_activation_evidence.sql", import.meta.url),
+      new URL("../drizzle/0340_tenancy_backfill_activation_evidence.sql", import.meta.url),
       "utf8",
     );
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -58,7 +58,7 @@ describe("migration 0339 tenancy backfill activation evidence", () => {
   test("keeps the evidence projection owner-only and fails closed without receipts", async () => {
     if (!shared) return;
     const [account] = await shared.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0339 evidence') returning id`;
+      insert into managed_accounts (name) values ('0340 evidence') returning id`;
     const [acl] = await shared.admin<
       Array<{ evidenceExecutable: boolean; boundaryExecutable: boolean }>
     >`
@@ -89,10 +89,10 @@ describe("migration 0339 tenancy backfill activation evidence", () => {
   test("classifies and converges only legacy connections with exact live membership", async () => {
     if (!shared) return;
     const [account] = await shared.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0339 connection convergence') returning id`;
+      insert into managed_accounts (name) values ('0340 connection convergence') returning id`;
     const [workspace] = await shared.admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, '0339 connection convergence') returning id`;
+      values (${account!.id}, '0340 connection convergence') returning id`;
     const ownerSubject = `user:${crypto.randomUUID()}`;
     const unresolvedSubject = `user:${crypto.randomUUID()}`;
     const [ownedConnection, unresolvedConnection] = await shared.admin.begin(
@@ -185,10 +185,10 @@ describe("migration 0339 tenancy backfill activation evidence", () => {
   test("an existing activation retires unresolved legacy reads and refuses new minting", async () => {
     if (!shared) return;
     const [account] = await shared.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0339 legacy retirement') returning id`;
+      insert into managed_accounts (name) values ('0340 legacy retirement') returning id`;
     const [workspace] = await shared.admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, '0339 legacy retirement') returning id`;
+      values (${account!.id}, '0340 legacy retirement') returning id`;
     const legacySubject = `user:${crypto.randomUUID()}`;
     const [legacy] = await shared.admin.begin(async (transaction) => {
       await transaction`select set_config('opengeni.account_id', ${account!.id}, true)`;
@@ -203,12 +203,12 @@ describe("migration 0339 tenancy backfill activation evidence", () => {
           'retired.example', 'api_key', 'ciphertext'
         ) returning id`;
     });
-    // A pre-0339 activation can legitimately carry zero or five receipts.
+    // A pre-0340 activation can legitimately carry zero or five receipts.
     await shared.admin`
       insert into session_tenancy_activations (
         account_id, activation_version, inventory_digest, parity_digest, activated_by
       ) values (
-        ${account!.id}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'pre-0339-test'
+        ${account!.id}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'pre-0340-test'
       )`;
 
     const writerTriggers = await shared.admin<Array<{ relation: string; enabled: string }>>`
@@ -284,10 +284,10 @@ describe("migration 0339 tenancy backfill activation evidence", () => {
   test("parity counts a historical ownerless session through the personal-workspace pointer", async () => {
     if (!shared) return;
     const [account] = await shared.admin<{ id: string }[]>`
-      insert into managed_accounts (name) values ('0339 personal parity') returning id`;
+      insert into managed_accounts (name) values ('0340 personal parity') returning id`;
     const [workspace] = await shared.admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, '0339 personal parity') returning id`;
+      values (${account!.id}, '0340 personal parity') returning id`;
     await shared.admin`
       insert into workspace_inference_controls (workspace_id, account_id)
       values (${workspace!.id}, ${account!.id})`;
@@ -310,7 +310,7 @@ describe("migration 0339 tenancy backfill activation evidence", () => {
           sandbox_group_id, reasoning_effort, latency_mode, first_party_mcp_tools,
           tool_policy, created_by_kind, created_by_subject_id
         ) values (
-          ${sessionId}, ${account!.id}, ${workspace!.id}, '0339 historical',
+          ${sessionId}, ${account!.id}, ${workspace!.id}, '0340 historical',
           'gpt-5', 'none', ${sessionId}, 'medium', 'standard', '[]'::jsonb,
           '{"mode":"workspace_default","inheritedFromSessionId":null}'::jsonb,
           'subject', ${subject}

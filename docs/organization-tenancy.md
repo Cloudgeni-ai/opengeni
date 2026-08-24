@@ -135,6 +135,26 @@ Configured/local subjects without an eligible active organization membership,
 and existing personal Documents, remain on the legacy origin-workspace lane
 instead of being guessed into a new organization-user authority.
 
+Migration `0339_document_authority_reclassification.sql` turns that deliberate
+non-guessing rule into an explicit administrator workflow. The caller supplies
+an idempotent operation id plus the exact expected Document authority tuple;
+the owner-only lifecycle writes an immutable before/after receipt and updates
+the Document and all chunks atomically. Stale tuples, conflicting operation-id
+reuse, a non-original subject claiming personal authority, and organization
+changes without exact account administration all fail closed. Origin
+workspace, base, file, creator, and content provenance never change. The exact
+account-admin capability is minted by the canonical access resolver and bound
+to its account and actor, rather than inferred from an organization-membership
+row or caller-set GUC. That keeps managed, local/configured, and signed delegated
+administrators equivalent. Activated personal Documents remain operable from a
+currently accessible same-organization sibling workspace after origin access is
+lost; targeting workspace authority still requires the immutable origin route.
+Receipt reads are bounded scope-bound cursor pages. A separate resumable
+run/operation/receipt ledger creates or adopts one internal Default collection
+per organization workspace without using collections as authority. A later
+cross-domain migration may consume these receipts as evidence but must not
+perform a second Document reclassification.
+
 Agent access is separate from human ownership. At exact attempt admission the
 database freezes only ready, agent-enabled personal Documents backed by an
 active `document.read` grant for that target workspace and the session's exact
@@ -1207,7 +1227,7 @@ resumes. This is what makes repeated runs *converge*: a subject the driver
 cannot resolve stays in its population permanently, so a fixed `LIMIT n` window
 over an organization with more than `n` `user:`-kind subjects would return the
 same first `n` rows on every pass and never reach subject `n + 1` at all.
-Migration 0339 connects the driver to the durable ledger. A non-dry walk with
+Migration 0340 connects the driver to the durable ledger. A non-dry walk with
 `--run-key` opens one `organization_memberships` receipt, records every refusal
 with the exact organization-membership id or source workspace-membership id
 that made it an obligation, and settles only a complete-from-the-start,
@@ -1217,7 +1237,7 @@ Dry runs still write nothing. The four membership-specific reason codes are
 part of the fixed, content-free vocabulary; no subject or proposed owner is
 stored in the ledger.
 
-Migration 0339 also repairs the two seams that walk feeds on. Migration 0290
+Migration 0340 also repairs the two seams that walk feeds on. Migration 0290
 gave `list_organization_membership_backfill_anchors` and
 `list_organization_memberships_without_personal_workspace` the
 `organization_membership_backfill` marker on the shared
@@ -1230,7 +1250,7 @@ owner's RLS, so only a superuser-migrated database (every prior test harness)
 hid it. The consequence was that an already-anchored subject read as
 provisionable and the memberships carrying no personal workspace - the actual
 target population - were invisible, so the walk could not converge them and its
-receipt counts were wrong. 0339 restores that visibility as its own narrow
+receipt counts were wrong. 0340 restores that visibility as its own narrow
 read-only policy, `organization_membership_backfill_read`, so the next migration
 to restate the shared list cannot delete it again.
 
@@ -1262,7 +1282,7 @@ Migration 0256 remains the one sibling family with a genuine discriminator:
 `connections.subject_id` plus an active `organization_memberships` row. None of
 these three tables has a `subject_id`, so the same shape does not transfer.
 
-#### Connection authority convergence (migration 0339)
+#### Connection authority convergence (migration 0340)
 
 Connections use that genuine discriminator through a separate bounded command:
 
@@ -1282,7 +1302,7 @@ on a complete converged walk produces the sixth activation receipt,
 `connections`; a partial walk must resume without a run key and classify under
 a fresh key only after convergence.
 
-Migration 0339 also closes both ways this compatibility population could reopen.
+Migration 0340 also closes both ways this compatibility population could reopen.
 After an organization activates, `bind_connection_authority` refuses to mint a
 new personal connection without a live membership, surviving `legacy_user`
 rows are invisible to runtime reads, and the worker refuses a pre-snapshot
@@ -1297,7 +1317,7 @@ Both of those paths depend on one seam,
 NON-superuser owner without `BYPASSRLS`. Migration 0256's inline
 `SELECT ... FOR SHARE` plus authority `INSERT` therefore matched nothing on
 every real deployment: a personal connection whose subject *did* hold a live
-membership silently degraded to `legacy_user`, and 0339's convergence would
+membership silently degraded to `legacy_user`, and 0340's convergence would
 have raised `42501 connection backfill membership authority is unavailable` on
 every deterministic candidate. The seam opens one read-only
 `connection_authority_binding` marker window - owner-only policies on two
@@ -1311,7 +1331,7 @@ this invisible: `SELECT ... FOR SHARE` is gated on the UPDATE/ALL policy
 `FOR SELECT` leaves a row-locking lookup blind. See
 [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) and the
 production-posture regression harness
-`packages/db/test/migration-0339-owner-migrated-tenancy-cutover.test.ts`.
+`packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`.
 
 Migration 0291 is the resulting assertion seam:
 `bun run db:verify-resource-classification --organization-id <uuid>
@@ -1396,7 +1416,7 @@ repairable, and `--apply` repairs only those:
   Slice B provisions a personal workspace *without* a `workspace_memberships`
   row. Migration 0302 extended live derivation to the membership's exact
   `personal_workspace_id`, so this is now a finite historical population;
-  migration 0339 makes parity count that pointer form as well as ordinary
+  migration 0340 makes parity count that pointer form as well as ordinary
   workspace membership.
 - **Parent-inheritance closure.** An ownerless session whose same-workspace
   parent now has an owner pair: branch 1 of the live trigger replayed against
@@ -1868,7 +1888,7 @@ is run:
    their `byScope` breakdown against the reviewed classification instead -
    `byScope` reports every authority distinction the schema can truthfully make,
    and any non-user-scoped total is derivable from it.
-   Migration 0339 additionally requires the newest receipt in each executable
+   Migration 0340 additionally requires the newest receipt in each executable
    phase-D family to be settled: `organization_memberships`, `sessions`,
    `variable_sets`, `rigs`, `machines`, and `connections`. Produce them with one
    complete membership walk, one resource-classification run, a converged
@@ -1924,7 +1944,7 @@ migration remains inert with the default `false`; the drained activation
 command refuses to write a per-organization receipt unless the switch is true.
 Once any receipt exists, API/worker startup and readiness also require true.
 That startup interlock is forward-only posture, not a rollback mechanism.
-Migration 0339 preserves the activation command and database function
+Migration 0340 preserves the activation command and database function
 signatures while adding the settled-backfill proof above. New activation rows
 bind the six exact receipt ids. Older activation rows retain their existing
 zero-receipt evidence and remain replayable only for their identical stored
@@ -1933,7 +1953,7 @@ database recomputes inventory, parity, and receipt evidence while holding the
 complete source-table fence and rejects a stale or fabricated supplied digest
 with SQLSTATE `40001`.
 
-Migration 0339 additionally makes that receipt writable. Migration 0303 created
+Migration 0340 additionally makes that receipt writable. Migration 0303 created
 `session_tenancy_activations` with FORCE ROW LEVEL SECURITY and a
 `FOR SELECT`-only policy and no INSERT policy at all, so under the documented
 non-superuser-owner posture the activation was denied `42501` on its own append
@@ -1946,7 +1966,7 @@ is the complete write set: the table is append-only, no `UPDATE` or `DELETE`
 writer exists anywhere in the tree, and activation is one-way. The runtime role
 keeps `SELECT` and nothing else.
 
-Migration 0339 also freezes the deployment-wide advisory boundary
+Migration 0340 also freezes the deployment-wide advisory boundary
 `session-tenancy-canonical-boundary:v1` behind the owner-only
 `lock_session_tenancy_activation_boundary()` seam. Operator activation keeps
 the organization advisory prefix, acquires every source-table
@@ -1957,7 +1977,7 @@ graph first, take this same boundary last, and then inspect the already-committe
 version-1 witness. This ordering means a setup transaction either commits
 unactivated before the first boundary or waits and observes it afterward; taking
 the global boundary before the operator's source locks would introduce a
-RowExclusive/global-lock deadlock and is forbidden. Migration 0339 does not
+RowExclusive/global-lock deadlock and is forbidden. Migration 0340 does not
 itself auto-activate new organizations.
 
 ### What an operator must not do

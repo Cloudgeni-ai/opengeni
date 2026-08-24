@@ -163,7 +163,13 @@ import type {
   UninstallPluginResult,
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
+  DocumentAuthorityReclassification,
+  DocumentDefaultCollectionBackfill,
+  ListDocumentAuthorityReclassificationsOptions,
+  ListDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
+  ReclassifyDocumentAuthorityRequest,
+  RunDocumentDefaultCollectionBackfillRequest,
   ClientConfig,
   WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
@@ -5440,6 +5446,53 @@ export class OpenGeniClient {
     return await this.requestJson<Document>(
       "POST",
       `/v1/workspaces/${workspaceId}/documents/${documentId}/move`,
+      request,
+    );
+  }
+
+  /**
+   * Atomically reclassify a Document's authority and every indexed chunk.
+   * The operation is replay-safe and rejects a stale expected authority tuple.
+   */
+  async reclassifyDocumentAuthority(
+    workspaceId: string,
+    documentId: string,
+    request: ReclassifyDocumentAuthorityRequest,
+  ): Promise<DocumentAuthorityReclassification> {
+    return await this.requestJson<DocumentAuthorityReclassification>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications`,
+      request,
+    );
+  }
+
+  /** List the current actor's durable authority-reclassification receipts. */
+  async listDocumentAuthorityReclassifications(
+    workspaceId: string,
+    documentId: string,
+    options: ListDocumentAuthorityReclassificationsOptions = {},
+  ): Promise<ListDocumentAuthorityReclassificationsResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor) params.set("cursor", options.cursor);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<ListDocumentAuthorityReclassificationsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications${query}`,
+    );
+  }
+
+  /**
+   * Advance one resumable, organization-scoped Default collection backfill.
+   * Reusing an operation ID is idempotent; keep the run ID across batches.
+   */
+  async runDocumentDefaultCollectionBackfill(
+    workspaceId: string,
+    request: RunDocumentDefaultCollectionBackfillRequest,
+  ): Promise<DocumentDefaultCollectionBackfill> {
+    return await this.requestJson<DocumentDefaultCollectionBackfill>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/document-default-collection-backfills`,
       request,
     );
   }

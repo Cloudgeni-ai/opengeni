@@ -185,7 +185,25 @@ const budgets = {
   // Advance only that aggregate to the next whole KiB above one KiB of
   // headroom; gzip, file-count, initial, per-file, lazy-chunk, and CSS caps stay
   // fixed.
-  directSessionRaw: 2121 * kib,
+  //
+  // The document-authority reclassification work adds
+  // `reclassifyDocumentAuthority`,
+  // `listDocumentAuthorityReclassifications` and
+  // `runDocumentDefaultCollectionBackfill` to the SDK. The web app calls none of
+  // them, but they are instance methods on the single `OpenGeniCoreClient` class
+  // the app imports wholesale, so they are retained and the direct-session graph
+  // grows. That is dead weight shipped to every browser session, and it is
+  // structural rather than specific to this change: every future SDK method
+  // taxes the browser bundle whether or not the browser uses it.
+  //
+  // Two independent growths stack in this head - that SDK surface and the
+  // Connected Machine attachment graph above - so the measurement is taken on
+  // the merged tree rather than on either change alone: 2,171,431 raw. The
+  // 2121-KiB cap left only 473 bytes, short of the one KiB of headroom the rule
+  // above mandates, so this advances to 2122 KiB. Every other cap stays fixed.
+  // It remains a stopgap; the real fix is to make the client
+  // tree-shakeable, tracked separately.
+  directSessionRaw: 2122 * kib,
   directSessionGzip: 593 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,

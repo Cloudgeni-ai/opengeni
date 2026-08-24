@@ -670,7 +670,7 @@ BEGIN
         ${literal(role)}
       );
     END IF;
-    -- Migration 0339's bounded connection convergence and repaired parity
+    -- Migration 0340's bounded connection convergence and repaired parity
     -- seams also live in the data schema. Converge their exact grants for the
     -- supported migrate-then-provision order.
     FOREACH routine_signature IN ARRAY ARRAY[
@@ -1581,6 +1581,22 @@ BEGIN
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_admissions FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_snapshots FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.personal_document_once_consumption_receipts FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
+      format('%I.reclassify_document_authority(jsonb)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.reclassify_document_authority(jsonb) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.reclassify_document_authority(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamptz, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamptz, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.run_document_default_collection_backfill(jsonb) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.run_document_default_collection_backfill(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.document_migration_capability_active(text) FROM PUBLIC');
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.document_migration_capability_active(text) TO %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE opengeni_private.document_migration_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('GRANT SELECT ON TABLE %I.document_authority_reclassifications TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON TABLE %I.document_authority_reclassifications FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.document_default_collection_backfill_runs, %I.document_default_collection_backfill_operations, %I.document_default_collection_backfill_receipts FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
       format('%I.create_scoped_variable_set(uuid,uuid,text,text,text,jsonb,boolean)', ${literal(schema)})

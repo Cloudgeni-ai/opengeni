@@ -192,7 +192,7 @@ $organization_membership_backfill_read_policy$;
 -- routines as a NON-superuser owner without BYPASSRLS, so the owner is
 -- policy-bound too. 0256's inline `SELECT ... FOR SHARE` plus authority INSERT
 -- therefore could not work on any production deployment: the mint path silently
--- degraded every personal connection to `legacy_user`, and 0339's backfill
+-- degraded every personal connection to `legacy_user`, and 0340's backfill
 -- verification would have raised `42501` on every deterministic candidate.
 -- Opening the reviewed marker window for exactly this binding is 0263's
 -- `assert_active_managed_human_organization_membership` pattern, restored on

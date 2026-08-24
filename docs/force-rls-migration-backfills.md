@@ -81,24 +81,43 @@ A migration-time backfill over a FORCE-RLS table must do one of:
 A convergence assertion is not a substitute for any of the above: put the
 assertion *inside* the window so a silent no-op fails loudly.
 
-### The runtime sibling: SECURITY DEFINER reads and row locks
+## The same trap at runtime: `SECURITY DEFINER` routines
 
-The same binding applies at *runtime*, not only during a migration. A SECURITY
-DEFINER routine owned by the schema owner is policy-bound on a FORCE-RLS table
-exactly like an ordinary caller, so a definer that reads a tenancy table needs a
-policy branch it can actually satisfy - a capability row, or one of the
-`opengeni.organization_tenancy_lifecycle` markers the authority tables already
-gate on (`0263`'s `assert_active_managed_human_organization_membership` is the
-worked example, and `0339`'s
-`opengeni_private.bind_connection_owner_authority` is the newer one).
+The mechanism is not confined to migration time. Inside a `SECURITY DEFINER`
+function, `current_user` is the function's **owner** - the same schema owner that
+runs migrations - so `FORCE ROW LEVEL SECURITY` binds it there too, on every
+ordinary request. A definer routine reading a capability-gated table therefore
+has the identical failure mode: **zero rows, no error.**
 
-One PostgreSQL rule makes this class especially easy to miss: **`SELECT ... FOR
-UPDATE/SHARE` is gated on the UPDATE/ALL policy `USING` clause in addition to
-the SELECT one.** A capability policy declared only `FOR SELECT` therefore lets
-a plain read through and silently returns **zero rows** for the identical query
-with a row lock on it. That is exactly how migration 0256's connection
-owner-membership lookup became blind on every production deployment while its
-sibling classifier - the same join without `FOR SHARE` - kept working.
+Two rules, both of which fail silently when broken:
+
+1. **Open the capability window before the read.** A table like
+   `organization_memberships` carries no GUC-only read policy; every branch is
+   `current_user = <owner> AND <x>_capability_active()`. Installing the
+   capability *after* the `SELECT` (or after an `IF FOUND` on it) makes the read
+   match nothing and takes the not-found path.
+2. **A capability-gated read must carry no locking clause.** PostgreSQL applies a
+   relation's `UPDATE` policies to any `SELECT` with a row-locking clause, so
+   `FOR SHARE`, `FOR KEY SHARE`, `FOR NO KEY UPDATE`, and `FOR UPDATE` **all**
+   return zero rows when the only matching policy is `FOR SELECT`. Nothing
+   raises. Where a referential pin is genuinely needed, take it through a foreign
+   key: RI checks bypass row security and lock the referenced row `FOR KEY SHARE`.
+
+`packages/db/drizzle/0339_document_authority_reclassification.sql`'s
+`reclassify_document_authority` follows both rules and asserts the window is live
+before the read, so a regression aborts instead of quietly pinning a personal
+Document to its origin workspace forever.
+
+**Known unrepaired instance.** `0258_three_scope_document_knowledge_authority.sql`
+gets rule 1 right but not rule 2:
+`create_personal_document_authority` and
+`prepare_session_attempt_personal_document_reads` both read
+`organization_memberships ... FOR SHARE` inside the capability window. On a
+superuser-migrated database they see the row; on the documented production
+posture they see none, so a new personal Document silently takes the legacy
+workspace-anchored lane instead of minting a portable organization-user
+authority. Migration bytes are frozen, so this needs its own reviewed repair
+migration - it is listed here rather than fixed in passing.
 
 The organization-tenancy lane alone has produced four instances, all invisible
 until a test ran through `acquireOwnerMigratedTestDatabase`:
@@ -126,7 +145,7 @@ writer/command table, not in the source-scanning
 `scripts/check-migration-rls-backfills.ts`, which strips `CREATE FUNCTION`
 bodies by design and structurally cannot see any of them.
 
-`packages/db/test/migration-0339-owner-migrated-tenancy-cutover.test.ts` is the
+`packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts` is the
 regression harness for the runtime half, the way
 `migration-0296-force-rls-backfill-repair.test.ts` is for the migration half.
 

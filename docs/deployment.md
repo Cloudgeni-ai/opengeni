@@ -463,7 +463,7 @@ activation:
   forward-only per-organization activation.
 
 The first two migration files declare `-- deployment-mode: maintenance`; 0303
-and 0339 install their contracts as rolling migrations but the separate
+and 0340 install their contracts as rolling migrations but the separate
 activation command is still a drained, forward-only cutover. Each activation
 rejects a live application with SQLSTATE `55000` before taking `ACCESS
 EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
@@ -485,7 +485,7 @@ For each subsequent activation:
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require 0303, 0339, plus every prerequisite
+6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
    migration to appear in `schema_migrations`;
 7. with the application still drained, run:
 
@@ -503,7 +503,7 @@ For each subsequent activation:
    exact drainable/bounded activation lane to be zero. It deliberately does not
    gate on total ownerless sessions or all-time immutable legacy writer rows;
    migration 0298 supplies their truthful attributable and observation-window
-   refinements. Migration 0339 also requires the newest
+   refinements. Migration 0340 also requires the newest
    `organization_memberships`, `sessions`, `variable_sets`, `rigs`, `machines`,
    and `connections` receipts to be completed, verifies full-population counts
    for the resource/session/connection classifiers, requires zero unresolved
@@ -523,10 +523,10 @@ For each subsequent activation:
    Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
    SECURITY` and a `FOR SELECT`-only policy, so under this exact
    non-superuser-owner posture the activation's own receipt `INSERT` was denied
-   with SQLSTATE `42501` after every gate had already passed. Migration 0339
+   with SQLSTATE `42501` after every gate had already passed. Migration 0340
    re-opens that single command behind an owner-only marker policy; the runtime
    role keeps `SELECT` and nothing else, and the table has no `UPDATE` or
-   `DELETE` writer at all. `packages/db/test/migration-0339-owner-migrated-tenancy-cutover.test.ts`
+   `DELETE` writer at all. `packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`
    commits a real receipt through this posture, so the cutover is executable end
    to end ([`force-rls-migration-backfills.md`](force-rls-migration-backfills.md)).
 8. start only that same digest's API and workers, and require the startup and

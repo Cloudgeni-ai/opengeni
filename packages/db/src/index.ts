@@ -18874,7 +18874,7 @@ export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
  */
 export const TENANCY_PARITY_LANES: readonly TenancyParityLaneDefinition[] = [
   {
-    // Migration 0339 bounds this lane with a deterministic subject + active
+    // Migration 0340 bounds this lane with a deterministic subject + active
     // same-organization membership repair. Activation then fences new minting
     // and hides any unresolved legacy row from runtime reads.
     id: "connectionsLegacyUser",
@@ -18972,7 +18972,7 @@ export const TENANCY_PARITY_UNVERIFIABLE: readonly TenancyParityUnverifiable[] =
       "subject-created sessions whose creator holds an active organization membership " +
       "AND stated authority over that workspace: a workspace_memberships row, or the " +
       "membership's own personal_workspace_id pointer. Only that attributable subset " +
-      "is drainable; migration 0339 measures both stated-authority forms in the " +
+      "is drainable; migration 0340 measures both stated-authority forms in the " +
       "'sessionsAttributableButUnattributed' lane.",
   },
 ];

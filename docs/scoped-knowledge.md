@@ -190,6 +190,58 @@ Configured/local
 subjects without an eligible active organization membership and legacy private
 rows keep the workspace binding established by migration 0165.
 
+Migration 0339 adds the only supported authority-reclassification lifecycle for
+those retained rows. It never guesses from a collection, creator other than the
+original personal owner, origin workspace, or present-day access. A caller must
+supply a UUID operation id and the exact current four-field authority tuple;
+PostgreSQL locks that operation, rejects stale expected state, and writes one
+immutable before/after receipt in the same transaction that changes the
+Document and every chunk. Moving to or from organization authority requires an
+opaque capability minted from the canonical exact `account:admin` grant; it is
+bound to the command's account and actor but does not require the principal to
+also have a managed `organization_memberships` row, so managed,
+local/configured, and signed delegated account administrators retain the same
+authority contract. A personal target is allowed only for the Document's
+immutable creating subject. The route workspace authorizes the command but
+never changes physical origin: an activated personal Document may be managed
+from another currently accessible same-organization workspace even after origin
+access is lost, while a workspace target must use (and therefore re-authorize)
+the immutable origin-workspace route. Cross-organization routes fail closed.
+Retries with the same logical input return the same receipt, conflicting reuse
+fails, and a failed transaction leaves the old authority and provenance intact.
+Receipt history is a scope-bound opaque-cursor page (default 50, maximum 100),
+never an unbounded array. The collection remains non-authoritative.
+
+The same migration supplies an account-admin-only, bounded Default-collection
+backfill. A stable run id advances a workspace UUID cursor in batches, one
+operation id makes each call replay-safe, and immutable per-workspace receipts
+record whether an existing Default was adopted or a missing one was created.
+This changes grouping only. It does not reclassify a Document or widen
+retrieval, ranking, citation, or file access.
+
+One run writes a receipt for **every** workspace in the account, so those
+receipts - and the reclassification receipts - are workspace-owned evidence that
+cascades with its workspace rather than pinning it. `deleteWorkspaceIfQuiescent`
+relies on cascades and has no quiescence branch for these tables, so an
+`ON DELETE RESTRICT` here would turn one administrator action into an untyped
+Postgres error on `DELETE /v1/workspaces/:workspaceId` for every workspace in
+the account. The row-level immutability trigger still refuses every direct
+`UPDATE`/`DELETE`; only the referential cascade of an owning parent may remove a
+receipt, and the run's aggregate counters are retained as the run-level history.
+
+Both lifecycle routines run `SECURITY DEFINER`, so inside them `current_user` is
+the schema owner - and `FORCE ROW LEVEL SECURITY` binds the owner too. Two rules
+follow, and both fail **silently** when broken. First, the
+`personal_document_authority_capabilities` window must be opened *before* the
+`organization_memberships` read, or that read matches zero rows and the portable
+personal-authority activation is skipped without an error. Second, that read must
+carry **no** locking clause: PostgreSQL applies a relation's `UPDATE` policies to
+any `SELECT ... FOR SHARE`/`FOR KEY SHARE`/`FOR UPDATE`, and every read policy on
+`organization_memberships` is `FOR SELECT` only, so a locking read also returns
+zero rows. The referential pin is taken by the
+`organization_user_resource_authorities` foreign-key check instead, which bypasses
+row security. See [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
+
 Personal Document ownership never becomes ambient agent authority. The exact
 attempt-admission transaction freezes only Documents covered by a live
 `document.read` once/session/always grant for the target workspace and exact

@@ -42,6 +42,20 @@ const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null
  * the value the cookie branch produced.
  */
 const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
+const resolvedAccessGrantAuthorizations = new WeakSet<object>();
+
+/**
+ * Opaque, request-local proof that the canonical access resolver authorized the
+ * exact account administrator named by the stamp. The random id is audit and
+ * replay provenance only; object identity is what prevents a caller from
+ * manufacturing this proof inside the API process.
+ */
+export type AccountAdminAuthorizationStamp = Readonly<{
+  authorizationId: string;
+  accountId: string;
+  actorSubjectId: string;
+  permission: "account:admin";
+}>;
 
 export type AccessDeps = {
   db: Database;
@@ -129,13 +143,46 @@ export function accessGrantAuthorizationFromContext(
     ) &&
     matchingAccountGrants.length === 1 &&
     matchingAccountGrants[0]?.subjectId === context.subjectId;
-  return {
+  const authorization: AccessGrantAuthorization = {
     grant,
     accountGrant: contextIntegrity ? matchingAccountGrants[0]! : null,
     authenticatedSubjectId: context.subjectId,
     contextIntegrity,
     canonicalManagedHumanSession: isCanonicalManagedHumanSession(context, grant),
   };
+  resolvedAccessGrantAuthorizations.add(authorization);
+  return authorization;
+}
+
+/**
+ * Mint the capability passed to an account-admin database lifecycle.
+ *
+ * This deliberately accepts every canonical access mode (managed,
+ * local/configured, and signed delegation). Organization-membership rows are
+ * one possible source of account authority, not the definition of it. A plain
+ * object with matching fields is rejected because only values returned by the
+ * access resolver are present in `resolvedAccessGrantAuthorizations`.
+ */
+export function requireAccountAdminAuthorizationStamp(
+  authorization: AccessGrantAuthorization,
+): AccountAdminAuthorizationStamp {
+  const { grant, accountGrant } = authorization;
+  if (
+    !resolvedAccessGrantAuthorizations.has(authorization) ||
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== grant.subjectId ||
+    accountGrant?.accountId !== grant.accountId ||
+    accountGrant.subjectId !== grant.subjectId ||
+    !accountGrant.permissions.includes("account:admin")
+  ) {
+    throw new HTTPException(403, { message: "missing permission: account:admin" });
+  }
+  return Object.freeze({
+    authorizationId: crypto.randomUUID(),
+    accountId: grant.accountId,
+    actorSubjectId: grant.subjectId,
+    permission: "account:admin" as const,
+  });
 }
 
 export async function requireAccessGrantAuthorization(
