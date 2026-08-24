@@ -713,8 +713,19 @@ fi
 export OPENGENI_DOCKER_NETWORK="${COMPOSE_PROJECT_NAME}_default"
 
 default_vite_api_base_url="http://127.0.0.1:8000"
+# Browser cookies are domain-scoped, so `localhost` and `127.0.0.1` are not
+# interchangeable here. Match the generated API URL to the configured local
+# web/public hostname; otherwise managed signup can create the user while the
+# browser silently drops the cross-site session cookie.
+browser_loopback_host="127.0.0.1"
+browser_base_url="${OPENGENI_WEB_BASE_URL:-${OPENGENI_PUBLIC_BASE_URL:-}}"
+if [[ "$browser_base_url" =~ ^https?://localhost([:/]|$) ]]; then
+  browser_loopback_host="localhost"
+elif [[ "$browser_base_url" =~ ^https?://127\.0\.0\.1([:/]|$) ]]; then
+  browser_loopback_host="127.0.0.1"
+fi
 if [ -z "${VITE_API_BASE_URL:-}" ] || [ "${VITE_API_BASE_URL}" = "$default_vite_api_base_url" ]; then
-  export VITE_API_BASE_URL="http://127.0.0.1:${OPENGENI_API_PORT}"
+  export VITE_API_BASE_URL="http://${browser_loopback_host}:${OPENGENI_API_PORT}"
 else
   export VITE_API_BASE_URL="$(rewrite_loopback_port "$VITE_API_BASE_URL" "$OPENGENI_API_PORT")"
 fi

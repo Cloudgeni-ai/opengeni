@@ -402,8 +402,8 @@ function PluginComponentCard({
           </Label>
           {connections === null ? (
             <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-2xs leading-4 text-fg-muted">
-              Connection data is unavailable. Refresh Capabilities before choosing the exact account
-              for this component.
+              Connection data is unavailable. Refresh Plugins before choosing the exact account for
+              this component.
             </p>
           ) : compatible.length > 0 ? (
             <select
@@ -423,7 +423,7 @@ function PluginComponentCard({
           ) : (
             <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-2xs leading-4 text-fg-muted">
               No active exact-domain Connection exists. Connect that account from its integration
-              row (or its Custom API) on Capabilities first, then retry this preview.
+              row (or its Custom API) on Plugins first, then retry this preview.
             </p>
           )}
         </div>

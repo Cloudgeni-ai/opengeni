@@ -36,6 +36,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         name: body.name,
+        description: body.description ?? null,
         prefix,
         keyHash: await sha256Hex(token),
         permissions,

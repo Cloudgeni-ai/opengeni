@@ -1723,9 +1723,15 @@ describe("OpenGeniClient api keys", () => {
     expect(keys).toEqual([apiKey as never]);
     const created = await client.createApiKey(WORKSPACE_ID, {
       name: "ci",
+      description: "Deploys the web application",
       permissions: ["sessions:read"],
     });
     expect(created.token).toBe("ogk_secret");
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      name: "ci",
+      description: "Deploys the web application",
+      permissions: ["sessions:read"],
+    });
     await client.deleteApiKey(WORKSPACE_ID, "key-1");
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [

@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import {
+  AuthApiError,
   authHeadersForAccessKey,
   configureClientAuth,
   createOpenGeniClient,
   redeemCodexResetCredit,
   resolveApiBaseUrl,
+  signInEmail,
   sendVerificationEmail,
   setStoredAccessKey,
   clearStoredAccessKey,
@@ -31,7 +33,10 @@ describe("web API auth helpers", () => {
       }),
     ).toEqual({ "x-opengeni-access-key": "secret" });
     expect(
-      authHeadersForAccessKey("secret", { mode: "managedSession", session: "cookie" }),
+      authHeadersForAccessKey("secret", {
+        mode: "managedSession",
+        session: "cookie",
+      }),
     ).toEqual({});
   });
 
@@ -93,7 +98,10 @@ describe("web API auth helpers", () => {
 
   test("sends managed verification resend requests through Better Auth", async () => {
     const originalFetch = globalThis.fetch;
-    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    const requests: Array<{
+      input: Parameters<typeof fetch>[0];
+      init?: RequestInit;
+    }> = [];
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       requests.push({ input, init });
       return Response.json({ status: true });
@@ -112,12 +120,44 @@ describe("web API auth helpers", () => {
     expect(String(request!.input)).toBe("/v1/auth/send-verification-email");
     expect(request!.init?.method).toBe("POST");
     expect(request!.init?.credentials).toBe("include");
-    expect(JSON.parse(String(request!.init?.body))).toEqual({ email: "user@example.com" });
+    expect(JSON.parse(String(request!.init?.body))).toEqual({
+      email: "user@example.com",
+    });
+  });
+
+  test("parses Better Auth failures into structured errors without raw JSON prefixes", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json(
+        {
+          message: "[body.email] Invalid email address",
+          code: "VALIDATION_ERROR",
+        },
+        { status: 400 },
+      )) as unknown as typeof fetch;
+
+    try {
+      await signInEmail({ email: "invalid", password: "password" });
+      throw new Error("Expected sign-in to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AuthApiError);
+      expect(error).toMatchObject({
+        status: 400,
+        code: "VALIDATION_ERROR",
+        field: "email",
+        message: "Invalid email address",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("sends the API contract header on managed-session mutations", async () => {
     const originalFetch = globalThis.fetch;
-    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    const requests: Array<{
+      input: Parameters<typeof fetch>[0];
+      init?: RequestInit;
+    }> = [];
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       requests.push({ input, init });
       return Response.json({
@@ -182,12 +222,18 @@ describe("createOpenGeniClient", () => {
   test("routes SDK calls through canonical workspace paths with cookies and access-key headers", async () => {
     const restoreLocalStorage = installTestLocalStorage();
     const originalFetch = globalThis.fetch;
-    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    const requests: Array<{
+      input: Parameters<typeof fetch>[0];
+      init?: RequestInit;
+    }> = [];
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       requests.push({ input, init });
       return Response.json([]);
     }) as unknown as typeof fetch;
-    configureClientAuth({ mode: "deploymentKey", headerName: "x-opengeni-access-key" });
+    configureClientAuth({
+      mode: "deploymentKey",
+      headerName: "x-opengeni-access-key",
+    });
     setStoredAccessKey("secret-key");
 
     try {
@@ -218,7 +264,10 @@ describe("createOpenGeniClient", () => {
       seenKeys.push(new Headers(init?.headers).get("x-opengeni-access-key"));
       return Response.json([]);
     }) as unknown as typeof fetch;
-    configureClientAuth({ mode: "deploymentKey", headerName: "x-opengeni-access-key" });
+    configureClientAuth({
+      mode: "deploymentKey",
+      headerName: "x-opengeni-access-key",
+    });
 
     try {
       const client = createOpenGeniClient();
@@ -239,7 +288,10 @@ describe("createOpenGeniClient", () => {
   test("preserves credential-free signed object-storage uploads", async () => {
     const restoreLocalStorage = installTestLocalStorage();
     const originalFetch = globalThis.fetch;
-    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    const requests: Array<{
+      input: Parameters<typeof fetch>[0];
+      init?: RequestInit;
+    }> = [];
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       requests.push({ input, init });
       const url = String(input);

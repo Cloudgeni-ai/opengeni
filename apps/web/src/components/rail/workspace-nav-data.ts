@@ -7,7 +7,7 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/variable-sets"
   | "/workspaces/$workspaceId/rigs"
   | "/workspaces/$workspaceId/machines"
-  | "/workspaces/$workspaceId/capabilities"
+  | "/workspaces/$workspaceId/plugins"
   | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/memory"
@@ -46,10 +46,22 @@ export type WorkspaceConfigGroup = {
 /** Product destinations promoted to the primary rail beside New session. */
 export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
   {
-    to: "/workspaces/$workspaceId/capabilities",
+    to: "/workspaces/$workspaceId/plugins",
     icon: "plug",
-    label: "Capabilities",
-    description: "Packs, MCP servers, and tools",
+    label: "Plugins",
+    description: "Integrations, MCP servers, skills, and packs",
+  },
+  {
+    to: "/workspaces/$workspaceId/documents",
+    icon: "file-search",
+    label: "Documents",
+    description: "Indexed knowledge for agents",
+  },
+  {
+    to: "/workspaces/$workspaceId/state",
+    icon: "brain-circuit",
+    label: "Company Brain",
+    description: "Knowledge, rules, guides, review, and learning",
   },
   {
     to: "/workspaces/$workspaceId/schedules",
@@ -114,22 +126,10 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
     label: "Knowledge",
     items: [
       {
-        to: "/workspaces/$workspaceId/documents",
-        icon: "file-search",
-        label: "Documents",
-        description: "Indexed knowledge for agents",
-      },
-      {
         to: "/workspaces/$workspaceId/memory",
         icon: "brain-circuit",
         label: "Memory",
         description: "Durable facts agents carry across sessions",
-      },
-      {
-        to: "/workspaces/$workspaceId/state",
-        icon: "map",
-        label: "Company Brain",
-        description: "Knowledge, rules, guides, review, and learning",
       },
     ],
   },
@@ -140,8 +140,8 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
       {
         to: "/workspaces/$workspaceId/settings",
         icon: "settings",
-        label: "General, members & keys",
-        description: "Name, API keys, members, and Codex subscriptions",
+        label: "Workspace settings",
+        description: "Members, permissions, models, keys, and defaults",
       },
     ],
   },

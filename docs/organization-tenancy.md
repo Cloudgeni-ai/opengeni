@@ -445,8 +445,18 @@ The managed-human API surface is:
   uses a deterministic `(created_at,id)` keyset represented by the last
   returned invitation UUID; ordinary members and cross-organization callers
   cannot enumerate invitation metadata;
+- `POST /v1/organizations` creates a separate organization, its first shared
+  workspace, the owning human's organization membership, and that human's
+  Personal workspace through one idempotent lifecycle transaction;
+- `POST /v1/organizations/:organizationId/workspaces` idempotently creates a
+  shared workspace without implicitly granting the organization administrator
+  operational access;
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
+- `PATCH /v1/organizations/:organizationId/workspaces/:workspaceId` plus its
+  `/settings` route, and `POST|PATCH|DELETE` below
+  `/v1/organizations/:organizationId/workspaces/:workspaceId/members` for the
+  shared-workspace control plane; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
 These routes require a direct managed-human cookie session; API keys and
@@ -517,15 +527,43 @@ navigate, announce success, or revalidate authority. A conflict refreshes
 authoritative state and requires a new human action rather than replaying the
 mutation.
 
-The roster intentionally uses a stable masked subject identifier because the
-lifecycle API does not expose a safe profile name or email. It never links or
-derives identity from another member's `personalWorkspaceId`, and organization
+The roster projects the safe name and email fields needed by an administrator;
+standalone reads Better Auth while embedded deployments inject the
+`userProfileLookup` identity port. A stable masked subject identifier is only a
+last-resort compatibility fallback. It never links or derives identity from
+another member's `personalWorkspaceId`, and organization
 administration does not grant access to that member's Personal workspace,
 private sessions, credentials, Connections, or personal resources. Workspace
-access remains a separately labelled administration surface. The current web
-form still needs its 0313 product update and approval before it can collect a
-pre-registration name and initial-workspace access. Provider email delivery
-remains a non-goal.
+access is administered from the organization console: invite the person to the
+organization first, then assign an active organization member to each shared
+workspace. Workspace settings links back to that control plane instead of
+creating an independent invitation path. Provider email delivery remains a
+non-goal.
+
+Migration `0331_managed_organization_creation.sql` adds the managed-cookie-only
+self-service organization factory. One idempotent lifecycle transaction creates
+the organization, its initial shared workspace, the owner membership and grant,
+and the owner's Personal workspace pointer. Exact operation ids serialize
+before replay lookup, and the SECURITY DEFINER function dynamically pins its
+runtime search path to `pg_catalog`, the selected data schema, then `pg_temp`.
+
+Migration `0332_organization_shared_workspace_control_plane.sql` makes the
+organization control plane authoritative rather than depending on an
+administrator also holding an operational workspace grant. The managed-cookie-
+only organization routes can create or update shared-workspace metadata/settings
+and add, update, or remove an active organization member's direct workspace access. Each
+mutation runs under an exact active owner/administrator organization membership
+and an organization-scoped transaction advisory fence. Missing,
+cross-organization, and Personal workspace ids are rejected through one
+non-enumerating result before mutation. The capability never creates an
+operational workspace grant for the organization administrator. The exception
+to the durable last-workspace-admin removal guard requires a transaction-local
+capability opened by the direct organization route; merely holding an
+organization role through an ordinary or delegated workspace route does not
+activate it. Organization
+Overview presents Member and Workspace administrator as the primary access
+presets while preserving existing custom permission sets until an administrator
+deliberately replaces one.
 
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, terminally cancels
@@ -866,8 +904,8 @@ create request defaults to workspace visibility; an explicit Only-me choice is
 accepted only for the exact canonical managed human in an activated
 organization and is inserted with owner provenance, visibility, and the first
 event/turn in the existing create transaction. The web checks the capability
-before enabling Only me, explains `not_activated` instead of silently hiding
-the choice, and never sends a restored private draft while that preflight is
+before presenting Only me, omits the locked choice when Workspace is the only
+valid value, and never sends a restored private draft while that preflight is
 pending or denied.
 
 Migration 0323 separates operator readiness from product enablement for shared
@@ -1024,15 +1062,15 @@ activity-write fence described in the Legacy behavior section, and migration
 reads. The later bounded API/core/SDK activation described above does not widen
 the personal-workspace exception or add another durable membership row.
 
-### C. Membership lifecycle (0263 current)
+### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 current)
 
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
 described above are active. The bounded managed web administration surface
-described above is also active. Pre-registration invitation storage, verified
-email binding, and direct invited-user convergence are active through 0314.
-Provider email delivery and automatic scheduling of the operator command remain
-deferred.
+described above is also active. Verified-email invitation binding,
+self-service managed organization creation, and organization-scoped shared
+workspace administration are active. Provider email delivery and automatic
+scheduling of the operator command remain deferred.
 
 ### D. Backfill
 

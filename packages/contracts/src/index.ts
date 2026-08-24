@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 import {
   boundSessionEventPayload,
@@ -28,6 +29,7 @@ export * from "./tool-catalog";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
+export * from "./permissions";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -715,92 +717,6 @@ export const SessionSpawnDenial = z.object({
   createdAt: z.string(),
 });
 export type SessionSpawnDenial = z.infer<typeof SessionSpawnDenial>;
-
-export const Permission = z.enum([
-  "account:read",
-  "account:admin",
-  "members:manage",
-  "workspace:create",
-  "billing:read",
-  "billing:manage",
-  "workspace:read",
-  "workspace:admin",
-  "sessions:create",
-  "sessions:read",
-  "sessions:control",
-  // sandbox workspace (sandbox contract §C.3 / crosscut PART 1.2). stream:view is a
-  // REAL, distinct permission — strictly BROADER than sessions:read — because the
-  // pixel plane (Channel B) exposes raw pixels: a viewer can see content the
-  // structured Channel-A event log never captured. sessions:read is NOT
-  // permission to watch raw pixels.
-  "stream:view",
-  // SEPARATE from stream:view: raw input to the desktop (bypasses approvalQueue /
-  // interrupt). NEVER granted by default in v1 (the input plane is OFF —
-  // streamControlEnabled=false); the permission exists so later hardening is a
-  // flag flip, not a redesign.
-  "stream:control",
-  // Accept the pixel-plane secret-leak acknowledgment (consent gate before the
-  // un-redacted desktop URL is handed out).
-  "stream:acknowledge",
-  "files:upload",
-  "files:read",
-  // Channel-A structured write surface (FS writes / apply-patch); distinct from
-  // files:read so a read-only viewer can't mutate the box filesystem.
-  "files:write",
-  // Attach to an interactive PTY (terminal-as-pty, Channel A); distinct from
-  // sessions:read which only reads the command-output firehose.
-  "terminal:attach",
-  "documents:manage",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "github:manage",
-  "github:use",
-  "api_keys:manage",
-  "connections:read",
-  "connections:write",
-  /** @deprecated alias of variable-sets:manage */
-  "environments:manage",
-  /** @deprecated alias of variable-sets:use */
-  "environments:use",
-  "variable-sets:list",
-  "variable-sets:read",
-  "variable-sets:write",
-  "variable-sets:manage",
-  "variable-sets:attach",
-  "variable-sets:use",
-  "secrets:list",
-  "secrets:read",
-  "secrets:write",
-  // Attach or rotate per-session third-party MCP server credentials. Deliberately
-  // not part of the worker's default first-party MCP permission set: a sandboxed
-  // agent must not be able to hand itself new bearer credentials.
-  "mcp_servers:attach",
-  // Programmatic sandbox -> tool access through the first-party MCP gate. This is
-  // intentionally narrow and is never part of first-party MCP defaults; callers
-  // must receive it through an explicit delegated `ogd_` mint carrying sessionId.
-  "codemode:call",
-  "goals:manage",
-  // Bring-your-own-compute (M5). enrollments:read lists a workspace's machines;
-  // enrollments:manage approves a device-flow enrollment (the LOUD whole-machine
-  // consent) + revokes a machine. Distinct from sessions/stream perms because an
-  // enrollment grants WHOLE-MACHINE access to a user's own hardware — a high-trust,
-  // admin-shaped action. workspace:admin is the super-wildcard over both.
-  "enrollments:read",
-  "enrollments:manage",
-  // Rigs (workspace-scoped, versioned sandbox machine definitions). rigs:use is
-  // read + propose-change (the agent-native, additive path a sandboxed session
-  // is trusted with); rigs:manage is create/edit/activate/promote/delete (the
-  // admin-shaped path that mints or rolls versions). workspace:admin is the
-  // super-wildcard over both.
-  "rigs:use",
-  "rigs:manage",
-  // Workspace-published HTML artifacts. Read permits listing/source retrieval;
-  // publish permits create, version publication, and rollback.
-  "artifacts:read",
-  "artifacts:publish",
-]);
-export type Permission = z.infer<typeof Permission>;
 
 /**
  * Capability-first permissions signed into a session's first-party OpenGeni
@@ -1962,6 +1878,28 @@ export const WorkspaceSessionDefaults = z
   .strict();
 export type WorkspaceSessionDefaults = z.infer<typeof WorkspaceSessionDefaults>;
 
+/**
+ * Exact capability selection inherited by new top-level sessions.
+ *
+ * The product UI presents understandable capability groups, but persistence
+ * stays source-of-truth exact: MCP server ids and first-party tool names. This
+ * keeps the runtime independent from presentation labels and lets a session
+ * narrow the resulting policy without changing the workspace default.
+ */
+export const WorkspaceSessionToolDefaults = z
+  .object({
+    mcpServerIds: z
+      .array(z.string().trim().min(1).max(128))
+      .max(128)
+      .transform((ids) => [...new Set(ids)]),
+    firstPartyMcpTools: z
+      .array(FirstPartyMcpToolName)
+      .max(512)
+      .transform((tools) => [...new Set(tools)]),
+  })
+  .strict();
+export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
+
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
   .object({
@@ -2127,6 +2065,7 @@ export const WorkspaceSettingsSchema = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
     /** Preferred workspace voice-input toggle. */
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /**
@@ -2167,6 +2106,14 @@ export function resolveWorkspaceSessionDefaults(
 ): WorkspaceSessionDefaults | null {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? (parsed.data.sessionDefaults ?? null) : null;
+}
+
+/** Exact capability defaults for new sessions, or null for deployment defaults. */
+export function resolveWorkspaceSessionToolDefaults(
+  settings: unknown,
+): WorkspaceSessionToolDefaults | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.sessionToolDefaults ?? null) : null;
 }
 
 /**
@@ -2276,6 +2223,7 @@ export const UpdateWorkspaceSettingsRequest = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -2966,6 +2914,7 @@ export const ApiKey = z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid().nullable(),
   name: z.string(),
+  description: z.string().nullable(),
   prefix: z.string(),
   permissions: z.array(Permission),
   expiresAt: z.string().nullable(),
@@ -2978,6 +2927,7 @@ export type ApiKey = z.infer<typeof ApiKey>;
 
 export const CreateApiKeyRequest = z.object({
   name: z.string().min(1),
+  description: z.string().trim().min(1).max(500).optional(),
   workspaceId: z.string().uuid().optional(),
   permissions: z.array(Permission).min(1),
   expiresAt: z.string().datetime({ offset: true }).optional(),
@@ -14219,6 +14169,7 @@ export const ClientAuthConfig = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("managedSession"),
     session: z.literal("cookie"),
+    emailVerificationRequired: z.boolean().default(true),
   }),
 ]);
 export type ClientAuthConfig = z.infer<typeof ClientAuthConfig>;

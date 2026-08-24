@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AddOrganizationWorkspaceMemberRequest,
+  CreateOrganizationRequest,
+  CreateOrganizationResponse,
   ListManagedOrganizationMembershipsResponse,
   ManagedOrganizationMembershipProjection,
   OrganizationMembershipProjection,
@@ -46,6 +49,46 @@ describe("organization tenancy foundation contracts", () => {
         membershipId: ids.membership,
       }).success,
     ).toBe(false);
+  });
+
+  test("assigns an existing organization membership to a shared workspace", () => {
+    expect(
+      AddOrganizationWorkspaceMemberRequest.parse({
+        organizationMembershipId: ids.membership,
+        role: "admin",
+        permissions: ["workspace:admin"],
+      }),
+    ).toEqual({
+      organizationMembershipId: ids.membership,
+      role: "admin",
+      permissions: ["workspace:admin"],
+    });
+    expect(
+      AddOrganizationWorkspaceMemberRequest.safeParse({
+        organizationMembershipId: "user@example.test",
+        permissions: ["workspace:read"],
+      }).success,
+    ).toBe(false);
+  });
+
+  test("bounds self-service organization creation and returns its initial workspace", () => {
+    const operationId = "00000000-0000-4000-8000-000000000008";
+    expect(CreateOrganizationRequest.parse({ name: "  Product team  ", operationId })).toEqual({
+      name: "Product team",
+      operationId,
+    });
+    expect(CreateOrganizationRequest.safeParse({ name: " ", operationId }).success).toBe(false);
+    expect(
+      CreateOrganizationResponse.parse({
+        organization: {
+          id: ids.organization,
+          name: "Product team",
+          createdAt: "2026-08-24T08:00:00.000Z",
+          updatedAt: "2026-08-24T08:00:00.000Z",
+        },
+        workspaceId: ids.workspace,
+      }),
+    ).toMatchObject({ workspaceId: ids.workspace });
   });
 
   test("requires explicit user scope and durable shared-output acknowledgement", () => {

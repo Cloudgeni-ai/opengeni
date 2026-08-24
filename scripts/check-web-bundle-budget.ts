@@ -164,9 +164,17 @@ const budgets = {
   // Advance only those aggregates: raw to the next whole KiB above one KiB of
   // headroom and gzip above the observed 1.5-KiB Linux/x64 skew. Initial,
   // per-file, file-count, lazy-chunk, and CSS caps remain fixed.
-  directSessionRaw: 2098 * kib,
-  directSessionGzip: 585 * kib,
-  directSessionFiles: 19,
+  // Capability bundle defaults on that merged graph measure 2,161,915 raw /
+  // 602,728 gzip bytes across 24 files. Advance only these direct-session
+  // envelopes; initial, per-file, lazy-chunk, and CSS caps remain unchanged.
+  // Managed organization bootstrap adds the authenticated principal routing
+  // needed to accept an invitation or create an organization before a user has
+  // any workspace. The sign-in and onboarding surfaces remain lazy; the merged
+  // macOS/arm64 graph measures 2,165,667 raw / 604,766 gzip bytes. Advance only
+  // the raw aggregate to the next whole KiB above one KiB of headroom.
+  directSessionRaw: 2116 * kib,
+  directSessionGzip: 591 * kib,
+  directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 31 * kib,

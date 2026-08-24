@@ -258,13 +258,18 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
               await expectOwnedTouchTargets(page, surface);
             }
             if (matrixCase.label === "desktop") {
-              // Workspace destinations live in the upward Settings hub menu.
-              const workspaceNav = page.getByRole("navigation", { name: "Workspace" });
-              const menu = workspaceNav.locator("details");
-              if (!(await menu.evaluate((node) => (node as HTMLDetailsElement).open))) {
-                await menu.locator("summary").click();
+              if (surface === "documents") {
+                // Documents remains in the session rail, whose single
+                // Workspace entry opens the persistent management shell.
+                const workspaceNav = page.getByRole("navigation", { name: "Workspace" });
+                await workspaceNav.getByRole("link", { name: "Workspace", exact: true }).waitFor();
+              } else {
+                // Managed workspace pages share a persistent destination rail.
+                await page
+                  .getByRole("navigation", { name: "Knowledge" })
+                  .getByRole("link", { name: "Memory", exact: true })
+                  .waitFor();
               }
-              await workspaceNav.getByRole("link", { name: "Memory", exact: true }).waitFor();
             }
             if (surface === "variable-sets") {
               await ensureVariableSetExpanded(page);

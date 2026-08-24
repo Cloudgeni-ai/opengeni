@@ -391,6 +391,7 @@ describe("embedded worker lifecycle contract", () => {
           "organization_private_session_setting_events",
           "organization_private_session_settings",
           "organization_profile_events",
+          "organization_shared_workspace_administration_capabilities",
           "organization_user_resource_authorities",
           "organization_user_resource_grants",
           "organization_user_retention_deletion_events",

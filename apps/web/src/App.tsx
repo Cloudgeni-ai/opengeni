@@ -11,8 +11,9 @@
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
-//   /workspaces/:id/packs                    → redirect to capabilities (Packs subsection)
-//   /workspaces/:id/capabilities             → capability catalog + registry (incl. Packs subsection)
+//   /workspaces/:id/packs                    → redirect to plugins (Packs subsection)
+//   /workspaces/:id/plugins                  → plugin catalog + registry (incl. Packs subsection)
+//   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /workspaces/:id/schedules                → scheduled tasks + run history
 //   /workspaces/:id/documents                → document bases + search
 //   /workspaces/:id/memory                   → durable workspace memory
@@ -39,6 +40,14 @@ import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/comp
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
 
 type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
+type WorkspaceSettingsSection =
+  | "general"
+  | "members"
+  | "tools"
+  | "plugins"
+  | "models"
+  | "api-keys"
+  | "danger";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
 
@@ -248,13 +257,21 @@ const workspacePacksRoute = createRoute({
 });
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "capabilities",
+  path: "plugins",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
   validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
   }),
   component: Capabilities,
+});
+const workspaceLegacyCapabilitiesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "capabilities",
+  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
+    ...(search.section === "packs" ? { section: "packs" as const } : {}),
+  }),
+  component: CapabilitiesLegacyRedirect,
 });
 const SCHEDULES_SEARCH_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -303,6 +320,21 @@ const workspaceMemoryRoute = createRoute({
 const workspaceSettingsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "settings",
+  validateSearch: (search: Record<string, unknown>): { section?: WorkspaceSettingsSection } => {
+    const section =
+      search.section === "general" ||
+      search.section === "members" ||
+      search.section === "tools" ||
+      search.section === "plugins" ||
+      search.section === "models" ||
+      search.section === "api-keys" ||
+      search.section === "danger"
+        ? search.section
+        : search.section === "capabilities" || search.section === "permissions"
+          ? "tools"
+          : undefined;
+    return section ? { section } : {};
+  },
   component: WorkspaceSettings,
 });
 const workspaceStateRoute = createRoute({
@@ -387,6 +419,7 @@ const routeTree = rootRoute.addChildren([
     workspacePriorityRoute,
     workspacePacksRoute,
     workspaceCapabilitiesRoute,
+    workspaceLegacyCapabilitiesRoute,
     workspaceSchedulesRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
@@ -510,9 +543,22 @@ function PacksRedirect() {
   const { workspaceId } = workspacePacksRoute.useParams();
   return (
     <Navigate
-      to="/workspaces/$workspaceId/capabilities"
+      to="/workspaces/$workspaceId/plugins"
       params={{ workspaceId }}
       search={{ section: "packs" }}
+      replace
+    />
+  );
+}
+
+function CapabilitiesLegacyRedirect() {
+  const { workspaceId } = workspaceLegacyCapabilitiesRoute.useParams();
+  const { section } = workspaceLegacyCapabilitiesRoute.useSearch();
+  return (
+    <Navigate
+      to="/workspaces/$workspaceId/plugins"
+      params={{ workspaceId }}
+      search={section ? { section } : {}}
       replace
     />
   );
@@ -566,7 +612,8 @@ function Memory() {
 
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
-  return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} />;
+  const { section } = workspaceSettingsRoute.useSearch();
+  return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} section={section ?? "general"} />;
 }
 
 function WorkspaceState() {

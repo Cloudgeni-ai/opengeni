@@ -1,4 +1,5 @@
 import {
+  CreateOrganizationResponse,
   ListOrganizationInvitationsResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationMembersResponse,
@@ -14,6 +15,7 @@ import {
   OrganizationRetentionDeletionResult,
   OrganizationRetentionPolicy,
   OrganizationSummary,
+  type CreateOrganizationResponse as CreateOrganizationResponseType,
   type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
@@ -40,6 +42,30 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 import { lockSessionEventWriteRows } from "./session-control";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
 import * as schema from "./schema";
+
+export async function createManagedOrganization(
+  db: Database,
+  input: {
+    subjectId: string;
+    subjectLabel: string;
+    name: string;
+    operationId: string;
+  },
+): Promise<CreateOrganizationResponseType> {
+  return await db.transaction(async (tx) => {
+    await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select create_managed_organization(
+        ${input.subjectId},
+        ${input.subjectLabel},
+        ${input.name},
+        ${input.operationId}::uuid
+      ) as result`,
+    );
+    return CreateOrganizationResponse.parse(row?.result);
+  });
+}
 
 /**
  * Bounded replay of one exact organization-lifecycle transaction after a
@@ -290,6 +316,7 @@ export async function removeWorkspaceMember(
     workspaceId: string;
     actorSubjectId: string;
     targetSubjectId: string;
+    requireOrganizationSharedWorkspaceAdministration?: boolean;
   },
 ): Promise<boolean> {
   const command = {
@@ -302,6 +329,26 @@ export async function removeWorkspaceMember(
   };
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
+    let organizationAdministrationCapabilityId: string | null = null;
+    if (input.requireOrganizationSharedWorkspaceAdministration) {
+      organizationAdministrationCapabilityId = await withRlsContext(
+        txDb,
+        { accountId: input.accountId, workspaceId: null },
+        async (scopedDb) => {
+          await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+          const [row] = await rawRows<{ capabilityId: string }>(
+            scopedDb,
+            sql`select open_organization_shared_workspace_administration_capability(
+              ${input.accountId}::uuid,
+              ${input.workspaceId}::uuid,
+              ${input.actorSubjectId}
+            ) as "capabilityId"`,
+          );
+          if (!row) throw new Error("Organization administration capability was not opened");
+          return row.capabilityId;
+        },
+      );
+    }
     // The personal-state fence first, exactly as the pre-0278 delete path took
     // it: session listing takes the shared counterpart and pin mutation the
     // same exclusive one. The removal command re-acquires it (reentrant within
@@ -326,7 +373,7 @@ export async function removeWorkspaceMember(
       },
     );
     await settleOrganizationMembershipProtocols(txDb, settlements);
-    return await withRlsContext(
+    const removed = await withRlsContext(
       txDb,
       { accountId: input.accountId, workspaceId: null },
       async (scopedDb) => {
@@ -341,6 +388,14 @@ export async function removeWorkspaceMember(
         return (row.result as { removed?: unknown } | null)?.removed === true;
       },
     );
+    if (organizationAdministrationCapabilityId) {
+      await txDb.execute(
+        sql`select close_organization_shared_workspace_administration_capability(
+          ${organizationAdministrationCapabilityId}::uuid
+        )`,
+      );
+    }
+    return removed;
   });
 }
 

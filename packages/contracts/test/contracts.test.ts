@@ -20,6 +20,7 @@ import {
   CreateSocialPostRequest,
   CreateDocumentBaseRequest,
   CreateCheckoutRequest,
+  CreateApiKeyRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   DocumentSearchRequest,
@@ -99,6 +100,19 @@ import {
   SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS,
 } from "../src";
+
+describe("API key descriptions", () => {
+  test("accepts a bounded description and rejects blank or oversized values", () => {
+    const base = { name: "CI", permissions: ["sessions:read"] } as const;
+    expect(
+      CreateApiKeyRequest.parse({ ...base, description: "  Deploys the web app  " }).description,
+    ).toBe("Deploys the web app");
+    expect(CreateApiKeyRequest.safeParse({ ...base, description: "   " }).success).toBe(false);
+    expect(CreateApiKeyRequest.safeParse({ ...base, description: "x".repeat(501) }).success).toBe(
+      false,
+    );
+  });
+});
 
 describe("contracts", () => {
   test("validates Stripe billing portal sessions", () => {
@@ -1311,6 +1325,9 @@ describe("contracts", () => {
     expect(payload.deploymentRevision).toBe("test-sha");
     expect(payload.fileUploads.enabled).toBe(true);
     expect(payload.auth.mode).toBe("managedSession");
+    expect(payload.auth.mode === "managedSession" && payload.auth.emailVerificationRequired).toBe(
+      true,
+    );
     expect(payload.mcpServers[0]?.id).toBe("opengeni");
     expect(payload.analytics).toEqual({ consentRequired: true, providers: {} });
     // models defaults to [] for back-compat (callers reading only allowedModels

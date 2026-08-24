@@ -65,6 +65,56 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("uses organization-scoped shared-workspace control-plane routes", async () => {
+    const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const membershipId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const subjectId = "user:member@example.test";
+    const { client, requests } = makeClient(() => jsonResponse({}));
+
+    await client.createOrganizationWorkspace(organizationId, {
+      name: "Product systems",
+      slug: "product-systems",
+      operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+    await client.updateOrganizationWorkspace(organizationId, WORKSPACE_ID, {
+      name: "Product systems",
+    });
+    await client.updateOrganizationWorkspaceSettings(organizationId, WORKSPACE_ID, {
+      memoryEnabled: true,
+    });
+    await client.addOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, {
+      organizationMembershipId: membershipId,
+      role: "member",
+      permissions: ["workspace:read"],
+    });
+    await client.updateOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, subjectId, {
+      role: "admin",
+      permissions: ["workspace:admin"],
+    });
+    await client.removeOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, subjectId);
+
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/organizations/${organizationId}/workspaces`,
+        `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}`,
+        `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/settings`,
+        `POST /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members`,
+        `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${encodeURIComponent(subjectId)}`,
+        `DELETE /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${encodeURIComponent(subjectId)}`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      name: "Product systems",
+      slug: "product-systems",
+      operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+    expect(JSON.parse(requests[3]!.body!)).toEqual({
+      organizationMembershipId: membershipId,
+      role: "member",
+      permissions: ["workspace:read"],
+    });
+  });
+
   test("manages bounded session/always personal grants without exposing once", async () => {
     const authorityId = "66666666-6666-4666-8666-666666666666";
     const grantId = "77777777-7777-4777-8777-777777777777";

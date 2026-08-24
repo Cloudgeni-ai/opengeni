@@ -163,6 +163,7 @@ describe("release schema contract", () => {
       "0327_slack_first_task_hint.sql",
       "0328_session_background_commands.sql",
       "0329_slack_orchestration_delivery_events.sql",
+      "0330_api_key_descriptions.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

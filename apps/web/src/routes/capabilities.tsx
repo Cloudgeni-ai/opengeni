@@ -1,4 +1,4 @@
-// Capabilities: the workspace integrations marketplace. A single scrollable
+// Plugins: the workspace integrations marketplace. A single scrollable
 // page with exactly three sections: Integrations, Connectors, and Bundles.
 // Integrations (Slack, GitHub, Google
 // Drive, Jira and Confluence, Outlook Mail/Calendar/Contacts, OneDrive) are
@@ -1643,15 +1643,15 @@ export function CapabilitiesRoute({
       ref={capabilityFocusFallbackRef}
       data-workspace-scroll-owner="self-managed"
       role="region"
-      aria-label="Capabilities"
+      aria-label="Plugins"
       tabIndex={-1}
       className="min-h-0 flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset"
     >
       <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeader
           icon={<PlugIcon className="size-4" />}
-          title="Capabilities"
-          description="Connect integrations and enable the tools, packs, and skills your agents can use."
+          title="Plugins"
+          description="Connect apps, MCP servers, skills, and packs for agents in this workspace."
           actions={
             <>
               <Button
@@ -1679,7 +1679,7 @@ export function CapabilitiesRoute({
               Built by OpenGeni
             </p>
             <h2 id="integrations-heading" className="mt-1 text-base font-semibold text-fg">
-              Integrations
+              Apps
             </h2>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
               These do more than call tools. They receive events, post as OpenGeni, and hold their
@@ -1738,7 +1738,7 @@ export function CapabilitiesRoute({
               Model Context Protocol
             </p>
             <h2 id="connectors-heading" className="mt-1 text-base font-semibold text-fg">
-              Connectors
+              MCP servers &amp; APIs
             </h2>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-fg-muted">
               Tools published by the service itself. Connect one and its tools become available to

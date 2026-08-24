@@ -63,6 +63,7 @@ export function PreferenceToggleRow(props: {
   disabled?: boolean;
   saving?: boolean;
   control?: ReactNode;
+  wrapDescription?: boolean;
   onToggle: () => void;
 }) {
   return (
@@ -70,7 +71,13 @@ export function PreferenceToggleRow(props: {
       {props.icon ? <span className="shrink-0">{props.icon}</span> : null}
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">{props.label}</div>
-        <p className="truncate text-2xs text-fg-subtle" title={props.description}>
+        <p
+          className={cn(
+            "text-2xs text-fg-subtle",
+            props.wrapDescription ? "leading-4" : "truncate",
+          )}
+          title={props.description}
+        >
           {props.description}
         </p>
       </div>

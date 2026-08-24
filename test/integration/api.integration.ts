@@ -1138,16 +1138,29 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json", cookie: cookie! },
       body: JSON.stringify({
         name: "Managed test key",
+        description: "Used by the managed authentication integration test",
         permissions: ["workspace:read", "sessions:create"],
       }),
     });
     expect(createdKey.status).toBe(201);
     const keyBody = (await createdKey.json()) as {
       token: string;
-      apiKey: { workspaceId: string };
+      apiKey: { workspaceId: string; description: string | null };
     };
     expect(keyBody.token).toStartWith("ogk_");
     expect(keyBody.apiKey.workspaceId).toBe(workspaceId);
+    expect(keyBody.apiKey.description).toBe("Used by the managed authentication integration test");
+    const listedKeys = await app.request(workspacePath(workspaceId, "/api-keys"), {
+      headers: { cookie: cookie! },
+    });
+    expect(listedKeys.status).toBe(200);
+    expect(
+      (
+        (await listedKeys.json()) as {
+          apiKeys: Array<{ description: string | null }>;
+        }
+      ).apiKeys[0]?.description,
+    ).toBe("Used by the managed authentication integration test");
     const keyWorkspaceList = await app.request("/v1/workspaces", {
       headers: { authorization: `Bearer ${keyBody.token}` },
     });
@@ -1166,7 +1179,11 @@ describe("API component integration", () => {
       }),
     });
     expect(billingKey.status).toBe(201);
-    const billingKeyBody = (await billingKey.json()) as { token: string };
+    const billingKeyBody = (await billingKey.json()) as {
+      token: string;
+      apiKey: { description: string | null };
+    };
+    expect(billingKeyBody.apiKey.description).toBeNull();
     const billing = await app.request(`/v1/billing?accountId=${context.defaultAccountId}`, {
       headers: { authorization: `Bearer ${billingKeyBody.token}` },
     });

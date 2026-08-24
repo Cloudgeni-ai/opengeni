@@ -16,6 +16,7 @@ import {
   ModelContextContributionSummaries,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OrganizationMember,
+  WorkspaceMember as WorkspaceMemberContract,
   SessionGoalSnapshot,
   ScheduledTaskRunAcceptedExecution,
   SessionGoalRootConstraintsWrite,
@@ -526,7 +527,9 @@ export {
   type SessionRlsActorContext,
   type RlsStrategy,
   type SandboxProviderReadLockIdentity,
+  type ManagedUserProfile,
   type UserLookup,
+  type UserProfileLookup,
 } from "./database";
 export { withSessionRlsActorContext } from "./database";
 import {
@@ -2138,6 +2141,51 @@ export async function createWorkspace(
   });
 }
 
+/**
+ * Create one shared workspace through the direct managed-human organization
+ * control plane. Organization authority is rechecked inside the lifecycle
+ * function, the operation id is replay-safe, and no operational
+ * workspace_memberships row is created for the actor.
+ */
+export async function createOrganizationSharedWorkspace(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    name: string;
+    slug?: string | null;
+    agentInstructions?: string | null;
+    operationId: string;
+  },
+): Promise<Workspace> {
+  return await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Database;
+    return await withRlsContext(
+      txDb,
+      { accountId: input.organizationId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+        const [result] = await rawRows<{ result: { workspaceId?: unknown } }>(
+          scopedDb,
+          sql`select create_organization_shared_workspace(
+            ${input.organizationId}::uuid,
+            ${input.actorSubjectId},
+            ${input.name},
+            ${input.slug ?? null},
+            ${input.agentInstructions ?? null},
+            ${input.operationId}::uuid
+          ) as result`,
+        );
+        const workspaceId = result?.result?.workspaceId;
+        if (typeof workspaceId !== "string") {
+          throw new Error("Organization shared-workspace creation returned no workspace id");
+        }
+        return await requireWorkspace(scopedDb, workspaceId);
+      },
+    );
+  });
+}
+
 export async function grantWorkspaceAccess(
   db: Database,
   input: {
@@ -2168,6 +2216,115 @@ export async function grantWorkspaceAccess(
         updatedAt: new Date(),
       },
     });
+}
+
+async function withOrganizationSharedWorkspaceAdministration<T>(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+  },
+  operation: (scopedDb: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      await scopedDb.execute(sql`select assert_organization_shared_workspace_administrator(
+        ${input.organizationId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.actorSubjectId}
+      )`);
+      return await operation(scopedDb);
+    },
+  );
+}
+
+/**
+ * Organization control-plane metadata update for one shared workspace. This
+ * capability never creates a workspace membership or an operational grant for
+ * the actor; the database excludes every Personal workspace before mutation.
+ */
+export async function updateOrganizationSharedWorkspace(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    name?: string;
+    slug?: string | null;
+    agentInstructions?: string | null;
+  },
+): Promise<Workspace> {
+  return await withOrganizationSharedWorkspaceAdministration(
+    db,
+    input,
+    async (scopedDb) =>
+      await updateWorkspace(scopedDb, input.workspaceId, {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.slug !== undefined ? { slug: input.slug } : {}),
+        ...(input.agentInstructions !== undefined
+          ? { agentInstructions: input.agentInstructions }
+          : {}),
+      }),
+  );
+}
+
+/** Same authority as metadata administration, preserving the canonical
+ * workspace-settings merge and inference-control lock path. */
+export async function updateOrganizationSharedWorkspaceSettings(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    patch: Record<string, unknown>;
+  },
+): Promise<Workspace> {
+  return await withOrganizationSharedWorkspaceAdministration(
+    db,
+    input,
+    async (scopedDb) => await updateWorkspaceSettings(scopedDb, input.workspaceId, input.patch),
+  );
+}
+
+/** Assign or update one active organization member in one shared workspace. */
+export async function upsertOrganizationSharedWorkspaceMember(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetOrganizationMembershipId: string;
+    subjectLabel?: string | null;
+    role?: string;
+    permissions: Permission[];
+    requireExisting: boolean;
+  },
+): Promise<WorkspaceMember> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select upsert_organization_shared_workspace_member(
+          ${input.organizationId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.actorSubjectId},
+          ${input.targetOrganizationMembershipId}::uuid,
+          ${input.subjectLabel ?? null},
+          ${input.role ?? null},
+          ${JSON.stringify(input.permissions)}::jsonb,
+          ${input.requireExisting}
+        ) as result`,
+      );
+      return WorkspaceMemberContract.parse(row?.result);
+    },
+  );
 }
 
 export async function updateWorkspace(
@@ -2367,6 +2524,30 @@ export async function getManagedUserByEmail(db: Database, email: string): Promis
     select id from auth_users where lower(email) = lower(${email}) limit 1
   `);
   return (rows as unknown as Array<{ id?: string }>)[0]?.id ?? null;
+}
+
+/**
+ * Resolve the safe profile fields organization administrators need to manage
+ * their own roster. Embedded deployments can provide the same projection
+ * through `userProfileLookup` without exposing their identity store schema.
+ */
+export async function getManagedUserProfilesByIds(
+  db: Database,
+  userIds: readonly string[],
+): Promise<Array<{ id: string; name: string | null; email: string }>> {
+  const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+  if (uniqueUserIds.length === 0) return [];
+  const binding = dbBindingFor(db);
+  if (binding?.userProfileLookup) {
+    return await binding.userProfileLookup(db, uniqueUserIds);
+  }
+  return await rawRows<{ id: string; name: string | null; email: string }>(
+    db,
+    sql`select id, name, email from auth_users where id in (${sql.join(
+      uniqueUserIds.map((userId) => sql`${userId}`),
+      sql`, `,
+    )})`,
+  );
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
@@ -2794,6 +2975,7 @@ export async function createApiKey(
     accountId: string;
     workspaceId?: string | null;
     name: string;
+    description?: string | null;
     prefix: string;
     keyHash: string;
     permissions: Permission[];
@@ -2810,6 +2992,7 @@ export async function createApiKey(
           accountId: input.accountId,
           workspaceId: input.workspaceId ?? null,
           name: input.name,
+          description: input.description ?? null,
           prefix: input.prefix,
           keyHash: input.keyHash,
           permissions: input.permissions,
@@ -65990,6 +66173,7 @@ function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     name: row.name,
+    description: row.description,
     prefix: row.prefix,
     permissions: row.permissions as Permission[],
     expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,
