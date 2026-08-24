@@ -162,6 +162,7 @@ describe("release schema contract", () => {
       "0325_child_lifecycle_notices.sql",
       "0327_slack_first_task_hint.sql",
       "0328_session_background_commands.sql",
+      "0329_slack_orchestration_delivery_events.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );

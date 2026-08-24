@@ -3820,6 +3820,8 @@ export type WorkspaceSettings = {
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
+  /** Slack orchestration notices; both default off when absent or invalid. */
+  slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
 };
 
@@ -3832,6 +3834,17 @@ export type WorkspaceSlackReactionSummonSettings = {
   enabled: boolean;
   emoji: "genie";
   channelPolicy: { mode: "bot_member" } | { mode: "allowlist"; channelIds: string[] };
+};
+
+/**
+ * Per-workspace switches for the two Slack orchestration notices. Both are off
+ * unless the workspace explicitly turned them on.
+ */
+export type WorkspaceSlackOrchestrationNoticeSettings = {
+  /** Post a pointer card when a child worker blocks on input or an approval. */
+  childRequiresAction?: boolean | undefined;
+  /** Post one line when a goal pauses for budget or the continuation cap. */
+  goalPaused?: boolean | undefined;
 };
 
 export type SlackReactionChannel = {
@@ -3859,6 +3872,7 @@ export type UpdateWorkspaceSettingsRequest = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
+  slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
 };
 

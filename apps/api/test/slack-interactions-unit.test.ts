@@ -531,6 +531,11 @@ describe("Slack event classification and safe projection", () => {
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.reasoning.delta" as never);
     expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("agent.toolCall.output" as never);
     expect(SLACK_DELIVERY_EVENT_TYPES).toContain("session.requiresAction");
+    // Orchestration surfacing. Both types arm a delivery claim; the pump
+    // filters them down to a blocked child worker and a budget/cap goal pause.
+    expect(SLACK_DELIVERY_EVENT_TYPES).toContain("system.update.pending");
+    expect(SLACK_DELIVERY_EVENT_TYPES).toContain("goal.paused");
+    expect(SLACK_DELIVERY_EVENT_TYPES).not.toContain("goal.resumed" as never);
   });
 
   test("coalesces only exact or boundary-safe terminal prefix shapes", () => {

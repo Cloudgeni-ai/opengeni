@@ -1,0 +1,12 @@
+---
+"@opengeni/api-router": minor
+"@opengeni/contracts": minor
+"@opengeni/db": minor
+"@opengeni/sdk": minor
+---
+
+Slack can notify the human when work they started stops making progress, **off by default and switched on per workspace**. The new `slackOrchestrationNotices` workspace setting carries one boolean per notice (`childRequiresAction`, `goalPaused`), two checkboxes sit beside the reaction shortcut in the Slack integration settings, and `resolveWorkspaceSlackOrchestrationNoticeSettings` fails closed: absent, malformed, or partially invalid settings resolve to both disabled, so only an explicit opt-in ever posts. An unsolicited Slack post is worse than a missed one, and the in-app rail and priority feed already surface this work.
+
+When a workspace opts in, a Slack-originated session's `child_requires_action` notice becomes one bounded pointer card ("A worker you started needs input", a single-line first-question or waiting-approval preview, and an **Open in OpenGeni** link to the child session), and a goal that pauses for `limits` or `max_auto_continuations` becomes one bounded line. Deferred child lifecycle notices, `user_pause` / `api` / `agent` / `no_progress` pauses, and `goal.resumed` stay silent, and so does a blocked-worker notice whose exact `(child, turn, generation)` boundary already carries a resolution or whose own row is `superseded` or `cancelled` - Slack delivery runs behind the session, and a card announcing a worker that is no longer blocked is worse than no card. Both notices draw on the same durable per-interaction slot budget as assistant progress, so an orchestration that fans out to many blocked children cannot turn one thread into a feed; a slot is claimed only when a card is actually going to be posted.
+
+A disabled notice takes the same "nothing to post for this event" path as an undeliverable one - no post, no ledger row, and the delivery cursor advances identically - and every pre-existing Slack card type is unaffected. Both reuse the durable per-event post-operation ledger, so reaper retries and replica claims cannot double-post. Rolling migration `0329_slack_orchestration_delivery_events.sql` adds `system.update.pending` and `goal.paused` to the Slack delivery claim's event types, and `@opengeni/db` exports the read-only `getSessionSystemUpdateById` and `childRequiresActionResolutionExists` used to resolve the exact typed notice and prove it is still current.

@@ -781,6 +781,12 @@ describe("SDK / contracts parity", () => {
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(slackReactionSummon).success).toBe(
       true,
     );
+    const slackOrchestrationNotices: UpdateWorkspaceSettingsRequest = {
+      slackOrchestrationNotices: { childRequiresAction: true, goalPaused: true },
+    };
+    expect(
+      ContractUpdateWorkspaceSettingsRequest.safeParse(slackOrchestrationNotices).success,
+    ).toBe(true);
     const transcription: WorkspaceTranscriptionPolicy = {
       enabled: true,
       acceptanceId: "11111111-1111-4111-8111-111111111111",
