@@ -12,7 +12,6 @@ import {
   KeyRoundIcon,
   Loader2Icon,
   PauseIcon,
-  PencilIcon,
   PlayIcon,
   PlusIcon,
   ShrinkIcon,
@@ -122,7 +121,6 @@ export function WorkspaceSettingsRoute({
   const [revokingKey, setRevokingKey] = useState<ApiKey | null>(null);
   const [busy, setBusy] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
-  const [editingName, setEditingName] = useState(false);
   const [gatewayRevision, setGatewayRevision] = useState(0);
   const canManageApiKeys = hasWorkspacePermission(
     context.accessContext,
@@ -312,88 +310,53 @@ export function WorkspaceSettingsRoute({
 
   const activeApiKeyCount = apiKeys.filter((key) => !key.revokedAt).length;
 
-  async function finishRename() {
-    const name = nameDraft.trim();
-    if (!name || name === activeWorkspace?.name) {
-      setNameDraft(activeWorkspace?.name ?? "");
-      setEditingName(false);
-      return;
-    }
-    await submitRename();
-    setEditingName(false);
-  }
-
   return (
     <WorkspaceSettingsContent section={section}>
       <section className="grid min-w-0 gap-6 text-left">
         {section === "general" ? (
           <>
-            <section className="grid gap-3 rounded-lg border border-border p-4">
+            <section className="grid max-w-xl gap-3">
               <div>
-                <h2 className="text-sm font-medium">Workspace</h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-sm font-medium">Workspace name</h2>
+                  {personal ? <PersonalWorkspaceBadge /> : null}
+                </div>
                 <p className="mt-1 text-xs text-fg-muted">Shown throughout {organizationLabel}.</p>
               </div>
-              <div className="flex min-w-0 items-center gap-2">
-                {editingName && canRename ? (
-                  <form
-                    className="flex min-w-0 flex-1 items-center gap-2"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void finishRename();
-                    }}
+              <form
+                className="flex min-w-0 items-center gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void submitRename();
+                }}
+              >
+                <Input
+                  value={nameDraft}
+                  onChange={(event) => setNameDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      setNameDraft(activeWorkspace?.name ?? "");
+                    }
+                  }}
+                  disabled={!canRename || renaming}
+                  className="h-9 text-sm"
+                  placeholder="Workspace name"
+                  aria-label="Workspace name"
+                />
+                {canRename ? (
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="secondary"
+                    disabled={
+                      renaming || !nameDraft.trim() || nameDraft.trim() === activeWorkspace?.name
+                    }
                   >
-                    <Input
-                      autoFocus
-                      value={nameDraft}
-                      onChange={(event) => setNameDraft(event.target.value)}
-                      onBlur={() => void finishRename()}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") {
-                          setNameDraft(activeWorkspace?.name ?? "");
-                          setEditingName(false);
-                        }
-                      }}
-                      className="h-9 max-w-md text-sm font-medium"
-                      placeholder="Workspace name"
-                      aria-label="Workspace name"
-                    />
-                    <Button
-                      type="submit"
-                      size="icon-sm"
-                      variant="ghost"
-                      disabled={renaming || !nameDraft.trim()}
-                      aria-label="Save workspace name"
-                    >
-                      {renaming ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <CheckIcon className="size-3.5" />
-                      )}
-                    </Button>
-                  </form>
-                ) : (
-                  <>
-                    <span className="min-w-0 truncate text-sm font-medium">
-                      {activeWorkspace?.name ?? "Workspace"}
-                    </span>
-                    {personal ? <PersonalWorkspaceBadge /> : null}
-                    {canRename ? (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="Rename workspace"
-                        onClick={() => {
-                          setNameDraft(activeWorkspace?.name ?? "");
-                          setEditingName(true);
-                        }}
-                      >
-                        <PencilIcon className="size-3.5" />
-                      </Button>
-                    ) : null}
-                  </>
-                )}
-              </div>
+                    {renaming ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
+                    Save
+                  </Button>
+                ) : null}
+              </form>
             </section>
 
             <section className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border p-4">

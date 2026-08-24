@@ -52,6 +52,18 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     description: "Integrations, MCP servers, skills, and packs",
   },
   {
+    to: "/workspaces/$workspaceId/documents",
+    icon: "file-search",
+    label: "Documents",
+    description: "Indexed knowledge for agents",
+  },
+  {
+    to: "/workspaces/$workspaceId/state",
+    icon: "brain-circuit",
+    label: "Company Brain",
+    description: "Knowledge, rules, guides, review, and learning",
+  },
+  {
     to: "/workspaces/$workspaceId/schedules",
     icon: "calendar-clock",
     label: "Schedules",
@@ -114,22 +126,10 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
     label: "Knowledge",
     items: [
       {
-        to: "/workspaces/$workspaceId/documents",
-        icon: "file-search",
-        label: "Documents",
-        description: "Indexed knowledge for agents",
-      },
-      {
         to: "/workspaces/$workspaceId/memory",
         icon: "brain-circuit",
         label: "Memory",
         description: "Durable facts agents carry across sessions",
-      },
-      {
-        to: "/workspaces/$workspaceId/state",
-        icon: "map",
-        label: "Company Brain",
-        description: "Knowledge, rules, guides, review, and learning",
       },
     ],
   },

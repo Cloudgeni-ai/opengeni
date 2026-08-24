@@ -15,16 +15,7 @@ describe("workspace management navigation", () => {
       section: "api-keys",
     });
 
-    for (const route of [
-      "agents",
-      "insights",
-      "documents",
-      "memory",
-      "state",
-      "variable-sets",
-      "rigs",
-      "machines",
-    ]) {
+    for (const route of ["agents", "insights", "memory", "variable-sets", "rigs", "machines"]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).not.toBeNull();
     }
 
@@ -35,7 +26,15 @@ describe("workspace management navigation", () => {
   });
 
   test("does not absorb ordinary workspace routes into management", () => {
-    for (const route of ["sessions", "plugins", "schedules", "artifacts", "priority"]) {
+    for (const route of [
+      "sessions",
+      "plugins",
+      "documents",
+      "state",
+      "schedules",
+      "artifacts",
+      "priority",
+    ]) {
       expect(workspaceManagementLocation(`${base}/${route}`, workspaceId)).toBeNull();
     }
   });

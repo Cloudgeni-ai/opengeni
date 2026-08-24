@@ -2,11 +2,9 @@ import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BarChart3Icon,
-  BookOpenIcon,
   BotIcon,
   BoxIcon,
   BoxesIcon,
-  BrainCircuitIcon,
   DatabaseIcon,
   KeyRoundIcon,
   LaptopIcon,
@@ -99,19 +97,9 @@ const WORKSPACE_PAGE_GROUPS = [
     label: "Knowledge",
     items: [
       {
-        to: "/workspaces/$workspaceId/documents" as const,
-        label: "Documents",
-        icon: BookOpenIcon,
-      },
-      {
         to: "/workspaces/$workspaceId/memory" as const,
         label: "Memory",
         icon: DatabaseIcon,
-      },
-      {
-        to: "/workspaces/$workspaceId/state" as const,
-        label: "Company Brain",
-        icon: BrainCircuitIcon,
       },
     ],
   },

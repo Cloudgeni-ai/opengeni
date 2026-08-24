@@ -15,12 +15,16 @@ describe("workspace rail destinations", () => {
 
     expect(primaryTargets).toEqual([
       "/workspaces/$workspaceId/plugins",
+      "/workspaces/$workspaceId/documents",
+      "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/schedules",
       "/workspaces/$workspaceId/artifacts",
     ]);
     expect(settingsTargets.filter((target) => primaryTargets.includes(target))).toEqual([]);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/schedules", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/artifacts", "ws-1")).toBe(false);
+    expect(isWorkspaceConfigPath("/workspaces/ws-1/documents", "ws-1")).toBe(false);
+    expect(isWorkspaceConfigPath("/workspaces/ws-1/state", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/settings", "ws-1")).toBe(true);
   });
 });
