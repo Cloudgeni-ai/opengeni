@@ -1,7 +1,7 @@
 -- deployment-mode: maintenance
 -- Activate ordered, FK-backed session Variable Set attachments. Runtime
 -- injection now consumes the complete ordered selection, so every API/control/
--- turn worker must be stopped before this cutover and no pre-0344 image may
+-- turn worker must be stopped before this cutover and no pre-0345 image may
 -- restart afterwards.
 
 SET LOCAL lock_timeout = '5s';
@@ -1001,21 +1001,30 @@ BEGIN
       || 'p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid, '
       || 'p_attempt_id uuid, p_execution_generation integer, p_variable_set_id uuid) '
       || 'RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER '
-      || 'SET search_path TO pg_catalog, pg_temp AS %L',
-    data_schema, function_source
+      || 'SET search_path TO pg_catalog, %I, pg_temp AS %L',
+    data_schema, data_schema, function_source
   );
 END
 $extend_scheduled_variable_set_generation_oracle$;
 
 DO $grants$
-DECLARE data_schema text := current_schema();
+DECLARE
+  data_schema text := current_schema();
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles', false
+  )::jsonb;
+  application_role text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    EXECUTE format(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.session_variable_set_attachments TO opengeni_app',
-      data_schema
+  FOR application_role IN
+    SELECT roles.role_name
+    FROM jsonb_array_elements_text(configured_roles) roles(role_name)
+  LOOP
+    EXECUTE pg_catalog.format(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.session_variable_set_attachments TO %I',
+      data_schema,
+      application_role
     );
-  END IF;
+  END LOOP;
 END
 $grants$;
 

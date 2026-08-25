@@ -28,6 +28,10 @@ describe("migration 0345 ordered session Variable Set attachments", () => {
     expect(source).toContain("rig_version.default_variable_set_ids");
     expect(source).toContain("'session.runtime.configured', 'session'");
     expect(source).toContain("SET CONSTRAINTS sessions_activity_insert_commit_guard");
+    expect(source).toContain("SET search_path TO pg_catalog, %I, pg_temp AS %L");
+    expect(source).toContain("FOR application_role IN");
+    expect(source).toContain("session_variable_set_attachments TO %I");
+    expect(source).not.toContain("session_variable_set_attachments TO opengeni_app");
     expect(source).toContain("REVOKE ALL ON FUNCTION refresh_session_variable_set_selection()");
     expect(source).not.toContain("value_encrypted");
   });
