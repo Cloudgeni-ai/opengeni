@@ -311,6 +311,90 @@ describe("timeline scroll ownership browser regression", () => {
     expect(after.text).toBe(before.text);
     expect(after.top).toBeCloseTo(before.top, 0);
   }, 30_000);
+
+  test("loads earlier messages when collapsed steps leave no upward scroll range", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+
+    // The tail contains only compact, collapsed step rows. Earlier history
+    // must load without requiring the reader to expand one just to manufacture
+    // a scroll range.
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    const beforeScroll = await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.metrics(),
+    );
+    expect(beforeScroll.maxScroll).toBeGreaterThan(0);
+
+    await scroller.hover();
+    for (let index = 0; index < 12; index += 1) {
+      await page.mouse.wheel(0, -1_200);
+      if (
+        (await page.evaluate(() => window.timelineCollapsedHistoryHarness!.metrics().scrollTop)) <
+        100
+      ) {
+        break;
+      }
+    }
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop < 100,
+      undefined,
+      { timeout: 5_000 },
+    );
+    expect(await page.locator('[data-conversation-message="user-1"]').isVisible()).toBe(true);
+    expect(await page.locator('[data-conversation-message="assistant-27"]').isVisible()).toBe(true);
+
+    // Expanding and collapsing a step changes row height, but it must neither
+    // remove surrounding chat rows nor destroy the usable scroll range.
+    const step = page.getByRole("button", { name: /steps/ }).nth(4);
+    const anchor = page.locator('[data-conversation-message="user-201"]');
+    await anchor.evaluate((node) => node.scrollIntoView({ block: "center" }));
+    const anchorTop = await anchor.evaluate((node) => node.getBoundingClientRect().top);
+    await step.click();
+    await page.waitForTimeout(180);
+    await step.click();
+    await page.waitForTimeout(180);
+    expect(await anchor.count()).toBe(1);
+    expect(await page.locator('[data-conversation-message^="user-"]').count()).toBe(9);
+    expect(await page.locator('[data-conversation-message^="assistant-"]').count()).toBe(9);
+    expect(
+      (await page.evaluate(() => window.timelineCollapsedHistoryHarness!.metrics())).maxScroll,
+    ).toBeGreaterThan(0);
+    expect(await anchor.evaluate((node) => node.getBoundingClientRect().top)).toBeCloseTo(
+      anchorTop,
+      0,
+    );
+  }, 30_000);
+
+  test("backfills history when collapsing dynamic step content removes the scroll range", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+
+    const step = page.getByRole("button", { name: /steps/ }).first();
+    await step.click();
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
+      undefined,
+      { timeout: 5_000 },
+    );
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.armOlder());
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(0);
+
+    await step.click();
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+    expect(await page.locator('[data-conversation-message^="user-"]').count()).toBe(9);
+    expect(await page.locator('[data-conversation-message^="assistant-"]').count()).toBe(9);
+    expect(
+      (await page.evaluate(() => window.timelineCollapsedHistoryHarness!.metrics())).maxScroll,
+    ).toBeGreaterThan(0);
+  }, 30_000);
 });
 
 async function visible(page: Page): Promise<VisibleRow> {

@@ -1111,6 +1111,71 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("requests older history when a collapsed tail underfills the scroller", async () => {
+    let calls = 0;
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const r = await renderComponent(
+      <MessageTimeline
+        items={items}
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    // A child disclosure can shrink without re-rendering MessageTimeline, but
+    // an ordinary parent commit must cover the initial underfilled window too.
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        status="idle"
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    await flush();
+
+    expect(calls).toBe(1);
+
+    // Unrelated commits against the same loaded window do not loop requests.
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        status="running"
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    await flush();
+    expect(calls).toBe(1);
+
+    // A newly prepended window may request the next page if it still does not
+    // fill the viewport.
+    await r.rerender(
+      <MessageTimeline
+        items={[reasoningItem("older-step", "older step"), ...items]}
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    await flush();
+    expect(calls).toBe(2);
+    await r.unmount();
+  });
+
   test("older prefetch does not loop at the batch top", async () => {
     let callback: IntersectionObserverCallback = () => undefined;
     let instance: IntersectionObserver | null = null;
