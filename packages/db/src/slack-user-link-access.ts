@@ -6,7 +6,7 @@ import {
   type SlackUserLinkAccessRequest,
   type SlackUserLinkAccessRequestStatus,
 } from "@opengeni/contracts";
-import { and, asc, eq, gt, inArray, ne } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 
 import { type Database, withWorkspaceRls } from "./database";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
@@ -53,9 +53,45 @@ export type SlackUserLinkAccessMutationInput = {
   idempotencyKey: string;
 };
 
+/**
+ * The Slack team one access request was raised from.
+ *
+ * The public request shape deliberately omits it, but an approver has to
+ * resolve the installation binding to know where the identity link belongs, and
+ * for a routed request that is not the workspace being granted.
+ */
+export async function slackUserLinkAccessRequestTeam(
+  db: Database,
+  input: { workspaceId: string; requestId: string },
+): Promise<{ slackTeamId: string; connectionId: string } | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        slackTeamId: schema.slackUserLinkAccessRequests.slackTeamId,
+        connectionId: schema.slackUserLinkAccessRequests.connectionId,
+      })
+      .from(schema.slackUserLinkAccessRequests)
+      .where(
+        and(
+          eq(schema.slackUserLinkAccessRequests.workspaceId, input.workspaceId),
+          eq(schema.slackUserLinkAccessRequests.id, input.requestId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
+}
+
+/**
+ * The tenancy an identity link belongs to. See `withSlackIdentityHomeScope`.
+ */
+export type SlackIdentityHome = { accountId: string; workspaceId: string };
+
 export type ApproveSlackUserLinkAccessInput = SlackUserLinkAccessMutationInput & {
   role?: string;
   permissions: Permission[];
+  /** The installation's tenancy, when it differs from the routed request's. */
+  identityHome?: SlackIdentityHome;
 };
 
 const activeStatuses: SlackUserLinkAccessRequestStatus[] = ["prepared", "pending"];
@@ -156,7 +192,13 @@ export async function prepareSlackUserLinkAccessRequest(
 
 export async function getSlackUserLinkAccessRequestForSubject(
   db: Database,
-  input: { workspaceId: string; requestId: string; subjectId: string },
+  input: {
+    workspaceId: string;
+    requestId: string;
+    subjectId: string;
+    /** The installation's tenancy, when it differs from the routed request's. */
+    identityHome?: SlackIdentityHome;
+  },
   now = new Date(),
 ): Promise<SlackUserLinkAccessRequest | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
@@ -320,7 +362,10 @@ export async function approveSlackUserLinkAccessRequest(
         });
       const membership = await membershipAllowsSlackLink(database, row);
       if (!membership) throw new Error("Slack access approval did not create the required grant");
-      await upsertSlackIdentityLink(database, row, input.actorSubjectId, now);
+      await withSlackIdentityHomeScope(database, row, input.identityHome, async () => {
+        await assertSlackIdentityAvailable(database, row);
+        await upsertSlackIdentityLink(database, row, input.actorSubjectId, now, input.identityHome);
+      });
       const [updated] = await database
         .update(schema.slackUserLinkAccessRequests)
         .set({
@@ -364,7 +409,13 @@ export async function approveSlackUserLinkAccessRequest(
  */
 export async function completeSlackUserLinkAccessIfGranted(
   db: Database,
-  input: { workspaceId: string; requestId: string; subjectId: string },
+  input: {
+    workspaceId: string;
+    requestId: string;
+    subjectId: string;
+    /** The installation's tenancy, when it differs from the routed request's. */
+    identityHome?: SlackIdentityHome;
+  },
   now = new Date(),
 ): Promise<SlackUserLinkAccessRequest | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
@@ -390,8 +441,10 @@ export async function completeSlackUserLinkAccessIfGranted(
       if (!(await membershipAllowsSlackLink(database, row))) {
         return mapRequest(row);
       }
-      await assertSlackIdentityAvailable(database, row);
-      await upsertSlackIdentityLink(database, row, input.subjectId, now);
+      await withSlackIdentityHomeScope(database, row, input.identityHome, async () => {
+        await assertSlackIdentityAvailable(database, row);
+        await upsertSlackIdentityLink(database, row, input.subjectId, now, input.identityHome);
+      });
       const [updated] = await tx
         .update(schema.slackUserLinkAccessRequests)
         .set({
@@ -600,17 +653,75 @@ async function assertSlackIdentityAvailable(database: Database, row: RequestRow)
   }
 }
 
+/**
+ * The tenancy an identity link belongs to.
+ *
+ * `slack_bot_user_links` is unique on `(connection_id, slack_user_id)` globally
+ * but RLS-visible only under ONE workspace, and the Slack pump reads it under
+ * the installation's. A request for a ROUTED workspace runs under that routed
+ * scope, so writing the link there would file it where the pump cannot see it,
+ * and reading it there is blind to the row that already exists at home. Both the
+ * availability check and the write therefore take the installation's tenancy
+ * explicitly, and fall back to the request row's when a caller has none, which
+ * is exactly the pre-routing behaviour.
+ */
+function identityHomeFor(row: RequestRow, home: SlackIdentityHome | undefined): SlackIdentityHome {
+  return home ?? { accountId: row.accountId, workspaceId: row.workspaceId };
+}
+
+/**
+ * Run the identity-link statements under the installation's own tenancy.
+ *
+ * The surrounding transaction is scoped to the request's workspace, which for a
+ * routed request is NOT where the link lives, and it must stay one transaction:
+ * an approval that granted membership without linking the identity, or the
+ * reverse, would be worse than either. So the tenant GUCs are swapped for
+ * exactly these statements and restored, rather than opening a second
+ * transaction. Restoring is not optional: everything after this call still
+ * belongs to the request's workspace.
+ */
+async function withSlackIdentityHomeScope<T>(
+  database: Database,
+  row: RequestRow,
+  home: SlackIdentityHome | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const identity = identityHomeFor(row, home);
+  if (identity.accountId === row.accountId && identity.workspaceId === row.workspaceId) {
+    return await fn();
+  }
+  await database.execute(
+    sql`select set_config('opengeni.account_id', ${identity.accountId}, true),
+               set_config('opengeni.workspace_id', ${identity.workspaceId}, true)`,
+  );
+  try {
+    return await fn();
+  } finally {
+    // A failed statement can leave the transaction aborted and unwinding to
+    // rollback, so preserve the original diagnostic rather than replacing it
+    // with the restore's own error.
+    await database
+      .execute(
+        sql`select set_config('opengeni.account_id', ${row.accountId}, true),
+                   set_config('opengeni.workspace_id', ${row.workspaceId}, true)`,
+      )
+      .catch(() => undefined);
+  }
+}
+
 async function upsertSlackIdentityLink(
   database: Database,
   row: RequestRow,
   actorSubjectId: string,
   now: Date,
+  home?: SlackIdentityHome,
 ) {
+  const identity = identityHomeFor(row, home);
   const [created] = await database
     .insert(schema.slackBotUserLinks)
     .values({
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
+      accountId: identity.accountId,
+      workspaceId: identity.workspaceId,
       connectionId: row.connectionId,
       slackTeamId: row.slackTeamId,
       slackUserId: row.slackUserId,
@@ -640,8 +751,8 @@ async function upsertSlackIdentityLink(
   await database
     .update(schema.slackBotUserLinks)
     .set({
-      accountId: row.accountId,
-      workspaceId: row.workspaceId,
+      accountId: identity.accountId,
+      workspaceId: identity.workspaceId,
       slackTeamId: row.slackTeamId,
       linkedBySubjectId: actorSubjectId,
       updatedAt: now,

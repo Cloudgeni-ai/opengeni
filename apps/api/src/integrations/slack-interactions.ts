@@ -79,6 +79,7 @@ import {
   listSessionEventPage,
   listSessionHumanInputRequests,
   listPendingSlackUserLinkAccessRequests,
+  slackUserLinkAccessRequestTeam,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
   reserveSlackInteractionActionHandles,
@@ -425,7 +426,13 @@ async function resolveSlackLinkTargetInstallation(
   deps: ApiRouteDeps,
   link: { slackTeamId: string; connectionId: string },
   workspaceId: string,
-): Promise<{ accountId: string; connectionId: string; workspaceName: string } | null> {
+): Promise<{
+  accountId: string;
+  connectionId: string;
+  workspaceName: string;
+  /** Where the identity link lives, which is not the routed workspace. */
+  identityHome: { accountId: string; workspaceId: string };
+} | null> {
   const route = await resolveSlackInstallationRoute(deps.db, link.slackTeamId);
   if (!route || route.connectionId !== link.connectionId || route.accountId.length === 0) {
     return null;
@@ -436,6 +443,7 @@ async function resolveSlackLinkTargetInstallation(
     accountId: route.accountId,
     connectionId: route.connectionId,
     workspaceName: workspace.name,
+    identityHome: { accountId: route.accountId, workspaceId: route.workspaceId },
   };
 }
 
@@ -621,6 +629,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         workspaceId,
         requestId: prepared.id,
         subjectId: context.subjectId,
+        identityHome: installation.identityHome,
       });
       if (!completed) throw freshSlackLinkRequired();
       return c.json(
@@ -734,14 +743,33 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
       const payload = ApproveSlackUserLinkAccessRequest.parse(await c.req.json());
+      // The identity link belongs to the installation, which for a routed
+      // request is a different workspace from the one being granted. The
+      // request row names its Slack team, so the binding resolves from it.
+      const requestId = c.req.param("requestId");
+      const requestTeam = await slackUserLinkAccessRequestTeam(deps.db, {
+        workspaceId,
+        requestId,
+      });
+      const installation = requestTeam
+        ? await resolveSlackInstallationRoute(deps.db, requestTeam.slackTeamId)
+        : null;
       try {
         const request = await approveSlackUserLinkAccessRequest(deps.db, {
           workspaceId,
-          requestId: c.req.param("requestId"),
+          requestId,
           actorSubjectId: grant.subjectId,
           expectedVersion: payload.expectedVersion,
           idempotencyKey: payload.idempotencyKey,
           permissions: payload.permissions,
+          ...(installation
+            ? {
+                identityHome: {
+                  accountId: installation.accountId,
+                  workspaceId: installation.workspaceId,
+                },
+              }
+            : {}),
           ...(payload.role !== undefined ? { role: payload.role } : {}),
         });
         const workspace = await getWorkspace(deps.db, workspaceId);
@@ -822,6 +850,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         workspaceId,
         requestId: prepared.id,
         subjectId: grant.subjectId,
+        identityHome: installation.identityHome,
       });
       if (completed?.status !== "completed") throw freshSlackLinkRequired();
       const saved = await getSlackBotUserLink(
