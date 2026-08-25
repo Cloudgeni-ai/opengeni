@@ -180,6 +180,7 @@ describe("release schema contract", () => {
       "0344_private_session_visibility_transition_gate.sql",
       "0345_tenant_scoped_session_tenancy_fence.sql",
       "0346_document_migration_audit_surface.sql",
+      "0347_connection_authority_convergence_evidence.sql",
       "0348_session_variable_set_attachments.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
@@ -219,6 +220,9 @@ describe("release schema contract", () => {
     const documentMigrationAuditSurface = completeSourceContract.migrations.some(
       (migration) => migration.path === "0346_document_migration_audit_surface.sql",
     );
+    const connectionAuthorityConvergenceEvidence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0347_connection_authority_convergence_evidence.sql",
+    );
     const sessionVariableSetAttachments = completeSourceContract.migrations.some(
       (migration) => migration.path === "0348_session_variable_set_attachments.sql",
     );
@@ -233,30 +237,33 @@ describe("release schema contract", () => {
         (privateSessionVisibilityTransitionGate ? 1 : 0) +
         (tenantScopedSessionTenancyFence ? 1 : 0) +
         (documentMigrationAuditSurface ? 1 : 0) +
+        (connectionAuthorityConvergenceEvidence ? 1 : 0) +
         (sessionVariableSetAttachments ? 1 : 0),
       latestMigration: sessionVariableSetAttachments
         ? "0348_session_variable_set_attachments.sql"
-        : documentMigrationAuditSurface
-          ? "0346_document_migration_audit_surface.sql"
-          : tenantScopedSessionTenancyFence
-            ? "0345_tenant_scoped_session_tenancy_fence.sql"
-            : privateSessionVisibilityTransitionGate
-              ? "0344_private_session_visibility_transition_gate.sql"
-              : personalDocumentForceRlsRepair
-                ? "0343_personal_document_force_rls_lock_repair.sql"
-                : slackRoutePromptSinglePending
-                  ? "0342_slack_route_prompt_single_pending.sql"
-                  : slackRoutingProbeFence
-                    ? "0341_slack_routing_probe_organization_fence.sql"
-                    : tenancyBackfillActivationEvidence
-                      ? "0340_tenancy_backfill_activation_evidence.sql"
-                      : documentAuthorityReclassification
-                        ? "0339_document_authority_reclassification.sql"
-                        : atomicConnectedMachineAttachments
-                          ? "0338_atomic_connected_machine_attachments.sql"
-                          : routedSlackHandles
-                            ? "0337_slack_routed_action_handles.sql"
-                            : "0336_atomic_session_fork_visibility.sql",
+        : connectionAuthorityConvergenceEvidence
+          ? "0347_connection_authority_convergence_evidence.sql"
+          : documentMigrationAuditSurface
+            ? "0346_document_migration_audit_surface.sql"
+            : tenantScopedSessionTenancyFence
+              ? "0345_tenant_scoped_session_tenancy_fence.sql"
+              : privateSessionVisibilityTransitionGate
+                ? "0344_private_session_visibility_transition_gate.sql"
+                : personalDocumentForceRlsRepair
+                  ? "0343_personal_document_force_rls_lock_repair.sql"
+                  : slackRoutePromptSinglePending
+                    ? "0342_slack_route_prompt_single_pending.sql"
+                    : slackRoutingProbeFence
+                      ? "0341_slack_routing_probe_organization_fence.sql"
+                      : tenancyBackfillActivationEvidence
+                        ? "0340_tenancy_backfill_activation_evidence.sql"
+                        : documentAuthorityReclassification
+                          ? "0339_document_authority_reclassification.sql"
+                          : atomicConnectedMachineAttachments
+                            ? "0338_atomic_connected_machine_attachments.sql"
+                            : routedSlackHandles
+                              ? "0337_slack_routed_action_handles.sql"
+                              : "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(
