@@ -895,6 +895,16 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           ${"0".repeat(64)}, ${"1".repeat(64)}, 'migration-0241-test'
         )
       `;
+      await admin.begin(async (tx) => {
+        await tx.unsafe(
+          "set local opengeni.organization_tenancy_lifecycle = 'organization_private_session_settings'",
+        );
+        await tx`
+          insert into organization_private_session_settings (
+            account_id, enabled, version, updated_by_membership_id
+          ) values (${drift.account}::uuid, true, 1, ${drift.membership}::uuid)
+        `;
+      });
 
       const transition = async () =>
         await withWorkspaceSubjectSessionActivityRls(

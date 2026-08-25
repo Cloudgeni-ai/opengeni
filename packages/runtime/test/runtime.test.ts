@@ -682,6 +682,44 @@ describe("runtime event normalization", () => {
     });
   });
 
+  test("preserves the assistant message phase on completed events", () => {
+    const [commentary] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        type: "message_output_item",
+        text: "Waiting for the child run to finish.",
+        rawItem: {
+          role: "assistant",
+          status: "completed",
+          phase: "commentary",
+          content: [{ type: "output_text", text: "Waiting for the child run to finish." }],
+        },
+      },
+    } as any);
+    const [finalAnswer] = normalizeSdkEvent({
+      type: "run_item_stream_event",
+      item: {
+        type: "message_output_item",
+        text: "All checks passed.",
+        rawItem: {
+          role: "assistant",
+          status: "completed",
+          phase: "final_answer",
+          content: [{ type: "output_text", text: "All checks passed." }],
+        },
+      },
+    } as any);
+
+    expect(commentary).toEqual({
+      type: "agent.message.completed",
+      payload: { text: "Waiting for the child run to finish.", phase: "commentary" },
+    });
+    expect(finalAnswer).toEqual({
+      type: "agent.message.completed",
+      payload: { text: "All checks passed.", phase: "final_answer" },
+    });
+  });
+
   test("extracts streamed usage without manufacturing a durable event", () => {
     const event = {
       type: "raw_model_stream_event",

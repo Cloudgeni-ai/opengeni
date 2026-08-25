@@ -12,6 +12,7 @@ import {
   createSession,
   ensureManagedAccessForUser,
   FORCE_RLS_TABLES,
+  getOrganizationPrivateSessionSettings,
   getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
@@ -28,6 +29,7 @@ import {
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
   upsertKnowledgeSourceObject,
@@ -1725,6 +1727,17 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         createdByContext: {},
       }),
     );
+    const privateSessionSettings = await getOrganizationPrivateSessionSettings(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+    });
+    await updateOrganizationPrivateSessionSettings(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+      enabled: true,
+      expectedVersion: privateSessionSettings.version,
+      operationId: crypto.randomUUID(),
+    });
     await transitionSessionVisibility(db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,

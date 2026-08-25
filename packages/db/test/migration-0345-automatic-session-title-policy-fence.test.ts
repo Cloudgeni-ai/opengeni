@@ -26,11 +26,11 @@ import {
 } from "../src/index";
 
 const fenceMigrationUrl = new URL(
-  "../drizzle/0344_automatic_session_title_policy_fence.sql",
+  "../drizzle/0345_automatic_session_title_policy_fence.sql",
   import.meta.url,
 );
 const quarantineMigrationUrl = new URL(
-  "../drizzle/0345_automatic_session_title_quarantine.sql",
+  "../drizzle/0346_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
 
@@ -60,13 +60,30 @@ async function quarantineStatement(batchSize = 500): Promise<string> {
   return batchSize === 500 ? statement : statement.replace("LIMIT 500", `LIMIT ${batchSize}`);
 }
 
-async function drainQuarantine(database: SharedTestDatabase, statement: string): Promise<number> {
+async function runQuarantineBatch(
+  database: SharedTestDatabase,
+  statement: string,
+): Promise<Array<{ id: string }>> {
+  return await database.admin.begin(async (transaction) => {
+    await transaction`select
+      set_config('lock_timeout', '1s', true),
+      set_config('statement_timeout', '10s', true)`;
+    return await transaction.unsafe<Array<{ id: string }>>(statement);
+  });
+}
+
+async function drainQuarantine(
+  database: SharedTestDatabase,
+  statement: string,
+  maxBatches = 16,
+): Promise<number> {
   let quarantined = 0;
-  for (;;) {
-    const rows = await database.admin.unsafe(statement);
+  for (let batch = 0; batch < maxBatches; batch += 1) {
+    const rows = await runQuarantineBatch(database, statement);
     quarantined += rows.length;
     if (rows.length === 0) return quarantined;
   }
+  throw new Error(`title quarantine did not drain after ${maxBatches} bounded batches`);
 }
 
 async function addAcceptedScheduledOccurrence(input: {
@@ -208,7 +225,7 @@ async function addAcceptedScheduledOccurrence(input: {
   );
 }
 
-describe("migrations 0344-0345 automatic session title policy fence", () => {
+describe("migrations 0345-0346 automatic session title policy fence", () => {
   test("use a short rolling fence followed by a bounded resumable quarantine", async () => {
     const fence = await readFile(fenceMigrationUrl, "utf8");
     const quarantine = await readFile(quarantineMigrationUrl, "utf8");
@@ -327,9 +344,10 @@ describe("migrations 0344-0345 automatic session title policy fence", () => {
       subjectId: `subject-${suffix}`,
     });
     const grant = access.workspaceGrants[0]!;
-    const sessions = await Promise.all(
-      Array.from({ length: 3 }, (_, index) =>
-        createSession(client.db, {
+    const sessions = [];
+    for (let index = 0; index < 3; index += 1) {
+      sessions.push(
+        await createSession(client.db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId!,
           initialMessage: `legacy automatic title ${index}`,
@@ -340,8 +358,8 @@ describe("migrations 0344-0345 automatic session title policy fence", () => {
           latencyMode: "standard",
           sandboxBackend: "none",
         }),
-      ),
-    );
+      );
+    }
     const ids = sessions.map((session) => session.id);
     await database.admin`alter table sessions disable trigger sessions_automatic_title_policy_v1_fence`;
     try {
@@ -355,7 +373,7 @@ describe("migrations 0344-0345 automatic session title policy fence", () => {
     }
 
     const oneRowBatch = await quarantineStatement(1);
-    expect((await database.admin.unsafe(oneRowBatch)).length).toBe(1);
+    expect((await runQuarantineBatch(database, oneRowBatch)).length).toBe(1);
     const safeAfterFirst = await database.admin<Array<{ count: number }>>`
       select count(*)::int as count
       from sessions
@@ -369,7 +387,7 @@ describe("migrations 0344-0345 automatic session title policy fence", () => {
       "SET title = 'New conversation', title_source = 'agent'",
       "SET title = 'New conversation', title_source = 'invalid'",
     );
-    await expect(database.admin.unsafe(failingBatch)).rejects.toThrow();
+    await expect(runQuarantineBatch(database, failingBatch)).rejects.toThrow();
     const safeAfterFailure = await database.admin<Array<{ count: number }>>`
       select count(*)::int as count
       from sessions

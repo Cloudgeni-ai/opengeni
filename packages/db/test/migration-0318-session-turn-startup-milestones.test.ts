@@ -12,7 +12,7 @@ let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0318-startup-milestones");
-});
+}, 180_000);
 
 afterAll(async () => {
   await shared?.release();

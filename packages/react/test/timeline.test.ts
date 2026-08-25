@@ -2652,6 +2652,185 @@ describe("groupTimeline", () => {
     });
   });
 
+  test("does not promote commentary when the turn has an ordinary final reply", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", { text: "Checking now.", phase: "commentary" }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "bun test" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("agent.message.completed", { text: "Checks passed.", phase: "final_answer" }),
+        event("turn.completed", {}),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "Checks passed.",
+      phase: "final_answer",
+    });
+    expect(
+      groups.filter(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === "Checking now.",
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("promotes the latest completed commentary when a tool turn settles without a final", () => {
+    reset();
+    const events = [
+      event("agent.message.delta", { text: "I am checking the worker." }),
+      event("agent.message.completed", {
+        text: "I am checking the worker.",
+        phase: "commentary",
+      }),
+      event("agent.toolCall.created", {
+        id: "call-1",
+        name: "session_wait",
+        arguments: { sessionId: "child-1" },
+      }),
+      event("agent.toolCall.output", { id: "call-1", output: { timedOut: true } }),
+      event("agent.message.completed", {
+        text: "The child is still running; I will wait for its result.",
+        phase: "commentary",
+      }),
+      // The worker also records its final-output receipt without SDK phase
+      // metadata. It must not erase the explicit commentary classification.
+      event("agent.message.completed", {
+        text: "The child is still running; I will wait for its result.",
+      }),
+      event("agent.toolCall.created", {
+        id: "call-2",
+        name: "goal_wait",
+        arguments: { reason: "child still running", untilSeconds: 900 },
+      }),
+      event("goal.held", { actor: "agent", reason: "child still running" }),
+      event("agent.toolCall.output", { id: "call-2", output: { status: "held" } }),
+      event("turn.completed", {}),
+    ];
+    const items = buildTimeline(events);
+    const groups = groupTimeline(items);
+
+    expect((items[0] as AgentMessageItem).streaming).toBe(false);
+    expect((items[0] as AgentMessageItem).phase).toBe("commentary");
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    const visible = groups[1]?.kind === "item" ? groups[1].item : null;
+    expect(visible).toMatchObject({
+      kind: "agent-message",
+      text: "The child is still running; I will wait for its result.",
+      phase: "commentary",
+      streaming: false,
+    });
+    const [turn] = turnGroups(groups);
+    expect(
+      turn?.groups.filter(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === "The child is still running; I will wait for its result.",
+      ),
+    ).toHaveLength(0);
+    expect(
+      turn?.groups.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === "I am checking the worker.",
+      ),
+    ).toBe(true);
+
+    expect(groupTimeline(buildTimeline(events))).toEqual(groups);
+  });
+
+  test("promotes completed commentary after ordinary tools without a goal hold", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", {
+          text: "The requested checks completed successfully.",
+          phase: "commentary",
+        }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "git status --short" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "clean" }),
+        event("turn.completed", {}),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "The requested checks completed successfully.",
+      phase: "commentary",
+    });
+  });
+
+  test("keeps a resumed continuation separate from the prior held-turn fallback", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event(
+          "agent.message.completed",
+          { text: "Waiting on CI.", phase: "commentary" },
+          { turnId: "turn-held" },
+        ),
+        event(
+          "agent.toolCall.created",
+          { id: "wait-1", name: "goal_wait", arguments: { untilSeconds: 900 } },
+          { turnId: "turn-held" },
+        ),
+        event(
+          "agent.toolCall.output",
+          { id: "wait-1", output: { status: "held" } },
+          { turnId: "turn-held" },
+        ),
+        event("turn.completed", {}, { turnId: "turn-held" }),
+        event(
+          "agent.toolCall.created",
+          { id: "check-1", name: "exec_command", arguments: { cmd: "gh run view" } },
+          { turnId: "turn-resumed" },
+        ),
+        event(
+          "agent.toolCall.output",
+          { id: "check-1", output: "success" },
+          { turnId: "turn-resumed" },
+        ),
+        event(
+          "agent.message.completed",
+          { text: "CI passed.", phase: "final_answer" },
+          { turnId: "turn-resumed" },
+        ),
+        event("turn.completed", {}, { turnId: "turn-resumed" }),
+      ]),
+    );
+
+    expect(
+      groups.map((group) =>
+        group.kind === "item" && group.item.kind === "agent-message"
+          ? `message:${group.item.text}`
+          : group.kind === "turn"
+            ? group.id
+            : group.kind,
+      ),
+    ).toEqual([
+      "turn-turn-held",
+      "message:Waiting on CI.",
+      "turn-turn-resumed",
+      "message:CI passed.",
+    ]);
+  });
+
   test("keeps a durable generated-video result outside the settled turn fold", () => {
     reset();
     const operationId = "66666666-6666-4666-8666-666666666666";
