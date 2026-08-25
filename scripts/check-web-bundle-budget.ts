@@ -205,12 +205,12 @@ const budgets = {
   // tree-shakeable, tracked separately.
   // Held-turn commentary projection adds the bounded waiting-state copy to
   // the shared session graph. The exact Linux/x64 production builds measure
-  // 2,173,426-2,173,468 raw bytes while gzip remains below its existing cap.
-  // Advance only the raw aggregate to the next whole-KiB envelope; every
-  // compressed, file-count, initial, per-file, lazy-chunk, and CSS cap stays
-  // fixed.
-  directSessionRaw: 2123 * kib,
-  directSessionGzip: 593 * kib,
+  // 2,173,426-2,173,468 raw bytes and 607,161-607,169 gzip bytes. Preserve the
+  // guard's one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance by
+  // advancing each to its next compliant whole-KiB envelope. Every file-count,
+  // initial, per-file, lazy-chunk, and CSS cap stays fixed.
+  directSessionRaw: 2124 * kib,
+  directSessionGzip: 595 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
