@@ -1731,6 +1731,44 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(sessions!.n).toBe(0);
     const refusal = value.slack.posts.find((post) => post.text.includes("No session was created."));
     expect(refusal?.text).toContain("do not have access");
+    // The access-request link is minted for the workspace they actually need,
+    // not the installation's, or it would send them to a page that refuses them.
+    const url = /https:\/\/\S+/u.exec(refusal!.text)![0].replace(/\.$/u, "");
+    const linkToken = new URLSearchParams(new URL(url).hash.slice(1)).get("slack_link");
+    expect(verifySlackUserLinkToken(signingMaterial, linkToken!)?.workspaceId).toBe(
+      routed.workspaceId,
+    );
+
+    // The message carries a signed token and is posted under a deterministic
+    // operation id, so a retry has to render the SAME bytes. A freshly minted
+    // token would be a different digest under one id, which the post ledger
+    // refuses permanently.
+    const before = value.slack.posts.length;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NO_ACCESS_RETRY_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.otherSlackUserId,
+            channel: channelId,
+            ts: "1700000600.0002",
+            text: "please do this again",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const second = value.slack.posts
+      .slice(before)
+      .find((post) => post.text.includes("Request access"));
+    expect(second).toBeTruthy();
+    // Same inbox row would give identical bytes; a different row legitimately
+    // mints its own token, so compare the stable half.
+    expect(second!.text.split("Request access:")[0]).toBe(
+      refusal!.text.split("Request access:")[0],
+    );
   });
 
   test("one workspace is not a choice, so an ordinary install never notices the flag", async () => {
