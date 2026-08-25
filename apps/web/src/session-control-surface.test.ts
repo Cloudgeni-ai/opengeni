@@ -123,6 +123,8 @@ describe("session control surface architecture", () => {
     expect(list).toContain("applySessionRailProjection(session, projected, { channelOwned })");
     expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
     expect(list).toContain("reconcileSessionChannelMovePointRead(");
+    expect(list).toContain("reconcileSessionChannelMoves(current, channelAuthoritySessions)");
+    expect(list).not.toContain("reconcileSessionChannelMoves(current, listedSessions)");
     expect(list).toContain("requestError.status === 404");
     expect(move).toContain("getSession(workspaceId, sessionId, {");
     expect(move).toContain("fresh: true");

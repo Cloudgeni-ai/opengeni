@@ -649,20 +649,30 @@ export function SessionList() {
     return [...source.values()];
   }, [attentionOverrides, channelMoveOverrides, pinOverrides, serverSessions]);
 
-  // Matching list state confirms the optimistic destination. A different or
-  // absent row is ambiguous because a pre-write request may have completed
-  // late or pagination may have omitted it, so resolve that disagreement with
-  // an exact point read started after the write. That point read can preserve
-  // the optimistic move, supersede it with a newer cross-client move, or retire
-  // it after deletion without requiring a database schema revision.
+  // Matching causally authoritative list/page evidence confirms the optimistic
+  // destination. Display-only retained rows cannot confirm or disagree: their
+  // channel may have been patched from context after their list authority
+  // expired. Resolve absent or different authority with an exact point read
+  // started after the write. That point read can preserve the optimistic move,
+  // supersede it with a newer cross-client move, or retire it after deletion
+  // without requiring a database schema revision.
   useEffect(() => {
-    setChannelMoveOverrides((current) => reconcileSessionChannelMoves(current, listedSessions));
-    const listedById = new Map(listedSessions.map((session) => [session.id, session]));
+    setChannelMoveOverrides((current) =>
+      reconcileSessionChannelMoves(current, channelAuthoritySessions),
+    );
+    const authoritativeById = new Map(
+      channelAuthoritySessions.map((session) => [session.id, session]),
+    );
     for (const [sessionId, override] of channelMoveOverrides) {
       if (!override.committed) continue;
-      const listed = listedById.get(sessionId);
-      if (listed && (listed.channelId ?? null) === override.channelId) continue;
-      const key = `${override.operation}:${listed?.channelId ?? "absent"}`;
+      const authoritativeEvidence = authoritativeById.get(sessionId);
+      if (
+        authoritativeEvidence &&
+        (authoritativeEvidence.channelId ?? null) === override.channelId
+      ) {
+        continue;
+      }
+      const key = `${override.operation}:${authoritativeEvidence?.channelId ?? "absent"}`;
       if (channelMoveProbes.current.get(sessionId) === key) continue;
       channelMoveProbes.current.set(sessionId, key);
       let readGeneration = 0;
@@ -713,8 +723,8 @@ export function SessionList() {
     }
   }, [
     channelMoveOverrides,
+    channelAuthoritySessions,
     context.sessionChannelProjectionAuthority,
-    listedSessions,
     rail.workspaceId,
     sessionClient,
     setContextSession,

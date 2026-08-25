@@ -11,6 +11,12 @@ import {
   rollbackSessionChannelMove,
   type SessionChannelMoveOverrides,
 } from "./session-channel-move";
+import {
+  authoritativeSessionContinuationChannels,
+  emptySessionContinuation,
+  mergeSessionContinuation,
+  reconcileRetainedSessionContinuationChannel,
+} from "./session-pagination";
 import { buildRailForest, channelRailSections } from "./sessions-group";
 import type { Session } from "../types";
 
@@ -154,6 +160,60 @@ describe("optimistic session channel moves", () => {
     const reconciled = reconcileSessionChannelMoves(afterStaleRefetch, [authoritative]);
     expect(reconciled.size).toBe(0);
     expect(applySessionChannelMove(authoritative, reconciled.get(stale.id))).toBe(authoritative);
+  });
+
+  test("a display-only retained row cannot confirm and release a committed move", () => {
+    const retainedA = session({ id: "session-1", channelId: "channel-old" });
+    const movedB = { ...retainedA, channelId: "channel-new" } as Session;
+    const pageGeneration = 3;
+    const pageOneReadGeneration = 1;
+    const newerRootReadGeneration = 2;
+    let continuation = mergeSessionContinuation(
+      emptySessionContinuation(pageGeneration),
+      pageGeneration,
+      pageGeneration,
+      { sessions: [retainedA], nextCursor: null },
+      10,
+      pageOneReadGeneration,
+      "root",
+      pageOneReadGeneration,
+    );
+
+    // A newer page-one read omits the old row, so it stays visible but loses
+    // channel authority. Context B may patch that display row after the write.
+    expect(
+      authoritativeSessionContinuationChannels(
+        continuation,
+        pageGeneration,
+        11,
+        newerRootReadGeneration,
+      ),
+    ).toEqual([]);
+    continuation = reconcileRetainedSessionContinuationChannel(
+      continuation,
+      pageGeneration,
+      11,
+      movedB,
+      newerRootReadGeneration,
+    );
+    expect(continuation.sessions[0]?.channelId).toBe("channel-new");
+
+    let overrides = beginSessionChannelMove(new Map(), retainedA.id, "channel-new", 1);
+    overrides = commitSessionChannelMove(overrides, retainedA.id, "channel-new", 1);
+    const authority = authoritativeSessionContinuationChannels(
+      continuation,
+      pageGeneration,
+      11,
+      newerRootReadGeneration,
+    ).map(({ session: authoritative }) => authoritative);
+    const afterDisplayPatch = reconcileSessionChannelMoves(overrides, authority);
+
+    expect(afterDisplayPatch).toBe(overrides);
+    // A late pre-write detail A and a failed post-write probe leave the move
+    // fence in place, so the visible projection remains B.
+    expect(applySessionChannelMove(retainedA, afterDisplayPatch.get(retainedA.id)).channelId).toBe(
+      "channel-new",
+    );
   });
 
   test("lets an exact post-write read supersede a move that another client changed again", () => {
