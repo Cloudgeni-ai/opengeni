@@ -7,6 +7,8 @@ import "./styles.css";
 type TimelineCollapsedHistoryHarness = {
   armOlder: () => void;
   loadCalls: () => number;
+  prependUnderfilledPage: () => void;
+  settleLoad: (call: number, outcome: "success" | "failure", complete?: boolean) => void;
   settleOlder: (outcome: "success" | "failure") => void;
   scroller: () => HTMLElement;
   metrics: () => {
@@ -104,6 +106,7 @@ function Harness() {
   const search = new URLSearchParams(window.location.search);
   const dynamicCollapse = search.has("dynamic-collapse");
   const manualLoad = search.has("manual-load");
+  const overlapLoads = search.has("overlap-loads");
   const [items, setItems] = useState<TimelineItem[]>(initialCollapsedTail);
   const [hasOlder, setHasOlder] = useState(!dynamicCollapse);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -114,6 +117,15 @@ function Harness() {
     resolve: (value: boolean) => void;
     reject: (reason: unknown) => void;
   } | null>(null);
+  const overlappingLoadsRef = useRef(
+    new Map<
+      number,
+      {
+        resolve: (value: boolean) => void;
+        reject: (reason: unknown) => void;
+      }
+    >(),
+  );
 
   const scroller = useCallback(() => {
     const node = document.querySelector<HTMLElement>(
@@ -138,7 +150,42 @@ function Harness() {
     pending.resolve(false);
   }, []);
 
+  const prependUnderfilledPage = useCallback(() => {
+    const call = loadCallsRef.current;
+    setItems((current) => [
+      ...settledTurn(100 + call * 40, `overlap-turn-${call}`, `Overlap turn ${call}`, false),
+      ...current,
+    ]);
+  }, []);
+
+  const settleLoad = useCallback(
+    (call: number, outcome: "success" | "failure", complete = false) => {
+      const pending = overlappingLoadsRef.current.get(call);
+      if (!pending) {
+        return;
+      }
+      overlappingLoadsRef.current.delete(call);
+      if (outcome === "failure") {
+        pending.reject(new Error(`transient collapsed-history load ${call} failure`));
+        return;
+      }
+      if (complete) {
+        setItems((current) => [...olderConversation(), ...current]);
+        setHasOlder(false);
+      }
+      pending.resolve(false);
+    },
+    [],
+  );
+
   const loadOlder = useCallback((): Promise<boolean> => {
+    if (overlapLoads) {
+      const call = ++loadCallsRef.current;
+      setLoadCalls(call);
+      return new Promise<boolean>((resolve, reject) => {
+        overlappingLoadsRef.current.set(call, { resolve, reject });
+      });
+    }
     const pending = pendingLoadRef.current;
     if (pending) {
       return pending.promise;
@@ -161,12 +208,14 @@ function Harness() {
       window.setTimeout(() => settleOlder("success"), 250);
     }
     return load;
-  }, [manualLoad, settleOlder]);
+  }, [manualLoad, overlapLoads, settleOlder]);
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
       armOlder: () => setHasOlder(true),
       loadCalls: () => loadCallsRef.current,
+      prependUnderfilledPage,
+      settleLoad,
       settleOlder,
       scroller,
       metrics: () => {
@@ -188,7 +237,7 @@ function Harness() {
     return () => {
       delete window.timelineCollapsedHistoryHarness;
     };
-  }, [loadCalls, scroller, settleOlder]);
+  }, [loadCalls, prependUnderfilledPage, scroller, settleLoad, settleOlder]);
 
   return (
     <main style={{ padding: 32 }} data-og-theme="light">
@@ -197,7 +246,7 @@ function Harness() {
           className="timeline-collapsed-history-shell"
           items={items}
           hasOlder={hasOlder}
-          loadingOlder={loadingOlder}
+          loadingOlder={overlapLoads ? false : loadingOlder}
           onLoadOlder={loadOlder}
           renderMessageText={(text, item) => <div data-conversation-message={item.id}>{text}</div>}
         />

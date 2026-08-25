@@ -378,8 +378,10 @@ export function MessageTimeline({
   // there is no upward scroll range, so reader intent can never arm the top
   // sentinel. Request one older page per loaded window until history either
   // fills the viewport or the host reports that no older rows remain.
-  const underfillLoadWindowRef = useRef<string | null>(null);
-  const [underfillSettledWindowKey, setUnderfillSettledWindowKey] = useState<string | null>(null);
+  const underfillLoadAttemptRef = useRef<readonly [string] | null>(null);
+  const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<readonly [string] | null>(
+    null,
+  );
   const underfillRetryReadyRef = useRef(false);
   const [underfillRetryReady, setUnderfillRetryReady] = useState(false);
   const resizeFollowRafRef = useRef<number | null>(null);
@@ -743,13 +745,13 @@ export function MessageTimeline({
         // handler cannot authorize a second concurrent request.
         return;
       }
-      let attempt = underfillLoadWindowRef.current;
-      if (attempt !== null && (attempt !== loadedWindowKey || !hasOlder)) {
+      let attempt = underfillLoadAttemptRef.current;
+      if (attempt !== null && (attempt[0] !== loadedWindowKey || !hasOlder)) {
         // The requested page landed. Ordinary sentinel prefetch may own the
         // next approach to the top once this window has a usable scroll range.
-        underfillLoadWindowRef.current = null;
+        underfillLoadAttemptRef.current = null;
         attempt = null;
-        setUnderfillSettledWindowKey(null);
+        setUnderfillSettledAttempt(null);
         underfillRetryReadyRef.current = false;
         setUnderfillRetryReady(false);
         olderLoadGateRef.current = "armed";
@@ -762,12 +764,13 @@ export function MessageTimeline({
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
-        (attempt === loadedWindowKey && !retry)
+        (attempt?.[0] === loadedWindowKey && !retry)
       ) {
         return;
       }
-      underfillLoadWindowRef.current = loadedWindowKey;
-      setUnderfillSettledWindowKey(null);
+      attempt = [loadedWindowKey];
+      underfillLoadAttemptRef.current = attempt;
+      setUnderfillSettledAttempt(null);
       underfillRetryReadyRef.current = false;
       setUnderfillRetryReady(false);
       // If the reader had already armed ordinary prefetch, do not let its
@@ -775,7 +778,11 @@ export function MessageTimeline({
       if (olderPrefetchArmedRef.current) {
         olderLoadGateRef.current = "cooling";
       }
-      const settle = () => setUnderfillSettledWindowKey(loadedWindowKey);
+      const settle = () => {
+        if (underfillLoadAttemptRef.current === attempt) {
+          setUnderfillSettledAttempt(attempt);
+        }
+      };
       let result: boolean | void | PromiseLike<boolean | void>;
       try {
         result = onLoadOlder();
@@ -797,13 +804,13 @@ export function MessageTimeline({
   // be about to commit a successful prepend. Once loading has settled, expose
   // one explicit retry only if this exact window still has older history.
   useEffect(() => {
-    if (!underfillSettledWindowKey) {
+    const attempt = underfillSettledAttempt;
+    if (attempt === null || underfillLoadAttemptRef.current !== attempt) {
       return;
     }
-    const attempt = underfillLoadWindowRef.current;
-    if (attempt !== underfillSettledWindowKey || loadedWindowKey !== attempt || !hasOlder) {
-      underfillLoadWindowRef.current = null;
-      setUnderfillSettledWindowKey(null);
+    if (loadedWindowKey !== attempt[0] || !hasOlder) {
+      underfillLoadAttemptRef.current = null;
+      setUnderfillSettledAttempt(null);
       underfillRetryReadyRef.current = false;
       setUnderfillRetryReady(false);
       return;
@@ -813,8 +820,8 @@ export function MessageTimeline({
     }
     underfillRetryReadyRef.current = true;
     setUnderfillRetryReady(true);
-    setUnderfillSettledWindowKey(null);
-  }, [hasOlder, loadedWindowKey, loadingOlder, underfillSettledWindowKey]);
+    setUnderfillSettledAttempt(null);
+  }, [hasOlder, loadedWindowKey, loadingOlder, underfillSettledAttempt]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
   const driveFollow = useCallback(
@@ -1157,8 +1164,8 @@ export function MessageTimeline({
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
-    underfillLoadWindowRef.current = null;
-    setUnderfillSettledWindowKey(null);
+    underfillLoadAttemptRef.current = null;
+    setUnderfillSettledAttempt(null);
     underfillRetryReadyRef.current = false;
     setUnderfillRetryReady(false);
     seenActivityIdsRef.current.clear();

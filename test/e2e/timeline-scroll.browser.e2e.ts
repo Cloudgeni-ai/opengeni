@@ -433,6 +433,53 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 
+  test("keeps the newer underfill owner when the previous page settles late", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load&overlap-loads`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    // Page A commits a still-underfilled page B before A's promise settles.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.prependUnderfilledPage());
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    // A settles after B owns the marker. Neither the settlement commit nor
+    // resize callbacks may reopen a duplicate B request.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleLoad(1, "success"));
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    // B can still reject and authorize one explicit retry; repeated resizes
+    // and the exiting retry node never start another concurrent load.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleLoad(2, "failure"));
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    await retry.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 3);
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(3);
+
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleLoad(3, "success", true),
+    );
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(3);
+  }, 30_000);
+
   test("backfills history when collapsing dynamic step content removes the scroll range", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse`);

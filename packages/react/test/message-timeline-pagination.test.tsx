@@ -1252,6 +1252,101 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("a late underfill settlement cannot clear the newer window attempt", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const retryLoad = deferred<boolean>();
+    const loads = [first, second, retryLoad];
+    let calls = 0;
+    const onLoadOlder = () => loads[calls++]!.promise;
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const r = await renderComponent(
+      <MessageTimeline items={items} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline items={items} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    const nextItems = [reasoningItem("older-step", "older step"), ...items];
+    await r.rerender(
+      <MessageTimeline items={nextItems} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    await actRun(() => {
+      resizeCallback([], resizeObserver!);
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    // Window B owns the active marker now. A's later settlement must not clear
+    // it or let the post-settlement commit/observer issue another B request.
+    await actRun(() => first.resolve(false));
+    await flush();
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    // B still owns settlement and can expose exactly one bounded manual retry.
+    await actRun(() => second.reject(new Error("transient page B failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(3);
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(3);
+
+    await r.rerender(
+      <MessageTimeline items={nextItems} hasOlder={false} onLoadOlder={onLoadOlder} />,
+    );
+    await actRun(() => retryLoad.resolve(false));
+    await flush();
+    expect(calls).toBe(3);
+    await r.unmount();
+  });
+
   test("underfill rejection exposes one retry without observer loops or duplicates", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
