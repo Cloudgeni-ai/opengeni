@@ -142,6 +142,11 @@ export type SharedTestDatabase = {
 export type BlankTestDatabase = {
   /** Superuser URL for this file's pristine (un-migrated) database. */
   databaseUrl: string;
+  /**
+   * The shared cluster's real app-role password. Pass this to `provisionRoles`
+   * instead of rotating the cluster-wide `opengeni_app` role from one test.
+   */
+  appPassword?: string;
   /** Release this file's handle: drops the database + decrements the refcount. */
   release: () => Promise<void>;
 };
@@ -690,6 +695,7 @@ export async function acquireBlankTestDatabase(label = "blank"): Promise<BlankTe
     let released = false;
     return {
       databaseUrl,
+      appPassword: APP_PASSWORD,
       release: async () => {
         if (released) {
           return;

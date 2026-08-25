@@ -108,6 +108,13 @@ Two rules, both of which fail silently when broken:
 before the read, so a regression aborts instead of quietly pinning a personal
 Document to its origin workspace forever.
 
+Migration `0343_personal_document_force_rls_lock_repair.sql` repairs the two
+shipped 0258 routines that violated rule 2. Its owner-migrated regression test
+proves the silent legacy fallback before the repair and the portable authority
+mint after it. New SECURITY DEFINER routines that touch FORCE-RLS tables must
+carry the same `acquireOwnerMigratedTestDatabase` coverage for every command
+they issue; a superuser-migrated test is not evidence for this boundary.
+
 Two other worked examples of a definer that satisfies a policy branch it can
 actually reach: `0263`'s
 `assert_active_managed_human_organization_membership`, which gates on one of the
