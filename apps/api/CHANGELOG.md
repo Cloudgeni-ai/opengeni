@@ -1,5 +1,28 @@
 # @opengeni/api-router
 
+## 2.3.0
+
+### Minor Changes
+
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- Updated dependencies [dc10a36]
+- Updated dependencies [c10f396]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/db@3.3.0
+  - @opengeni/runtime@1.3.2
+  - @opengeni/artifact-tool@0.3.6
+  - @opengeni/codemode@0.4.14
+  - @opengeni/config@0.19.2
+  - @opengeni/core@2.2.1
+  - @opengeni/documents@0.7.1
+  - @opengeni/events@0.3.125
+  - @opengeni/github@0.5.4
+  - @opengeni/observability@0.8.5
+  - @opengeni/storage@0.2.107
+
 ## 2.2.0
 
 ### Minor Changes
