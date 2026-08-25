@@ -1317,6 +1317,12 @@ Connections use that genuine discriminator through a separate bounded command:
 bun run db:backfill-connection-authority --organization-id <uuid>
 bun run db:backfill-connection-authority --organization-id <uuid> --apply \
   --limit 500 --max-batches 200 --run-key <fresh-key>
+
+# Repair only independently proven membership prerequisites first, then
+# perform the ordinary connection convergence:
+bun run db:backfill-connection-authority --organization-id <uuid> --apply \
+  --remediate-memberships --membership-run-key <fresh-membership-key> \
+  --run-key <fresh-connection-key>
 ```
 
 Dry-run is the default. Apply batches claim `legacy_user` rows with
@@ -1328,6 +1334,56 @@ the final full-population classifier records them unresolved. A fresh run key
 on a complete converged walk produces the sixth activation receipt,
 `connections`; a partial walk must resume without a run key and classify under
 a fresh key only after convergence.
+
+Migration 0347 adds the bounded operator evidence needed when 0340 reports a
+non-zero residual. Every invocation returns `evidenceBefore` and
+`evidenceAfter`; `--evidence-limit` controls the page (maximum 100), and
+`--after-connection-id` resumes display after a connection UUID. Completion is
+always decided by `evidenceAfter.remaining.total`, which is a full-organization
+count independent of that cursor. An empty late page therefore cannot report
+success while an earlier residual still exists. Evidence contains connection
+UUID, persisted subject id, a fixed classification, and a fixed action only. It
+does not expose provider configuration or credentials and never writes
+authority.
+
+The two automated actions are intentionally narrow:
+
+- `run_connection_backfill` means the exact active same-organization
+  membership already exists, so the normal 0340 upgrader is sufficient.
+- `run_membership_backfill_then_connection_backfill` means the independent
+  membership lifecycle has the exact Better Auth login, self-owned Better Auth
+  organization identity, and owner workspace-membership proof. Use
+  `--remediate-memberships` with fresh membership and connection receipt keys.
+  A connection row is never evidence for creating a membership.
+
+Every other action remains fail-closed and the command exits non-zero:
+
+- `review_membership_lifecycle_do_not_reactivate_automatically`: a suspended,
+  revoked, or otherwise terminal membership must go through an explicitly
+  authorized membership lifecycle. The backfill never reactivates it.
+- `restore_login_identity_then_recheck`: restore the exact supported login
+  identity through the authentication lifecycle, then rerun the dry run.
+- `correct_organization_identity_through_supported_account_lifecycle_then_recheck`:
+  correct the organization's managed identity through the supported account
+  lifecycle. Never rewrite identity columns as a backfill shortcut.
+- `establish_owner_workspace_membership_through_supported_membership_lifecycle_then_recheck`:
+  establish the required owner access through an authorized membership
+  lifecycle. Never promote access from connection provenance.
+- `classify_external_subject_then_migrate_via_authorized_connection_lifecycle`:
+  classify the external subject, then use its authorized connection lifecycle;
+  do not coerce it into a human subject.
+- `repair_conflicting_connection_authority_rows_under_incident_procedure` and
+  `repair_unrecognized_connection_authority_shape_under_incident_procedure`:
+  preserve the row and escalate under the database incident procedure with an
+  independently reviewed repair. These shapes have no general-purpose
+  automated rewrite.
+
+After any supported corrective action, rerun the dry run and use fresh receipt
+keys for an apply. Earlier unresolved receipts remain immutable evidence; a
+later recheck records current truth rather than rewriting history. The 0347
+inspector uses its own target-schema-local, invocation-exact, SELECT-only
+FORCE-RLS capability. It cannot inherit 0340's connection update capability or
+collide with a second OpenGeni schema in the same database.
 
 Migration 0340 also closes both ways this compatibility population could reopen.
 After an organization activates, `bind_connection_authority` refuses to mint a

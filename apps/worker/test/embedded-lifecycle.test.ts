@@ -9,6 +9,7 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type Database,
 } from "@opengeni/db";
 import {
@@ -493,7 +494,9 @@ describe("embedded worker lifecycle contract", () => {
           name,
           owner: "opengeni_migrator",
           can_execute: true,
-          public_execute: false,
+          public_execute: (
+            RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
+          ).includes(name),
           security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
             name,
           ),
