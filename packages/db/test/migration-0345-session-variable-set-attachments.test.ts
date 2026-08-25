@@ -30,6 +30,7 @@ describe("migration 0345 ordered session Variable Set attachments", () => {
     expect(source).toContain("SET CONSTRAINTS sessions_activity_insert_commit_guard");
     expect(source).toContain("SET search_path TO pg_catalog, %I, pg_temp AS %L");
     expect(source).toContain("FOR application_role IN");
+    expect(source).toContain("JOIN pg_catalog.pg_roles role_value");
     expect(source).toContain("session_variable_set_attachments TO %I");
     expect(source).not.toContain("session_variable_set_attachments TO opengeni_app");
     expect(source).toContain("REVOKE ALL ON FUNCTION refresh_session_variable_set_selection()");

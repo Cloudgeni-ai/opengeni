@@ -1018,6 +1018,7 @@ BEGIN
   FOR application_role IN
     SELECT roles.role_name
     FROM jsonb_array_elements_text(configured_roles) roles(role_name)
+    JOIN pg_catalog.pg_roles role_value ON role_value.rolname = roles.role_name
   LOOP
     EXECUTE pg_catalog.format(
       'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.session_variable_set_attachments TO %I',
