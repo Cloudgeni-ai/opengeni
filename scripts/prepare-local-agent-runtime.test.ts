@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { localRuntimeBuildId } from "./prepare-local-agent-runtime";
+import { localBrowserdSignatureCommands, localRuntimeBuildId } from "./prepare-local-agent-runtime";
 
 describe("local Connected Machine runtime identity", () => {
   test("is deterministic and changes with the complete source identity", () => {
@@ -8,5 +8,17 @@ describe("local Connected Machine runtime identity", () => {
     expect(first).toBe(localRuntimeBuildId(source));
     expect(first).toStartWith(`local-${process.platform}-${process.arch}-0123456789abcdef0123`);
     expect(first).not.toBe(localRuntimeBuildId(`f${source.slice(1)}`));
+  });
+});
+
+describe("local Connected Machine runtime signing", () => {
+  test("repairs and verifies Bun-compiled helpers only on darwin-arm64", () => {
+    const browserd = "/tmp/opengeni-browserd";
+    expect(localBrowserdSignatureCommands(browserd, "darwin", "arm64")).toEqual([
+      ["codesign", "--force", "--sign", "-", browserd],
+      ["codesign", "--verify", "--strict", browserd],
+    ]);
+    expect(localBrowserdSignatureCommands(browserd, "darwin", "x64")).toEqual([]);
+    expect(localBrowserdSignatureCommands(browserd, "linux", "arm64")).toEqual([]);
   });
 });
