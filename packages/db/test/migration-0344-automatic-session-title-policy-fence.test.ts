@@ -1,13 +1,25 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import {
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  DEFAULT_FIRST_PARTY_MCP_TOOLS,
+} from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
-  addSessionSystemUpdate,
+  addSessionSystemUpdateWithSourceMutation,
   appendSessionEvents,
+  bindScheduledTaskRunSessionInTransaction,
   bootstrapWorkspace,
   createDb,
+  createScheduledTask,
+  createScheduledTaskRun,
   createSession,
+  getScheduledTargetSessionExecution,
+  getScheduledTaskPersonalResourceAuthoritySubject,
+  getScheduledTaskRevisionAuthority,
+  getScheduledTaskRunAcceptedExecution,
   getSession,
+  settleScheduledTaskRunInTransaction,
   updateSessionTitle,
   type DbClient,
 } from "../src/index";
@@ -30,6 +42,145 @@ afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
 });
+
+async function addAcceptedScheduledOccurrence(input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+}) {
+  const task = await createScheduledTask(client.db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    name: "title rollout scheduled task",
+    status: "active",
+    schedule: { type: "manual" },
+    temporalScheduleId: `title-rollout-${crypto.randomUUID()}`,
+    runMode: "existing_session",
+    overlapPolicy: "allow_concurrent",
+    agentConfig: {
+      prompt: "Continue the rollout regression",
+      resources: [],
+      tools: [],
+      metadata: {},
+    },
+    createdBy: { kind: "service", subjectId: "scheduler" },
+    targetSessionId: input.sessionId,
+    metadata: {},
+  });
+  const personalResourceAuthoritySubjectId = await getScheduledTaskPersonalResourceAuthoritySubject(
+    client.db,
+    {
+      accountId: task.accountId,
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: task.authorityRevision,
+    },
+  );
+  const targetSessionExecution = await getScheduledTargetSessionExecution(
+    client.db,
+    task.workspaceId,
+    input.sessionId,
+    personalResourceAuthoritySubjectId,
+  );
+  if (!targetSessionExecution) throw new Error("scheduled target execution is unavailable");
+  const causalHumanAuthority = await getScheduledTaskRevisionAuthority(client.db, {
+    accountId: task.accountId,
+    workspaceId: task.workspaceId,
+    taskId: task.id,
+    taskAuthorityRevision: task.authorityRevision,
+  });
+  const runId = crypto.randomUUID();
+  const run = await createScheduledTaskRun(client.db, {
+    runId,
+    workspaceId: task.workspaceId,
+    taskId: task.id,
+    taskAuthorityRevision: task.authorityRevision,
+    taskExecutionDigest: task.executionDigest,
+    triggerType: "scheduled",
+    producerKey: `title-rollout-run:${runId}`,
+    acceptedExecutionSnapshot: {
+      version: 1,
+      task,
+      resolvedModel: targetSessionExecution.model,
+      resolvedReasoningEffort: targetSessionExecution.reasoningEffort,
+      resolvedLatencyMode: targetSessionExecution.latencyMode,
+      resolvedSandboxBackend: targetSessionExecution.sandboxBackend,
+      resolvedSandboxOs: targetSessionExecution.sandboxOs,
+      resolvedTools: targetSessionExecution.tools,
+      resolvedFirstPartyMcpTools: targetSessionExecution.firstPartyMcpTools ?? [
+        ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
+      ],
+      resolvedFirstPartyMcpPermissions: targetSessionExecution.firstPartyMcpPermissions ?? [
+        ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+      ],
+      resolvedVariableSet: null,
+      resolvedRig: null,
+      resolvedSlackBotConnection: null,
+      targetSessionExecution,
+      generatedSessionBinding: null,
+      personalConnectionDelegations: [],
+      personalResourceAuthoritySubjectId,
+      causalHumanSubjectId:
+        personalResourceAuthoritySubjectId ?? causalHumanAuthority?.subjectId ?? null,
+      causalHumanAuthority,
+      xaiProviderAccountAuthoritySnapshot: { version: 1, scope: "workspace" },
+      xaiAuthoritySubjectId: null,
+      connectionAuthoritySubjectId: null,
+      triggerInitiator: { kind: "service", subjectId: "scheduler" },
+      agentRunUsageIdempotencyKey: null,
+      incidentPreflightRequired: false,
+      alertOccurrenceLabels: null,
+    },
+  });
+  await bindScheduledTaskRunSessionInTransaction(client.db, {
+    accountId: task.accountId,
+    workspaceId: task.workspaceId,
+    runId: run.id,
+    sessionId: input.sessionId,
+  });
+  const accepted = await getScheduledTaskRunAcceptedExecution(client.db, {
+    workspaceId: task.workspaceId,
+    runId: run.id,
+  });
+  if (!accepted) throw new Error("scheduled run is missing its accepted execution");
+  return await addSessionSystemUpdateWithSourceMutation(
+    client.db,
+    {
+      accountId: task.accountId,
+      workspaceId: task.workspaceId,
+      sessionId: input.sessionId,
+      kind: "scheduled_occurrence",
+      classification: "info",
+      sourceId: run.id,
+      dedupeKey: `scheduled-task-run:${run.id}`,
+      summary: task.agentConfig.prompt,
+      payload: {
+        type: "scheduled_occurrence",
+        text: task.agentConfig.prompt,
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: run.id,
+      },
+      lineage: {
+        scheduledTaskId: task.id,
+        scheduledTaskRunId: run.id,
+        causalHumanSubjectId: accepted.causalHumanSubjectId,
+      },
+      personalConnectionDelegations: accepted.personalConnectionDelegations,
+      xaiProviderAccountAuthoritySnapshot: accepted.xaiProviderAccountAuthoritySnapshot,
+      scheduledTaskRunId: run.id,
+    },
+    async (tx, wakeEventId) => {
+      if (!wakeEventId) throw new Error("scheduled occurrence produced no wake event");
+      await settleScheduledTaskRunInTransaction(tx, {
+        workspaceId: task.workspaceId,
+        runId: run.id,
+        sessionId: input.sessionId,
+        triggerEventId: wakeEventId,
+        status: "dispatched",
+      });
+    },
+  );
+}
 
 describe("migration 0344 automatic session title policy fence", () => {
   test("is a rolling legacy-safe fence with quarantine and INSERT safety", async () => {
@@ -165,45 +316,25 @@ describe("migration 0344 automatic session title policy fence", () => {
       returning title, title_source as "titleSource"
     `;
     expect(legacyResult).toEqual({ title: "New conversation", titleSource: "agent" });
-    const legacyTitleEvents = await appendSessionEvents(
-      client.db,
-      grant.workspaceId!,
-      session.id,
-      [
-        {
-          type: "session.title_set",
-          payload: { title: legacyResult!.title, source: "agent" },
-        },
-      ],
-    );
+    const legacyTitleEvents = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+      {
+        type: "session.title_set",
+        payload: { title: legacyResult!.title, source: "agent" },
+      },
+    ]);
     expect(legacyTitleEvents[0]?.payload).toEqual({
       title: "New conversation",
       source: "agent",
     });
-    const scheduledTaskId = crypto.randomUUID();
-    const scheduledTaskRunId = crypto.randomUUID();
-    const delivered = await addSessionSystemUpdate(client.db, {
+    const delivered = await addAcceptedScheduledOccurrence({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      kind: "scheduled_occurrence",
-      classification: "info",
-      sourceId: scheduledTaskRunId,
-      dedupeKey: `scheduled-task-run:${scheduledTaskRunId}`,
-      summary: "Continue the rollout regression",
-      payload: {
-        type: "scheduled_occurrence",
-        text: "Continue the rollout regression",
-        scheduledTaskId,
-        scheduledTaskRunId,
-      },
-      lineage: { scheduledTaskId, scheduledTaskRunId },
-      scheduledTaskRunId,
     });
     expect(delivered).toMatchObject({
       added: true,
       reason: "added",
-      update: { kind: "scheduled_occurrence", sourceId: scheduledTaskRunId },
+      update: { kind: "scheduled_occurrence" },
     });
     expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
       title: "New conversation",
