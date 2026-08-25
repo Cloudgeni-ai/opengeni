@@ -413,6 +413,46 @@ on the invitation and organization membership writer tables. A live listed
 session rejects the cutover with SQLSTATE `55000`. After commit, never restart
 a pre-0314 image; remain in maintenance and fix forward.
 
+### Post-sign-in organization setup cutover (0348)
+
+`0348_named_signup_and_user_setup.sql` is a drained application protocol
+cutover. It moves self-service organization creation out of Better Auth signup
+and behind the first verified managed-cookie sign-in, and adds the invitation
+bound one-time account setup bearer. Old API binaries and old authentication
+hooks still synthesize a `better-auth:user` fallback organization and a
+`Default workspace`, and old browser clients do not speak the Personal-only
+setup contract. Before applying 0348:
+
+1. stop every API, control worker, and turn worker using the target database;
+2. supply the exact old/new runtime login list through
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
+   `applicationDatabaseRoles` for a programmatic migration);
+3. prove those roles have zero other sessions in `pg_stat_activity`;
+4. apply 0348 from the exact new image and require it in `schema_migrations`;
+5. start only that same image generation and complete readiness checks before
+   reopening admission.
+
+The migration checks the explicit role list before and after exclusive locks on
+`auth_users`, `auth_identities`, `managed_accounts`, the invitation tables, the
+organization membership table, `workspaces`, and `workspace_memberships`. A
+live listed session rejects the cutover with SQLSTATE `55000`. After commit,
+never restart a pre-0348 image; remain in maintenance and fix forward.
+
+Two operator-visible consequences follow the commit. `POST /v1/organizations`
+becomes the one-time setup entry point rather than an organization factory: a
+human who already holds an organization membership can no longer create a
+second organization through it. And `OPENGENI_API_CONTRACT_REVISION` advances,
+so every mutating client must be on the new bundle before admission reopens.
+
+No backfill is required. A human left holding a legacy `better-auth:user`
+fallback organization whose organization membership was never anchored is
+adopted by the setup lifecycle on their next sign-in - it reuses that exact
+account, names it from the one-shot signup intent, and creates the owner
+membership plus canonical Personal workspace against it - so no operator SQL is
+needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
+`OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
+checked before the invitation row commits and reported as `503`.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one

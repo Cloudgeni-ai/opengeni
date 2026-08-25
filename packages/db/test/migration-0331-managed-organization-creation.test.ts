@@ -53,6 +53,9 @@ describe("migration 0331 managed organization creation", () => {
       expect(created.organization.name).toBe("Shadow-safe organization");
     } finally {
       if (organizationId) {
+        await shared.admin`
+          delete from self_service_organization_setup_receipts
+          where account_id = ${organizationId}`;
         await shared.admin`delete from managed_accounts where id = ${organizationId}`;
       }
       await shared.admin`delete from auth_users where id = ${userId}`;

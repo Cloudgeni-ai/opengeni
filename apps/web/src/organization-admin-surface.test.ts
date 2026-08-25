@@ -90,7 +90,18 @@ describe("organization administration surface", () => {
   test("documents the bounded organization and workspace control plane", () => {
     expect(tenancyDocs).toContain("bounded organization\nadministration surface");
     expect(tenancyDocs).toContain("reads and mutations use independent operation lanes");
-    expect(tenancyDocs).toContain("Provider email delivery remains a\nnon-goal");
+    expect(tenancyDocs).toContain("The lifecycle therefore **adopts** that exact\naccount");
+    expect(tenancyDocs).toContain(
+      "This phase has no durable delivery outcome, retry, or reconciliation\nstate",
+    );
+    expect(tenancyDocs).toContain(
+      "durable invitation-email delivery outcome, retry, and reconciliation state",
+    );
+    expect(tenancyDocs).not.toContain("Provider email delivery remains a\nnon-goal");
+    expect(tenancyDocs).not.toContain("- provider invitation email delivery;");
+    expect(tenancyDocs).not.toContain(
+      "no organization membership, fallback\naccount, or bound invitation",
+    );
     expect(tenancyDocs).toContain("0332_organization_shared_workspace_control_plane.sql");
     expect(tenancyDocs).not.toContain("member-management\nUI remain deferred");
   });
