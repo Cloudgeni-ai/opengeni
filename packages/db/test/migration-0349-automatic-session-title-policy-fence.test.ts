@@ -11,6 +11,7 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { migrate, parseConcurrentIndexMigration } from "../src/migrate";
+import { FORCE_RLS_TABLES, PROTECTED_NO_DIRECT_DML_TABLES } from "../src/runtime-posture";
 import {
   addSessionSystemUpdateWithSourceMutation,
   appendSessionEvents,
@@ -258,6 +259,8 @@ describe("migrations 0349-0351 automatic session title policy fence", () => {
     expect(fence).toContain("session_events_automatic_title_quarantine_v1");
     expect(fence).toContain("'session_events'::regclass");
     expect(fence).toContain("CREATE TABLE automatic_session_title_fanout_outbox_v1");
+    expect(FORCE_RLS_TABLES).toContain("automatic_session_title_fanout_outbox_v1");
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("automatic_session_title_fanout_outbox_v1");
     expect(fence).toContain("automatic_title_fanout_workspace_event_fk");
     expect(fence).toContain("automatic_title_fanout_pending_idx");
     expect(fence).toContain("enqueue_automatic_session_title_fanout_v1");

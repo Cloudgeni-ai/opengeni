@@ -462,14 +462,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 292],
+            [FORCE_RLS_TABLES, 293],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 57],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 58],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
@@ -494,7 +494,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 304 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 305 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -603,6 +603,86 @@ describe("runtime database posture evaluator", () => {
 
   test("accepts the exact least-privilege FORCE-RLS contract", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+  });
+
+  test("enforces the automatic session title fanout capability boundary", () => {
+    const posture = safePosture();
+    posture.tables.push({
+      name: "automatic_session_title_fanout_outbox_v1",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      artifactOutboxDispatcherPolicy: false,
+      artifactMaterializerPolicy: false,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+      truncate: false,
+      references: false,
+      trigger: false,
+    });
+    posture.privateRoutines.push(
+      {
+        name: "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "claim_automatic_session_title_fanout_v1(integer)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+    );
+    const titleFanoutOptions: RuntimeDatabasePostureOptions = {
+      ...options,
+      protectedTables: ["tenant_rows", "automatic_session_title_fanout_outbox_v1"],
+      protectedNoDirectDmlTables: ["automatic_session_title_fanout_outbox_v1"],
+    };
+
+    expect(evaluateRuntimeDatabasePosture(posture, titleFanoutOptions)).toEqual([]);
+
+    const enqueue = posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("enqueue_automatic_session_title_fanout_v1("),
+    )!;
+    const claim = posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("claim_automatic_session_title_fanout_v1("),
+    )!;
+    enqueue.execute = true;
+    claim.execute = false;
+    claim.publicExecute = true;
+    claim.securityDefiner = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, titleFanoutOptions)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "runtime role has forbidden automatic session title fanout internal routine",
+        ),
+        expect.stringContaining("runtime role lacks automatic session title fanout capability"),
+        expect.stringContaining("PUBLIC has forbidden automatic session title fanout capability"),
+        expect.stringContaining("is not SECURITY DEFINER"),
+      ]),
+    );
   });
 
   test("enforces the exact personal-resource private capability boundary", () => {

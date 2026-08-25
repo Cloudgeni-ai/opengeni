@@ -36,10 +36,21 @@ const ARTIFACT_AUTHORIZATION_CAPABILITY_ROUTINES = [
   "authorize_editable_artifact_actor(uuid, uuid, text, text, text, text, text, text, integer, text, text, name)",
 ] as const;
 
-const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
+const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
+  "claim_automatic_session_title_fanout_v1(integer)",
+  "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+  "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+] as const;
+
+const AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES = [
+  "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
+] as const;
+
+const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
+  ...AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES,
 ]);
 
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
@@ -529,6 +540,7 @@ export const FORCE_RLS_TABLES = [
   "attached_browser_inventories",
   "audit_events",
   "auth_runs",
+  "automatic_session_title_fanout_outbox_v1",
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
@@ -1131,6 +1143,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "automatic_session_title_fanout_outbox_v1",
   "canonical_human_identities",
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
@@ -2336,6 +2349,70 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
+  const automaticTitleFanoutOutbox = tableByName.get("automatic_session_title_fanout_outbox_v1");
+  if (automaticTitleFanoutOutbox) {
+    for (const expectedRoutine of AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      if (matches.length !== 1) {
+        violations.push(
+          `automatic session title fanout capability ${expectedRoutine} is missing or ambiguous`,
+        );
+        continue;
+      }
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(
+          `automatic session title fanout capability ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (routine.owner !== automaticTitleFanoutOutbox.owner) {
+        violations.push(
+          `automatic session title fanout capability ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(
+          `runtime role lacks automatic session title fanout capability ${routine.name}`,
+        );
+      }
+      if (routine.publicExecute) {
+        violations.push(
+          `PUBLIC has forbidden automatic session title fanout capability ${routine.name}`,
+        );
+      }
+    }
+    for (const expectedRoutine of AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      if (matches.length !== 1) {
+        violations.push(
+          `automatic session title fanout internal routine ${expectedRoutine} is missing or ambiguous`,
+        );
+        continue;
+      }
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(
+          `automatic session title fanout internal routine ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (routine.owner !== automaticTitleFanoutOutbox.owner) {
+        violations.push(
+          `automatic session title fanout internal routine ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
+        );
+      }
+      if (routine.execute) {
+        violations.push(
+          `runtime role has forbidden automatic session title fanout internal routine ${routine.name}`,
+        );
+      }
+      if (routine.publicExecute) {
+        violations.push(
+          `PUBLIC has forbidden automatic session title fanout internal routine ${routine.name}`,
+        );
+      }
+    }
+  }
+
   const artifactMaterializationJobs = tableByName.get("editable_artifact_materialization_jobs");
   if (artifactMaterializationJobs) {
     for (const tableName of [
@@ -2848,8 +2925,8 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    const dedicatedArtifactCapability = DEDICATED_ARTIFACT_CAPABILITY_ROUTINES.has(routine.name);
-    if (!routine.execute && !dedicatedArtifactCapability) {
+    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (!routine.execute && !ownerInternalRoutine) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
