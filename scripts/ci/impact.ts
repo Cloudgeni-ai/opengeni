@@ -464,6 +464,10 @@ function fullPlan(
       // A migration-time backfill over a FORCE-RLS table silently matches zero
       // rows for the non-superuser owner OpenGeni migrates as.
       "migration-rls-backfills",
+      // A migration missing from the release-schema forward list is framed by
+      // the governed checkpoint input, so the pinned aggregate only breaks after
+      // merge, on protected main.
+      "migration-schema-contract",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -646,7 +650,7 @@ export function createImpactPlan(
     "public-hygiene",
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
-    guards.push("migration-ordinals", "migration-rls-backfills");
+    guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");
   if (examples.length > 0) guards.push("example-builds");

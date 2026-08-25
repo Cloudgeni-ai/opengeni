@@ -21,7 +21,7 @@
  * `namedSubjectHasLiveWorkspaceAuthority`, because no sibling module in this
  * package imports `./index` and this one must not be the first.
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, lte, sql } from "drizzle-orm";
 
 import { rawRows, withRlsContext, type Database } from "./database";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
@@ -466,4 +466,380 @@ export async function listNamedSubjectSlackRoutableWorkspaces(
 function compareCodeUnits(left: string, right: string): number {
   if (left === right) return 0;
   return left < right ? -1 : 1;
+}
+
+/** The trigger kinds a picker can be opened from, mirroring the table's CHECK. */
+export type SlackRoutePromptTriggerKind =
+  (typeof schema.slackRoutePrompts.$inferSelect)["triggerKind"];
+
+/** A pending first-use picker plus the workspaces it offered. */
+export type SlackRoutePrompt = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  connectionId: string;
+  inboxId: string;
+  slackTeamId: string;
+  slackUserId: string;
+  slackChannelId: string;
+  slackMessageTs: string;
+  providerEventId: string;
+  triggerKind: SlackRoutePromptTriggerKind;
+  requestText: string;
+  hasFiles: boolean;
+  slackThreadTs: string | null;
+  messageOperationId: string;
+  status: "pending" | "answered" | "expired" | "cancelled";
+  expiresAt: Date;
+  options: readonly SlackRoutePromptOption[];
+};
+
+export type SlackRoutePromptOption = {
+  id: string;
+  candidateAccountId: string;
+  candidateWorkspaceId: string;
+  candidateLabel: string;
+  position: number;
+};
+
+function mapPrompt(
+  row: typeof schema.slackRoutePrompts.$inferSelect,
+  options: readonly SlackRoutePromptOption[],
+): SlackRoutePrompt {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    connectionId: row.connectionId,
+    inboxId: row.inboxId,
+    slackTeamId: row.slackTeamId,
+    slackUserId: row.slackUserId,
+    slackChannelId: row.slackChannelId,
+    slackMessageTs: row.slackMessageTs,
+    providerEventId: row.providerEventId,
+    triggerKind: row.triggerKind,
+    requestText: row.requestText,
+    hasFiles: row.hasFiles,
+    slackThreadTs: row.slackThreadTs,
+    messageOperationId: row.messageOperationId,
+    status: row.status,
+    expiresAt: row.expiresAt,
+    options,
+  };
+}
+
+async function promptOptions(
+  scopedDb: Database,
+  promptId: string,
+): Promise<SlackRoutePromptOption[]> {
+  const rows = await scopedDb
+    .select()
+    .from(schema.slackRoutePromptOptions)
+    .where(eq(schema.slackRoutePromptOptions.promptId, promptId))
+    .orderBy(schema.slackRoutePromptOptions.position);
+  return rows.map((row) => ({
+    id: row.id,
+    candidateAccountId: row.candidateAccountId,
+    candidateWorkspaceId: row.candidateWorkspaceId,
+    candidateLabel: row.candidateLabel,
+    position: row.position,
+  }));
+}
+
+/**
+ * Open one first-use picker for a conversation, or return the one already open.
+ *
+ * Three separate uniques make this idempotent from three directions: Slack's
+ * retries of one event collide on `(connection_id, provider_event_id)`, a
+ * replayed inbox row collides on `(connection_id, inbox_id)`, and a genuinely
+ * different message in the same conversation collides on the partial pending
+ * index. The last one is why a second message never posts a second card: the
+ * person is already being asked the same question.
+ */
+export async function openSlackRoutePrompt(
+  db: Database,
+  home: SlackRouteHome,
+  input: {
+    connectionId: string;
+    inboxId: string;
+    slackTeamId: string;
+    slackUserId: string;
+    slackChannelId: string;
+    slackMessageTs: string;
+    providerEventId: string;
+    triggerKind: SlackRoutePromptTriggerKind;
+    requestText: string;
+    hasFiles: boolean;
+    slackThreadTs: string | null;
+    messageOperationId: string;
+    expiresAt: Date;
+    candidates: readonly SlackRoutableWorkspace[];
+    now?: Date;
+  },
+): Promise<{ opened: boolean; prompt: SlackRoutePrompt } | null> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(db, home, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const scoped = tx as unknown as Database;
+      // A card nobody ever clicked must not hold this person's slot forever.
+      // `now()` is not immutable, so the partial unique index cannot exclude an
+      // aged-out row; the writer settles it here instead, immediately before
+      // trying to open the next one. This is what gives `expired` a writer.
+      await scoped
+        .update(schema.slackRoutePrompts)
+        .set({ status: "expired", updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(schema.slackRoutePrompts.connectionId, input.connectionId),
+            eq(schema.slackRoutePrompts.slackChannelId, input.slackChannelId),
+            eq(schema.slackRoutePrompts.slackUserId, input.slackUserId),
+            eq(schema.slackRoutePrompts.status, "pending"),
+            lte(schema.slackRoutePrompts.expiresAt, now),
+          ),
+        );
+      const [created] = await scoped
+        .insert(schema.slackRoutePrompts)
+        .values([
+          {
+            accountId: home.accountId,
+            workspaceId: home.workspaceId,
+            connectionId: input.connectionId,
+            inboxId: input.inboxId,
+            slackTeamId: input.slackTeamId,
+            slackUserId: input.slackUserId,
+            slackChannelId: input.slackChannelId,
+            slackMessageTs: input.slackMessageTs,
+            providerEventId: input.providerEventId,
+            triggerKind: input.triggerKind,
+            requestText: input.requestText,
+            hasFiles: input.hasFiles,
+            slackThreadTs: input.slackThreadTs,
+            messageOperationId: input.messageOperationId,
+            status: "pending",
+            expiresAt: input.expiresAt,
+          },
+        ])
+        .onConflictDoNothing()
+        .returning();
+      if (!created) {
+        const [existing] = await scoped
+          .select()
+          .from(schema.slackRoutePrompts)
+          .where(
+            and(
+              eq(schema.slackRoutePrompts.connectionId, input.connectionId),
+              eq(schema.slackRoutePrompts.slackChannelId, input.slackChannelId),
+              eq(schema.slackRoutePrompts.slackUserId, input.slackUserId),
+              eq(schema.slackRoutePrompts.status, "pending"),
+            ),
+          )
+          .limit(1);
+        if (!existing) return null;
+        return {
+          opened: false,
+          prompt: mapPrompt(existing, await promptOptions(scoped, existing.id)),
+        };
+      }
+      const offered = input.candidates.map((candidate, index) => ({
+        accountId: home.accountId,
+        workspaceId: home.workspaceId,
+        promptId: created.id,
+        candidateAccountId: candidate.accountId,
+        candidateWorkspaceId: candidate.workspaceId,
+        candidateLabel: candidate.label,
+        position: index,
+      }));
+      if (offered.length > 0) {
+        await scoped.insert(schema.slackRoutePromptOptions).values(offered);
+      }
+      return { opened: true, prompt: mapPrompt(created, await promptOptions(scoped, created.id)) };
+    });
+  });
+}
+
+/**
+ * The prompt one offered button belongs to.
+ *
+ * The button's `value` is the option row id, which is a UUID precisely because
+ * the block-action normalizer already requires that shape. The option rows are a
+ * prompt-time SNAPSHOT and are never authority: the caller must re-authorize the
+ * chosen workspace live.
+ */
+export async function getSlackRoutePromptByOption(
+  db: Database,
+  home: SlackRouteHome,
+  optionId: string,
+): Promise<{ prompt: SlackRoutePrompt; chosen: SlackRoutePromptOption } | null> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const [option] = await scopedDb
+      .select()
+      .from(schema.slackRoutePromptOptions)
+      .where(eq(schema.slackRoutePromptOptions.id, optionId))
+      .limit(1);
+    if (!option) return null;
+    const [row] = await scopedDb
+      .select()
+      .from(schema.slackRoutePrompts)
+      .where(eq(schema.slackRoutePrompts.id, option.promptId))
+      .limit(1);
+    if (!row) return null;
+    return {
+      prompt: mapPrompt(row, await promptOptions(scopedDb, row.id)),
+      chosen: {
+        id: option.id,
+        candidateAccountId: option.candidateAccountId,
+        candidateWorkspaceId: option.candidateWorkspaceId,
+        candidateLabel: option.candidateLabel,
+        position: option.position,
+      },
+    };
+  });
+}
+
+/**
+ * Settle a prompt without answering it: the person pressed the cancel action, or
+ * it aged out. Only a still-pending row moves, so this cannot overwrite an
+ * answer that landed first.
+ */
+export async function settleSlackRoutePrompt(
+  db: Database,
+  home: SlackRouteHome,
+  input: { promptId: string; status: "expired" | "cancelled" },
+): Promise<boolean> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const settled = await scopedDb
+      .update(schema.slackRoutePrompts)
+      .set({ status: input.status, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.slackRoutePrompts.id, input.promptId),
+          eq(schema.slackRoutePrompts.status, "pending"),
+        ),
+      )
+      .returning({ id: schema.slackRoutePrompts.id });
+    return settled.length > 0;
+  });
+}
+
+/**
+ * Answer a picker: freeze the choice, remember it, and re-queue the request.
+ *
+ * All three commit together. The route row is the ask-once memory, so a later
+ * message in that conversation never asks again, and the re-queued inbox row is
+ * what actually starts the work the person asked for before they were
+ * interrupted by the question.
+ *
+ * The re-queued row carries a DERIVED provider event id, not the original one.
+ * The original inbox row still exists and is settled, so re-using its id would
+ * collide with the inbox's own `(connection_id, provider_event_id)` dedupe and
+ * silently queue nothing at all. Deriving it from the prompt keeps the insert
+ * idempotent for exactly this answer, so a double-click cannot create two
+ * sessions.
+ *
+ * Only a still-pending prompt answers. A second click, an expiry sweep, or a
+ * cancel that landed first all leave `answered: false` and change nothing.
+ */
+export async function answerSlackRoutePrompt(
+  db: Database,
+  home: SlackRouteHome,
+  input: {
+    promptId: string;
+    targetAccountId: string;
+    targetWorkspaceId: string;
+    answeredBySubjectId: string;
+    decidedBySlackUserId: string;
+    now?: Date;
+  },
+): Promise<{ answered: boolean; queuedProviderEventId: string | null }> {
+  const now = input.now ?? new Date();
+  return await withRlsContext(db, home, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const scoped = tx as unknown as Database;
+      const [prompt] = await scoped
+        .select()
+        .from(schema.slackRoutePrompts)
+        .where(eq(schema.slackRoutePrompts.id, input.promptId))
+        .limit(1)
+        .for("update");
+      if (!prompt || prompt.status !== "pending") {
+        return { answered: false, queuedProviderEventId: null };
+      }
+      if (prompt.expiresAt.getTime() <= now.getTime()) {
+        // Settle it here rather than leaving a dead row holding this person's
+        // slot: `expired` needs a writer on every path that observes expiry.
+        await scoped
+          .update(schema.slackRoutePrompts)
+          .set({ status: "expired", updatedAt: sql`now()` })
+          .where(
+            and(
+              eq(schema.slackRoutePrompts.id, prompt.id),
+              eq(schema.slackRoutePrompts.status, "pending"),
+            ),
+          );
+        return { answered: false, queuedProviderEventId: null };
+      }
+      await scoped
+        .update(schema.slackRoutePrompts)
+        .set({
+          status: "answered",
+          answeredTargetAccountId: input.targetAccountId,
+          answeredTargetWorkspaceId: input.targetWorkspaceId,
+          answeredBySubjectId: input.answeredBySubjectId,
+          answeredAt: now,
+          updatedAt: sql`now()`,
+        })
+        .where(eq(schema.slackRoutePrompts.id, prompt.id));
+
+      const directMessage = prompt.slackChannelId.startsWith("D") || prompt.triggerKind === "dm";
+      if (directMessage) {
+        await upsertSlackUserDmRoute(scoped, home, {
+          connectionId: prompt.connectionId,
+          slackTeamId: prompt.slackTeamId,
+          slackUserId: prompt.slackUserId,
+          targetAccountId: input.targetAccountId,
+          targetWorkspaceId: input.targetWorkspaceId,
+          decidedBySubjectId: input.answeredBySubjectId,
+          decidedBySlackUserId: input.decidedBySlackUserId,
+          source: "picker",
+        });
+      } else {
+        await upsertSlackChannelRoute(scoped, home, {
+          connectionId: prompt.connectionId,
+          slackTeamId: prompt.slackTeamId,
+          slackChannelId: prompt.slackChannelId,
+          targetAccountId: input.targetAccountId,
+          targetWorkspaceId: input.targetWorkspaceId,
+          decidedBySubjectId: input.answeredBySubjectId,
+          decidedBySlackUserId: input.decidedBySlackUserId,
+          source: "picker",
+        });
+      }
+
+      const queuedProviderEventId = `${prompt.providerEventId}:route:${prompt.id}`;
+      await scoped
+        .insert(schema.slackInteractionInbox)
+        .values([
+          {
+            accountId: home.accountId,
+            workspaceId: home.workspaceId,
+            connectionId: prompt.connectionId,
+            providerEventId: queuedProviderEventId,
+            providerMessageId: queuedProviderEventId,
+            slackTeamId: prompt.slackTeamId,
+            slackUserId: prompt.slackUserId,
+            slackChannelId: prompt.slackChannelId,
+            slackMessageTs: prompt.slackMessageTs,
+            slackThreadTs: prompt.slackThreadTs,
+            triggerKind: prompt.triggerKind,
+            text: prompt.requestText,
+            hasFiles: prompt.hasFiles,
+            routeState: "resolved",
+            targetAccountId: input.targetAccountId,
+            targetWorkspaceId: input.targetWorkspaceId,
+          },
+        ])
+        .onConflictDoNothing();
+      return { answered: true, queuedProviderEventId };
+    });
+  });
 }
