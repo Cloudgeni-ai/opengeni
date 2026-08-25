@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { MessageTimeline, type TimelineItem } from "@opengeni/react";
@@ -7,12 +7,14 @@ import "./styles.css";
 type TimelineCollapsedHistoryHarness = {
   armOlder: () => void;
   loadCalls: () => number;
+  settleOlder: (outcome: "success" | "failure") => void;
   scroller: () => HTMLElement;
   metrics: () => {
     scrollTop: number;
     scrollHeight: number;
     clientHeight: number;
     maxScroll: number;
+    liveTailGap: number;
   };
 };
 
@@ -99,11 +101,19 @@ function olderConversation(): TimelineItem[] {
 }
 
 function Harness() {
-  const dynamicCollapse = new URLSearchParams(window.location.search).has("dynamic-collapse");
+  const search = new URLSearchParams(window.location.search);
+  const dynamicCollapse = search.has("dynamic-collapse");
+  const manualLoad = search.has("manual-load");
   const [items, setItems] = useState<TimelineItem[]>(initialCollapsedTail);
   const [hasOlder, setHasOlder] = useState(!dynamicCollapse);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadCalls, setLoadCalls] = useState(0);
+  const loadCallsRef = useRef(0);
+  const pendingLoadRef = useRef<{
+    promise: Promise<boolean>;
+    resolve: (value: boolean) => void;
+    reject: (reason: unknown) => void;
+  } | null>(null);
 
   const scroller = useCallback(() => {
     const node = document.querySelector<HTMLElement>(
@@ -113,35 +123,72 @@ function Harness() {
     return node;
   }, []);
 
-  const loadOlder = useCallback(() => {
-    setLoadCalls((current) => current + 1);
-    setLoadingOlder(true);
-    window.setTimeout(() => {
-      setItems((current) => [...olderConversation(), ...current]);
-      setHasOlder(false);
-      setLoadingOlder(false);
-    }, 0);
+  const settleOlder = useCallback((outcome: "success" | "failure") => {
+    const pending = pendingLoadRef.current;
+    if (!pending) {
+      return;
+    }
+    pendingLoadRef.current = null;
+    if (outcome === "failure") {
+      pending.reject(new Error("transient collapsed-history load failure"));
+      return;
+    }
+    setItems((current) => [...olderConversation(), ...current]);
+    setHasOlder(false);
+    pending.resolve(false);
   }, []);
+
+  const loadOlder = useCallback((): Promise<boolean> => {
+    const pending = pendingLoadRef.current;
+    if (pending) {
+      return pending.promise;
+    }
+    loadCallsRef.current += 1;
+    setLoadCalls(loadCallsRef.current);
+    setLoadingOlder(true);
+    let resolveLoad!: (value: boolean) => void;
+    let rejectLoad!: (reason: unknown) => void;
+    const load = new Promise<boolean>((resolve, reject) => {
+      resolveLoad = resolve;
+      rejectLoad = reject;
+    }).finally(() => setLoadingOlder(false));
+    pendingLoadRef.current = {
+      promise: load,
+      resolve: resolveLoad,
+      reject: rejectLoad,
+    };
+    if (!manualLoad) {
+      window.setTimeout(() => settleOlder("success"), 250);
+    }
+    return load;
+  }, [manualLoad, settleOlder]);
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
       armOlder: () => setHasOlder(true),
-      loadCalls: () => loadCalls,
+      loadCalls: () => loadCallsRef.current,
+      settleOlder,
       scroller,
       metrics: () => {
         const node = scroller();
+        const tail = Array.from(
+          node.querySelectorAll<HTMLElement>("[data-og-timeline-group-anchor]"),
+        ).at(-1);
         return {
           scrollTop: node.scrollTop,
           scrollHeight: node.scrollHeight,
           clientHeight: node.clientHeight,
           maxScroll: Math.max(0, node.scrollHeight - node.clientHeight),
+          liveTailGap: tail
+            ? node.getBoundingClientRect().bottom - tail.getBoundingClientRect().bottom
+            : Number.NaN,
         };
       },
     };
     return () => {
       delete window.timelineCollapsedHistoryHarness;
     };
-  }, [loadCalls, scroller]);
+  }, [loadCalls, scroller, settleOlder]);
 
   return (
     <main style={{ padding: 32 }} data-og-theme="light">

@@ -1652,7 +1652,7 @@ function SessionChatPane(props: {
               loadVideoArtifactPlayback={loadVideoArtifactPlayback}
               hasOlder={props.hasOlder}
               loadingOlder={props.loadingOlder}
-              onLoadOlder={() => void props.onLoadOlder()}
+              onLoadOlder={props.onLoadOlder}
               hasNewer={props.hasNewer}
               loadingNewer={props.loadingNewer}
               onLoadNewer={() => void props.onLoadNewer()}

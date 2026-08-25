@@ -181,8 +181,12 @@ export type MessageTimelineProps = {
   hasOlder?: boolean | undefined;
   /** An older window is being fetched; shows the quiet top shimmer. */
   loadingOlder?: boolean | undefined;
-  /** Called when the reader nears the top and older history should backfill. */
-  onLoadOlder?: (() => void) | undefined;
+  /**
+   * Called when older history should backfill. Return the load promise when
+   * available so an underfilled timeline can expose a bounded retry after
+   * rejection or settlement without progress.
+   */
+  onLoadOlder?: (() => boolean | void | PromiseLike<boolean | void>) | undefined;
   /** Jump to the durable session start (bounded oldest window, no middle). */
   onJumpToStart?: (() => void | Promise<void>) | undefined;
   /** True while the oldest window is loading. */
@@ -375,7 +379,14 @@ export function MessageTimeline({
   // there is no upward scroll range, so reader intent can never arm the top
   // sentinel. Request one older page per loaded window until history either
   // fills the viewport or the host reports that no older rows remain.
-  const underfillLoadWindowRef = useRef<string | null>(null);
+  const underfillLoadAttemptRef = useRef<{ windowKey: string; sequence: number } | null>(null);
+  const underfillLoadSequenceRef = useRef(0);
+  const [underfillSettlement, setUnderfillSettlement] = useState<{
+    windowKey: string;
+    sequence: number;
+  } | null>(null);
+  const underfillRetryWindowKeyRef = useRef<string | null>(null);
+  const [underfillRetryWindowKey, setUnderfillRetryWindowKey] = useState<string | null>(null);
   const resizeFollowRafRef = useRef<number | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
@@ -451,9 +462,17 @@ export function MessageTimeline({
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const groupKeyByItemIdRef = useRef<Map<string, string>>(new Map());
   const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
+  const itemContentTopByIdRef = useRef<Map<string, number>>(new Map());
   const firstItemId = resolvedItems[0]?.id ?? null;
   const lastItemId = resolvedItems.at(-1)?.id ?? null;
   const loadedWindowKey = JSON.stringify([firstItemId, lastItemId, resolvedItems.length]);
+  const setUnderfillRetry = useCallback((windowKey: string | null) => {
+    if (underfillRetryWindowKeyRef.current === windowKey) {
+      return;
+    }
+    underfillRetryWindowKeyRef.current = windowKey;
+    setUnderfillRetryWindowKey(windowKey);
+  }, []);
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk =
@@ -730,14 +749,27 @@ export function MessageTimeline({
   );
 
   const requestOlderIfUnderfilled = useCallback(
-    (node: HTMLElement) => {
-      if (
-        underfillLoadWindowRef.current !== null &&
-        underfillLoadWindowRef.current !== loadedWindowKey
-      ) {
+    (node: HTMLElement, retry = false) => {
+      if (retry && underfillRetryWindowKeyRef.current !== loadedWindowKey) {
+        // AnimatePresence may retain the exiting button briefly. Its stale
+        // handler cannot authorize a second concurrent request.
+        return;
+      }
+      let attempt = underfillLoadAttemptRef.current;
+      if (attempt !== null && attempt.windowKey !== loadedWindowKey) {
         // The requested page landed. Ordinary sentinel prefetch may own the
         // next approach to the top once this window has a usable scroll range.
+        underfillLoadAttemptRef.current = null;
+        attempt = null;
+        setUnderfillSettlement(null);
+        setUnderfillRetry(null);
         olderLoadGateRef.current = "armed";
+      }
+      if (!hasOlder && attempt !== null) {
+        underfillLoadAttemptRef.current = null;
+        attempt = null;
+        setUnderfillSettlement(null);
+        setUnderfillRetry(null);
       }
       // clientHeight=0 is pre-layout/headless, not evidence that the rendered
       // history underfills a real viewport.
@@ -747,20 +779,71 @@ export function MessageTimeline({
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
-        underfillLoadWindowRef.current === loadedWindowKey
+        (attempt?.windowKey === loadedWindowKey && !retry)
       ) {
         return;
       }
-      underfillLoadWindowRef.current = loadedWindowKey;
+      const sequence = ++underfillLoadSequenceRef.current;
+      underfillLoadAttemptRef.current = { windowKey: loadedWindowKey, sequence };
+      setUnderfillSettlement(null);
+      setUnderfillRetry(null);
       // If the reader had already armed ordinary prefetch, do not let its
       // sentinel duplicate this request while the same short page is loading.
       if (olderPrefetchArmedRef.current) {
         olderLoadGateRef.current = "cooling";
       }
-      onLoadOlder();
+      let result: boolean | void | PromiseLike<boolean | void>;
+      try {
+        result = onLoadOlder();
+      } catch {
+        setUnderfillSettlement({ windowKey: loadedWindowKey, sequence });
+        return;
+      }
+      if (
+        result === null ||
+        (typeof result !== "object" && typeof result !== "function") ||
+        typeof (result as PromiseLike<boolean | void>).then !== "function"
+      ) {
+        // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
+        // that return the real promise opt into safe rejection/no-progress retry.
+        return;
+      }
+      void Promise.resolve(result).then(
+        () => setUnderfillSettlement({ windowKey: loadedWindowKey, sequence }),
+        () => setUnderfillSettlement({ windowKey: loadedWindowKey, sequence }),
+      );
     },
-    [hasOlder, loadedWindowKey, loadingOlder, onLoadOlder],
+    [hasOlder, loadedWindowKey, loadingOlder, onLoadOlder, setUnderfillRetry],
   );
+
+  // Promise settlement is not itself permission to auto-retry: the parent may
+  // be about to commit a successful prepend. Once loading has settled, expose
+  // one explicit retry only if this exact window still has older history.
+  useEffect(() => {
+    if (!underfillSettlement) {
+      return;
+    }
+    const attempt = underfillLoadAttemptRef.current;
+    if (
+      !attempt ||
+      attempt.sequence !== underfillSettlement.sequence ||
+      attempt.windowKey !== underfillSettlement.windowKey
+    ) {
+      setUnderfillSettlement(null);
+      return;
+    }
+    if (loadedWindowKey !== attempt.windowKey || !hasOlder) {
+      underfillLoadAttemptRef.current = null;
+      setUnderfillSettlement(null);
+      setUnderfillRetry(null);
+      return;
+    }
+    if (loadingOlder) {
+      return;
+    }
+    setUnderfillRetry(attempt.windowKey);
+    setUnderfillSettlement(null);
+  }, [hasOlder, loadedWindowKey, loadingOlder, setUnderfillRetry, underfillSettlement]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
   const driveFollow = useCallback(
@@ -888,44 +971,35 @@ export function MessageTimeline({
     const previousFirstItemId = previousFirstItemIdRef.current;
     const previousGroupKeyByItemId = groupKeyByItemIdRef.current;
     const previousGroupOffsetByKey = groupOffsetByKeyRef.current;
+    const previousItemContentTopById = itemContentTopByIdRef.current;
     const previousScrollTop = lastScrollTopRef.current;
+    const previousMaxScroll = lastMaxScrollRef.current;
+    const wasAtLiveTailBeforeCommit =
+      previousMaxScroll <= 1 ||
+      previousMaxScroll - previousScrollTop < Math.min(PIN_THRESHOLD_PX, previousMaxScroll);
     const firstItemChanged = previousFirstItemId !== null && firstItemId !== previousFirstItemId;
     const prepended =
       firstItemChanged && resolvedItems.some((item) => item.id === previousFirstItemId);
-    if (pendingJumpToStartRef.current && firstItemChanged) {
-      // The oldest window landed — jump against the NEW DOM, and skip the
-      // prepend correction (it would shift the reader away from the top).
-      pendingJumpToStartRef.current = false;
-      stopFollow();
-      writeScrollTop(node, 0);
-    } else if (wantPinRef.current && !hasNewer) {
-      // Jump-to-latest was pressed on a history window and the tip window is
-      // in THIS commit — consume pre-paint so the first tip frame is already
-      // at the bottom (post-paint consumption flashed one clamped frame).
-      wantPinRef.current = false;
-      if (autoFollow) {
-        applyPinned(true);
-        snapToBottom(node);
-      }
-    } else if (autoFollow && pinnedRef.current && !hasNewer) {
-      // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
-      // Pending unarmed leave: tip *growth* must not yank (Vimium during stream).
-      // Flat/shrink commits (fold) still recover — height did not grow under us.
-      if (!revealedRef.current) {
-        snapToBottom(node);
-      } else if (pendingReaderLeaveRef.current) {
-        if (node.scrollHeight <= lastScrollHeightRef.current) {
-          clearPendingReaderLeave();
-          driveFollow(node);
-        }
-      } else {
-        driveFollow(node);
-      }
-    } else if (prepended) {
-      // Keep the reader on the same retained rows. Prefer the offsetTop delta
-      // of the group that still holds the previous first item — that stays
-      // correct when loadOlder also truncates the tip (height delta then lies).
+    const restorePrependAnchor = () => {
+      // Keep the reader on the same retained rows. Prefer the exact first-item
+      // content coordinate (needed when a prepend merges inside one group),
+      // then the retained group offset, then scrollHeight as a final fallback.
       // If native anchoring already applied the same shift, leave scrollTop.
+      let delta: number | null = null;
+      if (previousFirstItemId !== null) {
+        const previousItemTop = previousItemContentTopById.get(previousFirstItemId);
+        const itemEl = node.querySelector(
+          `[data-og-timeline-item-id="${cssEscapeAttribute(previousFirstItemId)}"]`,
+        );
+        if (itemEl instanceof HTMLElement && previousItemTop !== undefined) {
+          const scrollerTop = node.getBoundingClientRect().top;
+          const currentItemTop = itemEl.getBoundingClientRect().top - scrollerTop + node.scrollTop;
+          const moved = Math.round(currentItemTop - previousItemTop);
+          if (moved !== 0) {
+            delta = moved;
+          }
+        }
+      }
       const anchorKey =
         previousFirstItemId !== null
           ? previousGroupKeyByItemId.get(previousFirstItemId)
@@ -936,8 +1010,7 @@ export function MessageTimeline({
         anchorKey !== undefined
           ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(anchorKey)}"]`)
           : null;
-      let delta: number | null = null;
-      if (anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
+      if (delta === null && anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
         const moved = Math.round(anchorEl.offsetTop - previousAnchorTop);
         if (moved !== 0) {
           delta = moved;
@@ -954,6 +1027,58 @@ export function MessageTimeline({
         if (Math.abs(node.scrollTop - expected) > 2) {
           writeScrollTop(node, expected);
         }
+      }
+    };
+    if (pendingJumpToStartRef.current && firstItemChanged) {
+      // The oldest window landed — jump against the NEW DOM, and skip the
+      // prepend correction (it would shift the reader away from the top).
+      pendingJumpToStartRef.current = false;
+      stopFollow();
+      writeScrollTop(node, 0);
+    } else if (wantPinRef.current && !hasNewer) {
+      // Jump-to-latest was pressed on a history window and the tip window is
+      // in THIS commit — consume pre-paint so the first tip frame is already
+      // at the bottom (post-paint consumption flashed one clamped frame).
+      wantPinRef.current = false;
+      if (autoFollow) {
+        applyPinned(true);
+        snapToBottom(node);
+      }
+    } else if (prepended) {
+      restorePrependAnchor();
+      if (autoFollow && pinnedRef.current && !hasNewer) {
+        if (wasAtLiveTailBeforeCommit && !pendingReaderLeaveRef.current) {
+          // The reader is at the live tail now, even if they were browsing
+          // history when loadOlder started. Rebase the camera after the exact
+          // anchor correction so the prepend is never treated as hot growth.
+          stopFollow();
+          clearPendingReaderLeave();
+          followRef.current = {
+            ...createTipFollowState(),
+            lastHeight: node.scrollHeight,
+            lastClientHeight: node.clientHeight,
+          };
+        } else {
+          // Geometry or a pending extension/programmatic leave proves the
+          // reader was browsing history even if the pin ref has not settled.
+          stopFollow();
+          clearPendingReaderLeave();
+          applyPinned(false);
+        }
+      }
+    } else if (autoFollow && pinnedRef.current && !hasNewer) {
+      // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
+      // Pending unarmed leave: tip *growth* must not yank (Vimium during stream).
+      // Flat/shrink commits (fold) still recover — height did not grow under us.
+      if (!revealedRef.current) {
+        snapToBottom(node);
+      } else if (pendingReaderLeaveRef.current) {
+        if (node.scrollHeight <= lastScrollHeightRef.current) {
+          clearPendingReaderLeave();
+          driveFollow(node);
+        }
+      } else {
+        driveFollow(node);
       }
     }
     // After a prepend, if restore left us below the top prefetch band,
@@ -980,7 +1105,12 @@ export function MessageTimeline({
       }
     }
     groupKeyByItemIdRef.current = nextKeyByItemId;
-    const needOffsets = prepended || firstItemChanged || !pinnedRef.current || Boolean(hasNewer);
+    const needOffsets =
+      prepended ||
+      firstItemChanged ||
+      !pinnedRef.current ||
+      Boolean(hasNewer) ||
+      itemContentTopByIdRef.current.size === 0;
     if (needOffsets) {
       const nextOffsetByKey = new Map<string, number>();
       for (const { key } of groups) {
@@ -990,6 +1120,18 @@ export function MessageTimeline({
         }
       }
       groupOffsetByKeyRef.current = nextOffsetByKey;
+      const scrollerTop = node.getBoundingClientRect().top;
+      const nextItemContentTopById = new Map<string, number>();
+      for (const itemEl of node.querySelectorAll<HTMLElement>("[data-og-timeline-item-id]")) {
+        const itemId = itemEl.dataset.ogTimelineItemId;
+        if (itemId) {
+          nextItemContentTopById.set(
+            itemId,
+            itemEl.getBoundingClientRect().top - scrollerTop + node.scrollTop,
+          );
+        }
+      }
+      itemContentTopByIdRef.current = nextItemContentTopById;
     }
   });
 
@@ -1055,13 +1197,17 @@ export function MessageTimeline({
     lastClientHeightRef.current = 0;
     groupKeyByItemIdRef.current = new Map();
     groupOffsetByKeyRef.current = new Map();
+    itemContentTopByIdRef.current = new Map();
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
-    underfillLoadWindowRef.current = null;
+    underfillLoadSequenceRef.current += 1;
+    underfillLoadAttemptRef.current = null;
+    setUnderfillSettlement(null);
+    setUnderfillRetry(null);
     seenActivityIdsRef.current.clear();
     applyPinned(true);
-  }, [allGroups.length, revealed, applyPinned]);
+  }, [allGroups.length, revealed, applyPinned, setUnderfillRetry]);
 
   // Parent commits cover the initial/history-loading cases. Disclosure state
   // changes are child-local, so the ResizeObserver below owns dynamic collapse
@@ -1494,7 +1640,8 @@ export function MessageTimeline({
                   <AnimatePresence>
                     {loadingOlder ||
                     loadingOldest ||
-                    (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
+                    (hasOlder && onJumpToStart && olderPrefetchArmed) ||
+                    (underfillRetryWindowKey === loadedWindowKey && hasOlder && !loadingOlder) ? (
                       // Floating over the scroller (not a timeline row) so showing and
                       // hiding it never reflows history under the reader.
                       <motion.div
@@ -1512,6 +1659,23 @@ export function MessageTimeline({
                               {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
                             </span>
                           </span>
+                        ) : null}
+                        {underfillRetryWindowKey === loadedWindowKey &&
+                        hasOlder &&
+                        !loadingOlder ? (
+                          <button
+                            type="button"
+                            data-og-retry-older=""
+                            onClick={() => {
+                              const node = scrollRef.current;
+                              if (node) {
+                                requestOlderIfUnderfilled(node, true);
+                              }
+                            }}
+                            className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium text-og-fg shadow-og-md backdrop-blur transition-colors hover:bg-og-surface-4"
+                          >
+                            Retry earlier activity
+                          </button>
                         ) : null}
                         {hasOlder && onJumpToStart && !loadingOldest ? (
                           <button

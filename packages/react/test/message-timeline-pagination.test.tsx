@@ -64,6 +64,20 @@ function manyEvents(count: number): SessionEvent[] {
   return Array.from({ length: count }, (_, index) => event(index + 1));
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 async function readerScrollUp(scroller: HTMLElement, scrollTop = 0): Promise<void> {
   // Wheel marks reader intent (fold clamps never synthesize wheel). Scroll
   // position then lands far from the tip.
@@ -93,6 +107,7 @@ async function armOlderPrefetch(container: HTMLElement): Promise<void> {
 }
 
 const originalIntersectionObserver = globalThis.IntersectionObserver;
+const originalResizeObserver = globalThis.ResizeObserver;
 const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
 const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
 const originalElementRect = Element.prototype.getBoundingClientRect;
@@ -111,6 +126,7 @@ function stubNativeScrollAnchoringUnsupported(): void {
 
 afterEach(() => {
   globalThis.IntersectionObserver = originalIntersectionObserver;
+  globalThis.ResizeObserver = originalResizeObserver;
   globalThis.requestAnimationFrame = originalRequestAnimationFrame;
   globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
   Element.prototype.getBoundingClientRect = originalElementRect;
@@ -1176,6 +1192,157 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("a delayed underfill prepend keeps the revealed live tail pinned immediately", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const load = deferred<boolean>();
+    let calls = 0;
+    const tail = [userItem("tail", "live tail")];
+    const onLoadOlder = () => {
+      calls += 1;
+      return load.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={tail} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 240,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <MessageTimeline items={tail} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+    expect(
+      r.container.querySelector("[data-og-timeline-scroller]")?.getAttribute("style") ?? "",
+    ).not.toContain("visibility");
+
+    // The response lands after the two-frame reveal. Prepending grows a real
+    // scroll range, but the reader is still pinned at the live tail. The first
+    // painted commit must already be parked there rather than easing up from 0.
+    layout.setContentHeight(1_600);
+    await r.rerender(
+      <MessageTimeline
+        items={[userItem("older", "older history"), ...tail]}
+        status="idle"
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(layout.tipBottomGap()).toBeLessThan(2);
+
+    await actRun(() => load.resolve(false));
+    await flush();
+    expect(calls).toBe(1);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("underfill rejection exposes one retry without observer loops or duplicates", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    let calls = 0;
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const onLoadOlder = () => {
+      calls += 1;
+      return calls === 1 ? first.promise : second.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={items} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline items={items} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // ResizeObserver can fire repeatedly while the same request is pending.
+    resizeCallback([], resizeObserver!);
+    resizeCallback([], resizeObserver!);
+    resizeCallback([], resizeObserver!);
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => first.reject(new Error("transient listEvents failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry-older]");
+    expect(retry).not.toBeNull();
+
+    // Failure never becomes an automatic retry loop, even across unrelated
+    // commits and repeated resize notifications against the same short window.
+    await r.rerender(
+      <MessageTimeline items={items} status="running" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    resizeCallback([], resizeObserver!);
+    resizeCallback([], resizeObserver!);
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    // AnimatePresence can retain the exiting DOM node. Even invoking that
+    // stale handler again cannot create a duplicate concurrent request.
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    resizeCallback([], resizeObserver!);
+    resizeCallback([], resizeObserver!);
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    await r.rerender(
+      <MessageTimeline
+        items={[reasoningItem("older-step", "older step"), ...items]}
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await actRun(() => second.resolve(false));
+    await flush();
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await r.unmount();
+  });
+
   test("older prefetch does not loop at the batch top", async () => {
     let callback: IntersectionObserverCallback = () => undefined;
     let instance: IntersectionObserver | null = null;
@@ -1866,7 +2033,7 @@ describe("MessageTimeline pagination affordances", () => {
     };
     globalThis.cancelAnimationFrame = () => undefined;
 
-    const originalResizeObserver = globalThis.ResizeObserver;
+    const resizeObserverBeforeTest = globalThis.ResizeObserver;
     const resizeCallbacks: ResizeObserverCallback[] = [];
     globalThis.ResizeObserver = class {
       constructor(callback: ResizeObserverCallback) {
@@ -1893,7 +2060,7 @@ describe("MessageTimeline pagination affordances", () => {
       layout.restore();
       await r.unmount();
     } finally {
-      globalThis.ResizeObserver = originalResizeObserver;
+      globalThis.ResizeObserver = resizeObserverBeforeTest;
     }
   });
 

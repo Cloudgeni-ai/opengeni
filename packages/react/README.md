@@ -272,7 +272,7 @@ function OpsChannel({ sessionId }: { sessionId: string }) {
         status={sessionStatus}
         hasOlder={hasOlder}
         loadingOlder={loadingOlder}
-        onLoadOlder={() => void loadOlder()}
+        onLoadOlder={loadOlder}
         className="min-h-0 flex-1"
       />
       <QueueSurface queue={queue} composer={composer} />

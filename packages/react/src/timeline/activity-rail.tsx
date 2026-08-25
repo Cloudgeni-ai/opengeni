@@ -124,6 +124,7 @@ export function ActivityRail({
           <div
             key={item.id}
             data-og-timeline-row-anchor=""
+            data-og-timeline-item-id={item.id}
             data-og-annotation-source-key={
               item.kind === "tool-call" ? item.annotationSource?.eventId : undefined
             }

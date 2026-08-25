@@ -369,6 +369,70 @@ describe("timeline scroll ownership browser regression", () => {
     );
   }, 30_000);
 
+  test("keeps the live tail fixed when a delayed underfill page resolves", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+    await page.waitForFunction(() => {
+      const node = window.timelineCollapsedHistoryHarness!.scroller();
+      return node.style.visibility !== "hidden";
+    });
+
+    const evidence = await page.evaluate(async () => {
+      const harness = window.timelineCollapsedHistoryHarness!;
+      const before = harness.metrics();
+      harness.settleOlder("success");
+      const samples = [];
+      for (let index = 0; index < 24; index += 1) {
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        samples.push(harness.metrics());
+      }
+      return { before, samples };
+    });
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+
+    expect(evidence.samples).toHaveLength(24);
+    const parkedGap = evidence.samples[0]!.liveTailGap;
+    expect(evidence.samples.every((sample) => Math.abs(sample.liveTailGap - parkedGap) < 1)).toBe(
+      true,
+    );
+    expect(parkedGap).toBeLessThan(48);
+    expect(evidence.samples.every((sample) => sample.maxScroll - sample.scrollTop < 2)).toBe(true);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+  }, 30_000);
+
+  test("retries one transient underfill failure without resize loops or duplicate requests", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("failure"));
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+
+    // Repeated layout observations against the unchanged short window do not
+    // turn one rejection into a polling loop.
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    await retry.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    await page.waitForFunction(() => document.querySelector("[data-og-retry-older]") === null);
+    expect(await retry.count()).toBe(0);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("backfills history when collapsing dynamic step content removes the scroll range", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse`);
