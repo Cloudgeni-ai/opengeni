@@ -21,7 +21,7 @@
  * `namedSubjectHasLiveWorkspaceAuthority`, because no sibling module in this
  * package imports `./index` and this one must not be the first.
  */
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, lte, sql } from "drizzle-orm";
 
 import { rawRows, withRlsContext, type Database } from "./database";
 import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
@@ -574,11 +574,29 @@ export async function openSlackRoutePrompt(
     messageOperationId: string;
     expiresAt: Date;
     candidates: readonly SlackRoutableWorkspace[];
+    now?: Date;
   },
 ): Promise<{ opened: boolean; prompt: SlackRoutePrompt } | null> {
+  const now = input.now ?? new Date();
   return await withRlsContext(db, home, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
       const scoped = tx as unknown as Database;
+      // A card nobody ever clicked must not hold this person's slot forever.
+      // `now()` is not immutable, so the partial unique index cannot exclude an
+      // aged-out row; the writer settles it here instead, immediately before
+      // trying to open the next one. This is what gives `expired` a writer.
+      await scoped
+        .update(schema.slackRoutePrompts)
+        .set({ status: "expired", updatedAt: sql`now()` })
+        .where(
+          and(
+            eq(schema.slackRoutePrompts.connectionId, input.connectionId),
+            eq(schema.slackRoutePrompts.slackChannelId, input.slackChannelId),
+            eq(schema.slackRoutePrompts.slackUserId, input.slackUserId),
+            eq(schema.slackRoutePrompts.status, "pending"),
+            lte(schema.slackRoutePrompts.expiresAt, now),
+          ),
+        );
       const [created] = await scoped
         .insert(schema.slackRoutePrompts)
         .values([
@@ -611,6 +629,7 @@ export async function openSlackRoutePrompt(
             and(
               eq(schema.slackRoutePrompts.connectionId, input.connectionId),
               eq(schema.slackRoutePrompts.slackChannelId, input.slackChannelId),
+              eq(schema.slackRoutePrompts.slackUserId, input.slackUserId),
               eq(schema.slackRoutePrompts.status, "pending"),
             ),
           )
@@ -742,7 +761,21 @@ export async function answerSlackRoutePrompt(
         .where(eq(schema.slackRoutePrompts.id, input.promptId))
         .limit(1)
         .for("update");
-      if (!prompt || prompt.status !== "pending" || prompt.expiresAt.getTime() <= now.getTime()) {
+      if (!prompt || prompt.status !== "pending") {
+        return { answered: false, queuedProviderEventId: null };
+      }
+      if (prompt.expiresAt.getTime() <= now.getTime()) {
+        // Settle it here rather than leaving a dead row holding this person's
+        // slot: `expired` needs a writer on every path that observes expiry.
+        await scoped
+          .update(schema.slackRoutePrompts)
+          .set({ status: "expired", updatedAt: sql`now()` })
+          .where(
+            and(
+              eq(schema.slackRoutePrompts.id, prompt.id),
+              eq(schema.slackRoutePrompts.status, "pending"),
+            ),
+          );
         return { answered: false, queuedProviderEventId: null };
       }
       await scoped

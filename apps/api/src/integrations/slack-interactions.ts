@@ -1374,6 +1374,24 @@ async function postSlackRouteRefusal(
   });
 }
 
+/**
+ * A workspace name as a Slack button label.
+ *
+ * Slack renders a button label as plain text and the stored option snapshot caps
+ * it at 128 bytes, so bound it once at the boundary: the button, the row and
+ * every outcome card then agree. Counted in UTF-8 bytes, because that is what
+ * the CHECK counts.
+ */
+function boundedSlackRouteLabel(label: string): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(label).length <= 72) return label;
+  let bounded = label;
+  while (bounded.length > 0 && encoder.encode(`${bounded}...`).length > 72) {
+    bounded = bounded.slice(0, -1);
+  }
+  return `${bounded}...`;
+}
+
 /** How long a first-use picker stays answerable. */
 const SLACK_ROUTE_PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -1399,6 +1417,13 @@ async function askSlackRouteChoice(
   candidates: readonly SlackRoutableWorkspace[],
 ): Promise<void> {
   const offered = candidates.slice(0, MAX_SLACK_ROUTE_PROMPT_BUTTONS);
+  // Slack renders a button label as plain text and the stored snapshot caps it
+  // at 128 bytes, so bound it once here: the button, the stored row and every
+  // outcome card then agree, and the full name still shows in OpenGeni.
+  const bounded = offered.map((candidate) => ({
+    ...candidate,
+    label: boundedSlackRouteLabel(candidate.label),
+  }));
   const opened = await openSlackRoutePrompt(deps.db, home, {
     connectionId: entry.connectionId,
     inboxId: entry.id,
@@ -1413,15 +1438,18 @@ async function askSlackRouteChoice(
     slackThreadTs: entry.slackThreadTs,
     messageOperationId: deterministicUuid(`slack-route-prompt:${entry.id}`),
     expiresAt: new Date(Date.now() + SLACK_ROUTE_PROMPT_TTL_MS),
-    candidates: offered,
+    candidates: bounded,
   });
-  // Someone is already being asked this exact question in this conversation.
-  // Asking again would put two live cards in front of one person.
-  if (!opened || !opened.opened) return;
-
-  const where = entry.slackChannelId.startsWith("D")
+  if (!opened) return;
+  // The prompt commits before the card is posted, so a transient Slack failure
+  // would otherwise leave a pending row with no card in front of anybody and
+  // silently deaden the conversation. Post unconditionally instead: the
+  // operation id is persisted on the prompt and the card is rendered from the
+  // prompt's own stored options, so a replay reproduces identical bytes and the
+  // post ledger returns the completed original rather than posting twice.
+  const where = opened.prompt.slackChannelId.startsWith("D")
     ? "your messages with OpenGeni"
-    : `<#${entry.slackChannelId}>`;
+    : `<#${opened.prompt.slackChannelId}>`;
   const blocks: SlackMessageBlock[] = [
     {
       type: "section",
@@ -1449,21 +1477,22 @@ async function askSlackRouteChoice(
       ],
     },
   ];
-  if (candidates.length > offered.length) {
-    const url = slackWorkspaceUrl(deps, home.workspaceId);
-    blocks.push({
-      type: "section",
-      text: {
-        type: "mrkdwn",
-        text: url
-          ? `More workspaces: <${url}|Choose in OpenGeni>`
-          : "More workspaces are available in OpenGeni under Capabilities, then Slack.",
-      },
-    });
-  }
+  // Deliberately unconditional rather than derived from the live candidate
+  // count: a replay must render identical bytes, and membership can change
+  // between attempts.
+  const url = slackWorkspaceUrl(deps, home.workspaceId);
+  blocks.push({
+    type: "section",
+    text: {
+      type: "mrkdwn",
+      text: url
+        ? `You can change this later in <${url}|OpenGeni>, under Capabilities, then Slack.`
+        : "You can change this later in OpenGeni, under Capabilities, then Slack.",
+    },
+  });
   await client.postMessage({
     operationId: opened.prompt.messageOperationId,
-    userId: entry.slackUserId,
+    userId: opened.prompt.slackUserId,
     text: boundedOutput(
       `OpenGeni can start this task in more than one workspace. Pick where ${where} should work.`,
     ),
@@ -1485,6 +1514,12 @@ async function handleSlackRouteChoice(
   actionId: string,
   optionId: string,
 ): Promise<void> {
+  if (!deps.settings.slackWorkspaceRoutingEnabled) {
+    // A card can outlive the flag being turned back off. Honouring the click
+    // would write a route row and start work through a path the operator has
+    // disabled.
+    throw new SlackInteractionPermanentError("slack_route_choice_unavailable");
+  }
   const found = await getSlackRoutePromptByOption(deps.db, home, optionId);
   if (!found) throw new SlackInteractionPermanentError("slack_route_prompt_invalid");
   const { prompt, chosen } = found;
@@ -1504,7 +1539,9 @@ async function handleSlackRouteChoice(
   // ledger rather than saying so.
   const replaceCard = async (outcome: string, text: string) => {
     await client.updateMessage({
-      operationId: deterministicUuid(`slack-route-answered:${prompt.id}:${actionId}:${outcome}`),
+      operationId: deterministicUuid(
+        `slack-route-answered:${prompt.id}:${actionId}:${chosen.id}:${outcome}`,
+      ),
       channelId: entry.slackChannelId,
       timestamp: entry.slackMessageTs,
       text,
@@ -1515,8 +1552,16 @@ async function handleSlackRouteChoice(
   };
 
   if (actionId === "opengeni.route.cancel") {
-    await settleSlackRoutePrompt(deps.db, home, { promptId: prompt.id, status: "cancelled" });
-    await replaceCard("cancelled", "OpenGeni did not start this task. No session was created.");
+    const cancelled = await settleSlackRoutePrompt(deps.db, home, {
+      promptId: prompt.id,
+      status: "cancelled",
+    });
+    await replaceCard(
+      cancelled ? "cancelled" : "already_settled",
+      cancelled
+        ? "OpenGeni did not start this task. No session was created."
+        : "OpenGeni already settled this choice.",
+    );
     return;
   }
 
@@ -1534,12 +1579,16 @@ async function handleSlackRouteChoice(
       })
     : null;
   if (!grant || !hasPermission(grant.permissions, "sessions:create")) {
-    // Fail closed and leave the prompt answerable: the person may still have
-    // another workspace on the same card they can use.
-    await replaceCard(
-      "denied",
-      `OpenGeni cannot start work in *${chosen.candidateLabel}*: you do not have access to it. No session was created.`,
-    );
+    // Fail closed WITHOUT touching the card: the person may still have another
+    // workspace on it that they can use, and replacing the card would take the
+    // remaining buttons away and leave a pending prompt nobody can answer.
+    await client.postMessage({
+      operationId: deterministicUuid(`slack-route-denied:${prompt.id}:${chosen.id}`),
+      userId: entry.slackUserId,
+      text: boundedOutput(
+        `OpenGeni cannot start work in ${chosen.candidateLabel}: you do not have access to it. No session was created. Pick another workspace on the card, or ask an OpenGeni administrator for access.`,
+      ),
+    });
     return;
   }
 

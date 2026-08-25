@@ -1354,13 +1354,37 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
     expect(beforeAnswer!.n).toBe(0);
 
-    // Slack retries the same event: still one card, still one prompt.
+    const cardsAfterFirst = value.slack.posts.length;
+    // Slack retries the same event: the inbox dedupe means there is nothing new
+    // to drain at all.
     expect((await postEvent(value.app, first)).status).toBe(200);
-    await drainAll(value.deps);
+    expect(await drainAll(value.deps)).toBe(0);
+
+    // A genuinely DIFFERENT message in the same channel is the case the pending
+    // index governs. It must not open a second prompt or post a second card.
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_ASK_SECOND_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000700.0009",
+            text: "and another thing",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await drainAll(value.deps)).toBe(1);
     const [prompts] = await shared!.admin<{ n: number }[]>`
       select count(*)::int as n from slack_route_prompts
       where connection_id = ${value.connectionId} and status = 'pending'`;
     expect(prompts!.n).toBe(1);
+    // The card is re-posted through the same operation id, so the ledger
+    // returns the completed original rather than putting a second card up.
+    expect(value.slack.posts).toHaveLength(cardsAfterFirst);
 
     const [option] = await shared!.admin<{ id: string }[]>`
       select o.id from slack_route_prompt_options o
@@ -1462,7 +1486,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       join slack_route_prompts p on p.id = o.prompt_id
       where p.connection_id = ${value.connectionId}
         and o.candidate_workspace_id = ${routed.workspaceId}`;
-    const click = () =>
+    const click = (actionTs: string) =>
       value.app.request(
         signedRequest(
           "/v1/integrations/slack/interactions",
@@ -1476,7 +1500,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
               actions: [
                 {
                   action_id: "opengeni.route.select",
-                  action_ts: `176000000${Math.floor(Math.random() * 9)}.000011`,
+                  action_ts: actionTs,
                   value: option!.id,
                 },
               ],
@@ -1485,10 +1509,100 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
           "application/x-www-form-urlencoded",
         ),
       );
-    expect((await click()).status).toBe(200);
-    expect((await click()).status).toBe(200);
+    // Two distinct clicks, not one deduped by a colliding timestamp.
+    expect((await click("1760000000.000011")).status).toBe(200);
+    expect((await click("1760000000.000012")).status).toBe(200);
     await drainAll(value.deps);
     expect(await interactions(routed.workspaceId)).toHaveLength(1);
+    // The second click says so rather than wedging the post ledger.
+    expect(value.slack.calls.filter((call) => call.method === "chat.update").length).toBe(2);
+  });
+
+  test("an unanswered picker expires instead of deadening the conversation", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const channelId = "C_EXPIRING";
+    const ask = (suffix: string, ts: string) =>
+      postEvent(value.app, {
+        teamId: value.teamId,
+        eventId: `E_EXPIRE_${suffix}_${crypto.randomUUID()}`,
+        event: {
+          type: "app_mention",
+          user: value.ownerSlackUserId,
+          channel: channelId,
+          ts,
+          text: "please decide",
+        },
+      });
+    expect((await ask("first", "1700000900.0001")).status).toBe(200);
+    await drainAll(value.deps);
+    const [pending] = await shared!.admin<{ id: string }[]>`
+      select id from slack_route_prompts
+      where connection_id = ${value.connectionId} and status = 'pending'`;
+    expect(pending?.id).toBeTruthy();
+
+    // Nobody clicks, and the card ages out.
+    await shared!.admin`
+      update slack_route_prompts set expires_at = now() - interval '1 minute'
+      where id = ${pending!.id}::uuid`;
+
+    expect((await ask("second", "1700000900.0002")).status).toBe(200);
+    await drainAll(value.deps);
+    const rows = await shared!.admin<{ id: string; status: string }[]>`
+      select id, status from slack_route_prompts
+      where connection_id = ${value.connectionId} order by created_at`;
+    // The dead row is settled and a fresh question is asked, rather than the
+    // channel silently swallowing every later message forever.
+    expect(rows.map((row) => row.status)).toEqual(["expired", "pending"]);
+  });
+
+  test("asking one person in a channel does not swallow another person's request", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+      linkOther: true,
+    });
+    // Both people must be genuinely ambiguous, or the sole-candidate rule
+    // correctly answers for them without asking.
+    await grantWorkspaceAccess(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.routed!.workspaceId,
+      subjectId: value.otherSubjectId,
+      permissions: ["sessions:create", "sessions:read", "sessions:control"],
+    });
+    const channelId = "C_TWO_PEOPLE";
+    for (const [suffix, user, ts] of [
+      ["owner", value.ownerSlackUserId, "1700001000.0001"],
+      ["other", value.otherSlackUserId, "1700001000.0002"],
+    ] as const) {
+      expect(
+        (
+          await postEvent(value.app, {
+            teamId: value.teamId,
+            eventId: `E_TWO_${suffix}_${crypto.randomUUID()}`,
+            event: {
+              type: "app_mention",
+              user,
+              channel: channelId,
+              ts,
+              text: "my own request",
+            },
+          })
+        ).status,
+      ).toBe(200);
+    }
+    await drainAll(value.deps);
+    const asked = await shared!.admin<{ slack_user_id: string }[]>`
+      select slack_user_id from slack_route_prompts
+      where connection_id = ${value.connectionId} and status = 'pending'
+      order by slack_user_id`;
+    expect(asked.map((row) => row.slack_user_id).sort()).toEqual(
+      [value.ownerSlackUserId, value.otherSlackUserId].sort(),
+    );
   });
 
   test("a routed workspace the person cannot reach never falls back to another one", async () => {
