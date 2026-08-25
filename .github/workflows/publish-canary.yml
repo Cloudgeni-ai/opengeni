@@ -47,4 +47,5 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
+          OPENGENI_RELEASE: "1"
         run: bun scripts/publish-canary.ts
