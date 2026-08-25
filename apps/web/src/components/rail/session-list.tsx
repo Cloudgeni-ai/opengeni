@@ -276,6 +276,7 @@ export function SessionList() {
     ...(hierarchyMode ? { parentSessionId: null } : {}),
     archivedOnly: false,
     pollIntervalMs: 15_000,
+    beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
   // Archive is a closed folder at the end of the normal session rail. Keep
   // its page independent so opening it never changes the active-session view.
@@ -293,6 +294,7 @@ export function SessionList() {
     limit: 1,
     pinsOnly: true,
     pollIntervalMs: 15_000,
+    beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
   // Workspace-shared channels back the user-facing workstreams. Unfiled roots
   // live in Recents even before the first workstream is created. The list is
@@ -318,6 +320,7 @@ export function SessionList() {
     loading,
     error,
     readRevision: rootReadRevision,
+    readGeneration: rootReadGeneration,
     refresh,
   } = rootPage;
   const { sessions: archivedSessions, refresh: refreshArchivedSessions } = archivedRootPage;
@@ -326,6 +329,7 @@ export function SessionList() {
     loading: globalPinsLoading,
     error: globalPinsError,
     pinnedTruncated: globalPinsTruncated,
+    readGeneration: globalPinsReadGeneration,
     refresh: refreshGlobalPins,
   } = globalPinPage;
   const pinned = hierarchyMode ? globalPinned : rootPage.pinned;
@@ -356,10 +360,9 @@ export function SessionList() {
   const [continuation, setContinuation] = useState(() => emptySessionContinuation(pageGeneration));
   const activeContinuation = activeSessionContinuation(continuation, pageGeneration);
   const extraSessions = activeContinuation.sessions;
-  const authoritativeExtraSessions = authoritativeSessionContinuation(
-    activeContinuation,
-    pageGeneration,
-    rootReadRevision,
+  const authoritativeExtraSessions = useMemo(
+    () => authoritativeSessionContinuation(activeContinuation, pageGeneration, rootReadRevision),
+    [activeContinuation, pageGeneration, rootReadRevision],
   );
   const continuationCursor =
     activeContinuation.nextCursor === undefined ? nextCursor : activeContinuation.nextCursor;
@@ -427,7 +430,8 @@ export function SessionList() {
   const pendingSessionFocus = useRef<PendingSessionFocus | null>(null);
   const [focusRestoreRevision, setFocusRestoreRevision] = useState(0);
   const channelMoveProbes = useRef(new Map<string, string>());
-  const listChannelProjectionOwner = useRef({});
+  const rootChannelProjectionOwner = useRef({});
+  const pinsChannelProjectionOwner = useRef({});
   const moveChannelProjectionOwner = useRef({});
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
     pollIntervalMs: 30_000,
@@ -436,22 +440,63 @@ export function SessionList() {
     () => [...childPages.values()].flatMap((page) => page.sessions),
     [childPages],
   );
+  const pinnedChannelReadGeneration = hierarchyMode ? globalPinsReadGeneration : rootReadGeneration;
+  const currentListChannelEvidence = useMemo(() => {
+    const evidence = new Map<string, { session: Session; readGeneration: number }>();
+    const add = (candidates: readonly Session[], readGeneration: number) => {
+      for (const session of candidates) {
+        const current = evidence.get(session.id);
+        if (!current || readGeneration >= current.readGeneration) {
+          evidence.set(session.id, { session, readGeneration });
+        }
+      }
+    };
+    add([...authoritativeExtraSessions, ...sessions], rootReadGeneration);
+    add(pinned, pinnedChannelReadGeneration);
+    return evidence;
+  }, [
+    authoritativeExtraSessions,
+    pinned,
+    pinnedChannelReadGeneration,
+    rootReadGeneration,
+    sessions,
+  ]);
   const listedSessions = useMemo(() => {
     const source = new Map<string, Session>();
     for (const session of [...extraSessions, ...sessions, ...loadedChildren, ...pinned]) {
       const current = source.get(session.id);
       source.set(session.id, current ? mergeSessionForRail(current, session) : session);
     }
-    return [...source.values()];
-  }, [extraSessions, loadedChildren, pinned, sessions]);
-  const channelAuthoritySessions = useMemo(() => {
-    const source = new Map<string, Session>();
-    for (const session of [...authoritativeExtraSessions, ...sessions, ...pinned]) {
-      const current = source.get(session.id);
-      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
-    }
-    return [...source.values()];
-  }, [authoritativeExtraSessions, pinned, sessions]);
+    return [...source.values()].map((session) => {
+      const evidence = currentListChannelEvidence.get(session.id);
+      const projected =
+        evidence && (session.channelId ?? null) !== (evidence.session.channelId ?? null)
+          ? { ...session, channelId: evidence.session.channelId ?? null }
+          : session;
+      return context.sessionChannelProjectionAuthority.project(
+        projected,
+        evidence?.readGeneration ?? 0,
+      );
+    });
+  }, [
+    context.sessionChannelProjectionAuthority,
+    currentListChannelEvidence,
+    extraSessions,
+    loadedChildren,
+    pinned,
+    sessions,
+  ]);
+  const rootChannelAuthoritySessions = useMemo(
+    () => [...authoritativeExtraSessions, ...sessions],
+    [authoritativeExtraSessions, sessions],
+  );
+  const channelAuthoritySessions = useMemo(
+    () =>
+      [...currentListChannelEvidence.values()].map(({ session, readGeneration }) =>
+        context.sessionChannelProjectionAuthority.project(session, readGeneration),
+      ),
+    [context.sessionChannelProjectionAuthority, currentListChannelEvidence],
+  );
   const channelAuthorityById = useMemo(
     () => new Map(channelAuthoritySessions.map((session) => [session.id, session])),
     [channelAuthoritySessions],
@@ -467,10 +512,30 @@ export function SessionList() {
     );
   }, [context.session, pageGeneration, rootReadRevision]);
   useLayoutEffect(() => {
-    const owner = listChannelProjectionOwner.current;
-    context.sessionChannelProjectionAuthority.replace(owner, channelAuthoritySessions);
+    const owner = rootChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      rootChannelAuthoritySessions,
+      0,
+      rootReadGeneration,
+    );
     return () => context.sessionChannelProjectionAuthority.clear(owner);
-  }, [channelAuthoritySessions, context.sessionChannelProjectionAuthority]);
+  }, [context.sessionChannelProjectionAuthority, rootChannelAuthoritySessions, rootReadGeneration]);
+  useLayoutEffect(() => {
+    const owner = pinsChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      hierarchyMode ? globalPinned : [],
+      0,
+      globalPinsReadGeneration,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [
+    context.sessionChannelProjectionAuthority,
+    globalPinned,
+    globalPinsReadGeneration,
+    hierarchyMode,
+  ]);
   useLayoutEffect(() => {
     const owner = moveChannelProjectionOwner.current;
     context.sessionChannelProjectionAuthority.replace(
@@ -556,9 +621,11 @@ export function SessionList() {
       const key = `${override.operation}:${listed?.channelId ?? "absent"}`;
       if (channelMoveProbes.current.get(sessionId) === key) continue;
       channelMoveProbes.current.set(sessionId, key);
+      const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
       void readSessionChannelMovePoint(sessionClient, rail.workspaceId, sessionId)
         .then((authoritative) => {
           if (channelMoveProbes.current.get(sessionId) !== key) return;
+          context.sessionChannelProjectionAuthority.recordRead(authoritative, readGeneration);
           setChannelMoveOverrides((current) =>
             reconcileSessionChannelMovePointRead(
               current,
@@ -586,7 +653,14 @@ export function SessionList() {
           }
         });
     }
-  }, [channelMoveOverrides, listedSessions, rail.workspaceId, sessionClient, setContextSession]);
+  }, [
+    channelMoveOverrides,
+    context.sessionChannelProjectionAuthority,
+    listedSessions,
+    rail.workspaceId,
+    sessionClient,
+    setContextSession,
+  ]);
 
   useEffect(() => {
     movingSessions.current.clear();

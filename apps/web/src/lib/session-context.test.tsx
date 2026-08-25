@@ -236,6 +236,80 @@ describe("session context equality", () => {
     ).toBe(remoteMoveDetail.channelId);
   });
 
+  test("rejects a late stale pins-only channel after newer root and detail evidence", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const rootOwner = {};
+    const pinsOwner = {};
+    const moveOwner = {};
+    const channelA = "00000000-0000-4000-8000-000000000202";
+    const channelB = "00000000-0000-4000-8000-000000000203";
+    const channelC = "00000000-0000-4000-8000-000000000204";
+    const staleFetchedSession = {
+      ...session(true, 2),
+      channelId: channelA,
+      status: "idle",
+    } as Session;
+    const stalePins = { ...staleFetchedSession };
+    const freshRoot = { ...staleFetchedSession, channelId: channelB, status: "running" } as Session;
+    const freshDetail = {
+      ...freshRoot,
+      effectiveControl: {
+        ...effectiveControl,
+        controlVersion: 2,
+        controlEtag: "active-2",
+      },
+    } as Session;
+
+    // The pins-only request starts first and remains gated while root and
+    // exact detail reads observe the remote move to B.
+    const stalePinsGeneration = authority.beginRead();
+    const rootGeneration = authority.beginRead();
+    authority.replace(rootOwner, [freshRoot], 0, rootGeneration);
+    const detailGeneration = authority.beginRead();
+    authority.recordRead(freshDetail, detailGeneration);
+    let current = mergeSessionContextProjection(stalePins, freshDetail, authority, "detail");
+    expect(current?.channelId).toBe(channelB);
+
+    // The old pins-only A response completes last. It may still contribute pin
+    // metadata, but its older request generation cannot regain channel ownership
+    // in either the rail or the open route.
+    authority.replace(pinsOwner, [stalePins], 0, stalePinsGeneration);
+    const projectedLatePins = authority.project(stalePins, stalePinsGeneration);
+    expect(projectedLatePins.channelId).toBe(channelB);
+    current = applySessionRailProjection(current!, projectedLatePins);
+    expect(current).toMatchObject({
+      channelId: channelB,
+      status: "running",
+      effectiveControl: freshDetail.effectiveControl,
+    });
+    expect(
+      mergeSessionContextProjection(current, staleFetchedSession, authority, "live"),
+    ).toMatchObject({ channelId: channelB, status: "idle", effectiveControl });
+
+    // An active optimistic move remains the higher-priority operation fence;
+    // clearing it restores the newest accepted read rather than stale pins.
+    const optimisticMove = { ...freshDetail, channelId: channelC };
+    authority.replace(moveOwner, [optimisticMove], 1);
+    expect(authority.owns(optimisticMove)).toBe(true);
+    authority.clear(moveOwner);
+    expect(authority.project(stalePins, stalePinsGeneration).channelId).toBe(channelB);
+
+    // Workspace identity remains part of the evidence key, and a pins page
+    // that actually starts later is legitimate new authority.
+    expect(
+      authority.project(
+        {
+          ...stalePins,
+          workspaceId: "00000000-0000-4000-8000-000000000099",
+        },
+        stalePinsGeneration,
+      ).channelId,
+    ).toBe(channelA);
+    const freshPinsGeneration = authority.beginRead();
+    authority.replace(pinsOwner, [stalePins], 0, freshPinsGeneration);
+    expect(authority.project(stalePins, freshPinsGeneration).channelId).toBe(channelA);
+  });
+
   test("releases a rolled-back move fence so detail can restore the prior project", () => {
     const authority = new SessionChannelProjectionAuthority();
     const listOwner = {};

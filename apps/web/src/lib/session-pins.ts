@@ -10,6 +10,12 @@ const outboundChannels = new Map<string, BroadcastChannel>();
 
 type SessionTreeStats = NonNullable<Session["treeStats"]>;
 type SessionChannelProjection = Pick<Session, "id" | "workspaceId" | "channelId">;
+type SessionChannelEvidence = {
+  channelId: string | null;
+  priority: number;
+  readGeneration: number;
+};
+type SessionChannelRead = Omit<SessionChannelEvidence, "priority">;
 
 function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspaceId">): string {
   return `${projection.workspaceId}\u0000${projection.id}`;
@@ -22,12 +28,21 @@ function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspace
 export class SessionChannelProjectionAuthority {
   private readonly projectionsByOwner = new Map<
     object,
-    ReadonlyMap<string, { channelId: string | null; priority: number }>
+    ReadonlyMap<string, SessionChannelEvidence>
   >();
+  private readonly acceptedReads = new Map<string, SessionChannelRead>();
+  private nextReadGeneration = 0;
 
-  replace(owner: object, projections: readonly SessionChannelProjection[], priority = 0): void {
+  readonly beginRead = (): number => ++this.nextReadGeneration;
+
+  replace(
+    owner: object,
+    projections: readonly SessionChannelProjection[],
+    priority = 0,
+    readGeneration = 0,
+  ): void {
     if (projections.length === 0) {
-      this.projectionsByOwner.delete(owner);
+      this.clear(owner);
       return;
     }
     this.projectionsByOwner.set(
@@ -35,7 +50,7 @@ export class SessionChannelProjectionAuthority {
       new Map(
         projections.map((projection) => [
           sessionChannelProjectionKey(projection),
-          { channelId: projection.channelId ?? null, priority },
+          { channelId: projection.channelId ?? null, priority, readGeneration },
         ]),
       ),
     );
@@ -45,19 +60,52 @@ export class SessionChannelProjectionAuthority {
     this.projectionsByOwner.delete(owner);
   }
 
+  /** Retain an accepted exact/detail read so older list requests cannot revive stale filing. */
+  recordRead(projection: SessionChannelProjection, readGeneration: number): void {
+    if (readGeneration <= 0) return;
+    const key = sessionChannelProjectionKey(projection);
+    const current = this.acceptedReads.get(key);
+    if (current && current.readGeneration >= readGeneration) return;
+    this.acceptedReads.set(key, {
+      channelId: projection.channelId ?? null,
+      readGeneration,
+    });
+    if (this.acceptedReads.size > 512) {
+      this.acceptedReads.delete(this.acceptedReads.keys().next().value!);
+    }
+  }
+
+  project<T extends SessionChannelProjection>(projection: T, readGeneration: number): T {
+    const accepted = this.acceptedReads.get(sessionChannelProjectionKey(projection));
+    if (
+      !accepted ||
+      accepted.readGeneration <= readGeneration ||
+      accepted.channelId === (projection.channelId ?? null)
+    ) {
+      return projection;
+    }
+    return { ...projection, channelId: accepted.channelId };
+  }
+
   owns(projection: SessionChannelProjection | null): boolean {
     if (!projection) return false;
     const key = sessionChannelProjectionKey(projection);
     const channelId = projection.channelId ?? null;
-    let highestPriority = Number.NEGATIVE_INFINITY;
-    let owned = false;
+    const accepted = this.acceptedReads.get(key);
+    let highestPriority = accepted ? 0 : Number.NEGATIVE_INFINITY;
+    let highestGeneration = accepted?.readGeneration ?? Number.NEGATIVE_INFINITY;
+    let owned = accepted?.channelId === channelId;
     for (const projections of this.projectionsByOwner.values()) {
       const candidate = projections.get(key);
       if (!candidate || candidate.priority < highestPriority) continue;
-      if (candidate.priority > highestPriority) {
+      if (candidate.priority > highestPriority || candidate.readGeneration > highestGeneration) {
         highestPriority = candidate.priority;
+        highestGeneration = candidate.readGeneration;
         owned = candidate.channelId === channelId;
-      } else if (candidate.channelId === channelId) {
+      } else if (
+        candidate.readGeneration === highestGeneration &&
+        candidate.channelId === channelId
+      ) {
         owned = true;
       }
     }

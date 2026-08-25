@@ -46,6 +46,23 @@ describe("session pin reconciliation", () => {
     ).toBe(updated);
   });
 
+  test("prefers a newer root read over a late older pins-only owner", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const rootOwner = {};
+    const pinsOwner = {};
+    const rootProjection = { ...session, channelId: "channel-new" } as Session;
+    const stalePinsProjection = { ...session, channelId: "channel-old" } as Session;
+
+    authority.replace(rootOwner, [rootProjection], 0, 2);
+    authority.replace(pinsOwner, [stalePinsProjection], 0, 1);
+
+    expect(authority.owns(rootProjection)).toBe(true);
+    expect(authority.owns(stalePinsProjection)).toBe(false);
+
+    authority.replace(pinsOwner, [stalePinsProjection], 0, 3);
+    expect(authority.owns(stalePinsProjection)).toBe(true);
+  });
+
   test("merges only authoritative personal pin fields", () => {
     const updated = applySessionPinProjection(session, {
       id: session.id,

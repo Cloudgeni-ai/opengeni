@@ -111,8 +111,13 @@ describe("session control surface architecture", () => {
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
     expect(list).toContain("readSessionChannelMovePoint(sessionClient");
     expect(list).toContain("sessionChannelProjectionAuthority.replace(");
+    expect(list).toContain("rootReadGeneration");
+    expect(list).toContain("globalPinsReadGeneration");
+    expect(list).toContain("pinsChannelProjectionOwner");
+    expect(list).toContain("currentListChannelEvidence");
+    expect(list).toContain("sessionChannelProjectionAuthority.project(");
     expect(list).toContain("authoritativeSessionContinuation(");
-    expect(list).toContain("replace(owner, channelAuthoritySessions)");
+    expect(list).not.toContain("replace(owner, channelAuthoritySessions)");
     expect(list).not.toContain("replace(owner, listedSessions)");
     expect(list).toContain("applySessionRailProjection(session, projected, { channelOwned })");
     expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
@@ -120,6 +125,8 @@ describe("session control surface architecture", () => {
     expect(list).toContain("requestError.status === 404");
     expect(move).toContain("getSession(workspaceId, sessionId, { fresh: true })");
     expect(route).toContain("readRevision: sessionReadRevision");
+    expect(route).toContain("readGeneration: sessionReadGeneration");
+    expect(route).toContain("sessionChannelProjectionAuthority.recordRead(");
     expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "detail"');
     expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "live"');
   });

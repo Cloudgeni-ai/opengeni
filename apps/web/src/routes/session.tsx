@@ -199,8 +199,12 @@ export function SessionRoute({
     loading,
     error: loadError,
     readRevision: sessionReadRevision,
+    readGeneration: sessionReadGeneration,
     refresh: refreshSession,
-  } = useSession(sessionId, { events });
+  } = useSession(sessionId, {
+    events,
+    beginRead: context.sessionChannelProjectionAuthority.beginRead,
+  });
   const creationHandoff =
     context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
       ? context.sessionCreationHandoff
@@ -308,6 +312,7 @@ export function SessionRoute({
       return;
     }
     reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
+    context.sessionChannelProjectionAuthority.recordRead(fetchedSession, sessionReadGeneration);
     setContextSession((current) =>
       mergeSessionContextProjection(
         current,
@@ -320,6 +325,7 @@ export function SessionRoute({
     context.sessionChannelProjectionAuthority,
     fetchedSession,
     sessionId,
+    sessionReadGeneration,
     sessionReadRevision,
     setContextSession,
   ]);

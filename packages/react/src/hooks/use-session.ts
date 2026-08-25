@@ -12,6 +12,8 @@ export type UseSessionOptions = EmbeddedSessionReadClientOverride &
   SessionEventFeedOptions & {
     /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
     pollIntervalMs?: number | undefined;
+    /** Optional shared causal clock invoked when each network read starts. */
+    beginRead?: (() => number) | undefined;
   };
 
 export type UseSessionResult = {
@@ -20,6 +22,8 @@ export type UseSessionResult = {
   error: Error | null;
   /** Monotonic revision of accepted authoritative detail reads. */
   readRevision: number;
+  /** Causal generation captured when the accepted network read started. */
+  readGeneration: number;
   refresh: () => Promise<void>;
   /** Manually rename the session (PATCH, source='user'). Returns the updated session, or null on failure. */
   updateTitle: (title: string) => Promise<Session | null>;
@@ -44,16 +48,23 @@ export function useSession(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [override, setOverride] = useState<Session | null>(null);
   const nextReadRevision = useRef(0);
+  const nextReadGeneration = useRef(0);
+  const beginRead = options.beginRead;
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const load = useCallback(async () => {
     if (!sessionId) {
       return null;
     }
+    const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
     const fetched = await client.getSession(workspaceId, sessionId, { fresh: true });
     // A fresh server read supersedes any optimistic/event-driven override.
     setOverride(null);
-    return { session: fetched, revision: ++nextReadRevision.current };
-  }, [client, workspaceId, sessionId]);
+    return {
+      session: fetched,
+      revision: ++nextReadRevision.current,
+      readGeneration,
+    };
+  }, [beginRead, client, workspaceId, sessionId]);
   const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled,
@@ -68,6 +79,7 @@ export function useSession(
 
   const base = data?.session ?? null;
   const readRevision = data?.revision ?? 0;
+  const readGeneration = data?.readGeneration ?? 0;
   // The override only ever carries title/titleSource patches; it is reset on
   // every fresh load so it can never go stale against the server snapshot.
   const session = useMemo(
@@ -123,6 +135,7 @@ export function useSession(
     loading,
     error,
     readRevision,
+    readGeneration,
     refresh,
     updateTitle,
     updating: mutating,

@@ -14,6 +14,8 @@ export type UseWorkspaceSessionsOptions = ClientOverride & {
   /** Refresh interval (ms) for fleet/manager views. Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
+  /** Optional shared causal clock invoked when each network read starts. */
+  beginRead?: (() => number) | undefined;
 };
 
 export type UseWorkspaceSessionsResult = {
@@ -31,6 +33,8 @@ export type UseWorkspaceSessionsResult = {
   error: Error | null;
   /** Monotonic revision of accepted authoritative list-page reads. */
   readRevision: number;
+  /** Causal generation captured when the accepted network read started. */
+  readGeneration: number;
   refresh: () => Promise<void>;
 };
 
@@ -47,6 +51,8 @@ export function useWorkspaceSessions(
   const archivedOnly = options.archivedOnly;
   const enabled = options.enabled ?? true;
   const nextReadRevision = useRef(0);
+  const nextReadGeneration = useRef(0);
+  const beginRead = options.beginRead;
   const queryKey = [
     workspaceId,
     limit ?? "",
@@ -62,6 +68,7 @@ export function useWorkspaceSessions(
     previousQueryKey.current = queryKey;
   }, [queryKey]);
   const load = useCallback(async () => {
+    const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
     const page = await client.listSessionPage(workspaceId, {
       ...(limit !== undefined ? { limit } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
@@ -70,8 +77,14 @@ export function useWorkspaceSessions(
       ...(pinsOnly ? { pinsOnly: true } : {}),
       ...(archivedOnly ? { archivedOnly: true } : {}),
     });
-    return { queryKey, page, revision: ++nextReadRevision.current };
+    return {
+      queryKey,
+      page,
+      revision: ++nextReadRevision.current,
+      readGeneration,
+    };
   }, [
+    beginRead,
     client,
     workspaceId,
     limit,
@@ -111,6 +124,7 @@ export function useWorkspaceSessions(
         (state.data !== null && state.data.queryKey !== queryKey)),
     error: state.error,
     readRevision: page ? (state.data?.revision ?? 0) : 0,
+    readGeneration: page ? (state.data?.readGeneration ?? 0) : 0,
     refresh: state.refresh,
   };
 }

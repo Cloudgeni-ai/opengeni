@@ -312,6 +312,50 @@ describe("useWorkspaceSessions", () => {
     await hook.unmount();
   });
 
+  test("captures a shared causal generation when each list request starts", async () => {
+    let releaseInitial: (() => void) | null = null;
+    let nextGeneration = 40;
+    const started: number[] = [];
+    const beginRead = () => {
+      const generation = ++nextGeneration;
+      started.push(generation);
+      return generation;
+    };
+    const client = fakeClient({
+      listSessionPage: async () => {
+        if (started.length === 1) {
+          await new Promise<void>((resolve) => {
+            releaseInitial = resolve;
+          });
+        }
+        return {
+          pinned: [],
+          sessions: [{ id: `session-${started.length}` } as never],
+          nextCursor: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID, beginRead }),
+      undefined,
+    );
+    await flush();
+
+    expect(started).toEqual([41]);
+    expect(hook.result.current.readGeneration).toBe(0);
+    await reactAct(async () => releaseInitial!());
+    await flush();
+    expect(hook.result.current.readGeneration).toBe(41);
+
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(started).toEqual([41, 42]);
+    expect(hook.result.current.readGeneration).toBe(42);
+    await hook.unmount();
+  });
+
   test("does not report a query transition as loading while disabled", async () => {
     const client = fakeClient({
       listSessionPage: async () => ({

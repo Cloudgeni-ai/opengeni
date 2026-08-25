@@ -213,7 +213,11 @@ const budgets = {
   // larger merged envelope for both changes: one-KiB raw headroom and the
   // 1.5-KiB gzip platform-skew allowance. Every file-count, initial, per-file,
   // lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2124 * kib,
+  // Causal channel authority for independently polled root, pins-only, detail,
+  // and post-move reads measures 2,175,936 raw / 607,961 gzip bytes in the exact
+  // Linux/x64 production build. Advance only the raw graph to 2,126 KiB so the
+  // guard retains one KiB of headroom; every other cap remains fixed.
+  directSessionRaw: 2126 * kib,
   directSessionGzip: 595 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
