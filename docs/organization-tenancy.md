@@ -772,6 +772,8 @@ order is:
 
 ```
 advisory 'organization-membership:<organization id>'
+  -> shared advisory 'session-tenancy:<workspace id>' for every organization
+     workspace in UUID order (after the 0345 protocol cutover)
   -> managed_accounts FOR KEY SHARE
   -> per workspace, in UUID order:
        workspace_inference_controls FOR SHARE
@@ -780,6 +782,15 @@ advisory 'organization-membership:<organization id>'
   -> sessions FOR NO KEY UPDATE -> session_turns FOR UPDATE
   -> session_turn_attempts FOR UPDATE
 ```
+
+The 0345 session-tenancy cutover extends the same prefix to every privileged
+membership lifecycle entry point, including the preparation seam and the
+wrapped 0263 body. The shared workspace fences do not stall ordinary session
+writers, but they exclude a concurrent visibility transition or fork before
+the lifecycle takes any session row lock or performs any session mutation.
+Retention database finalization uses the same sorted organization-wide shared
+fence set because it can pause scheduled tasks in any organization workspace
+before deleting the revoked member's personal workspace and its cascades.
 
 **Do not reintroduce a conflicting organization row lock.** Any new
 organization-wide seam that both locks `managed_accounts` more strongly than

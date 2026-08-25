@@ -2,6 +2,109 @@
 SET lock_timeout = '5s';
 SET statement_timeout = '10min';
 
+-- opengeni_private contains historical singleton worker routines, so one
+-- database can support exactly one dedicated OpenGeni target schema. Bind the
+-- protocol before any shared CREATE OR REPLACE or target-schema mutation. A
+-- same-target migration-ledger replay is harmless; a different target must
+-- stop before it can repin a global routine or install a partial helper set.
+CREATE TABLE IF NOT EXISTS opengeni_private.session_tenancy_fence_target_registry (
+  singleton boolean NOT NULL,
+  target_schema regnamespace NOT NULL,
+  CONSTRAINT session_tenancy_fence_target_registry_pk PRIMARY KEY (singleton),
+  CONSTRAINT session_tenancy_fence_target_registry_singleton_chk CHECK (singleton)
+);
+
+REVOKE ALL ON TABLE
+  opengeni_private.session_tenancy_fence_target_registry
+  FROM PUBLIC;
+
+DO $session_tenancy_fence_target_registry_contract$
+DECLARE
+  registry_table oid := pg_catalog.to_regclass(
+    'opengeni_private.session_tenancy_fence_target_registry'
+  );
+  actual_columns text[];
+  actual_constraints text[];
+  registered_target pg_catalog.regnamespace;
+  requested_target pg_catalog.regnamespace :=
+    pg_catalog.current_schema()::pg_catalog.regnamespace;
+BEGIN
+  IF registry_table IS NULL OR NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_class relation
+    WHERE relation.oid = registry_table
+      AND relation.relkind = 'r'
+      AND relation.relowner = current_user::pg_catalog.regrole
+  ) THEN
+    RAISE EXCEPTION '0345 session tenancy target registry owner/type drift'
+      USING ERRCODE = '55000';
+  END IF;
+  SELECT pg_catalog.array_agg(
+    attribute.attname || ':'
+      || pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) || ':'
+      || attribute.attnotnull::text
+    ORDER BY attribute.attnum
+  ) INTO actual_columns
+  FROM pg_catalog.pg_attribute attribute
+  WHERE attribute.attrelid = registry_table
+    AND attribute.attnum > 0
+    AND NOT attribute.attisdropped;
+  IF actual_columns IS DISTINCT FROM ARRAY[
+    'singleton:boolean:true',
+    'target_schema:regnamespace:true'
+  ]::text[] THEN
+    RAISE EXCEPTION '0345 session tenancy target registry column drift'
+      USING ERRCODE = '55000', DETAIL = actual_columns::text;
+  END IF;
+  SELECT pg_catalog.array_agg(
+    constraint_value.conname || ':' || constraint_value.contype::text || ':'
+      || pg_catalog.pg_get_constraintdef(constraint_value.oid, false)
+    ORDER BY constraint_value.conname
+  ) INTO actual_constraints
+  FROM pg_catalog.pg_constraint constraint_value
+  WHERE constraint_value.conrelid = registry_table;
+  IF actual_constraints IS DISTINCT FROM ARRAY[
+    'session_tenancy_fence_target_registry_pk:p:PRIMARY KEY (singleton)',
+    'session_tenancy_fence_target_registry_singleton_chk:c:CHECK (singleton)'
+  ]::text[] THEN
+    RAISE EXCEPTION '0345 session tenancy target registry constraint drift'
+      USING ERRCODE = '55000', DETAIL = actual_constraints::text;
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_class relation
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      COALESCE(
+        relation.relacl,
+        pg_catalog.acldefault('r', relation.relowner)
+      )
+    ) acl
+    WHERE relation.oid = registry_table
+      AND acl.grantee <> relation.relowner
+  ) THEN
+    RAISE EXCEPTION '0345 session tenancy target registry ACL drift'
+      USING ERRCODE = '55000';
+  END IF;
+
+  INSERT INTO opengeni_private.session_tenancy_fence_target_registry (
+    singleton, target_schema
+  ) VALUES (true, requested_target)
+  ON CONFLICT (singleton) DO NOTHING;
+
+  SELECT registry.target_schema
+  INTO registered_target
+  FROM opengeni_private.session_tenancy_fence_target_registry registry
+  WHERE registry.singleton
+  FOR UPDATE;
+  IF registered_target IS DISTINCT FROM requested_target THEN
+    RAISE EXCEPTION
+      '0345 session tenancy target schema is already bound to %, not %',
+      registered_target,
+      requested_target
+      USING ERRCODE = '55000';
+  END IF;
+END
+$session_tenancy_fence_target_registry_contract$;
+
 -- This is a protocol cutover, not merely a convention in the new TypeScript
 -- image. Every hot-table mutation must arrive with the workspace fence already
 -- held; the trigger deliberately refuses to acquire it after PostgreSQL may
@@ -55,43 +158,830 @@ $fence$;
 
 REVOKE ALL ON FUNCTION opengeni_private.require_session_tenancy_fence() FROM PUBLIC;
 
+-- FORCE RLS also applies to the non-bypass migration owner that owns these
+-- SECURITY-DEFINER routines. A global sweep cannot know which workspace
+-- fences to take until it can read a bounded workspace-id inventory, so give
+-- only the private helpers below an exact-schema/backend/xact-bound read
+-- capability. Every open gets an independent token: if an inner helper raises,
+-- its insert rolls back before its exception handler runs, so closing that
+-- exact token cannot consume an outer helper's authority. The capability is
+-- closed before the helper returns any count. Once the fences are held, a
+-- second owner-only policy admits the routine's actual reads and mutations for
+-- those exact workspaces. opengeni_app cannot mint the capability, and merely
+-- acquiring an advisory lock does not satisfy the current_user owner check.
+CREATE TABLE IF NOT EXISTS opengeni_private.session_tenancy_fence_inventory_capabilities (
+  capability_id uuid PRIMARY KEY,
+  target_schema oid NOT NULL,
+  backend_pid integer NOT NULL,
+  transaction_id xid8 NOT NULL
+);
+
+REVOKE ALL ON TABLE
+  opengeni_private.session_tenancy_fence_inventory_capabilities
+  FROM PUBLIC;
+
+-- opengeni_private is shared by dedicated target schemas. A second target may
+-- reuse this ledger only when the first target installed the exact owner,
+-- shape, primary key, and closed ACL expected here; otherwise stop rather than
+-- inheriting ambiguous authority.
+DO $session_tenancy_fence_inventory_contract$
+DECLARE
+  capability_table oid := pg_catalog.to_regclass(
+    'opengeni_private.session_tenancy_fence_inventory_capabilities'
+  );
+  actual_columns text[];
+  primary_key_columns text[];
+BEGIN
+  IF capability_table IS NULL THEN
+    RAISE EXCEPTION '0345 session tenancy inventory ledger is missing'
+      USING ERRCODE = '55000';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_class relation
+    WHERE relation.oid = capability_table
+      AND relation.relkind = 'r'
+      AND relation.relowner = current_user::pg_catalog.regrole
+  ) THEN
+    RAISE EXCEPTION '0345 session tenancy inventory ledger owner/type drift'
+      USING ERRCODE = '55000';
+  END IF;
+  SELECT pg_catalog.array_agg(
+    attribute.attname || ':'
+      || pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) || ':'
+      || attribute.attnotnull::text
+    ORDER BY attribute.attnum
+  ) INTO actual_columns
+  FROM pg_catalog.pg_attribute attribute
+  WHERE attribute.attrelid = capability_table
+    AND attribute.attnum > 0
+    AND NOT attribute.attisdropped;
+  IF actual_columns IS DISTINCT FROM ARRAY[
+    'capability_id:uuid:true',
+    'target_schema:oid:true',
+    'backend_pid:integer:true',
+    'transaction_id:xid8:true'
+  ]::text[] THEN
+    RAISE EXCEPTION '0345 session tenancy inventory ledger column drift'
+      USING ERRCODE = '55000', DETAIL = actual_columns::text;
+  END IF;
+  SELECT pg_catalog.array_agg(attribute.attname ORDER BY key.ordinality)
+  INTO primary_key_columns
+  FROM pg_catalog.pg_constraint constraint_value
+  CROSS JOIN LATERAL pg_catalog.unnest(constraint_value.conkey)
+    WITH ORDINALITY key(attnum, ordinality)
+  JOIN pg_catalog.pg_attribute attribute
+    ON attribute.attrelid = constraint_value.conrelid
+    AND attribute.attnum = key.attnum
+  WHERE constraint_value.conrelid = capability_table
+    AND constraint_value.contype = 'p';
+  IF primary_key_columns IS DISTINCT FROM ARRAY['capability_id']::text[]
+    OR (
+      SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint constraint_value
+      WHERE constraint_value.conrelid = capability_table
+    ) <> 1
+  THEN
+    RAISE EXCEPTION '0345 session tenancy inventory ledger constraint drift'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_class relation
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      COALESCE(
+        relation.relacl,
+        pg_catalog.acldefault('r', relation.relowner)
+      )
+    ) acl
+    WHERE relation.oid = capability_table
+      AND acl.grantee <> relation.relowner
+  ) THEN
+    RAISE EXCEPTION '0345 session tenancy inventory ledger ACL drift'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$session_tenancy_fence_inventory_contract$;
+
+CREATE OR REPLACE FUNCTION
+  opengeni_private.session_tenancy_fence_inventory_capability_active(
+    p_target_schema oid
+  )
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $inventory_active$
+  SELECT EXISTS (
+    SELECT 1
+    FROM opengeni_private.session_tenancy_fence_inventory_capabilities capability
+    WHERE capability.target_schema = p_target_schema
+      AND capability.backend_pid = pg_catalog.pg_backend_pid()
+      AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+  )
+$inventory_active$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.session_tenancy_fence_inventory_capability_active(oid)
+  FROM PUBLIC;
+
+CREATE OR REPLACE FUNCTION
+  opengeni_private.open_session_tenancy_fence_inventory(p_target_schema oid)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $open_inventory$
+DECLARE
+  capability_id_value uuid := pg_catalog.gen_random_uuid();
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_namespace namespace
+    JOIN opengeni_private.session_tenancy_fence_target_registry registry
+      ON registry.target_schema = namespace.oid
+      AND registry.singleton
+    WHERE namespace.oid = p_target_schema
+  ) THEN
+    RAISE EXCEPTION 'session tenancy inventory target schema is not registered'
+      USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO opengeni_private.session_tenancy_fence_inventory_capabilities (
+    capability_id, target_schema, backend_pid, transaction_id
+  ) VALUES (
+    capability_id_value,
+    p_target_schema,
+    pg_catalog.pg_backend_pid(),
+    pg_catalog.pg_current_xact_id()
+  );
+  RETURN capability_id_value;
+END
+$open_inventory$;
+
+CREATE OR REPLACE FUNCTION
+  opengeni_private.close_session_tenancy_fence_inventory(p_capability_id uuid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $close_inventory$
+  DELETE FROM opengeni_private.session_tenancy_fence_inventory_capabilities
+  WHERE capability_id = p_capability_id
+    AND backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+$close_inventory$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.open_session_tenancy_fence_inventory(oid)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_private.close_session_tenancy_fence_inventory(uuid)
+  FROM PUBLIC;
+
+-- Inventory authority ends before a helper returns. The caller may still need
+-- owner-side RLS access while it mutates the rows protected by the locks, so
+-- that phase has a separate exact-token capability. It is opened only after
+-- all affected workspace fences are held and is closed by the patched caller
+-- on both success and exception.
+CREATE TABLE IF NOT EXISTS opengeni_private.session_tenancy_fenced_access_capabilities (
+  capability_id uuid PRIMARY KEY,
+  target_schema oid NOT NULL,
+  backend_pid integer NOT NULL,
+  transaction_id xid8 NOT NULL
+);
+
+REVOKE ALL ON TABLE
+  opengeni_private.session_tenancy_fenced_access_capabilities
+  FROM PUBLIC;
+
+DO $session_tenancy_fenced_access_contract$
+DECLARE
+  capability_table oid := pg_catalog.to_regclass(
+    'opengeni_private.session_tenancy_fenced_access_capabilities'
+  );
+  actual_columns text[];
+  primary_key_columns text[];
+BEGIN
+  IF capability_table IS NULL OR NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_class relation
+    WHERE relation.oid = capability_table
+      AND relation.relkind = 'r'
+      AND relation.relowner = current_user::pg_catalog.regrole
+  ) THEN
+    RAISE EXCEPTION '0345 session tenancy fenced-access ledger owner/type drift'
+      USING ERRCODE = '55000';
+  END IF;
+  SELECT pg_catalog.array_agg(
+    attribute.attname || ':'
+      || pg_catalog.format_type(attribute.atttypid, attribute.atttypmod) || ':'
+      || attribute.attnotnull::text
+    ORDER BY attribute.attnum
+  ) INTO actual_columns
+  FROM pg_catalog.pg_attribute attribute
+  WHERE attribute.attrelid = capability_table
+    AND attribute.attnum > 0
+    AND NOT attribute.attisdropped;
+  IF actual_columns IS DISTINCT FROM ARRAY[
+    'capability_id:uuid:true',
+    'target_schema:oid:true',
+    'backend_pid:integer:true',
+    'transaction_id:xid8:true'
+  ]::text[] THEN
+    RAISE EXCEPTION '0345 session tenancy fenced-access ledger column drift'
+      USING ERRCODE = '55000', DETAIL = actual_columns::text;
+  END IF;
+  SELECT pg_catalog.array_agg(attribute.attname ORDER BY key.ordinality)
+  INTO primary_key_columns
+  FROM pg_catalog.pg_constraint constraint_value
+  CROSS JOIN LATERAL pg_catalog.unnest(constraint_value.conkey)
+    WITH ORDINALITY key(attnum, ordinality)
+  JOIN pg_catalog.pg_attribute attribute
+    ON attribute.attrelid = constraint_value.conrelid
+    AND attribute.attnum = key.attnum
+  WHERE constraint_value.conrelid = capability_table
+    AND constraint_value.contype = 'p';
+  IF primary_key_columns IS DISTINCT FROM ARRAY['capability_id']::text[]
+    OR (
+      SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint constraint_value
+      WHERE constraint_value.conrelid = capability_table
+    ) <> 1
+    OR EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_class relation
+      CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(
+          relation.relacl,
+          pg_catalog.acldefault('r', relation.relowner)
+        )
+      ) acl
+      WHERE relation.oid = capability_table
+        AND acl.grantee <> relation.relowner
+    )
+  THEN
+    RAISE EXCEPTION '0345 session tenancy fenced-access ledger constraint/ACL drift'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$session_tenancy_fenced_access_contract$;
+
+CREATE OR REPLACE FUNCTION
+  opengeni_private.open_session_tenancy_fenced_access(p_target_schema oid)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $open_fenced_access$
+DECLARE
+  capability_id_value uuid := pg_catalog.gen_random_uuid();
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_namespace namespace
+    JOIN opengeni_private.session_tenancy_fence_target_registry registry
+      ON registry.target_schema = namespace.oid
+      AND registry.singleton
+    WHERE namespace.oid = p_target_schema
+  ) THEN
+    RAISE EXCEPTION 'session tenancy fenced-access target schema is not registered'
+      USING ERRCODE = '22023';
+  END IF;
+  INSERT INTO opengeni_private.session_tenancy_fenced_access_capabilities (
+    capability_id, target_schema, backend_pid, transaction_id
+  ) VALUES (
+    capability_id_value,
+    p_target_schema,
+    pg_catalog.pg_backend_pid(),
+    pg_catalog.pg_current_xact_id()
+  );
+  RETURN capability_id_value;
+END
+$open_fenced_access$;
+
+CREATE OR REPLACE FUNCTION
+  opengeni_private.close_session_tenancy_fenced_access(p_capability_id uuid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $close_fenced_access$
+  DELETE FROM opengeni_private.session_tenancy_fenced_access_capabilities
+  WHERE capability_id = p_capability_id
+    AND backend_pid = pg_catalog.pg_backend_pid()
+    AND transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+$close_fenced_access$;
+
+CREATE OR REPLACE FUNCTION
+  opengeni_private.session_tenancy_fenced_access_capability_active(
+    p_target_schema oid
+  )
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $fenced_access_active$
+  SELECT EXISTS (
+    SELECT 1
+    FROM opengeni_private.session_tenancy_fenced_access_capabilities capability
+    WHERE capability.target_schema = p_target_schema
+      AND capability.backend_pid = pg_catalog.pg_backend_pid()
+      AND capability.transaction_id = pg_catalog.pg_current_xact_id_if_assigned()
+  )
+$fenced_access_active$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.open_session_tenancy_fenced_access(oid)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_private.close_session_tenancy_fenced_access(uuid)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_private.session_tenancy_fenced_access_capability_active(oid)
+  FROM PUBLIC;
+
+-- CREATE OR REPLACE preserves a function's owner and direct role grants. Do
+-- not let a pre-existing same-signature object silently retain mint/close or
+-- capability-observation authority. All six shared seams must be owned only by
+-- this migration owner and executable by no other role.
+DO $session_tenancy_shared_capability_function_contract$
+DECLARE
+  signature text;
+  routine oid;
+BEGIN
+  FOREACH signature IN ARRAY ARRAY[
+    'opengeni_private.session_tenancy_fence_inventory_capability_active(oid)',
+    'opengeni_private.open_session_tenancy_fence_inventory(oid)',
+    'opengeni_private.close_session_tenancy_fence_inventory(uuid)',
+    'opengeni_private.session_tenancy_fenced_access_capability_active(oid)',
+    'opengeni_private.open_session_tenancy_fenced_access(oid)',
+    'opengeni_private.close_session_tenancy_fenced_access(uuid)'
+  ] LOOP
+    routine := pg_catalog.to_regprocedure(signature);
+    IF routine IS NULL OR NOT EXISTS (
+      SELECT 1 FROM pg_catalog.pg_proc procedure
+      WHERE procedure.oid = routine
+        AND procedure.proowner = current_user::pg_catalog.regrole
+        AND procedure.prosecdef
+    ) THEN
+      RAISE EXCEPTION
+        '0345 shared session tenancy capability function owner/type drift: %',
+        signature USING ERRCODE = '55000';
+    END IF;
+    IF EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_proc procedure
+      CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(
+          procedure.proacl,
+          pg_catalog.acldefault('f', procedure.proowner)
+        )
+      ) acl
+      WHERE procedure.oid = routine
+        AND acl.grantee <> procedure.proowner
+    ) THEN
+      RAISE EXCEPTION
+        '0345 shared session tenancy capability function ACL drift: %',
+        signature USING ERRCODE = '55000';
+    END IF;
+  END LOOP;
+END
+$session_tenancy_shared_capability_function_contract$;
+
+-- The target identity is a literal namespace OID captured by this migration,
+-- not a search_path-, GUC-, or caller-controlled string. Each dedicated schema
+-- owns a separate copy, so later target migrations cannot overwrite it.
+DO $session_tenancy_fence_target_identity$
+DECLARE
+  target_schema text := pg_catalog.current_schema();
+  target_schema_oid oid := pg_catalog.current_schema()::pg_catalog.regnamespace;
+BEGIN
+  EXECUTE pg_catalog.format($identity$
+    CREATE OR REPLACE FUNCTION %1$I.session_tenancy_fence_target_schema()
+    RETURNS oid
+    LANGUAGE sql
+    IMMUTABLE
+    SECURITY DEFINER
+    SET search_path = pg_catalog
+    AS $body$ SELECT %2$s::oid $body$;
+    REVOKE ALL ON FUNCTION %1$I.session_tenancy_fence_target_schema() FROM PUBLIC;
+  $identity$, target_schema, target_schema_oid);
+END
+$session_tenancy_fence_target_identity$;
+
+CREATE OR REPLACE FUNCTION session_tenancy_fence_owner_policy_active(
+  p_actor text,
+  p_expected_owner text,
+  p_target_schema oid,
+  p_workspace_id uuid,
+  p_inventory boolean
+)
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $owner_policy$
+DECLARE
+  lock_key bigint;
+BEGIN
+  IF p_actor IS DISTINCT FROM p_expected_owner THEN
+    RETURN false;
+  END IF;
+  IF p_inventory THEN
+    RETURN opengeni_private.session_tenancy_fence_inventory_capability_active(
+      p_target_schema
+    );
+  END IF;
+  IF p_workspace_id IS NULL THEN
+    RETURN false;
+  END IF;
+  IF NOT opengeni_private.session_tenancy_fenced_access_capability_active(
+    p_target_schema
+  ) THEN
+    RETURN false;
+  END IF;
+  lock_key := pg_catalog.hashtextextended(
+    'session-tenancy:' || p_workspace_id::text,
+    0
+  );
+  RETURN EXISTS (
+    SELECT 1 FROM pg_catalog.pg_locks held
+    WHERE held.locktype = 'advisory'
+      AND held.pid = pg_catalog.pg_backend_pid()
+      AND held.granted
+      AND held.classid = (((lock_key >> 32) & 4294967295)::bigint)::oid
+      AND held.objid = ((lock_key & 4294967295)::bigint)::oid
+      AND held.objsubid = 1
+      AND held.mode IN ('ShareLock', 'ExclusiveLock')
+  );
+END
+$owner_policy$;
+
+REVOKE ALL ON FUNCTION
+  session_tenancy_fence_owner_policy_active(text, text, oid, uuid, boolean)
+  FROM PUBLIC;
+-- This predicate returns only a boolean derived from its arguments and the
+-- current backend's private capability/lock state. Every runtime role must be
+-- able to plan RLS expressions that reference it; authority-minting functions
+-- and the ledger remain fully revoked.
+GRANT EXECUTE ON FUNCTION
+  session_tenancy_fence_owner_policy_active(text, text, oid, uuid, boolean)
+  TO PUBLIC;
+
+DO $session_tenancy_fence_owner_policies$
+DECLARE
+  target_schema text := pg_catalog.current_schema();
+  target_schema_oid oid := pg_catalog.current_schema()::pg_catalog.regnamespace;
+  migration_owner text := current_user;
+  table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'sandbox_leases',
+    'sandbox_lease_holders',
+    'sandbox_retained_processes',
+    'sessions'
+  ] LOOP
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY session_tenancy_fence_inventory_read ON %I.%I '
+        || 'FOR SELECT USING ('
+        || '%I.session_tenancy_fence_owner_policy_active('
+        || 'current_user, %L, %s::oid, workspace_id, true))',
+      target_schema,
+      table_name,
+      target_schema,
+      migration_owner,
+      target_schema_oid
+    );
+  END LOOP;
+
+  FOREACH table_name IN ARRAY ARRAY[
+    'sandbox_leases',
+    'sandbox_lease_holders',
+    'sandbox_retained_processes'
+  ] LOOP
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY session_tenancy_fenced_owner_write ON %I.%I '
+        || 'FOR ALL USING ('
+        || '%I.session_tenancy_fence_owner_policy_active('
+        || 'current_user, %L, %s::oid, workspace_id, false)) '
+        || 'WITH CHECK ('
+        || '%I.session_tenancy_fence_owner_policy_active('
+        || 'current_user, %L, %s::oid, workspace_id, false))',
+      target_schema,
+      table_name,
+      target_schema,
+      migration_owner,
+      target_schema_oid,
+      target_schema,
+      migration_owner,
+      target_schema_oid
+    );
+  END LOOP;
+
+  FOREACH table_name IN ARRAY ARRAY[
+    'sandbox_workspace_mutation_admissions',
+    'sessions',
+    'session_turns',
+    'session_turn_attempts',
+    'session_background_commands'
+  ] LOOP
+    EXECUTE pg_catalog.format(
+      'CREATE POLICY session_tenancy_fenced_owner_read ON %I.%I '
+        || 'FOR SELECT USING ('
+        || '%I.session_tenancy_fence_owner_policy_active('
+        || 'current_user, %L, %s::oid, workspace_id, false))',
+      target_schema,
+      table_name,
+      target_schema,
+      migration_owner,
+      target_schema_oid
+    );
+  END LOOP;
+
+  -- `session_visibility_isolation` is RESTRICTIVE, so a permissive owner
+  -- policy alone cannot expose private sessions to the bounded inventory or
+  -- to a fenced definer. Admit only this exact owner+schema+xact capability or
+  -- an already-held workspace fence, then retain the original subject rule.
+  EXECUTE pg_catalog.format(
+    'DROP POLICY IF EXISTS session_visibility_isolation ON %I.sessions',
+    target_schema
+  );
+  EXECUTE pg_catalog.format(
+    'CREATE POLICY session_visibility_isolation ON %1$I.sessions AS RESTRICTIVE '
+      || 'FOR ALL USING ('
+      || '%1$I.session_tenancy_fence_owner_policy_active('
+      || 'current_user, %2$L, %3$s::oid, workspace_id, true) '
+      || 'OR %1$I.session_tenancy_fence_owner_policy_active('
+      || 'current_user, %2$L, %3$s::oid, workspace_id, false) '
+      || 'OR nullif(pg_catalog.current_setting(''opengeni.subject_id'', true), '''') '
+      || 'IS NULL OR visibility = ''workspace_shared'' '
+      || 'OR %1$I.session_private_actor_visible('
+      || 'account_id, workspace_id, owner_organization_membership_id, owner_subject_id)'
+      || ') WITH CHECK ('
+      || '%1$I.session_tenancy_fence_owner_policy_active('
+      || 'current_user, %2$L, %3$s::oid, workspace_id, true) '
+      || 'OR %1$I.session_tenancy_fence_owner_policy_active('
+      || 'current_user, %2$L, %3$s::oid, workspace_id, false) '
+      || 'OR nullif(pg_catalog.current_setting(''opengeni.subject_id'', true), '''') '
+      || 'IS NULL OR visibility = ''workspace_shared'' '
+      || 'OR %1$I.session_private_actor_visible('
+      || 'account_id, workspace_id, owner_organization_membership_id, owner_subject_id)'
+      || ')',
+    target_schema,
+    migration_owner,
+    target_schema_oid
+  );
+END
+$session_tenancy_fence_owner_policies$;
+
 -- The lifecycle reaper is deliberately cross-workspace, but it still mutates
 -- sandbox_lease_holders and therefore participates in the same quiescence
--- protocol. Acquire every currently represented holder workspace in stable
--- order before the reaper locks any operation, lease, or holder row. These are
+-- protocol. Acquire every currently active lease workspace in stable order
+-- before the reaper locks any operation, lease, or holder row. These are
 -- shared advisory locks: ordinary tenant writers continue concurrently, while
 -- a fork/visibility transition waits only when its workspace has live holder
 -- state that the global sweep may inspect or remove.
-CREATE OR REPLACE FUNCTION opengeni_private.acquire_sandbox_reaper_session_tenancy_fences()
+CREATE OR REPLACE FUNCTION acquire_sandbox_reaper_session_tenancy_fences()
 RETURNS integer
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $reaper_fences$
 DECLARE
+  inventory_capability_id uuid;
   workspace_id_value uuid;
   locked_count integer := 0;
 BEGIN
-  FOR workspace_id_value IN
-    SELECT DISTINCT holder.workspace_id
-    FROM sandbox_lease_holders holder
-    WHERE holder.workspace_id IS NOT NULL
-    ORDER BY holder.workspace_id
-  LOOP
-    PERFORM pg_catalog.pg_advisory_xact_lock_shared(
-      pg_catalog.hashtextextended(
-        'session-tenancy:' || workspace_id_value::text,
-        0
-      )
+  PERFORM pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);
+  inventory_capability_id :=
+    opengeni_private.open_session_tenancy_fence_inventory(
+      session_tenancy_fence_target_schema()
     );
+  FOR workspace_id_value IN
+    SELECT DISTINCT lease.workspace_id
+    FROM sandbox_leases lease
+    WHERE lease.workspace_id IS NOT NULL
+      AND (
+        lease.liveness <> 'cold'
+        OR EXISTS (
+          SELECT 1 FROM sandbox_lease_holders holder
+          WHERE holder.lease_id = lease.id
+        )
+      )
+    ORDER BY lease.workspace_id
+  LOOP
+    PERFORM acquire_session_tenancy_fence(workspace_id_value);
     locked_count := locked_count + 1;
   END LOOP;
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
   RETURN locked_count;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
+  RAISE;
 END
 $reaper_fences$;
 
 REVOKE ALL ON FUNCTION
-  opengeni_private.acquire_sandbox_reaper_session_tenancy_fences()
+  acquire_sandbox_reaper_session_tenancy_fences()
+  FROM PUBLIC;
+
+-- Routine-local entry points must not depend on a TypeScript wrapper having
+-- opened the fence. This single-workspace helper is intentionally private so
+-- direct app-executable SECURITY-DEFINER calls can enter the same shared
+-- protocol after validating their scope and before taking their first row
+-- lock or mutating a fenced table.
+CREATE OR REPLACE FUNCTION acquire_session_tenancy_fence(
+  p_workspace_id uuid
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $workspace_fence$
+BEGIN
+  IF p_workspace_id IS NULL THEN
+    RAISE EXCEPTION 'session-tenancy fence requires a workspace'
+      USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock_shared(
+    pg_catalog.hashtextextended(
+      'session-tenancy:' || p_workspace_id::text,
+      0
+    )
+  );
+END
+$workspace_fence$;
+
+REVOKE ALL ON FUNCTION
+  acquire_session_tenancy_fence(uuid)
+  FROM PUBLIC;
+
+-- Global retained-process claiming is bounded by p_limit at mutation time,
+-- but SKIP LOCKED means the exact batch cannot be known safely before its row
+-- locks. Fence every currently due workspace, and no other workspace, in UUID
+-- order before the claim CTE starts taking those locks.
+CREATE OR REPLACE FUNCTION
+  acquire_due_retained_process_session_tenancy_fences()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $retained_process_fences$
+DECLARE
+  inventory_capability_id uuid;
+  workspace_id_value uuid;
+  locked_count integer := 0;
+BEGIN
+  PERFORM pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);
+  inventory_capability_id :=
+    opengeni_private.open_session_tenancy_fence_inventory(
+      session_tenancy_fence_target_schema()
+    );
+  FOR workspace_id_value IN
+    SELECT DISTINCT process.workspace_id
+    FROM sandbox_retained_processes process
+    WHERE process.workspace_id IS NOT NULL
+      AND process.state = 'active'
+      AND process.reconcile_after <= pg_catalog.now()
+    ORDER BY process.workspace_id
+  LOOP
+    PERFORM acquire_session_tenancy_fence(workspace_id_value);
+    locked_count := locked_count + 1;
+  END LOOP;
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
+  RETURN locked_count;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
+  RAISE;
+END
+$retained_process_fences$;
+
+REVOKE ALL ON FUNCTION
+  acquire_due_retained_process_session_tenancy_fences()
+  FROM PUBLIC;
+
+-- Rotation deletes viewer holders only for due leases. Lock the distinct due
+-- lease workspaces for that population, not every workspace with an unrelated
+-- live lease.
+CREATE OR REPLACE FUNCTION
+  acquire_due_sandbox_rotation_session_tenancy_fences(
+    p_lead_ms bigint
+  )
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $rotation_fences$
+DECLARE
+  inventory_capability_id uuid;
+  workspace_id_value uuid;
+  locked_count integer := 0;
+BEGIN
+  PERFORM pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);
+  inventory_capability_id :=
+    opengeni_private.open_session_tenancy_fence_inventory(
+      session_tenancy_fence_target_schema()
+    );
+  FOR workspace_id_value IN
+    SELECT DISTINCT lease.workspace_id
+    FROM sandbox_leases lease
+    WHERE lease.workspace_id IS NOT NULL
+      AND lease.backend = 'modal'
+      AND lease.liveness IN ('warming', 'warm')
+      AND lease.provider_deadline_at IS NOT NULL
+      AND lease.provider_deadline_at
+        <= pg_catalog.now()
+          + pg_catalog.make_interval(secs => p_lead_ms / 1000.0)
+      AND lease.rotation_requested_at IS NULL
+      AND (
+        lease.reaper_hold_id IS NULL
+        OR lease.reaper_hold_until <= pg_catalog.now()
+      )
+    ORDER BY lease.workspace_id
+  LOOP
+    PERFORM acquire_session_tenancy_fence(workspace_id_value);
+    locked_count := locked_count + 1;
+  END LOOP;
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
+  RETURN locked_count;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
+  RAISE;
+END
+$rotation_fences$;
+
+REVOKE ALL ON FUNCTION
+  acquire_due_sandbox_rotation_session_tenancy_fences(bigint)
+  FROM PUBLIC;
+
+-- One connected machine may back sessions in several workspaces. Discover
+-- the exact update population without row locks, then acquire every workspace
+-- fence in deterministic order after the detach routine opens its bounded
+-- write capability but before it locks or mutates dependent-session state.
+CREATE OR REPLACE FUNCTION
+  acquire_scoped_machine_session_tenancy_fences(
+    p_account_id uuid,
+    p_sandbox_id uuid
+  )
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $machine_fences$
+DECLARE
+  inventory_capability_id uuid;
+  workspace_id_value uuid;
+  locked_count integer := 0;
+BEGIN
+  IF p_account_id IS NULL OR p_sandbox_id IS NULL THEN
+    RAISE EXCEPTION 'machine session-tenancy fences require complete scope'
+      USING ERRCODE = '22023';
+  END IF;
+  inventory_capability_id :=
+    opengeni_private.open_session_tenancy_fence_inventory(
+      session_tenancy_fence_target_schema()
+    );
+  FOR workspace_id_value IN
+    SELECT DISTINCT session.workspace_id
+    FROM sessions session
+    WHERE session.account_id = p_account_id
+      AND (
+        session.active_sandbox_id = p_sandbox_id
+        OR (
+          session.sandbox_group_id = p_sandbox_id
+          AND session.sandbox_backend = 'selfhosted'
+        )
+      )
+    ORDER BY session.workspace_id
+  LOOP
+    PERFORM acquire_session_tenancy_fence(workspace_id_value);
+    locked_count := locked_count + 1;
+  END LOOP;
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
+  RETURN locked_count;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM opengeni_private.close_session_tenancy_fence_inventory(
+    inventory_capability_id
+  );
+  RAISE;
+END
+$machine_fences$;
+
+REVOKE ALL ON FUNCTION
+  acquire_scoped_machine_session_tenancy_fences(uuid, uuid)
   FROM PUBLIC;
 
 -- Both shipped global reapers are SECURITY-DEFINER routines that take row
@@ -103,9 +993,13 @@ DO $repair_global_sandbox_reapers$
 DECLARE
   interaction_definition text;
   lease_definition text;
-  interaction_prefix constant text := E'    BEGIN\n      IF p_interaction_holder_ttl_ms <= 0 THEN';
+  interaction_prefix constant text :=
+    E'      IF p_interaction_holder_ttl_ms <= 0 THEN\n'
+    || E'        RETURN 0;\n'
+    || E'      END IF;';
   lease_prefix constant text := E'    BEGIN\n      PERFORM pg_catalog.set_config(''opengeni.sandbox_recovery_protocol_v2'', ''1'', true);';
-  fenced_prefix constant text := E'    BEGIN\n      PERFORM opengeni_private.acquire_sandbox_reaper_session_tenancy_fences();\n';
+  fenced_prefix constant text :=
+    E'      PERFORM acquire_sandbox_reaper_session_tenancy_fences();';
 BEGIN
   SELECT pg_catalog.pg_get_functiondef(
     'opengeni_private.reap_stale_interaction_transitions(bigint)'::regprocedure
@@ -127,7 +1021,7 @@ BEGIN
   EXECUTE pg_catalog.replace(
     interaction_definition,
     interaction_prefix,
-    fenced_prefix || E'      IF p_interaction_holder_ttl_ms <= 0 THEN'
+    interaction_prefix || E'\n\n' || fenced_prefix
   );
 
   SELECT pg_catalog.pg_get_functiondef(
@@ -150,11 +1044,911 @@ BEGIN
   EXECUTE pg_catalog.replace(
     lease_definition,
     lease_prefix,
-    fenced_prefix
+    E'    BEGIN\n' || fenced_prefix || E'\n'
       || E'      PERFORM pg_catalog.set_config(''opengeni.sandbox_recovery_protocol_v2'', ''1'', true);'
   );
 END
 $repair_global_sandbox_reapers$;
+
+-- The retained-process claim and provider-deadline rotation sweeps are also
+-- global SECURITY-DEFINER mutators. Their TypeScript callers do not provide a
+-- workspace scope, so repair the installed SQL definitions themselves with
+-- population-specific, deterministically ordered fence helpers.
+DO $repair_global_background_session_tenancy_fences$
+DECLARE
+  definition text;
+  patched text;
+  occurrences integer;
+  protocol_prefix constant text :=
+    E'      PERFORM pg_catalog.set_config(''opengeni.sandbox_recovery_protocol_v2'', ''1'', true);';
+BEGIN
+  definition := pg_catalog.pg_get_functiondef(
+    'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)'
+      ::regprocedure
+  );
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, protocol_prefix, ''))
+  ) / pg_catalog.length(protocol_prefix);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(
+      definition,
+      'acquire_due_retained_process_session_tenancy_fences'
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0345 retained-process claim definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(
+    definition,
+    protocol_prefix,
+    E'      PERFORM acquire_due_retained_process_session_tenancy_fences();\n\n'
+      || protocol_prefix
+  );
+  EXECUTE patched;
+
+  definition := pg_catalog.pg_get_functiondef(
+    'opengeni_private.request_due_sandbox_rotations(bigint,integer)'
+      ::regprocedure
+  );
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, protocol_prefix, ''))
+  ) / pg_catalog.length(protocol_prefix);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(
+      definition,
+      'acquire_due_sandbox_rotation_session_tenancy_fences'
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0345 due sandbox rotation definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(
+    definition,
+    protocol_prefix,
+    E'      PERFORM acquire_due_sandbox_rotation_session_tenancy_fences(\n'
+      || E'        p_lead_ms\n'
+      || E'      );\n\n'
+      || protocol_prefix
+  );
+  EXECUTE patched;
+END
+$repair_global_background_session_tenancy_fences$;
+
+-- Organization membership suspension/offboarding is account-wide: the
+-- preparation seam and both layers of the command can inspect or mutate
+-- session state in every workspace owned by the organization. Enter every
+-- workspace's shared fence in stable order immediately after the existing
+-- organization-membership advisory prefix and before any of those routines
+-- take row locks. Keeping this in their SECURITY-DEFINER SQL path also covers
+-- direct command invocations rather than relying on one TypeScript caller.
+CREATE OR REPLACE FUNCTION
+  acquire_organization_session_tenancy_fences(
+    p_account_id uuid
+  )
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $membership_fences$
+DECLARE
+  workspace_id_value uuid;
+  locked_count integer := 0;
+BEGIN
+  IF p_account_id IS NULL THEN
+    RAISE EXCEPTION 'organization session-tenancy fence requires an organization'
+      USING ERRCODE = '22023';
+  END IF;
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended(
+      'organization-membership:' || p_account_id::text,
+      0
+    )
+  );
+  FOR workspace_id_value IN
+    SELECT workspace.id
+    FROM workspaces workspace
+    WHERE workspace.account_id = p_account_id
+    ORDER BY workspace.id
+  LOOP
+    PERFORM acquire_session_tenancy_fence(workspace_id_value);
+    locked_count := locked_count + 1;
+  END LOOP;
+  RETURN locked_count;
+END
+$membership_fences$;
+
+REVOKE ALL ON FUNCTION
+  acquire_organization_session_tenancy_fences(uuid)
+  FROM PUBLIC;
+
+-- Migration 0299 installed the organization advisory prefix in all three
+-- lifecycle routines by exact definition repair. Extend that same prefix with
+-- the workspace fences, again refusing any definition drift instead of
+-- silently leaving one privileged mutation path outside the protocol.
+DO $repair_organization_membership_session_tenancy_fences$
+DECLARE
+  signature text;
+  definition text;
+  patched text;
+  occurrences integer;
+  organization_prefix constant text :=
+    E'  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(\n'
+    || E'    ''organization-membership:'' || account_id_value::text, 0\n'
+    || E'  ));';
+  fenced_prefix constant text := organization_prefix
+    || E'\n  PERFORM acquire_organization_session_tenancy_fences(\n'
+    || E'    account_id_value\n'
+    || E'  );';
+BEGIN
+  FOREACH signature IN ARRAY ARRAY[
+    'prepare_organization_membership_protocol_settlements(jsonb)',
+    'organization_membership_command_0263(jsonb)',
+    'organization_membership_command(jsonb)'
+  ] LOOP
+    definition := pg_catalog.pg_get_functiondef(
+      pg_catalog.to_regprocedure(
+        pg_catalog.quote_ident(pg_catalog.current_schema()) || '.' || signature
+      )
+    );
+    IF definition IS NULL THEN
+      RAISE EXCEPTION
+        '0345 organization membership lifecycle function % is missing', signature
+        USING ERRCODE = '55000';
+    END IF;
+    occurrences := (
+      pg_catalog.length(definition)
+        - pg_catalog.length(
+          pg_catalog.replace(definition, organization_prefix, '')
+        )
+    ) / pg_catalog.length(organization_prefix);
+    IF occurrences <> 1
+      OR pg_catalog.strpos(
+        definition,
+        'acquire_organization_session_tenancy_fences'
+      ) > 0
+    THEN
+      RAISE EXCEPTION
+        '0345 organization membership session-tenancy prefix drift for %',
+        signature USING ERRCODE = '55000';
+    END IF;
+    patched := pg_catalog.replace(
+      definition,
+      organization_prefix,
+      fenced_prefix
+    );
+    IF pg_catalog.strpos(patched, fenced_prefix) = 0
+      OR pg_catalog.strpos(patched, organization_prefix)
+        > pg_catalog.strpos(patched, fenced_prefix)
+    THEN
+      RAISE EXCEPTION
+        '0345 organization membership session-tenancy repair failed for %',
+        signature USING ERRCODE = '55000';
+    END IF;
+    EXECUTE patched;
+  END LOOP;
+END
+$repair_organization_membership_session_tenancy_fences$;
+
+DO $repair_organization_retention_session_tenancy_fence$
+DECLARE
+  definition text;
+  patched text;
+  occurrences integer;
+  authority_prefix constant text :=
+    E'  PERFORM opengeni_private.assert_organization_retention_account(p_account_id);';
+  fenced_prefix constant text := authority_prefix
+    || E'\n  PERFORM acquire_organization_session_tenancy_fences(\n'
+    || E'    p_account_id\n'
+    || E'  );';
+BEGIN
+  definition := pg_catalog.pg_get_functiondef(
+    pg_catalog.to_regprocedure(
+      pg_catalog.quote_ident(pg_catalog.current_schema())
+        || '.finalize_organization_retention_deletion(uuid,uuid,uuid,text)'
+    )
+  );
+  IF definition IS NULL THEN
+    RAISE EXCEPTION '0345 organization retention finalizer is missing'
+      USING ERRCODE = '55000';
+  END IF;
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(
+        pg_catalog.replace(definition, authority_prefix, '')
+      )
+  ) / pg_catalog.length(authority_prefix);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(
+      definition,
+      'acquire_organization_session_tenancy_fences'
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0345 organization retention session-tenancy prefix drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(
+    definition,
+    authority_prefix,
+    fenced_prefix
+  );
+  IF pg_catalog.strpos(patched, fenced_prefix) = 0 THEN
+    RAISE EXCEPTION '0345 organization retention session-tenancy repair failed'
+      USING ERRCODE = '55000';
+  END IF;
+  EXECUTE patched;
+END
+$repair_organization_retention_session_tenancy_fence$;
+
+-- Finish the direct-call cutover for every app-executable SECURITY-DEFINER
+-- routine that writes one of the fenced tables. Each repair anchors on one
+-- exact frozen source fragment and aborts the migration on definition drift.
+-- The fence is inside the routine, after authority/argument validation where
+-- available, and before its first row lock or protected-table mutation.
+DO $repair_app_mutator_session_tenancy_fences$
+DECLARE
+  definition text;
+  patched text;
+  occurrences integer;
+  anchor text;
+  replacement text;
+  target regprocedure;
+BEGIN
+  target := pg_catalog.to_regprocedure(
+    pg_catalog.quote_ident(pg_catalog.current_schema())
+      || '.backfill_organization_session_ownership(uuid,integer,boolean,text)'
+  );
+  definition := pg_catalog.pg_get_functiondef(target);
+  anchor := E'  ledger_available := p_run_key IS NOT NULL';
+  replacement :=
+    E'  IF NOT p_dry_run THEN\n'
+    || E'    PERFORM acquire_organization_session_tenancy_fences(\n'
+    || E'      p_organization_id\n'
+    || E'    );\n'
+    || E'  END IF;\n\n'
+    || anchor;
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF target IS NULL OR occurrences <> 1
+    OR pg_catalog.strpos(
+      definition,
+      'acquire_organization_session_tenancy_fences'
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0345 session ownership backfill definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  EXECUTE patched;
+
+  target := pg_catalog.to_regprocedure(
+    pg_catalog.quote_ident(pg_catalog.current_schema())
+      || '.detach_scoped_machine_dependent_sessions(uuid,uuid,uuid)'
+  );
+  definition := pg_catalog.pg_get_functiondef(target);
+  anchor :=
+    E'  INSERT INTO opengeni_private.scoped_compute_capabilities(\n'
+    || E'    backend_pid, transaction_id, capability_kind\n'
+    || E'  ) VALUES (pg_catalog.pg_backend_pid(), pg_catalog.pg_current_xact_id(), ''write'')\n'
+    || E'  ON CONFLICT DO NOTHING;';
+  replacement :=
+    anchor
+    || E'\n  PERFORM acquire_scoped_machine_session_tenancy_fences(\n'
+    || E'    p_account_id, p_sandbox_id\n'
+    || E'  );';
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF target IS NULL OR occurrences <> 1
+    OR pg_catalog.strpos(
+      definition,
+      'acquire_scoped_machine_session_tenancy_fences'
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0345 scoped machine detach definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  EXECUTE patched;
+
+  target := pg_catalog.to_regprocedure(
+    pg_catalog.quote_ident(pg_catalog.current_schema())
+      || '.accept_turn_personal_resource_attachment(uuid,uuid,uuid,uuid,text,integer,boolean,integer)'
+  );
+  definition := pg_catalog.pg_get_functiondef(target);
+  anchor :=
+    E'    RAISE EXCEPTION ''session tenancy product is not activated'' USING ERRCODE = ''42501'';\n'
+    || E'  END IF;';
+  replacement :=
+    anchor
+    || E'\n\n  PERFORM acquire_session_tenancy_fence(p_workspace_id);';
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF target IS NULL OR occurrences <> 1
+    OR pg_catalog.strpos(definition, 'acquire_session_tenancy_fence') > 0
+  THEN
+    RAISE EXCEPTION '0345 accepted-turn attachment definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  EXECUTE patched;
+
+  target := pg_catalog.to_regprocedure(
+    pg_catalog.quote_ident(pg_catalog.current_schema())
+      || '.materialize_scheduled_task_reusable_session_from_run('
+      || 'uuid,uuid,uuid,uuid,uuid,bigint,text)'
+  );
+  definition := pg_catalog.pg_get_functiondef(target);
+  anchor :=
+    E'  IF p_source_revision <= 0 OR p_source_digest !~ ''^[0-9a-f]{64}$'' THEN';
+  replacement :=
+    E'  PERFORM acquire_session_tenancy_fence(p_workspace_id);\n\n'
+    || anchor;
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF target IS NULL OR occurrences <> 1
+    OR pg_catalog.strpos(definition, 'acquire_session_tenancy_fence') > 0
+  THEN
+    RAISE EXCEPTION '0345 scheduled reusable-session materializer definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  EXECUTE patched;
+
+  target := pg_catalog.to_regprocedure(
+    pg_catalog.quote_ident(pg_catalog.current_schema())
+      || '.workspace_membership_removal_command(jsonb)'
+  );
+  definition := pg_catalog.pg_get_functiondef(target);
+  anchor := E'  input_hash_value := pg_catalog.encode(';
+  replacement :=
+    E'  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(\n'
+    || E'    ''organization-membership:'' || account_id_value::text, 0\n'
+    || E'  ));\n'
+    || E'  PERFORM acquire_session_tenancy_fence(workspace_id_value);\n\n'
+    || anchor;
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF target IS NULL OR occurrences <> 1
+    OR pg_catalog.strpos(definition, 'acquire_session_tenancy_fence') > 0
+  THEN
+    RAISE EXCEPTION '0345 workspace membership removal definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  EXECUTE patched;
+END
+$repair_app_mutator_session_tenancy_fences$;
+
+-- A held advisory lock is necessary but not sufficient for the owner-only RLS
+-- branch. These five routines are the paths that need owner access after their
+-- bounded inventory helper returns. Give each invocation its own fenced-access
+-- token after the locks are acquired, and delete that exact token on every
+-- normal or exceptional exit. Refuse all frozen-definition drift.
+DO $repair_owner_fenced_access_scopes$
+DECLARE
+  definition text;
+  patched text;
+  anchor text;
+  replacement text;
+  tail_anchor text;
+  tail_replacement text;
+  before_tail text;
+  occurrences integer;
+BEGIN
+  definition := pg_catalog.pg_get_functiondef(
+    'opengeni_private.reap_stale_interaction_transitions(bigint)'::regprocedure
+  );
+  anchor := E'      settled_count integer := 0;';
+  replacement := anchor || E'\n      fenced_access_capability_id uuid;';
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(definition, 'fenced_access_capability_id') > 0
+  THEN
+    RAISE EXCEPTION '0345 interaction reaper fenced-access definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  anchor := E'      PERFORM acquire_sandbox_reaper_session_tenancy_fences();';
+  replacement := anchor
+    || E'\n      fenced_access_capability_id :='
+    || E'\n        opengeni_private.open_session_tenancy_fenced_access('
+    || E'\n          session_tenancy_fence_target_schema()'
+    || E'\n        );';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 interaction reaper fenced-access open anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  anchor := E'      RETURN settled_count;';
+  replacement :=
+    E'      PERFORM opengeni_private.close_session_tenancy_fenced_access('
+    || E'\n        fenced_access_capability_id'
+    || E'\n      );\n'
+    || anchor;
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 interaction reaper fenced-access normal-close anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  tail_anchor := E'    END;\n    $function$\n';
+  tail_replacement :=
+    E'    EXCEPTION WHEN OTHERS THEN\n'
+      || E'      PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+      || E'        fenced_access_capability_id\n'
+      || E'      );\n'
+      || E'      RAISE;\n'
+      || E'    END;\n'
+      || E'    $function$\n';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, tail_anchor, ''))
+  ) / pg_catalog.length(tail_anchor);
+  IF occurrences <> 1
+    OR pg_catalog.right(patched, pg_catalog.length(tail_anchor))
+      IS DISTINCT FROM tail_anchor
+  THEN
+    RAISE EXCEPTION '0345 interaction reaper fenced-access tail drift'
+      USING ERRCODE = '55000';
+  END IF;
+  before_tail := patched;
+  patched := pg_catalog.regexp_replace(
+    patched,
+    E'    END;\\n    \\$function\\$\\n$',
+    tail_replacement
+  );
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(
+          patched,
+          'close_session_tenancy_fenced_access',
+          ''
+        ))
+  ) / pg_catalog.length('close_session_tenancy_fenced_access');
+  IF patched IS NOT DISTINCT FROM before_tail
+    OR pg_catalog.right(patched, pg_catalog.length(tail_replacement))
+      IS DISTINCT FROM tail_replacement
+    OR pg_catalog.strpos(patched, 'fenced_access_capability_id uuid;') = 0
+    OR pg_catalog.strpos(patched, 'open_session_tenancy_fenced_access') = 0
+    OR occurrences <> 2
+  THEN
+    RAISE EXCEPTION '0345 interaction reaper fenced-access repair failed'
+      USING ERRCODE = '55000';
+  END IF;
+  EXECUTE patched;
+
+  definition := pg_catalog.pg_get_functiondef(
+    'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'
+      ::regprocedure
+  );
+  anchor := E'    DECLARE\n      locked_ids uuid[];';
+  replacement := E'    DECLARE\n      fenced_access_capability_id uuid;\n'
+    || E'      locked_ids uuid[];';
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(definition, 'fenced_access_capability_id') > 0
+  THEN
+    RAISE EXCEPTION '0345 lease reaper fenced-access definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  anchor := E'      PERFORM acquire_sandbox_reaper_session_tenancy_fences();';
+  replacement := anchor
+    || E'\n      fenced_access_capability_id :='
+    || E'\n        opengeni_private.open_session_tenancy_fenced_access('
+    || E'\n          session_tenancy_fence_target_schema()'
+    || E'\n        );';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 lease reaper fenced-access open anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  anchor :=
+    E'      IF pg_catalog.cardinality(locked_ids) = 0 THEN\n'
+    || E'        RETURN;\n'
+    || E'      END IF;';
+  replacement :=
+    E'      IF pg_catalog.cardinality(locked_ids) = 0 THEN\n'
+    || E'        PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+    || E'          fenced_access_capability_id\n'
+    || E'        );\n'
+    || E'        RETURN;\n'
+    || E'      END IF;';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 lease reaper fenced-access early-close anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  tail_anchor := E'    END;\n    $function$\n';
+  tail_replacement :=
+    E'      PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+      || E'        fenced_access_capability_id\n'
+      || E'      );\n'
+      || E'    EXCEPTION WHEN OTHERS THEN\n'
+      || E'      PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+      || E'        fenced_access_capability_id\n'
+      || E'      );\n'
+      || E'      RAISE;\n'
+      || E'    END;\n'
+      || E'    $function$\n';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, tail_anchor, ''))
+  ) / pg_catalog.length(tail_anchor);
+  IF occurrences <> 1
+    OR pg_catalog.right(patched, pg_catalog.length(tail_anchor))
+      IS DISTINCT FROM tail_anchor
+  THEN
+    RAISE EXCEPTION '0345 lease reaper fenced-access tail drift'
+      USING ERRCODE = '55000';
+  END IF;
+  before_tail := patched;
+  patched := pg_catalog.regexp_replace(
+    patched,
+    E'    END;\\n    \\$function\\$\\n$',
+    tail_replacement
+  );
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(
+          patched,
+          'close_session_tenancy_fenced_access',
+          ''
+        ))
+  ) / pg_catalog.length('close_session_tenancy_fenced_access');
+  IF patched IS NOT DISTINCT FROM before_tail
+    OR pg_catalog.right(patched, pg_catalog.length(tail_replacement))
+      IS DISTINCT FROM tail_replacement
+    OR pg_catalog.strpos(patched, 'fenced_access_capability_id uuid;') = 0
+    OR pg_catalog.strpos(patched, 'open_session_tenancy_fenced_access') = 0
+    OR occurrences <> 3
+  THEN
+    RAISE EXCEPTION '0345 lease reaper fenced-access repair failed'
+      USING ERRCODE = '55000';
+  END IF;
+  EXECUTE patched;
+
+  definition := pg_catalog.pg_get_functiondef(
+    'opengeni_private.request_due_sandbox_rotations(bigint,integer)'
+      ::regprocedure
+  );
+  anchor := E'    DECLARE\n      requested integer;';
+  replacement := E'    DECLARE\n      fenced_access_capability_id uuid;\n'
+    || E'      requested integer;';
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(definition, 'fenced_access_capability_id') > 0
+  THEN
+    RAISE EXCEPTION '0345 rotation fenced-access definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  anchor :=
+    E'      PERFORM acquire_due_sandbox_rotation_session_tenancy_fences(\n'
+    || E'        p_lead_ms\n'
+    || E'      );';
+  replacement := anchor
+    || E'\n      fenced_access_capability_id :='
+    || E'\n        opengeni_private.open_session_tenancy_fenced_access('
+    || E'\n          session_tenancy_fence_target_schema()'
+    || E'\n        );';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 rotation fenced-access open anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  anchor := E'      RETURN requested;';
+  replacement :=
+    E'      PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+    || E'        fenced_access_capability_id\n'
+    || E'      );\n'
+    || anchor;
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 rotation fenced-access normal-close anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  tail_anchor := E'    END;\n    $function$\n';
+  tail_replacement :=
+    E'    EXCEPTION WHEN OTHERS THEN\n'
+      || E'      PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+      || E'        fenced_access_capability_id\n'
+      || E'      );\n'
+      || E'      RAISE;\n'
+      || E'    END;\n'
+      || E'    $function$\n';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, tail_anchor, ''))
+  ) / pg_catalog.length(tail_anchor);
+  IF occurrences <> 1
+    OR pg_catalog.right(patched, pg_catalog.length(tail_anchor))
+      IS DISTINCT FROM tail_anchor
+  THEN
+    RAISE EXCEPTION '0345 rotation fenced-access tail drift'
+      USING ERRCODE = '55000';
+  END IF;
+  before_tail := patched;
+  patched := pg_catalog.regexp_replace(
+    patched,
+    E'    END;\\n    \\$function\\$\\n$',
+    tail_replacement
+  );
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(
+          patched,
+          'close_session_tenancy_fenced_access',
+          ''
+        ))
+  ) / pg_catalog.length('close_session_tenancy_fenced_access');
+  IF patched IS NOT DISTINCT FROM before_tail
+    OR pg_catalog.right(patched, pg_catalog.length(tail_replacement))
+      IS DISTINCT FROM tail_replacement
+    OR pg_catalog.strpos(patched, 'fenced_access_capability_id uuid;') = 0
+    OR pg_catalog.strpos(patched, 'open_session_tenancy_fenced_access') = 0
+    OR occurrences <> 2
+  THEN
+    RAISE EXCEPTION '0345 rotation fenced-access repair failed'
+      USING ERRCODE = '55000';
+  END IF;
+  EXECUTE patched;
+
+  definition := pg_catalog.pg_get_functiondef(
+    'opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)'
+      ::regprocedure
+  );
+  anchor := E'    BEGIN\n      IF p_limit < 1 OR p_limit > 100 THEN';
+  replacement :=
+    E'    DECLARE\n'
+    || E'      fenced_access_capability_id uuid;\n'
+    || E'    BEGIN\n'
+    || E'      IF p_limit < 1 OR p_limit > 100 THEN';
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(definition, 'fenced_access_capability_id') > 0
+  THEN
+    RAISE EXCEPTION '0345 retained-process fenced-access definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  anchor := E'      PERFORM acquire_due_retained_process_session_tenancy_fences();';
+  replacement := anchor
+    || E'\n      fenced_access_capability_id :='
+    || E'\n        opengeni_private.open_session_tenancy_fenced_access('
+    || E'\n          session_tenancy_fence_target_schema()'
+    || E'\n        );';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 retained-process fenced-access open anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  anchor := E'      SET CONSTRAINTS '
+    || pg_catalog.quote_ident(pg_catalog.current_schema())
+    || E'.sandbox_retained_processes_identity_v2 DEFERRED;';
+  replacement := anchor
+    || E'\n      PERFORM opengeni_private.close_session_tenancy_fenced_access('
+    || E'\n        fenced_access_capability_id'
+    || E'\n      );';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 retained-process fenced-access normal-close anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  tail_anchor := E'    END;\n    $function$\n';
+  tail_replacement :=
+    E'    EXCEPTION WHEN OTHERS THEN\n'
+      || E'      PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+      || E'        fenced_access_capability_id\n'
+      || E'      );\n'
+      || E'      RAISE;\n'
+      || E'    END;\n'
+      || E'    $function$\n';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, tail_anchor, ''))
+  ) / pg_catalog.length(tail_anchor);
+  IF occurrences <> 1
+    OR pg_catalog.right(patched, pg_catalog.length(tail_anchor))
+      IS DISTINCT FROM tail_anchor
+  THEN
+    RAISE EXCEPTION '0345 retained-process fenced-access tail drift'
+      USING ERRCODE = '55000';
+  END IF;
+  before_tail := patched;
+  patched := pg_catalog.regexp_replace(
+    patched,
+    E'    END;\\n    \\$function\\$\\n$',
+    tail_replacement
+  );
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(
+          patched,
+          'close_session_tenancy_fenced_access',
+          ''
+        ))
+  ) / pg_catalog.length('close_session_tenancy_fenced_access');
+  IF patched IS NOT DISTINCT FROM before_tail
+    OR pg_catalog.right(patched, pg_catalog.length(tail_replacement))
+      IS DISTINCT FROM tail_replacement
+    OR pg_catalog.strpos(patched, 'fenced_access_capability_id uuid;') = 0
+    OR pg_catalog.strpos(patched, 'open_session_tenancy_fenced_access') = 0
+    OR occurrences <> 2
+  THEN
+    RAISE EXCEPTION '0345 retained-process fenced-access repair failed'
+      USING ERRCODE = '55000';
+  END IF;
+  EXECUTE patched;
+
+  definition := pg_catalog.pg_get_functiondef(
+    pg_catalog.to_regprocedure(
+      pg_catalog.quote_ident(pg_catalog.current_schema())
+        || '.detach_scoped_machine_dependent_sessions(uuid,uuid,uuid)'
+    )
+  );
+  anchor := E'DECLARE\n  dependent_workspace_id uuid;';
+  replacement := E'DECLARE\n  fenced_access_capability_id uuid;\n'
+    || E'  dependent_workspace_id uuid;';
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1
+    OR pg_catalog.strpos(definition, 'fenced_access_capability_id') > 0
+  THEN
+    RAISE EXCEPTION '0345 machine detach fenced-access definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  anchor :=
+    E'  PERFORM acquire_scoped_machine_session_tenancy_fences(\n'
+    || E'    p_account_id, p_sandbox_id\n'
+    || E'  );';
+  replacement := anchor
+    || E'\n  fenced_access_capability_id :='
+    || E'\n    opengeni_private.open_session_tenancy_fenced_access('
+    || E'\n      session_tenancy_fence_target_schema()'
+    || E'\n    );';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 machine detach fenced-access open anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  anchor :=
+    E'  PERFORM pg_catalog.set_config(\n'
+    || E'    ''opengeni.session_activity_gate_workspace_id'', '
+    || E'p_origin_workspace_id::text, true\n'
+    || E'  );\n'
+    || E'  DELETE FROM opengeni_private.scoped_compute_capabilities\n'
+    || E'  WHERE backend_pid = pg_catalog.pg_backend_pid()';
+  replacement :=
+    E'  PERFORM pg_catalog.set_config(\n'
+    || E'    ''opengeni.session_activity_gate_workspace_id'', '
+    || E'p_origin_workspace_id::text, true\n'
+    || E'  );\n'
+    || E'  PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+    || E'    fenced_access_capability_id\n'
+    || E'  );\n'
+    || E'  DELETE FROM opengeni_private.scoped_compute_capabilities\n'
+    || E'  WHERE backend_pid = pg_catalog.pg_backend_pid()';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 machine detach fenced-access normal-close anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  anchor :=
+    E'EXCEPTION WHEN OTHERS THEN\n'
+    || E'  DELETE FROM opengeni_private.scoped_compute_capabilities\n'
+    || E'  WHERE backend_pid = pg_catalog.pg_backend_pid()';
+  replacement :=
+    E'EXCEPTION WHEN OTHERS THEN\n'
+    || E'  PERFORM opengeni_private.close_session_tenancy_fenced_access(\n'
+    || E'    fenced_access_capability_id\n'
+    || E'  );\n'
+    || E'  DELETE FROM opengeni_private.scoped_compute_capabilities\n'
+    || E'  WHERE backend_pid = pg_catalog.pg_backend_pid()';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF occurrences <> 1 THEN
+    RAISE EXCEPTION '0345 machine detach fenced-access exception-close anchor drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(patched, anchor, replacement);
+  tail_anchor := E'  RAISE;\nEND\n$function$\n';
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(patched, tail_anchor, ''))
+  ) / pg_catalog.length(tail_anchor);
+  IF occurrences <> 1
+    OR pg_catalog.right(patched, pg_catalog.length(tail_anchor))
+      IS DISTINCT FROM tail_anchor
+  THEN
+    RAISE EXCEPTION '0345 machine detach fenced-access tail drift'
+      USING ERRCODE = '55000';
+  END IF;
+  occurrences := (
+    pg_catalog.length(patched)
+      - pg_catalog.length(pg_catalog.replace(
+          patched,
+          'close_session_tenancy_fenced_access',
+          ''
+        ))
+  ) / pg_catalog.length('close_session_tenancy_fenced_access');
+  IF pg_catalog.strpos(patched, 'fenced_access_capability_id uuid;') = 0
+    OR pg_catalog.strpos(patched, 'open_session_tenancy_fenced_access') = 0
+    OR occurrences <> 2
+  THEN
+    RAISE EXCEPTION '0345 machine detach fenced-access repair failed'
+      USING ERRCODE = '55000';
+  END IF;
+  EXECUTE patched;
+END
+$repair_owner_fenced_access_scopes$;
 
 DO $install_session_tenancy_fences$
 DECLARE
@@ -970,8 +2764,53 @@ DECLARE
   target_schema text := current_schema();
 BEGIN
   EXECUTE format(
-    'ALTER FUNCTION opengeni_private.acquire_sandbox_reaper_session_tenancy_fences() '
+    'ALTER FUNCTION opengeni_private.reap_stale_interaction_transitions(bigint) '
       || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.request_due_sandbox_rotations(bigint,integer) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.acquire_sandbox_reaper_session_tenancy_fences() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.acquire_due_retained_process_session_tenancy_fences() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.acquire_due_sandbox_rotation_session_tenancy_fences(bigint) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.acquire_scoped_machine_session_tenancy_fences(uuid,uuid) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
+    target_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.acquire_organization_session_tenancy_fences(uuid) '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema,
     target_schema
   );
   EXECUTE format(

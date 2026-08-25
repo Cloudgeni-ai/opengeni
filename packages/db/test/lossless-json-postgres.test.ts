@@ -373,6 +373,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       await oldWriter.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
         await tx`select set_config('opengeni.workspace_id', ${workspace!.id}, true)`;
+        await tx`select pg_advisory_xact_lock_shared(
+          hashtextextended(${`session-tenancy:${workspace!.id}`}, 0)
+        )`;
         await tx`
           update sessions set title = 'old writer unrelated update'
           where id = ${sessionId}
@@ -387,6 +390,9 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       await oldWriter.begin(async (tx) => {
         await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
         await tx`select set_config('opengeni.workspace_id', ${workspace!.id}, true)`;
+        await tx`select pg_advisory_xact_lock_shared(
+          hashtextextended(${`session-tenancy:${workspace!.id}`}, 0)
+        )`;
         await tx`
           update sessions set initial_message = ${legacyTextMarker}
           where id = ${sessionId}
