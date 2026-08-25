@@ -406,6 +406,39 @@ export function slackReactionInboxEntry(
   };
 }
 
+/**
+ * Prove a Slack link token may name this workspace.
+ *
+ * Before routing, a token could only ever name the installation's own
+ * workspace, and both intent routes asserted exactly that. A routed
+ * conversation asks for access to the workspace the work would actually land
+ * in, which is a different one, so the assertion becomes: the installation
+ * binding resolves for the token's team, it is the same connection the token
+ * was minted against, and the named workspace belongs to that installation's
+ * organization.
+ *
+ * That is the same fence the route tables carry. It does not widen access by
+ * itself: this only decides which workspace an access REQUEST may be raised
+ * for, and the request still goes through the ordinary approval path.
+ */
+async function resolveSlackLinkTargetInstallation(
+  deps: ApiRouteDeps,
+  link: { slackTeamId: string; connectionId: string },
+  workspaceId: string,
+): Promise<{ accountId: string; connectionId: string; workspaceName: string } | null> {
+  const route = await resolveSlackInstallationRoute(deps.db, link.slackTeamId);
+  if (!route || route.connectionId !== link.connectionId || route.accountId.length === 0) {
+    return null;
+  }
+  const workspace = await getWorkspace(deps.db, workspaceId);
+  if (!workspace || workspace.accountId !== route.accountId) return null;
+  return {
+    accountId: route.accountId,
+    connectionId: route.connectionId,
+    workspaceName: workspace.name,
+  };
+}
+
 export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/integrations/slack/events", async (c) => {
     const signed = await readSignedSlackRequest(c, deps);
@@ -568,22 +601,13 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     if (!link || link.workspaceId !== workspaceId) {
       throw freshSlackLinkRequired();
     }
-    const route = await resolveSlackInstallationRoute(deps.db, link.slackTeamId);
-    if (
-      !route ||
-      route.workspaceId !== workspaceId ||
-      route.connectionId !== link.connectionId ||
-      route.accountId.length === 0
-    ) {
-      throw freshSlackLinkRequired();
-    }
-    const workspace = await getWorkspace(deps.db, workspaceId);
-    if (!workspace || workspace.accountId !== route.accountId) {
+    const installation = await resolveSlackLinkTargetInstallation(deps, link, workspaceId);
+    if (!installation) {
       throw freshSlackLinkRequired();
     }
     try {
       const prepared = await prepareSlackUserLinkAccessRequest(deps.db, {
-        accountId: route.accountId,
+        accountId: installation.accountId,
         workspaceId,
         tokenDigest: createHash("sha256").update(payload.linkToken).digest("hex"),
         connectionId: link.connectionId,
@@ -602,7 +626,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       return c.json(
         SlackUserLinkAccessRequest.parse({
           ...completed,
-          workspaceDisplayName: workspace.name,
+          workspaceDisplayName: installation.workspaceName,
         }),
         201,
       );
@@ -776,8 +800,8 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         message: "invalid or expired Slack identity link",
       });
     }
-    const route = await resolveSlackInstallationRoute(deps.db, link.slackTeamId);
-    if (!route || route.workspaceId !== workspaceId || route.connectionId !== link.connectionId) {
+    const installation = await resolveSlackLinkTargetInstallation(deps, link, workspaceId);
+    if (!installation) {
       throw new HTTPException(404, {
         message: "Slack installation not found",
       });
@@ -1365,7 +1389,15 @@ async function postSlackRouteRefusal(
       : refusal.reason === "no_access_to_route"
         ? `OpenGeni starts work from this conversation in ${
             refusal.requested ?? "another workspace"
-          }, and you do not have access to it. Ask an OpenGeni administrator for access to that workspace, or point this conversation somewhere else in OpenGeni under Capabilities, then Slack. No session was created.`
+          }, and you do not have access to it. Request access: ${linkUrl(deps, {
+            // Minted for the workspace they actually need, not the
+            // installation's. The token only decides which workspace an access
+            // request may be raised for; approval is unchanged.
+            workspaceId: refusal.workspaceId ?? entry.workspaceId,
+            connectionId: entry.connectionId,
+            slackTeamId: entry.slackTeamId,
+            slackUserId: entry.slackUserId,
+          })}. No session was created.`
         : "OpenGeni has no workspace it can start this task in for you. Ask an OpenGeni administrator to give you access to one. No session was created.";
   await client.postMessage({
     operationId: deterministicUuid(`slack-route-denied:${entry.id}:${refusal.reason}`),

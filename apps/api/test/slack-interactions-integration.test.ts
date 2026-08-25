@@ -1731,6 +1731,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(sessions!.n).toBe(0);
     const refusal = value.slack.posts.find((post) => post.text.includes("No session was created."));
     expect(refusal?.text).toContain("do not have access");
+    // The access-request link is minted for the workspace they actually need,
+    // not the installation's, or it would send them to a page that refuses them.
+    const url = /https:\/\/\S+/u.exec(refusal!.text)![0].replace(/\.$/u, "");
+    const linkToken = new URLSearchParams(new URL(url).hash.slice(1)).get("slack_link");
+    expect(verifySlackUserLinkToken(signingMaterial, linkToken!)?.workspaceId).toBe(
+      routed.workspaceId,
+    );
   });
 
   test("one workspace is not a choice, so an ordinary install never notices the flag", async () => {
