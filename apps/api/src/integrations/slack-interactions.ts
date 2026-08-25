@@ -1499,11 +1499,12 @@ async function resolveSlackRouteForEntry(
  * Every branch ends with "No session was created." because the one thing a
  * refusal must never do is leave someone believing work is under way.
  *
- * No access-request link is minted here. The existing link flow signs a token
- * for the installation's own workspace, and offering one for a workspace it
- * cannot yet resolve would send people to a page that refuses them. Until that
- * flow accepts a routed workspace, the refusal names the workspace and points
- * at an administrator.
+ * Only `no_access_to_route` mints an access-request link, and it mints one for
+ * the workspace they actually need rather than the installation's. The other
+ * two branches deliberately do not: a prefix naming something they cannot
+ * reach, and an empty candidate list, both describe a workspace OpenGeni has
+ * not established it will confirm to this person, so they point at an
+ * administrator instead.
  */
 async function postSlackRouteRefusal(
   deps: ApiRouteDeps,
