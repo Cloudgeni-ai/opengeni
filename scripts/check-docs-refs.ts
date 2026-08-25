@@ -20,6 +20,9 @@ const sourceRoots = [
 
 const recordMarker = "<!-- docs-refs: record -->";
 const ignoreMarker = "<!-- docs-refs: ignore -->";
+const architecturePath = "docs/architecture.md";
+const architectureMaxWords = 12_000;
+const architectureMaxLineLength = 500;
 const pathReferencePattern =
   /^(?:apps|packages|scripts|docs|deploy|agent|\.github|\.agents)\/[A-Za-z0-9_./-]+$/;
 const packageReferencePattern = /@opengeni\/[a-z0-9-]+/g;
@@ -27,10 +30,11 @@ const inlineCodePattern = /`([^`\n]+)`/g;
 const skippedPathFragments = ["*", "<", ">", "{", "$", "..."];
 const externalPackageAllowlist = new Set<string>();
 
-const [files, workspacePackages] = await Promise.all([
+const [files, workspaceFiles] = await Promise.all([
   listFiles(sourceRoots),
-  listWorkspacePackages(),
+  listFiles(["apps", "packages"]),
 ]);
+const workspacePackages = await listWorkspacePackages(workspaceFiles);
 const findings: Finding[] = [];
 
 for (const file of files.filter(isCurrentTierDoc)) {
@@ -43,6 +47,11 @@ for (const file of files.filter(isCurrentTierDoc)) {
   checkReferences(file, text, workspacePackages, findings);
 }
 
+const architectureText = await Bun.file(architecturePath)
+  .text()
+  .catch(() => "");
+checkArchitectureMap(architectureText, workspaceFiles, findings);
+
 if (findings.length > 0) {
   for (const finding of findings) {
     console.error(`${finding.file}:${finding.line} — ${finding.token} (${finding.reason})`);
@@ -50,11 +59,10 @@ if (findings.length > 0) {
   process.exit(1);
 }
 
-console.log("Docs reference freshness guard passed.");
+console.log("Docs reference freshness and architecture map guards passed.");
 
-async function listWorkspacePackages(): Promise<Set<string>> {
+async function listWorkspacePackages(workspaceFiles: string[]): Promise<Set<string>> {
   const names = new Set<string>();
-  const workspaceFiles = await listFiles(["apps", "packages"]);
   for (const file of workspaceFiles) {
     if (!/^(?:apps|packages)\/[^/]+\/package\.json$/.test(file)) {
       continue;
@@ -72,6 +80,70 @@ async function listWorkspacePackages(): Promise<Set<string>> {
     }
   }
   return names;
+}
+
+function checkArchitectureMap(text: string, workspaceFiles: string[], out: Finding[]): void {
+  if (!text) {
+    out.push({
+      file: architecturePath,
+      line: 1,
+      token: architecturePath,
+      reason: "architecture map is missing or unreadable",
+    });
+    return;
+  }
+
+  const wordCount = text.match(/\S+/gu)?.length ?? 0;
+  if (wordCount > architectureMaxWords) {
+    out.push({
+      file: architecturePath,
+      line: 1,
+      token: `${wordCount} words`,
+      reason: `architecture orientation budget exceeds ${architectureMaxWords} words`,
+    });
+  }
+
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (line.length <= architectureMaxLineLength) {
+      continue;
+    }
+    out.push({
+      file: architecturePath,
+      line: index + 1,
+      token: `${line.length} characters`,
+      reason: `architecture line exceeds ${architectureMaxLineLength} characters`,
+    });
+  }
+
+  const workspaceMapStart = text.indexOf("### 6.1 Applications");
+  const workspaceMapEnd = text.indexOf("### 6.3 Rust agent and relay");
+  if (workspaceMapStart < 0 || workspaceMapEnd < 0 || workspaceMapEnd <= workspaceMapStart) {
+    out.push({
+      file: architecturePath,
+      line: 1,
+      token: "§6 workspace map",
+      reason: "architecture app/package map headings are missing or out of order",
+    });
+    return;
+  }
+  const workspaceMap = text.slice(workspaceMapStart, workspaceMapEnd);
+
+  for (const manifest of workspaceFiles.filter((file) =>
+    /^(?:apps|packages)\/[^/]+\/package\.json$/.test(file),
+  )) {
+    const packagePath = manifest.slice(0, -"/package.json".length);
+    if (workspaceMap.includes(`\`${packagePath}\``)) {
+      continue;
+    }
+    out.push({
+      file: architecturePath,
+      line: 1,
+      token: packagePath,
+      reason: "workspace app/package is missing from the architecture map",
+    });
+  }
 }
 
 function checkReferences(

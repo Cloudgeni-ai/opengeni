@@ -2,7 +2,7 @@
 
 This repository is a clean TypeScript/Bun stack. The public API is session-based.
 
-> **Start here for orientation: [`docs/architecture.md`](docs/architecture.md).** It is the canonical whole-system map — what OpenGeni is, the load-bearing invariants, the full repo layout, per-component deep-dives, and a *"if you're changing X, read Y first"* decision table. Read it before navigating an unfamiliar area, and **keep it current**: if your change adds/removes/renames an app, package, or sandbox backend; alters an architectural invariant, the data-flow, or the session/turn lifecycle; or changes which file is canonical for a change area — update `docs/architecture.md` in the *same* change. A stale map is a bug. (This file, AGENTS.md, owns *how to run and operate* the stack; architecture.md owns *how the system is shaped*.)
+> **Start here for orientation: [`docs/architecture.md`](docs/architecture.md).** It is the canonical whole-system map — what OpenGeni is, the load-bearing invariants, the current app/package layout, the major ownership boundaries, and the *"if you're changing X, read Y first"* routing index. Read it before navigating an unfamiliar area, and **keep it current**: if your change adds/removes/renames an app, package, or sandbox backend; alters an architectural invariant, the data-flow, or the session/turn lifecycle; or changes which file is canonical for a change area — update `docs/architecture.md` in the *same* change. A stale map is a bug. (This file, AGENTS.md, owns *how to run and operate* the stack; architecture.md owns *how the system is shaped*.)
 
 When the user says **"start the dev server"**, **"spin it up"**, or **"run the full stack"**, they mean the steps under **Full local stack**.
 
