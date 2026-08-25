@@ -61,9 +61,9 @@ if (findings.length > 0) {
 
 console.log("Docs reference freshness and architecture map guards passed.");
 
-async function listWorkspacePackages(workspaceFiles: string[]): Promise<Set<string>> {
+async function listWorkspacePackages(packageFiles: string[]): Promise<Set<string>> {
   const names = new Set<string>();
-  for (const file of workspaceFiles) {
+  for (const file of packageFiles) {
     if (!/^(?:apps|packages)\/[^/]+\/package\.json$/.test(file)) {
       continue;
     }
@@ -82,7 +82,7 @@ async function listWorkspacePackages(workspaceFiles: string[]): Promise<Set<stri
   return names;
 }
 
-function checkArchitectureMap(text: string, workspaceFiles: string[], out: Finding[]): void {
+function checkArchitectureMap(text: string, mapFiles: string[], out: Finding[]): void {
   if (!text) {
     out.push({
       file: architecturePath,
@@ -130,7 +130,7 @@ function checkArchitectureMap(text: string, workspaceFiles: string[], out: Findi
   }
   const workspaceMap = text.slice(workspaceMapStart, workspaceMapEnd);
 
-  for (const manifest of workspaceFiles.filter((file) =>
+  for (const manifest of mapFiles.filter((file) =>
     /^(?:apps|packages)\/[^/]+\/package\.json$/.test(file),
   )) {
     const packagePath = manifest.slice(0, -"/package.json".length);
