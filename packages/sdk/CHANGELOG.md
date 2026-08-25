@@ -1,5 +1,16 @@
 # @opengeni/sdk
 
+## 2.4.0
+
+### Minor Changes
+
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- Updated dependencies [dc10a36]
+  - @opengeni/contracts@2.4.0
+
 ## 2.3.0
 
 ### Minor Changes
