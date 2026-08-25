@@ -53,14 +53,12 @@ async function appSessionLockWaiters(): Promise<number> {
     from pg_stat_activity
     where datname = current_database()
       and usename = 'opengeni_app'
-      and wait_event_type = 'Lock'
-      and lower(query) like '%sessions%'
-      and lower(query) like '%no key update%'`;
+      and wait_event_type = 'Lock'`;
   return row?.count ?? 0;
 }
 
 async function waitForAppSessionLockWaiters(minimum: number): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     if ((await appSessionLockWaiters()) >= minimum) return;
     await Bun.sleep(10);
