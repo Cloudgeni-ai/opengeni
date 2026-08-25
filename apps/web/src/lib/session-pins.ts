@@ -109,9 +109,9 @@ export function applySessionChannelProjection(
 
 /**
  * Merge a detail/SSE projection into the root context without allowing a
- * slower detail read to erase a newer list or optimistic pin projection.
- * Detail remains authoritative for every non-pin field; the current context
- * contributes only its pin fields when that projection is newer or equal.
+ * slower detail read to erase newer list-owned pin or project projections.
+ * Detail remains authoritative for route-owned fields; the current context
+ * contributes personal pin fields and the project filing.
  */
 export function mergeSessionContextProjection(
   current: Session | null,
@@ -120,7 +120,8 @@ export function mergeSessionContextProjection(
   if (!projected) {
     return null;
   }
-  return applySessionPinProjection(projected, current ?? projected) ?? projected;
+  const pinned = applySessionPinProjection(projected, current ?? projected) ?? projected;
+  return applySessionChannelProjection(pinned, current ?? projected) ?? pinned;
 }
 
 /**
