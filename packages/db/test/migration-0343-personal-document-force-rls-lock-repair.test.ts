@@ -54,6 +54,13 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     if (!owned) return;
     const { admin, adminUrl, ownerUrl, ownerRole, appPassword } = owned;
     await applyBelow(ownerUrl, REPAIR);
+    // Current session adapters select the complete current sessions row while
+    // this fixture intentionally holds the database below 0343. Supply only
+    // the later column they need, then remove it before the real deferred
+    // migration chain runs so 0347 still owns creation and backfill.
+    await admin`
+      alter table sessions
+      add column variable_set_ids jsonb not null default '[]'::jsonb`;
     await provisionRoles(adminUrl, { appPassword, rlsStrategy: "force" });
 
     const [posture] = await admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
@@ -85,7 +92,8 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     const appUrl = new URL(ownerUrl);
     appUrl.username = "opengeni_app";
     appUrl.password = appPassword;
-    const app = postgres(appUrl.toString(), { max: 1, onnotice: () => undefined });
+    const openApp = () => postgres(appUrl.toString(), { max: 1, onnotice: () => undefined });
+    let app = openApp();
     const runtimeOwner = postgres(ownerUrl, { max: 1, onnotice: () => undefined });
     const db = createDb(adminUrl, { max: 1 });
 
@@ -178,7 +186,10 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       where resource_kind = 'document' and resource_id = ${beforeDocument}`;
     expect(legacyAuthorities).toHaveLength(0);
 
+    await app.end({ timeout: 5 });
+    await admin`alter table sessions drop column variable_set_ids`;
     await migrate(ownerUrl);
+    app = openApp();
 
     const afterDocument = crypto.randomUUID();
     const [authority] = await mint(afterDocument);
