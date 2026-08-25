@@ -239,8 +239,8 @@ const PIN_THRESHOLD_PX = 48;
 const OLDER_PREFETCH_MARGIN_PX = 400;
 const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 
-// State: 0 underfill pending, 1 underfill settled, 2 prefetch pending,
-// 3 prefetch settled. The tuple identity is the exact ownership fence.
+// State: 0 underfill, 1 prefetch pending, 2 prefetch settled.
+// The tuple identity is the exact ownership fence.
 type OlderLoadAttempt = [boundary: string | null, state: number];
 
 function invokeOlderLoad(load: () => unknown, settle: () => void): 0 | 1 {
@@ -388,10 +388,6 @@ export function MessageTimeline({
   // history forever while the reader sits at the tip. Arm on first scroll-up.
   const olderPrefetchArmedRef = useRef(false);
   const [olderPrefetchArmed, setOlderPrefetchArmed] = useState(false);
-  // One loadOlder per visit to the top band. Re-arm only after the reader
-  // leaves that band (scrolls down / sentinel exits) — never from scrolling
-  // further toward y=0 (that was the batch-top load loop).
-  const olderLoadGateRef = useRef(true);
   // A collapsed history tail can be shorter than the viewport. In that state
   // there is no upward scroll range, so reader intent can never arm the top
   // sentinel. Request one older page per loaded window until history either
@@ -403,8 +399,6 @@ export function MessageTimeline({
   const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<OlderLoadAttempt | null>(
     null,
   );
-  const underfillRetryReadyRef = useRef(false);
-  const [underfillRetryReady, setUnderfillRetryReady] = useState(false);
   const resizeFollowRafRef = useRef<number | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
@@ -483,6 +477,12 @@ export function MessageTimeline({
   const firstItemContentTopRef = useRef<number | null>(null);
   const firstItemId = resolvedItems[0]?.id ?? null;
   const olderBoundaryKey = firstItemId;
+  const underfillRetryReady =
+    underfillSettledAttempt !== null &&
+    underfillSettledAttempt === olderLoadAttemptRef.current &&
+    underfillSettledAttempt[0] === olderBoundaryKey &&
+    hasOlder &&
+    !loadingOlder;
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk =
@@ -500,29 +500,11 @@ export function MessageTimeline({
     }
   }, []);
 
-  const clearOlderLoadOwner = useCallback(() => {
-    olderLoadAttemptRef.current = null;
-    underfillRetryReadyRef.current = false;
-    setUnderfillRetryReady(false);
+  const rearmOlderPrefetchAfterLeavingTop = useCallback((node: HTMLElement) => {
+    if (node.scrollTop > OLDER_PREFETCH_MARGIN_PX && olderLoadAttemptRef.current?.[1] === 2) {
+      olderLoadAttemptRef.current = null;
+    }
   }, []);
-
-  const rearmOlderPrefetchAfterLeavingTop = useCallback(
-    (node: HTMLElement) => {
-      if (node.scrollTop <= OLDER_PREFETCH_MARGIN_PX) {
-        return;
-      }
-      const attempt = olderLoadAttemptRef.current;
-      if (attempt?.[1] === 3) {
-        clearOlderLoadOwner();
-      }
-      // A pending promise keeps the whole older-load boundary cooling. A
-      // settled/legacy callback gets one retry on the reader's next approach.
-      if (!olderLoadAttemptRef.current) {
-        olderLoadGateRef.current = true;
-      }
-    },
-    [clearOlderLoadOwner],
-  );
 
   const revealedRef = useRef(revealed);
   revealedRef.current = revealed;
@@ -782,16 +764,13 @@ export function MessageTimeline({
 
   const requestOlderIfUnderfilled = useCallback(
     (node: HTMLElement, retry = false) => {
-      if (retry && !underfillRetryReadyRef.current) {
-        // AnimatePresence may retain the exiting button briefly. Its stale
-        // handler cannot authorize a second concurrent request.
-        return;
-      }
       const currentAttempt = olderLoadAttemptRef.current;
       if (
         retry &&
-        (!currentAttempt || currentAttempt[1] >= 2 || currentAttempt[0] !== olderBoundaryKey)
+        (currentAttempt !== underfillSettledAttempt || currentAttempt?.[0] !== olderBoundaryKey)
       ) {
+        // AnimatePresence may retain the exiting button briefly. Its stale
+        // handler cannot replace a newer exact owner.
         return;
       }
       // clientHeight=0 is pre-layout/headless, not evidence that the rendered
@@ -808,13 +787,11 @@ export function MessageTimeline({
       }
       const attempt: OlderLoadAttempt = [olderBoundaryKey, 0];
       olderLoadAttemptRef.current = attempt;
-      underfillRetryReadyRef.current = false;
-      setUnderfillRetryReady(false);
+      setUnderfillSettledAttempt(null);
       // Every underfill request owns the ordinary sentinel too, even if reader
       // intent had not armed it yet when this short-window request began.
       const settle = () => {
         if (olderLoadAttemptRef.current === attempt) {
-          attempt[1] = 1;
           setUnderfillSettledAttempt(attempt);
         }
       };
@@ -822,7 +799,7 @@ export function MessageTimeline({
       // that return the real promise opt into safe rejection/no-progress retry.
       invokeOlderLoad(onLoadOlder, settle);
     },
-    [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
+    [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder, underfillSettledAttempt],
   );
 
   // Promise settlement is not itself permission to auto-retry: the parent may
@@ -833,13 +810,19 @@ export function MessageTimeline({
     if (!attempt) {
       return;
     }
-    if (attempt[0] !== olderBoundaryKey || !hasOlder) {
-      clearOlderLoadOwner();
-    } else if (attempt === underfillSettledAttempt && !loadingOlder) {
-      underfillRetryReadyRef.current = true;
-      setUnderfillRetryReady(true);
+    if (!hasOlder || (attempt[0] !== olderBoundaryKey && attempt[1] === 0)) {
+      olderLoadAttemptRef.current = null;
+    } else if (attempt[0] !== olderBoundaryKey) {
+      // Successful ordinary prefetch stays as this top visit's cooldown owner
+      // until the reader leaves; boundary progress makes it settled even if
+      // the host's promise has not resolved yet.
+      attempt[1] = 2;
+      const node = scrollRef.current;
+      if (node) {
+        rearmOlderPrefetchAfterLeavingTop(node);
+      }
     }
-  }, [clearOlderLoadOwner, hasOlder, loadingOlder, olderBoundaryKey, underfillSettledAttempt]);
+  }, [hasOlder, olderBoundaryKey, rearmOlderPrefetchAfterLeavingTop]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
   const driveFollow = useCallback(
@@ -1170,7 +1153,6 @@ export function MessageTimeline({
       olderPrefetchArmedRef.current = false;
       setOlderPrefetchArmed(false);
     }
-    olderLoadGateRef.current = true;
     wantPinRef.current = false;
     pendingJumpToStartRef.current = false;
     previousFirstItemIdRef.current = null;
@@ -1186,7 +1168,7 @@ export function MessageTimeline({
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
     olderLoadAttemptRef.current = null;
-    setUnderfillRetryReady(false);
+    setUnderfillSettledAttempt(null);
     seenActivityIdsRef.current.clear();
     applyPinned(true);
   }, [allGroups.length, revealed, applyPinned]);
@@ -1239,31 +1221,26 @@ export function MessageTimeline({
           // owner here; a still-pending request remains cooling so a quick
           // leave/re-enter cannot overlap it.
           const attempt = olderLoadAttemptRef.current;
-          if (attempt?.[1] === 3) {
-            clearOlderLoadOwner();
-          }
-          if (!olderLoadAttemptRef.current) {
-            olderLoadGateRef.current = true;
+          if (attempt?.[1] === 2) {
+            olderLoadAttemptRef.current = null;
           }
           return;
         }
         // Both automatic underfill and ordinary prefetch use one boundary
         // owner. In particular, live growth cannot arm a second sentinel load
         // while the short-window request that preceded it is still pending.
-        if (olderLoadAttemptRef.current || !olderLoadGateRef.current) {
+        if (olderLoadAttemptRef.current) {
           return;
         }
-        const attempt: OlderLoadAttempt = [olderBoundaryKey, 2];
+        const attempt: OlderLoadAttempt = [olderBoundaryKey, 1];
         olderLoadAttemptRef.current = attempt;
-        olderLoadGateRef.current = false;
         const settle = () => {
           if (olderLoadAttemptRef.current !== attempt) {
             return;
           }
-          attempt[1] = 3;
+          attempt[1] = 2;
           if (root.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
-            clearOlderLoadOwner();
-            olderLoadGateRef.current = true;
+            olderLoadAttemptRef.current = null;
           }
         };
         // Preserve legacy fire-and-forget top-band retries: the callback has
@@ -1274,15 +1251,7 @@ export function MessageTimeline({
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [
-    clearOlderLoadOwner,
-    firstGroupKey,
-    hasOlder,
-    loadingOlder,
-    olderBoundaryKey,
-    olderPrefetchArmed,
-    onLoadOlder,
-  ]);
+  }, [firstGroupKey, hasOlder, loadingOlder, olderBoundaryKey, olderPrefetchArmed, onLoadOlder]);
 
   // History view: page forward when the reader nears the bottom of the current
   // non-tip window. Does not pull the whole gap — one density-bounded page.
@@ -1652,7 +1621,7 @@ export function MessageTimeline({
                     {loadingOlder ||
                     loadingOldest ||
                     (hasOlder && onJumpToStart && olderPrefetchArmed) ||
-                    (underfillRetryReady && hasOlder) ? (
+                    underfillRetryReady ? (
                       // Floating over the scroller (not a timeline row) so showing and
                       // hiding it never reflows history under the reader.
                       <motion.div
