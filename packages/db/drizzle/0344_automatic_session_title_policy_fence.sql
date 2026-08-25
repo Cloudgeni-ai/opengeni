@@ -32,6 +32,9 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()
+FROM PUBLIC;
+
 DROP TRIGGER IF EXISTS sessions_automatic_title_policy_v1_fence ON sessions;
 CREATE TRIGGER sessions_automatic_title_policy_v1_fence
 BEFORE UPDATE OF title, title_source ON sessions

@@ -39,12 +39,32 @@ describe("migration 0344 automatic session title policy fence", () => {
     expect(source).toContain("BEFORE UPDATE OF title, title_source");
     expect(source).toContain("ON sessions");
     expect(source).not.toContain("public.sessions");
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()",
+    );
+    expect(source).toContain("FROM PUBLIC");
     expect(source).not.toContain("BEFORE INSERT");
   });
 
   test("blocks an old automatic writer while admitting normalized and human writers", async () => {
     const database = shared;
     if (!database) return;
+
+    const [functionAcl] = await database.admin<
+      Array<{ appExecute: boolean; publicExecute: boolean }>
+    >`
+      select
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute"
+      from pg_proc procedure
+      join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'opengeni_private'
+        and procedure.proname = 'enforce_automatic_session_title_policy_v1'`;
+    expect(functionAcl).toEqual({ appExecute: false, publicExecute: false });
 
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
