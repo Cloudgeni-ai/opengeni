@@ -775,11 +775,12 @@ export function MessageTimeline({
       if (olderPrefetchArmedRef.current) {
         olderLoadGateRef.current = "cooling";
       }
+      const settle = () => setUnderfillSettledWindowKey(loadedWindowKey);
       let result: boolean | void | PromiseLike<boolean | void>;
       try {
         result = onLoadOlder();
       } catch {
-        setUnderfillSettledWindowKey(loadedWindowKey);
+        settle();
         return;
       }
       if (!result || typeof (result as PromiseLike<boolean | void>).then !== "function") {
@@ -787,10 +788,7 @@ export function MessageTimeline({
         // that return the real promise opt into safe rejection/no-progress retry.
         return;
       }
-      void Promise.resolve(result).then(
-        () => setUnderfillSettledWindowKey(loadedWindowKey),
-        () => setUnderfillSettledWindowKey(loadedWindowKey),
-      );
+      void Promise.resolve(result).then(settle, settle);
     },
     [hasOlder, loadedWindowKey, loadingOlder, onLoadOlder],
   );
@@ -1609,7 +1607,7 @@ export function MessageTimeline({
                         transition={{ duration: 0.15, ease: "easeOut" }}
                         data-og-loading-older=""
                         aria-live="polite"
-                        className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
+                        className="absolute inset-x-0 top-3 z-10 flex justify-center"
                       >
                         {loadingOlder || loadingOldest ? (
                           <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
@@ -1634,13 +1632,10 @@ export function MessageTimeline({
                                 }
                                 return;
                               }
-                              if (!onJumpToStart) {
-                                return;
-                              }
                               applyPinned(false);
                               pendingJumpToStartRef.current = true;
                               const seq = ++jumpToStartSeqRef.current;
-                              void Promise.resolve(onJumpToStart()).then(
+                              void Promise.resolve(onJumpToStart!()).then(
                                 () => {
                                   // The commit that swaps in the oldest window consumes
                                   // the flag against the new DOM; this write covers the
