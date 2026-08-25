@@ -179,10 +179,14 @@ const USER_RESOURCE_LIFECYCLE_ROUTINES = [
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
+const CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE =
+  "connection_authority_convergence_audit_capability_active(uuid)";
 const CONNECTION_AUTHORITY_ROUTINES = [
+  CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
   "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
+  "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
 ] as const;
 const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES = [
   "get_self_personal_github_repository_selection(uuid, uuid, text, uuid)",
