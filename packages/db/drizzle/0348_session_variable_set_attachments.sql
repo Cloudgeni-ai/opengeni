@@ -16,14 +16,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0347 session Variable Set attachments require an explicit application database role list'
+      '0348 session Variable Set attachments require an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0347 session Variable Set attachments received a malformed application database role list'
+      '0348 session Variable Set attachments received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -42,7 +42,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0347 session Variable Set attachments received an invalid application database role list'
+      '0348 session Variable Set attachments received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -54,7 +54,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0347 session Variable Set attachments require all configured OpenGeni application database sessions to be stopped'
+      '0348 session Variable Set attachments require all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -852,7 +852,7 @@ BEGIN
   FOR SHARE OF variable_set;$new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0347 could not extend the personal-resource attachment lock set'
+    RAISE EXCEPTION '0348 could not extend the personal-resource attachment lock set'
       USING ERRCODE = '55000';
   END IF;
 
@@ -872,7 +872,7 @@ BEGIN
       AND attachment.session_id = p_session_id$new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0347 could not extend the personal-resource attachment closure'
+    RAISE EXCEPTION '0348 could not extend the personal-resource attachment closure'
       USING ERRCODE = '55000';
   END IF;
   function_source := replace(
@@ -885,7 +885,7 @@ BEGIN
   IF function_source NOT LIKE '%IF selected_count > 52 THEN%'
     OR function_source LIKE '%IF selected_count > 28 THEN%'
   THEN
-    RAISE EXCEPTION '0347 could not update the personal-resource attachment bound'
+    RAISE EXCEPTION '0348 could not update the personal-resource attachment bound'
       USING ERRCODE = '55000';
   END IF;
 
@@ -942,7 +942,7 @@ BEGIN
     'session_value.variable_set_ids, session_value.variable_set_id, session_value.rig_id,'
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0347 could not extend the scheduled session selection snapshot'
+    RAISE EXCEPTION '0348 could not extend the scheduled session selection snapshot'
       USING ERRCODE = '55000';
   END IF;
 
@@ -965,7 +965,7 @@ BEGIN
       AND run_snapshot -> 'targetSessionExecution' ->> 'variableSetId' = p_variable_set_id::text$new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0347 could not extend the scheduled accepted generation lookup'
+    RAISE EXCEPTION '0348 could not extend the scheduled accepted generation lookup'
       USING ERRCODE = '55000';
   END IF;
 
@@ -976,7 +976,7 @@ BEGIN
     'IF NOT coalesce(session_row.variable_set_ids, ''[]''::jsonb) ? p_variable_set_id::text'
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0347 could not extend the scheduled exact-session selection check'
+    RAISE EXCEPTION '0348 could not extend the scheduled exact-session selection check'
       USING ERRCODE = '55000';
   END IF;
 

@@ -493,9 +493,7 @@ describe("embedding host session authorization routes", () => {
     );
 
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({
-      message: expect.stringContaining("no accepted, queued, claimed, or pending work"),
-    });
+    expect(await response.text()).toContain("no accepted, queued, claimed, or pending work");
     const [session] = await shared!.admin<
       Array<{ variableSetIds: string[]; variableSetId: string | null }>
     >`

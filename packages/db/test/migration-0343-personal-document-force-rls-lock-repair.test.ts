@@ -57,7 +57,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // Current session adapters select the complete current sessions row while
     // this fixture intentionally holds the database below 0343. Supply only
     // the later column they need, then remove it before the real deferred
-    // migration chain runs so 0347 still owns creation and backfill.
+    // migration chain runs so 0348 still owns creation and backfill.
     await admin`
       alter table sessions
       add column variable_set_ids jsonb not null default '[]'::jsonb`;

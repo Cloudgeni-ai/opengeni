@@ -180,7 +180,7 @@ describe("release schema contract", () => {
       "0344_private_session_visibility_transition_gate.sql",
       "0345_tenant_scoped_session_tenancy_fence.sql",
       "0346_document_migration_audit_surface.sql",
-      "0347_session_variable_set_attachments.sql",
+      "0348_session_variable_set_attachments.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -220,7 +220,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0346_document_migration_audit_surface.sql",
     );
     const sessionVariableSetAttachments = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0347_session_variable_set_attachments.sql",
+      (migration) => migration.path === "0348_session_variable_set_attachments.sql",
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -235,7 +235,7 @@ describe("release schema contract", () => {
         (documentMigrationAuditSurface ? 1 : 0) +
         (sessionVariableSetAttachments ? 1 : 0),
       latestMigration: sessionVariableSetAttachments
-        ? "0347_session_variable_set_attachments.sql"
+        ? "0348_session_variable_set_attachments.sql"
         : documentMigrationAuditSurface
           ? "0346_document_migration_audit_surface.sql"
           : tenantScopedSessionTenancyFence

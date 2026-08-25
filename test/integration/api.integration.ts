@@ -118,6 +118,23 @@ async function setSessionStatus(
   });
 }
 
+async function settleSessionTurnsForVariableSetDetach(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.execute(dbSql`
+      update session_turns
+      set status = 'cancelled', active_attempt_id = null,
+        cancelled_by = 'integration-test', cancel_reason = 'explicit_variable_set_detach',
+        finished_at = coalesce(finished_at, now()), updated_at = now()
+      where workspace_id = ${workspaceId} and session_id = ${sessionId}
+        and status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+    `);
+  });
+}
+
 describe("API component integration", () => {
   let services: TestServices;
   let dbClient: ReturnType<typeof createDb>;
@@ -7937,7 +7954,7 @@ describe("API component integration", () => {
     expect(JSON.stringify(events)).not.toContain("session-secret-abcdef");
   });
 
-  test("preserves active Variable Set deletion fences and clears terminal attachments", async () => {
+  test("keeps every session attachment fenced until an explicit quiescent detach", async () => {
     workflow = new FakeWorkflowClient();
     const app = createApp({
       settings: testSettings({
@@ -7977,6 +7994,9 @@ describe("API component integration", () => {
       "requires_action",
       "recovering",
       "waiting_capacity",
+      "idle",
+      "failed",
+      "cancelled",
     ] as const) {
       const { environment, session } = await createAttachedSession(status);
       const blocked = await app.request(
@@ -7984,31 +8004,35 @@ describe("API component integration", () => {
         { method: "DELETE" },
       );
       expect(blocked.status).toBe(409);
-      expect(await blocked.text()).toContain("active session");
+      expect(await blocked.text()).toContain("session");
       const retained = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
       expect(((await retained.json()) as { environmentId: string | null }).environmentId).toBe(
         environment.id,
       );
 
       await setSessionStatus(dbClient.db, workspaceId, session.id, "cancelled", null);
+      await settleSessionTurnsForVariableSetDetach(dbClient.db, workspaceId, session.id);
+      const detached = await app.request(
+        workspacePath(workspaceId, `/sessions/${session.id}/variable-sets`),
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ variableSetIds: [] }),
+        },
+      );
+      expect(detached.status).toBe(200);
+      expect(
+        ((await detached.json()) as { environmentId: string | null }).environmentId,
+      ).toBeNull();
+      const events = await listSessionEvents(dbClient.db, workspaceId, session.id);
+      expect(events.filter((event) => event.type === "session.variable_sets.updated")).toHaveLength(
+        1,
+      );
       const cleanup = await app.request(
         workspacePath(workspaceId, `/environments/${environment.id}`),
         { method: "DELETE" },
       );
       expect(cleanup.status).toBe(200);
-    }
-
-    for (const status of ["idle", "failed", "cancelled"] as const) {
-      const { environment, session } = await createAttachedSession(status);
-      const allowed = await app.request(
-        workspacePath(workspaceId, `/environments/${environment.id}`),
-        { method: "DELETE" },
-      );
-      expect(allowed.status).toBe(200);
-      const detached = await app.request(workspacePath(workspaceId, `/sessions/${session.id}`));
-      expect(
-        ((await detached.json()) as { environmentId: string | null }).environmentId,
-      ).toBeNull();
     }
   });
 
@@ -8243,8 +8267,25 @@ describe("API component integration", () => {
     expect(detach.status).toBe(200);
     expect(((await detach.json()) as { environmentId: string | null }).environmentId).toBeNull();
     // The still-attached idle reusable session remains a live attachment even
-    // after the task detaches. Terminal settlement releases that deletion fence.
+    // after the task detaches. Terminal settlement alone cannot bypass lease
+    // rotation, event, and audit evidence: detach through the session route.
     await setSessionStatus(dbClient.db, workspaceId, reusableSession.id, "failed", null);
+    const blockedBySession = await app.request(
+      workspacePath(workspaceId, `/environments/${environment.id}`),
+      { method: "DELETE" },
+    );
+    expect(blockedBySession.status).toBe(409);
+    expect(await blockedBySession.text()).toContain("session");
+    await settleSessionTurnsForVariableSetDetach(dbClient.db, workspaceId, reusableSession.id);
+    const sessionDetach = await app.request(
+      workspacePath(workspaceId, `/sessions/${reusableSession.id}/variable-sets`),
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ variableSetIds: [] }),
+      },
+    );
+    expect(sessionDetach.status).toBe(200);
     const deleteResponse = await app.request(
       workspacePath(workspaceId, `/environments/${environment.id}`),
       { method: "DELETE" },
