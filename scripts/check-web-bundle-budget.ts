@@ -209,7 +209,14 @@ const budgets = {
   // guard's one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance by
   // advancing each to its next compliant whole-KiB envelope. Every file-count,
   // initial, per-file, lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2124 * kib,
+  // The organization-admin document migration audit adds three typed SDK
+  // methods to the same non-tree-shakeable client. Exact Linux/x64 PR CI
+  // measures the direct-session graph at 2,175,302 raw / 607,439 gzip bytes.
+  // Advance only raw to the next whole-KiB envelope that preserves at least
+  // one KiB of headroom; gzip retains more than the 1.5-KiB platform-skew
+  // allowance, and every other cap remains unchanged. OPE-355 tracks removing
+  // this structural browser tax instead of continuing to grow the shared class.
+  directSessionRaw: 2126 * kib,
   directSessionGzip: 595 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
