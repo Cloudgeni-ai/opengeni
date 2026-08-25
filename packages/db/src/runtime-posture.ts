@@ -235,6 +235,13 @@ const DOCUMENT_MIGRATION_AUTHORITY_ROUTINES = [
   "list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamp with time zone, uuid)",
   "reclassify_document_authority(jsonb)",
   "run_document_default_collection_backfill(jsonb)",
+  "list_document_default_collection_backfill_runs(jsonb)",
+  "get_document_default_collection_backfill_audit(jsonb)",
+  "list_organization_document_authority_reclassifications(jsonb)",
+] as const;
+const DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES = [
+  "document_migration_audit_capability_active(text)",
+  "assert_document_migration_audit_authority(jsonb)",
 ] as const;
 const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean)",
@@ -476,6 +483,7 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
+  ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [

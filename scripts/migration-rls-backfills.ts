@@ -296,35 +296,79 @@ const NON_DML =
 
 type OwnerCapabilityPolicy = { guc: string; table: string };
 
+function parenthesizedPolicyClause(statement: string, marker: RegExp): string | null {
+  const match = marker.exec(statement);
+  if (!match || match.index === undefined) return null;
+  const open = statement.indexOf("(", match.index);
+  if (open === -1) return null;
+
+  let depth = 0;
+  for (let index = open; index < statement.length; index += 1) {
+    const char = statement[index]!;
+    if (char === "'" || char === '"') {
+      const quote = char;
+      index += 1;
+      while (index < statement.length) {
+        if (statement[index] === quote && statement[index + 1] === quote) {
+          index += 2;
+          continue;
+        }
+        if (statement[index] === quote) break;
+        index += 1;
+      }
+      continue;
+    }
+    if (char === "(") depth += 1;
+    if (char === ")") {
+      depth -= 1;
+      if (depth === 0) return statement.slice(open + 1, index);
+    }
+  }
+  return null;
+}
+
+function ownerCapabilityClauseGuc(clause: string, table: string): string | null {
+  const exactOwner = new RegExp(
+    String.raw`current_user\s*=\s*\(\s*SELECT\s+pg_catalog\.pg_get_userbyid\s*\(\s*[a-z0-9_]+\.relowner\s*\)\s+FROM\s+pg_catalog\.pg_class\s+[a-z0-9_]+\s+WHERE\s+[a-z0-9_]+\.oid\s*=\s*'${table}'::regclass\s*\)`,
+    "gi",
+  );
+  const capability =
+    /(?:pg_catalog\.)?current_setting\s*\(\s*'opengeni\.([a-z0-9_]+)'\s*,\s*true\s*\)\s*=\s*'1'/gi;
+  const ownerMatches = clause.match(exactOwner) ?? [];
+  const capabilityMatches = [...clause.matchAll(capability)];
+  if (ownerMatches.length !== 1 || capabilityMatches.length !== 1) return null;
+
+  const normalized = clause
+    .replace(exactOwner, "OWNER")
+    .replace(capability, "CAPABILITY")
+    .replace(/[()\s]/g, "")
+    .toUpperCase();
+  if (normalized !== "OWNERANDCAPABILITY" && normalized !== "CAPABILITYANDOWNER") return null;
+  return capabilityMatches[0]![1]!;
+}
+
 function ownerCapabilityPolicy(statement: string): OwnerCapabilityPolicy | null {
   const target =
     /^CREATE\s+POLICY\s+(?:"[^"]+"|[a-z0-9_]+)\s+ON\s+(?:(?:"[^"]+"|[a-z0-9_]+)\.)?"?([a-z0-9_]+)"?/i.exec(
       statement.trim(),
     );
-  const guc = /current_setting\s*\(\s*'opengeni\.([a-z0-9_]+)'\s*,\s*true\s*\)/i.exec(statement);
-  if (
-    !target ||
-    !guc ||
-    !/\bFOR\s+ALL\b/i.test(statement) ||
-    !/\bWITH\s+CHECK\b/i.test(statement)
-  ) {
+  if (!target || !/\bFOR\s+ALL\b/i.test(statement)) {
     return null;
   }
 
   const table = target[1]!;
-  const exactOwner = new RegExp(
-    String.raw`current_user\s*=\s*\(\s*SELECT\s+pg_catalog\.pg_get_userbyid\s*\(\s*[a-z0-9_]+\.relowner\s*\)\s+FROM\s+pg_catalog\.pg_class\s+[a-z0-9_]+\s+WHERE\s+[a-z0-9_]+\.oid\s*=\s*'${table}'::regclass\s*\)`,
-    "gi",
-  );
-  const exactOwnerChecks = statement.match(exactOwner)?.length ?? 0;
-  const capabilityChecks = statement.match(
-    new RegExp(
-      String.raw`current_setting\s*\(\s*'opengeni\.${guc[1]}'\s*,\s*true\s*\)\s*=\s*'1'`,
-      "gi",
-    ),
-  )?.length;
-  if (exactOwnerChecks < 2 || (capabilityChecks ?? 0) < 2) return null;
-  return { guc: guc[1]!, table };
+  const usingClause = parenthesizedPolicyClause(statement, /\bUSING\s*\(/i);
+  const withCheckClause = parenthesizedPolicyClause(statement, /\bWITH\s+CHECK\s*\(/i);
+  if (!usingClause || !withCheckClause) return null;
+
+  // Each RLS arm must be exactly the owner proof AND the transaction-local
+  // capability proof (in either order, with arbitrary grouping parentheses).
+  // Counting tokens across the whole policy would accept owner OR capability,
+  // allowing any application role to activate the custom GUC itself.
+  const usingGuc = ownerCapabilityClauseGuc(usingClause, table);
+  const withCheckGuc = ownerCapabilityClauseGuc(withCheckClause, table);
+  if (!usingGuc || usingGuc !== withCheckGuc) return null;
+  return { guc: usingGuc, table };
 }
 
 function activatedOwnerCapabilityTables(

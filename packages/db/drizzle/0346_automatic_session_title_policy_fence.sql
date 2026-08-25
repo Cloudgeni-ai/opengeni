@@ -13,7 +13,7 @@ DROP TRIGGER IF EXISTS sessions_automatic_title_policy_v1_fence ON sessions;
 -- FORCE RLS also binds the non-superuser table owner used by production
 -- migrations. This persistent policy opens only an exact owner + transaction-
 -- local capability seam; ordinary application roles cannot activate it. The
--- following migration uses that seam in one bounded statement per transaction.
+-- following migrations use that seam in one bounded statement per transaction.
 DROP POLICY IF EXISTS sessions_automatic_title_quarantine_v1 ON sessions;
 CREATE POLICY sessions_automatic_title_quarantine_v1 ON sessions
 FOR ALL
@@ -33,6 +33,35 @@ WITH CHECK (
     SELECT pg_catalog.pg_get_userbyid(relation.relowner)
     FROM pg_catalog.pg_class relation
     WHERE relation.oid = 'sessions'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.automatic_session_title_quarantine_v1',
+    true
+  ) = '1'
+);
+
+-- The quarantine advances the authoritative session sequence and appends a
+-- safe title event in the same transaction. Give that INSERT the identical
+-- owner/capability fence so rolling clients receive a superseding projection.
+DROP POLICY IF EXISTS session_events_automatic_title_quarantine_v1 ON session_events;
+CREATE POLICY session_events_automatic_title_quarantine_v1 ON session_events
+FOR ALL
+USING (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'session_events'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.automatic_session_title_quarantine_v1',
+    true
+  ) = '1'
+)
+WITH CHECK (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'session_events'::regclass
   )
   AND pg_catalog.current_setting(
     'opengeni.automatic_session_title_quarantine_v1',

@@ -67,6 +67,22 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("CLIENTPRIVATEKEY=secretword")).toBeNull();
   });
 
+  test("rejects quoted object-literal and JSON secret assignments", () => {
+    expect(normalizeAutomaticSessionTitle('{"DATABASE_APIKEY":"swordfish"}')).toBeNull();
+    expect(normalizeAutomaticSessionTitle('{"password":"swordfish"}')).toBeNull();
+    expect(normalizeAutomaticSessionTitle("{'OAUTH_ACCESSTOKEN':'sesame'}")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("｛＂CLIENT_PRIVATEKEY＂：＂secretword＂｝")).toBeNull();
+  });
+
+  test("rejects secret key and access key assignment suffix chains", () => {
+    expect(normalizeAutomaticSessionTitle("STRIPE_SECRET_KEY=sesame")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("AWS_SECRET_ACCESS_KEY=swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("AWS_ACCESS_KEY_ID=shortword")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("stripeSecretKey=sesame")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("AWSSECRETACCESSKEY=swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("AWSACCESSKEYID=shortword")).toBeNull();
+  });
+
   test("does not reject benign discussion of secret-management concepts", () => {
     expect(normalizeAutomaticSessionTitle("Password reset flow")).toBe("Password reset flow");
     expect(normalizeAutomaticSessionTitle("API key rotation policy")).toBe(

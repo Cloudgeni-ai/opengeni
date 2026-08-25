@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { parseConcurrentIndexMigration } from "../src/migrate";
 import {
   addSessionSystemUpdateWithSourceMutation,
   appendSessionEvents,
@@ -29,8 +30,12 @@ const fenceMigrationUrl = new URL(
   "../drizzle/0346_automatic_session_title_policy_fence.sql",
   import.meta.url,
 );
+const quarantineIndexMigrationUrl = new URL(
+  "../drizzle/0347_automatic_session_title_quarantine_index.sql",
+  import.meta.url,
+);
 const quarantineMigrationUrl = new URL(
-  "../drizzle/0347_automatic_session_title_quarantine.sql",
+  "../drizzle/0348_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
 
@@ -228,9 +233,10 @@ async function addAcceptedScheduledOccurrence(input: {
   );
 }
 
-describe("migrations 0346-0347 automatic session title policy fence", () => {
-  test("use a short rolling fence followed by a bounded resumable quarantine", async () => {
+describe("migrations 0346-0348 automatic session title policy fence", () => {
+  test("use a short rolling fence, concurrent candidate index, and bounded resumable quarantine", async () => {
     const fence = await readFile(fenceMigrationUrl, "utf8");
+    const quarantineIndex = await readFile(quarantineIndexMigrationUrl, "utf8");
     const quarantine = await readFile(quarantineMigrationUrl, "utf8");
     expect(fence.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(fence).not.toContain("LOCK TABLE sessions");
@@ -238,6 +244,8 @@ describe("migrations 0346-0347 automatic session title policy fence", () => {
     expect(fence).not.toContain("ALTER TABLE sessions FORCE ROW LEVEL SECURITY");
     expect(fence).not.toMatch(/\bUPDATE sessions\b/i);
     expect(fence).toContain("sessions_automatic_title_quarantine_v1");
+    expect(fence).toContain("session_events_automatic_title_quarantine_v1");
+    expect(fence).toContain("'session_events'::regclass");
     expect(fence).toContain("pg_catalog.pg_get_userbyid(relation.relowner)");
     expect(fence).toContain("opengeni.automatic_session_title_quarantine_v1");
     expect(fence).toContain("opengeni.automatic_session_title_v1_candidate");
@@ -256,16 +264,80 @@ describe("migrations 0346-0347 automatic session title policy fence", () => {
     expect(fence).toContain("FROM PUBLIC");
 
     expect(
+      quarantineIndex.startsWith(
+        "-- deployment-mode: rolling\n-- opengeni:concurrent-index lock-timeout=5s\n",
+      ),
+    ).toBe(true);
+    expect(quarantineIndex).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS");
+    expect(quarantineIndex).toContain("sessions_automatic_title_quarantine_v1_idx");
+    expect(quarantineIndex).toContain("ON sessions (id)");
+    expect(quarantineIndex).toContain("title_source IS DISTINCT FROM 'user'");
+    expect(
+      parseConcurrentIndexMigration(
+        "0347_automatic_session_title_quarantine_index.sql",
+        quarantineIndex,
+      ),
+    ).toMatchObject({
+      indexName: "sessions_automatic_title_quarantine_v1_idx",
+      lockTimeout: "5s",
+      skipWhenValid: false,
+    });
+
+    expect(
       quarantine.startsWith(
         "-- deployment-mode: rolling\n-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s\n",
       ),
     ).toBe(true);
     expect(quarantine).toContain("LIMIT 500");
     expect(quarantine).toContain("FOR UPDATE OF session");
-    expect(quarantine).toContain("RETURNING session.id");
+    expect(quarantine).toContain("last_sequence = session.last_sequence + 1");
+    expect(quarantine).toContain("INSERT INTO session_events");
+    expect(quarantine).toContain("'session.title_set'");
+    expect(quarantine).toContain("RETURNING session_id AS id");
     expect(quarantine).not.toContain("SKIP LOCKED");
     expect(quarantine).not.toContain("ALTER TABLE");
     expect(quarantine).not.toContain("LOCK TABLE");
+  });
+
+  test("keeps candidate discovery on the concurrent partial index after cleaned rows disappear", async () => {
+    const database = shared;
+    if (!database) return;
+
+    const [index] = await database.admin<
+      Array<{ valid: boolean; ready: boolean; predicate: string | null }>
+    >`
+      select
+        candidate.indisvalid as valid,
+        candidate.indisready as ready,
+        pg_catalog.pg_get_expr(candidate.indpred, candidate.indrelid) as predicate
+      from pg_catalog.pg_index candidate
+      join pg_catalog.pg_class relation on relation.oid = candidate.indexrelid
+      join pg_catalog.pg_namespace namespace on namespace.oid = relation.relnamespace
+      where namespace.nspname = current_schema()
+        and relation.relname = 'sessions_automatic_title_quarantine_v1_idx'
+    `;
+    expect(index).toMatchObject({ valid: true, ready: true });
+    expect(index?.predicate).toContain("title_source IS DISTINCT FROM 'user'::text");
+    expect(index?.predicate).toContain("title IS DISTINCT FROM 'New conversation'::text");
+
+    const plan = await database.admin.begin(async (transaction) => {
+      await transaction`set local enable_seqscan = off`;
+      return await transaction.unsafe<Array<{ "QUERY PLAN": string }>>(`
+        explain (costs off)
+        select session.id
+        from sessions session
+        where session.title_source is distinct from 'user'
+          and (
+            session.title is distinct from 'New conversation'
+            or session.title_source is distinct from 'agent'
+          )
+        order by session.id
+        limit 500
+      `);
+    });
+    expect(plan.map((row) => row["QUERY PLAN"]).join("\n")).toContain(
+      "sessions_automatic_title_quarantine_v1_idx",
+    );
   });
 
   test("quarantines legacy automatic titles while preserving user-edited titles", async () => {
@@ -305,11 +377,12 @@ describe("migrations 0346-0347 automatic session title policy fence", () => {
       latencyMode: "standard",
       sandboxBackend: "none",
     });
+    const unsafeTitle = "Password: swordfish";
     await database.admin`alter table sessions disable trigger sessions_automatic_title_policy_v1_fence`;
     try {
       await database.admin`
         update sessions
-        set title = 'Password: swordfish', title_source = 'agent'
+        set title = ${unsafeTitle}, title_source = 'agent'
         where id = ${legacy.id}
       `;
       await database.admin`
@@ -321,15 +394,48 @@ describe("migrations 0346-0347 automatic session title policy fence", () => {
       await database.admin`alter table sessions enable trigger sessions_automatic_title_policy_v1_fence`;
     }
 
+    const [unsafeEvent] = await appendSessionEvents(client.db, grant.workspaceId!, legacy.id, [
+      {
+        type: "session.title_set",
+        payload: { title: unsafeTitle, source: "agent" },
+      },
+    ]);
+    expect(unsafeEvent?.payload).toEqual({ title: unsafeTitle, source: "agent" });
+
     expect(await drainQuarantine(database, await quarantineStatement())).toBe(1);
-    expect(await getSession(client.db, grant.workspaceId!, legacy.id)).toMatchObject({
+    const quarantined = await getSession(client.db, grant.workspaceId!, legacy.id);
+    expect(quarantined).toMatchObject({
       title: "New conversation",
       titleSource: "agent",
+      lastSequence: (unsafeEvent?.sequence ?? 0) + 1,
     });
     expect(await getSession(client.db, grant.workspaceId!, human.id)).toMatchObject({
       title: "Human incident review",
       titleSource: "user",
     });
+
+    const titleEvents = await database.admin<
+      Array<{ sequence: number; payload: { title?: unknown; source?: unknown } }>
+    >`
+      select sequence, payload
+      from session_events
+      where session_id = ${legacy.id}
+        and type = 'session.title_set'
+      order by sequence
+    `;
+    expect(titleEvents.at(-1)).toMatchObject({
+      sequence: quarantined?.lastSequence,
+      payload: { title: "New conversation", source: "agent" },
+    });
+    // A pre-policy browser applies every replayed title event without comparing
+    // it to the fetched row sequence. The migration's final event must still
+    // leave that old reducer on the safe projection.
+    expect(
+      titleEvents.reduce(
+        (title, event) => (typeof event.payload.title === "string" ? event.payload.title : title),
+        quarantined?.title ?? null,
+      ),
+    ).toBe("New conversation");
   }, 180_000);
 
   test("commits bounded progress, rolls back a failed batch, and resumes safely", async () => {

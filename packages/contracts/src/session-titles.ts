@@ -30,7 +30,7 @@ const KNOWN_SENSITIVE_VALUE_PATTERNS = [
 ] as const;
 
 const SECRET_ASSIGNMENT_CANDIDATE_PATTERN =
-  /(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_.-]*)\s*[=:]\s*[^\s,;]+/gu;
+  /(?:^|[^A-Za-z0-9])(?:(['"])([A-Za-z][A-Za-z0-9_.-]*)\1|([A-Za-z][A-Za-z0-9_.-]*))\s*[=:]\s*[^\s,;]+/gu;
 
 const SECRET_LABEL_ASSIGNMENT_PATTERN =
   /\b(?:api[ _-]?key|access[ _-]?token|auth[ _-]?token|credential|credentials|password|passwd|private[ _-]?key|secret|token)\b\s*[=:]\s*[^\s,;]+/iu;
@@ -46,14 +46,31 @@ const SENSITIVE_ASSIGNMENT_KEY_SUFFIXES = new Set([
 
 const COMPACT_SENSITIVE_ASSIGNMENT_KEY_SUFFIXES = [
   "apikey",
+  "accesskey",
+  "accesskeyid",
   "accesstoken",
   "authtoken",
   "privatekey",
+  "secretkey",
 ] as const;
+
+const SENSITIVE_ASSIGNMENT_KEY_WORD_SUFFIXES = [
+  ["api", "key"],
+  ["access", "key"],
+  ["access", "key", "id"],
+  ["private", "key"],
+  ["secret", "key"],
+] as const;
+
+function hasWordSuffix(words: readonly string[], suffix: readonly string[]): boolean {
+  if (words.length < suffix.length) return false;
+  const offset = words.length - suffix.length;
+  return suffix.every((word, index) => words[offset + index] === word);
+}
 
 function containsSensitiveAssignment(value: string): boolean {
   for (const match of value.matchAll(SECRET_ASSIGNMENT_CANDIDATE_PATTERN)) {
-    const key = match[1];
+    const key = match[2] ?? match[3];
     if (!key) continue;
     const words = key
       .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -66,14 +83,7 @@ function containsSensitiveAssignment(value: string): boolean {
     if (last && COMPACT_SENSITIVE_ASSIGNMENT_KEY_SUFFIXES.some((suffix) => last.endsWith(suffix))) {
       return true;
     }
-
-    const suffix = words.slice(-2).join(" ");
-    if (
-      suffix === "api key" ||
-      suffix === "access token" ||
-      suffix === "auth token" ||
-      suffix === "private key"
-    ) {
+    if (SENSITIVE_ASSIGNMENT_KEY_WORD_SUFFIXES.some((suffix) => hasWordSuffix(words, suffix))) {
       return true;
     }
   }

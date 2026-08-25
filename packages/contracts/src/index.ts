@@ -4952,6 +4952,107 @@ export const DocumentDefaultCollectionBackfill = z.object({
 });
 export type DocumentDefaultCollectionBackfill = z.infer<typeof DocumentDefaultCollectionBackfill>;
 
+export const DocumentDefaultCollectionBackfillRunAudit = DocumentDefaultCollectionBackfill.omit({
+  operationId: true,
+}).extend({
+  actorSubjectId: z.string().min(1),
+  startedAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type DocumentDefaultCollectionBackfillRunAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillRunAudit
+>;
+
+export const DocumentDefaultCollectionBackfillOperationAudit = z.object({
+  operationId: z.string().uuid(),
+  result: DocumentDefaultCollectionBackfill,
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type DocumentDefaultCollectionBackfillOperationAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillOperationAudit
+>;
+
+export const DocumentDefaultCollectionBackfillReceiptAudit = z.object({
+  workspaceId: z.string().uuid(),
+  baseId: z.string().uuid(),
+  outcome: z.enum(["created", "adopted"]),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type DocumentDefaultCollectionBackfillReceiptAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillReceiptAudit
+>;
+
+export const ListDocumentMigrationAuditQuery = ListDocumentAuthorityReclassificationsQuery;
+export type ListDocumentMigrationAuditQuery = z.infer<typeof ListDocumentMigrationAuditQuery>;
+
+export const ListDocumentDefaultCollectionBackfillRunsResponse = z.object({
+  runs: z.array(DocumentDefaultCollectionBackfillRunAudit),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+});
+export type ListDocumentDefaultCollectionBackfillRunsResponse = z.infer<
+  typeof ListDocumentDefaultCollectionBackfillRunsResponse
+>;
+
+export const GetDocumentDefaultCollectionBackfillAuditQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
+    .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
+  operationCursor: z
+    .string()
+    .min(1)
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .optional(),
+  receiptCursor: z
+    .string()
+    .min(1)
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .optional(),
+});
+export type GetDocumentDefaultCollectionBackfillAuditQuery = z.infer<
+  typeof GetDocumentDefaultCollectionBackfillAuditQuery
+>;
+
+export const DocumentDefaultCollectionBackfillAudit = z.object({
+  run: DocumentDefaultCollectionBackfillRunAudit,
+  operations: z.array(DocumentDefaultCollectionBackfillOperationAudit),
+  receipts: z.array(DocumentDefaultCollectionBackfillReceiptAudit),
+  operationsHasMore: z.boolean(),
+  operationsNextCursor: z
+    .string()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .nullable(),
+  receiptsHasMore: z.boolean(),
+  receiptsNextCursor: z
+    .string()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .nullable(),
+});
+export type DocumentDefaultCollectionBackfillAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillAudit
+>;
+
+export const OrganizationDocumentAuthorityReclassification =
+  DocumentAuthorityReclassification.extend({
+    actorSubjectId: z.string().min(1),
+    requestWorkspaceId: z.string().uuid(),
+  });
+export type OrganizationDocumentAuthorityReclassification = z.infer<
+  typeof OrganizationDocumentAuthorityReclassification
+>;
+
+export const ListOrganizationDocumentAuthorityReclassificationsResponse = z.object({
+  receipts: z.array(OrganizationDocumentAuthorityReclassification),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+});
+export type ListOrganizationDocumentAuthorityReclassificationsResponse = z.infer<
+  typeof ListOrganizationDocumentAuthorityReclassificationsResponse
+>;
+
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
   baseIds: z.array(z.string().uuid()).optional(),
