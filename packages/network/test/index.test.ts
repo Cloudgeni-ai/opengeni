@@ -186,19 +186,24 @@ describe("DNS-pinned outbound transport", () => {
 
   test("prefers IPv4 while retaining the complete vetted dual-stack answer", async () => {
     const pinned: DnsAddress[][] = [];
-    const response = await pinnedFetch("https://dual-stack.example.test/mcp", undefined, production, {
-      dnsLookup: async () => [
-        { address: "2606:4700:3032::6815:3c7a", family: 6 },
-        { address: "104.21.60.122", family: 4 },
-        { address: "2606:4700:3035::ac43:c447", family: 6 },
-        { address: "172.67.196.71", family: 4 },
-      ],
-      agentFactory: (addresses) => {
-        pinned.push([...addresses]);
-        return fakeDispatcher();
+    const response = await pinnedFetch(
+      "https://dual-stack.example.test/mcp",
+      undefined,
+      production,
+      {
+        dnsLookup: async () => [
+          { address: "2606:4700:3032::6815:3c7a", family: 6 },
+          { address: "104.21.60.122", family: 4 },
+          { address: "2606:4700:3035::ac43:c447", family: 6 },
+          { address: "172.67.196.71", family: 4 },
+        ],
+        agentFactory: (addresses) => {
+          pinned.push([...addresses]);
+          return fakeDispatcher();
+        },
+        fetchImpl: async () => new Response("connected"),
       },
-      fetchImpl: async () => new Response("connected"),
-    });
+    );
 
     expect(await response.text()).toBe("connected");
     expect(pinned).toEqual([
