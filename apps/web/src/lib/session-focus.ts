@@ -123,9 +123,9 @@ export function shouldRecordSessionRowFocusIntent(
 
 /**
  * Roving focus may move real DOM focus only for an explicit keyboard-navigation
- * intent. A pin mutation can reorder/remount the same row while preserving its
- * focus index; that derived change must not steal focus from a restored row
- * actions trigger.
+ * intent. A pin or project move can reorder/remount the same row while
+ * preserving its focus index; that derived change must not steal focus from a
+ * restored row actions trigger.
  */
 export function shouldMoveSessionRowFocus(
   intentSessionId: string | null,
@@ -159,7 +159,7 @@ function belongsToSession(element: HTMLElement, sessionId: string): boolean {
 }
 
 /**
- * Decide whether a pin-operation focus restore may replace the active element.
+ * Decide whether a group-remount focus restore may replace the active element.
  * An unrelated input, button, or menu is never displaced; only focus lost to
  * the operation's own remount/ Radix close path is eligible.
  */
