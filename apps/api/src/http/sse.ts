@@ -316,17 +316,6 @@ export async function sseSessionStream(
     writeTail = write.catch(() => {});
     return write;
   };
-  const scheduleHeartbeat = () => {
-    if (channel.stopped()) return;
-    heartbeatTimer = setTimeout(() => {
-      heartbeatTimer = null;
-      void writeFrame(": heartbeat\n\n")
-        .then(scheduleHeartbeat)
-        .catch((error) => {
-          if (!(error instanceof SseStreamStoppedError)) fail(error);
-        });
-    }, heartbeatIntervalMs);
-  };
   const deliverDurableThrough = async (targetSequence?: number) => {
     while (true) {
       if (targetSequence !== undefined && lastSent >= targetSequence) return;
@@ -364,10 +353,28 @@ export async function sseSessionStream(
       if (targetSequence === undefined && page.length < limit) return;
     }
   };
+  let durableDeliveryTail = Promise.resolve();
+  const reconcileDurableThrough = (targetSequence?: number): Promise<void> => {
+    const deliveryRun = durableDeliveryTail.then(() => deliverDurableThrough(targetSequence));
+    durableDeliveryTail = deliveryRun.catch(() => {});
+    return deliveryRun;
+  };
   const send = async (event: SessionEvent) => {
     const targetSequence = sessionEventResumeSequence(event);
     if (targetSequence <= lastSent) return;
-    await deliverDurableThrough(targetSequence);
+    await reconcileDurableThrough(targetSequence);
+  };
+  const scheduleHeartbeat = () => {
+    if (channel.stopped()) return;
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null;
+      void reconcileDurableThrough()
+        .then(() => writeFrame(": heartbeat\n\n"))
+        .then(scheduleHeartbeat)
+        .catch((error) => {
+          if (!(error instanceof SseStreamStoppedError)) fail(error);
+        });
+    }, heartbeatIntervalMs);
   };
   delivery = createLatestWinsDelivery(send, fail);
 
@@ -389,7 +396,7 @@ export async function sseSessionStream(
     }
     unsubscribe = release;
 
-    await deliverDurableThrough();
+    await reconcileDurableThrough();
     await writeFrame(": connected\n\n");
     scheduleHeartbeat();
     bootstrapping = false;

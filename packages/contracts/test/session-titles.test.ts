@@ -67,6 +67,13 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("CLIENTPRIVATEKEY=secretword")).toBeNull();
   });
 
+  test("rejects compact keys ending in generic sensitive labels", () => {
+    expect(normalizeAutomaticSessionTitle("GITHUBTOKEN=sesame")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("clientsecret=swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("DATABASEPASSWORD=huntertwo")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("serviceCredentials=secretword")).toBeNull();
+  });
+
   test("rejects quoted object-literal and JSON secret assignments", () => {
     expect(normalizeAutomaticSessionTitle('{"DATABASE_APIKEY":"swordfish"}')).toBeNull();
     expect(normalizeAutomaticSessionTitle('{"password":"swordfish"}')).toBeNull();
@@ -82,6 +89,25 @@ describe("automatic session titles", () => {
     expect(
       normalizeAutomaticSessionTitle(String.raw`{\\\"OAUTH_ACCESSTOKEN\\\":\\\"sesame\\\"}`),
     ).toBeNull();
+  });
+
+  test("rejects quoted multiword secret assignment keys, including escaped objects", () => {
+    expect(normalizeAutomaticSessionTitle('{"api key":"swordfish"}')).toBeNull();
+    expect(normalizeAutomaticSessionTitle("{'access key':'sesame'}")).toBeNull();
+    expect(normalizeAutomaticSessionTitle('{"auth key":"secretword"}')).toBeNull();
+    expect(normalizeAutomaticSessionTitle(String.raw`{\"private key\":\"swordfish\"}`)).toBeNull();
+  });
+
+  test("rejects common scheme-less URL forms without treating file paths as hosts", () => {
+    expect(normalizeAutomaticSessionTitle("Investigate www.example.com/reset")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Open example.com/account")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Inspect tenant.internal?mode=debug")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Review example.com DNS migration")).toBe(
+      "Review example.com DNS migration",
+    );
+    expect(normalizeAutomaticSessionTitle("Review package.json/scripts migration")).toBe(
+      "Review package.json/scripts migration",
+    );
   });
 
   test("rejects secret key and access key assignment suffix chains", () => {
@@ -119,6 +145,10 @@ describe("automatic session titles", () => {
     );
     const escapedBenignObject = String.raw`{\"MONKEY\":\"swordfish\"} review`;
     expect(normalizeAutomaticSessionTitle(escapedBenignObject)).toBe(escapedBenignObject);
+    const escapedBenignMultiwordObject = String.raw`{\"release channel\":\"stable\"} review`;
+    expect(normalizeAutomaticSessionTitle(escapedBenignMultiwordObject)).toBe(
+      escapedBenignMultiwordObject,
+    );
   });
 
   test("uses Unicode normalization only for detection and preserves accepted international text", () => {

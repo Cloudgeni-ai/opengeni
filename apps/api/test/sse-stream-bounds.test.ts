@@ -26,6 +26,20 @@ function event(sequence: number): SessionEvent {
   };
 }
 
+function titleEvent(sequence: number, title: string): SessionEvent {
+  return {
+    id: `44444444-4444-4444-8444-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type: "session.title_set",
+    payload: { title, source: "agent" },
+    occurredAt: "2026-08-25T00:00:00.000Z",
+    turnId: null,
+    clientEventId: null,
+  };
+}
+
 const realDb = await import("@opengeni/db");
 const realListSessionEvents = realDb.listSessionEvents;
 const realListWorkspaceControlEvents = realDb.listWorkspaceControlEvents;
@@ -299,6 +313,35 @@ test("session SSE coalesces long durable delta runs before they reach the browse
     { after: 0, limit: 100 },
     { after: 100, limit: 100 },
     { after: 200, limit: 100 },
+  ]);
+  await reader.cancel();
+});
+
+test("an open session stream reconciles a quarantine title event without bus fanout", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  const response = await sseSessionStream(
+    fakeDb as never,
+    { subscribe: async () => () => {} } as unknown as EventBus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+
+  durableEvents = [titleEvent(1, "New conversation")];
+  const [quarantineEvent] = await readSessionEvents(reader, 1);
+  expect(quarantineEvent).toMatchObject({
+    sequence: 1,
+    type: "session.title_set",
+    payload: { title: "New conversation", source: "agent" },
+  });
+  expect(durableReads).toEqual([
+    { after: 0, limit: 100 },
+    { after: 0, limit: 100 },
   ]);
   await reader.cancel();
 });

@@ -29,8 +29,28 @@ const KNOWN_SENSITIVE_VALUE_PATTERNS = [
   /[?&](?:access_token|api_key|apikey|password|secret|token)=[^\s&#]+/iu,
 ] as const;
 
+const SCHEMELESS_HOST_CANDIDATE_PATTERN =
+  /\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?(?::\d{1,5})?(?:[/?#][^\s]*)?/giu;
+
+const FILE_LIKE_HOST_SUFFIXES = new Set([
+  "css",
+  "html",
+  "js",
+  "json",
+  "jsx",
+  "lock",
+  "md",
+  "sql",
+  "toml",
+  "ts",
+  "tsx",
+  "xml",
+  "yaml",
+  "yml",
+]);
+
 const SECRET_ASSIGNMENT_CANDIDATE_PATTERN =
-  /(?:^|[^A-Za-z0-9])(?:(['"])([A-Za-z][A-Za-z0-9_.-]*)\1|([A-Za-z][A-Za-z0-9_.-]*))\s*[=:]\s*[^\s,;]+/gu;
+  /(?:^|[^A-Za-z0-9])(?:(['"])([A-Za-z][A-Za-z0-9_. -]*)\1|([A-Za-z][A-Za-z0-9_.-]*))\s*[=:]\s*[^\s,;]+/gu;
 
 const SECRET_LABEL_ASSIGNMENT_PATTERN =
   /\b(?:api[ _-]?key|access[ _-]?token|auth[ _-]?token|credential|credentials|password|passwd|private[ _-]?key|secret|token)\b\s*[=:]\s*[^\s,;]+/iu;
@@ -50,14 +70,21 @@ const COMPACT_SENSITIVE_ASSIGNMENT_KEY_SUFFIXES = [
   "accesskeyid",
   "accesstoken",
   "authtoken",
+  "credential",
+  "credentials",
+  "password",
+  "passwd",
   "privatekey",
+  "secret",
   "secretkey",
+  "token",
 ] as const;
 
 const SENSITIVE_ASSIGNMENT_KEY_WORD_SUFFIXES = [
   ["api", "key"],
   ["access", "key"],
   ["access", "key", "id"],
+  ["auth", "key"],
   ["private", "key"],
   ["secret", "key"],
 ] as const;
@@ -86,6 +113,21 @@ function containsSensitiveAssignment(value: string): boolean {
     if (SENSITIVE_ASSIGNMENT_KEY_WORD_SUFFIXES.some((suffix) => hasWordSuffix(words, suffix))) {
       return true;
     }
+  }
+  return false;
+}
+
+function containsSchemelessUrl(value: string): boolean {
+  for (const match of value.matchAll(SCHEMELESS_HOST_CANDIDATE_PATTERN)) {
+    const candidate = match[0];
+    if (candidate.toLowerCase().startsWith("www.")) return true;
+    if (!/[/?#]/u.test(candidate)) continue;
+
+    const authority = candidate.split(/[/?#]/u, 1)[0] ?? "";
+    const hostname = authority.replace(/:\d{1,5}$/u, "");
+    const suffix = hostname.split(".").at(-1)?.toLowerCase();
+    if (suffix && FILE_LIKE_HOST_SUFFIXES.has(suffix)) continue;
+    return true;
   }
   return false;
 }
@@ -128,6 +170,7 @@ function containsSensitiveAutomaticTitleValue(value: string): boolean {
   const detectionValue = automaticTitleDetectionValue(value);
 
   if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(detectionValue))) return true;
+  if (containsSchemelessUrl(detectionValue)) return true;
   if (SECRET_LABEL_ASSIGNMENT_PATTERN.test(detectionValue)) return true;
   if (containsSensitiveAssignment(detectionValue)) return true;
   if (OPAQUE_IDENTIFIER_PATTERN.test(detectionValue)) return true;
