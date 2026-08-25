@@ -99,6 +99,7 @@ function invitation(role: OrganizationInvitation["role"]): OrganizationInvitatio
   return {
     id: `invite-${role}`,
     organizationId: identityA.organizationId,
+    organizationName: "Organization A",
     targetEmail: `${role}@example.test`,
     targetName: null,
     initialWorkspaceIds: [],
@@ -369,7 +370,6 @@ describe("organization administration component fences", () => {
             accessibleWorkspaceIds={new Set(["workspace-company"])}
             onOrganizationChanged={onOrganizationChanged}
             onCreateWorkspace={async () => undefined}
-            onCreateOrganization={async () => undefined}
           />
         </StrictMode>,
       );
@@ -438,7 +438,6 @@ describe("organization administration component fences", () => {
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => undefined}
           onCreateWorkspace={async () => undefined}
-          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -516,7 +515,6 @@ describe("organization administration component fences", () => {
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => undefined}
           onCreateWorkspace={async () => undefined}
-          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -541,51 +539,6 @@ describe("organization administration component fences", () => {
     };
     expect(secondRequest.operationId).toBe(firstRequest.operationId);
     expect(container.textContent).toContain("Acme Research");
-
-    await act(async () => root.unmount());
-    container.remove();
-  });
-
-  test("lets an ordinary member create another organization and safely retries it", async () => {
-    const uncertain = Object.assign(new Error("response lost"), {
-      outcomeUnknown: true,
-    });
-    const onCreateOrganization = mock(async (_name: string, _operationId: string) => {
-      if (onCreateOrganization.mock.calls.length === 1) throw uncertain;
-    });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(
-        <OrganizationOverviewSection
-          client={{} as OpenGeniCoreClient}
-          identity={identityA}
-          actorRole="member"
-          managedSession
-          accessibleWorkspaceIds={new Set()}
-          onOrganizationChanged={() => undefined}
-          onCreateWorkspace={async () => undefined}
-          onCreateOrganization={onCreateOrganization}
-        />,
-      );
-    });
-
-    expect(container.textContent).toContain("Create another organization");
-    expect(container.textContent).toContain("does not allow you to change this organization");
-    const nameInput = container.querySelector<HTMLInputElement>(
-      'input[aria-label="New organization name"]',
-    );
-    if (!nameInput) throw new Error("Missing new organization name input");
-    await enterText(nameInput, "Independent team");
-    await act(async () => button(container, "Create").click());
-    await flush();
-    await act(async () => button(container, "Create").click());
-    await flush();
-
-    expect(onCreateOrganization).toHaveBeenCalledTimes(2);
-    expect(onCreateOrganization.mock.calls[1]?.[1]).toBe(onCreateOrganization.mock.calls[0]?.[1]);
 
     await act(async () => root.unmount());
     container.remove();
@@ -619,7 +572,6 @@ describe("organization administration component fences", () => {
           accessibleWorkspaceIds={new Set()}
           onOrganizationChanged={() => Promise.reject(new Error("access refresh unavailable"))}
           onCreateWorkspace={async () => undefined}
-          onCreateOrganization={async () => undefined}
         />,
       );
     });
@@ -843,9 +795,7 @@ describe("organization administration component fences", () => {
     });
     await flush();
     expect(container.textContent).toContain("new-member@example.test");
-    expect(container.textContent).toContain(
-      "Invitation created for new-member@example.test. It is available in OpenGeni.",
-    );
+    expect(container.textContent).toContain("Invitation emailed to new-member@example.test.");
     expect(toastSuccess).toHaveBeenCalledWith("Organization invitation created");
     expect(button(container, "Load more invitations").disabled).toBe(false);
 

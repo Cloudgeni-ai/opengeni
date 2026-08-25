@@ -19,6 +19,7 @@ describe("organization membership lifecycle contracts", () => {
     ).toEqual({
       id: "00000000-0000-4000-8000-000000000001",
       organizationId: "00000000-0000-4000-8000-000000000002",
+      organizationName: null,
       targetEmail: "existing@example.test",
       targetName: null,
       initialWorkspaceIds: [],

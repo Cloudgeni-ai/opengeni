@@ -25,6 +25,7 @@
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/agent-topology                      → DEV-only agent tree preview (mocked)
+//   /dev/onboarding                          → DEV-only production onboarding components
 import {
   Navigate,
   RouterProvider,
@@ -77,6 +78,14 @@ const LazyOrgSettingsRoute = lazyRouteComponent(
 const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
+);
+const LazySetupAccountRoute = lazyRouteComponent(
+  () => import("@/routes/setup-account"),
+  "SetupAccountRoute",
+);
+const LazyOnboardingPreviewRoute = lazyRouteComponent(
+  () => import("@/routes/onboarding-preview"),
+  "OnboardingPreviewRoute",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyRigDetailRoute = lazyRouteComponent(
@@ -164,6 +173,11 @@ const resetPasswordRoute = createRoute({
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
 });
+const setupAccountRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "setup-account",
+  component: SetupAccount,
+});
 // DEV-only visual harness for the Session composer chrome stack (queue / goal /
 // agents / composer). Public so it needs no live auth or session; omitted from
 // production route trees.
@@ -176,6 +190,11 @@ const agentTopologyPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/agent-topology",
   component: AgentTopologyPreview,
+});
+const onboardingPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/onboarding",
+  component: LazyOnboardingPreviewRoute,
 });
 const workspaceRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -403,7 +422,10 @@ const routeTree = rootRoute.addChildren([
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
-  ...(import.meta.env.DEV ? [composerChromeGalleryRoute, agentTopologyPreviewRoute] : []),
+  setupAccountRoute,
+  ...(import.meta.env.DEV
+    ? [composerChromeGalleryRoute, agentTopologyPreviewRoute, onboardingPreviewRoute]
+    : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
@@ -661,6 +683,10 @@ function Device() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function SetupAccount() {
+  return <LazySetupAccountRoute />;
 }
 
 function ComposerChromeGallery() {

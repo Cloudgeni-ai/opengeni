@@ -10,6 +10,7 @@ export type OrganizationInvitationStatus = z.infer<typeof OrganizationInvitation
 export const OrganizationInvitation = z.object({
   id: z.string().uuid(),
   organizationId: z.string().uuid(),
+  organizationName: z.string().trim().min(1).max(120).nullable().default(null),
   targetEmail: z.string().email(),
   targetName: z.string().trim().min(1).max(120).nullable().default(null),
   initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
@@ -236,6 +237,54 @@ export const CreateOrganizationInvitationRequest = z.object({
 });
 export type CreateOrganizationInvitationRequest = z.infer<
   typeof CreateOrganizationInvitationRequest
+>;
+
+/**
+ * Public, signed-out completion contract for an invitation-bound account setup.
+ * The bearer is delivered out of band to the invited email address. It is
+ * never persisted in plaintext; `operationId` makes an outcome-unknown retry
+ * converge on the first committed result.
+ */
+export const CompleteOrganizationUserSetupRequest = z.object({
+  token: z.string().min(32).max(2048),
+  name: z.string().trim().min(1).max(120),
+  password: z.string().min(8).max(128),
+  operationId: z.string().uuid(),
+});
+export type CompleteOrganizationUserSetupRequest = z.infer<
+  typeof CompleteOrganizationUserSetupRequest
+>;
+
+export const CompleteOrganizationUserSetupResponse = z.object({
+  status: z.literal("complete"),
+});
+export type CompleteOrganizationUserSetupResponse = z.infer<
+  typeof CompleteOrganizationUserSetupResponse
+>;
+
+/** Authenticated organization-name-only setup after ordinary account creation. */
+export const CompleteSelfServiceOrganizationSetupRequest = z.object({
+  organizationName: z.string().trim().min(1).max(120),
+  operationId: z.string().uuid(),
+});
+export type CompleteSelfServiceOrganizationSetupRequest = z.infer<
+  typeof CompleteSelfServiceOrganizationSetupRequest
+>;
+
+export const CompleteSelfServiceOrganizationSetupResponse = z.object({
+  status: z.literal("complete"),
+  organizationId: z.string().uuid(),
+  personalWorkspaceId: z.string().uuid(),
+});
+export type CompleteSelfServiceOrganizationSetupResponse = z.infer<
+  typeof CompleteSelfServiceOrganizationSetupResponse
+>;
+
+export const SelfServiceOrganizationOnboardingStatus = z.object({
+  state: z.enum(["required", "invitation_pending", "unavailable", "complete"]),
+});
+export type SelfServiceOrganizationOnboardingStatus = z.infer<
+  typeof SelfServiceOrganizationOnboardingStatus
 >;
 
 export const AcceptOrganizationInvitationRequest = z.object({

@@ -387,9 +387,8 @@ managed-human lifecycle dual-write. The physical `managed_accounts.id` remains
 the organization identifier; a managed human converges on one membership and
 one deterministic personal-workspace lifecycle pointer in every organization
 they join, while stable user-resource authority still belongs to the
-organization membership rather than that workspace. A self-service user with
-no membership or pending invitation receives the legacy `better-auth:user`
-organization. Maintenance migration 0314 binds pending invitations only after
+organization membership rather than that workspace. Maintenance migration 0314
+binds pending invitations only after
 the exact Better Auth email is verified, suppresses that fallback while an
 invitation is pending, appends immutable exact-subject binding evidence, and
 accepts the invited user directly into the inviting organization with any
@@ -399,6 +398,25 @@ canonical organization locks, so a committing invitation cannot race the
 fallback organization decision. Public invitation projections never expose
 target registration state. All API/control/turn-worker database sessions must
 be drained before 0314, and a pre-0314 image must never restart after it commits.
+Drained maintenance migration 0348 keeps public Better Auth signup account-only and moves
+self-service organization creation behind the first verified managed-cookie
+sign-in. Its idempotent FORCE-RLS lifecycle accepts only an organization name
+and creates exactly one active owner membership plus its canonical Personal
+workspace/control row—no Default/shared workspace and no Personal
+`workspace_memberships` row. Any bound invitation wins before organization
+creation. The same migration adds a separate digest-only invited-user setup
+bearer delivered in a scrubbed URL fragment: one transaction creates the
+verified Better Auth credential, binds and
+accepts the exact invitation with its selected shared-workspace grants, and
+consumes the bearer without creating a session or fallback organization.
+Plaintext and temporary passwords are never stored or emailed; normal sign-in
+is the first session mint for this path. Stop every API/control/turn worker,
+supply the exact application database roles, apply 0348, and never restart a
+pre-0348 image: old access writers can still synthesize the retired Default
+workspace graph. The public setup route rate-limits before work and proves the
+non-consuming token authority before password hashing; its final lifecycle
+still revalidates and consumes atomically. Product-owned onboarding mutations
+are API-contract fenced and the web sends the exact release revision.
 The four tenancy tables remain FORCE-RLS with no direct `opengeni_app` table
 DML; the only runtime write path is the target-schema-local,
 PUBLIC-revoked `ensure_managed_human_personal_workspace` SECURITY DEFINER
@@ -445,10 +463,11 @@ Offboarding applies the same canonical workspace/session/turn/attempt teardown,
 then terminally revokes membership and rejects re-invitation while retaining
 physical data and authority until expiry. Migration 0314 supports invitations
 before registration with verified-email binding and exact-subject acceptance.
-Migration 0330 adds the
-managed-cookie-only `POST /v1/organizations` factory: one idempotent SECURITY
-DEFINER transaction creates the organization, initial shared workspace, owner
-grant, organization membership, and private personal-workspace pointer. The
+Migration 0331 introduced the managed-cookie-only `POST /v1/organizations`
+factory with a provisional initial-shared-workspace graph. Migration 0348
+replaces that function in place so compatibility callers converge on the final
+organization-name-only lifecycle above: one owner membership plus one canonical
+Personal workspace/control row, with no owner grant or forced shared workspace. The
 organization administration UI is the product control plane for inviting
 people and then assigning those organization members to shared workspaces;
 workspace settings no longer creates people independently. Organization owners
