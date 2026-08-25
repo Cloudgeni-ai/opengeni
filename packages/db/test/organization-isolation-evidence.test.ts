@@ -40,6 +40,7 @@ import {
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const externalAdminUrl = process.env.OPENGENI_ORG_ISOLATION_POSTGRES_ADMIN_URL;
 const externalAppUrl = process.env.OPENGENI_ORG_ISOLATION_POSTGRES_APP_URL;
+const currentRuntimeApplicationName = "opengeni-lossless-v1-session-variable-sets-v1";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -127,7 +128,10 @@ beforeAll(async () => {
   }
   if (!shared) return;
   client = createDb(shared.appUrl, { max: 8 });
-  app = postgres(shared.appUrl, { max: 4 });
+  app = postgres(shared.appUrl, {
+    max: 4,
+    connection: { application_name: currentRuntimeApplicationName },
+  });
   fixture = await seedFixture(shared, client);
 }, 300_000);
 
