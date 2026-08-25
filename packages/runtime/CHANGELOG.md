@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 1.3.2
+
+### Patch Changes
+
+- Updated dependencies [dc10a36]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/sdk@2.4.0
+  - @opengeni/codemode@0.4.14
+  - @opengeni/config@0.19.2
+
 ## 1.3.1
 
 ### Patch Changes
