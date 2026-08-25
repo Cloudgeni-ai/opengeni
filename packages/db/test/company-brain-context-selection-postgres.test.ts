@@ -9,6 +9,7 @@ import {
   createDb,
   createSession,
   ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
   getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
@@ -17,6 +18,7 @@ import {
   resolveCompanyBrainContextSelection,
   saveWorkspaceMemory,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
   withWorkspaceRls,
   dbSql,
@@ -80,6 +82,17 @@ async function fixture(
       account_id, activation_version, inventory_digest, parity_digest, activated_by
     ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
     on conflict (account_id) do nothing`;
+  const privateSessionSettings = await getOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: ownerSubjectId,
+  });
+  await updateOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: ownerSubjectId,
+    enabled: true,
+    expectedVersion: privateSessionSettings.version,
+    operationId: crypto.randomUUID(),
+  });
   await shared.admin`
     update workspaces set settings = ${shared.admin.json(
       options.mode === "absent"
