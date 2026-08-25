@@ -66,6 +66,9 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
   the active branch is waiting in `requires_action` is promoted to the same
   replacement path: the pending request is cancelled and the conversational
   message runs next instead of entering the visible queue;
+- resubmitting a checked-out queue Edit is existing accepted work, not a new
+  conversational answer, so it preserves the active request and its queue
+  placement;
 - Pause preserves an unexecuted request, just as it preserves an ordinary
   pending approval. Resume admits that same frozen turn;
 - expiry is enforced by a replay-safe Temporal timer and remains correct across

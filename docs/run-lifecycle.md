@@ -64,7 +64,9 @@ to Steer-equivalent replacement: pending human-input or approval state is
 cancelled, the new prompt is inserted at the head, and its routing is
 `accepted_for_steering`. Running, recovering, and capacity-waiting turns retain
 ordinary Send queue semantics. An explicitly paused branch also remains inert;
-only Resume or an explicit Steer activates it.
+only Resume or an explicit Steer activates it. Resubmitting a checked-out queue
+Edit also keeps ordinary queue placement: it is a revision of already accepted
+work, not a new conversational answer to the active wait.
 
 An owner-authored `personalResourceAttachment` is part of that same accepted
 work transaction for create, Send, and Steer. The server derives the fixed

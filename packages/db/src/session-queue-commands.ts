@@ -1723,16 +1723,30 @@ export async function submitHumanPromptInTransaction(
     );
   }
 
+  const draft =
+    input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
+      ? null
+      : await getComposerDraftInTransaction(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          subjectId: input.subjectId,
+          lock: true,
+        });
+  const isQueueEditSubmission = draft?.sourceTurnId !== null && draft?.sourceTurnId !== undefined;
+
   // A normal Send received while the active branch is waiting in
   // `requires_action` is the human choosing to continue conversationally
   // instead of through the pending decision surface. Promote only that active
   // wait to Steer semantics so the frozen wait is cancelled and the new prompt
-  // runs next. An explicitly paused branch remains inert until Resume or an
-  // explicit Steer; running, recovering, and capacity-waiting work also retain
-  // ordinary queue semantics.
+  // runs next. A queue-edit submission preserves the identity and placement of
+  // already accepted queued work, so it must never cancel an unrelated active
+  // wait. An explicitly paused branch remains inert until Resume or an explicit
+  // Steer; running, recovering, and capacity-waiting work also retain ordinary
+  // queue semantics.
   const effectiveDelivery =
     input.delivery === "send" &&
     (input.actor.type === "human" || input.actor.type === "operator") &&
+    !isQueueEditSubmission &&
     before.state === "active" &&
     session.status === "requires_action" &&
     session.activeTurnId !== null
@@ -1756,16 +1770,6 @@ export async function submitHumanPromptInTransaction(
           reason: input.actor.type === "service" ? "service_steer" : "human_steer",
           observedControlEtag: input.controlEtag ?? null,
           admission,
-        });
-
-  const draft =
-    input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
-      ? null
-      : await getComposerDraftInTransaction(db, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          subjectId: input.subjectId,
-          lock: true,
         });
   if (input.expectedDraftRevision !== null && input.expectedDraftRevision !== undefined) {
     const actualRevision = draft?.revision ?? 0;

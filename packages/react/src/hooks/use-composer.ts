@@ -570,9 +570,17 @@ function reconcileOptimisticSendFromEvents(
   );
   const triggerEventId = operation.triggerEventId ?? accepted?.id ?? null;
   const turnId = operation.turnId ?? promptTurnIdForTrigger(triggerEventId, events);
+  const acceptedRouting = promptRoutingFromAcceptedEvent(accepted ?? null);
+  const destination =
+    acceptedRouting === "queued_for_execution"
+      ? "queue"
+      : acceptedRouting === "accepted_for_execution" || acceptedRouting === "accepted_for_steering"
+        ? "chat"
+        : operation.destination;
   const needsAdmissionUpdate =
     accepted !== undefined &&
     (operation.state !== "queued" ||
+      operation.destination !== destination ||
       operation.triggerEventId !== triggerEventId ||
       operation.turnId !== turnId ||
       operation.error !== undefined ||
@@ -581,6 +589,7 @@ function reconcileOptimisticSendFromEvents(
     ? {
         ...operation,
         state: "queued",
+        destination,
         triggerEventId,
         turnId,
         error: undefined,
