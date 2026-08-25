@@ -12,6 +12,7 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
+  createVariableSet,
   getActiveSessionHistoryItems,
   initializeSessionStartAtomically,
   listSessionEvents,
@@ -362,6 +363,70 @@ describe("embedding host session authorization routes", () => {
     expect(policyEvents[0]?.payload).toEqual({
       serverId: "external_tools",
       effectiveFrom: "next_attempt",
+    });
+  });
+
+  test("replaces ordered Variable Sets only after exact session and resource authorization", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const first = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-first-${crypto.randomUUID()}`,
+    });
+    const second = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-second-${crypto.randomUUID()}`,
+    });
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      subjectId: value.grant.subjectId,
+      permissions: [
+        "sessions:read",
+        "sessions:control",
+        "variable-sets:attach",
+        "variable-sets:use",
+      ],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const decisions: Array<{ operation: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, surface }) => {
+        decisions.push({ operation, surface });
+        return { allowed: true, relatedSessionAccess: "root" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/variable-sets`;
+    const response = await app.request(path, {
+      method: "PUT",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ variableSetIds: [first.id, second.id] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: value.child.id,
+      variableSetIds: [first.id, second.id],
+      variableSetId: second.id,
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.variable_sets.write",
+      surface: "http",
+    });
+    const events = (
+      await listSessionEvents(client.db, value.grant.workspaceId, value.child.id)
+    ).filter((event) => event.type === "session.variable_sets.updated");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.payload).toMatchObject({
+      variableSets: [
+        { id: first.id, name: first.name },
+        { id: second.id, name: second.name },
+      ],
+      collisionPolicy: "later_selected_set_wins",
     });
   });
 

@@ -673,6 +673,7 @@ export function SessionRoute({
           events={events}
           connectionState={connectionState}
           primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
+          onReloadSession={refreshSession}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
           openFileRequest={sandboxFileRequest}
@@ -749,6 +750,7 @@ export function SessionRoute({
         events={events}
         connectionState={connectionState}
         primary={chatPane}
+        onReloadSession={refreshSession}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
         openFileRequest={sandboxFileRequest}
@@ -787,6 +789,7 @@ function SessionDock(props: {
   events: SessionEvent[];
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;
+  onReloadSession: () => Promise<void>;
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
   onOpenNavigation: () => void;
@@ -873,6 +876,7 @@ function SessionDock(props: {
             session={props.session}
             events={props.events}
             connectionState={props.connectionState}
+            onReloadSession={props.onReloadSession}
           />
         </Suspense>
       ),
@@ -1311,13 +1315,17 @@ function SessionChatPane(props: {
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
   const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
-  const [fixedVariableSetScope, fixedRigScope] = useFixedResourceScopes(
+  const sessionVariableSetIds =
+    props.session.variableSetIds ??
+    (props.session.variableSetId ? [props.session.variableSetId] : []);
+  const [fixedVariableSetScopes, fixedRigScope] = useFixedResourceScopes(
     context.client,
     workspace?.id ?? null,
-    props.session.variableSetId,
+    sessionVariableSetIds,
     props.session.rigId,
     fixedResourceCatalogEnabled,
   );
+  const fixedVariableSetScope = fixedVariableSetScopes.at(-1) ?? null;
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -1328,6 +1336,8 @@ function SessionChatPane(props: {
     session: props.session,
     enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
+      variableSetIds: sessionVariableSetIds,
+      variableSetScopes: fixedVariableSetScopes,
       variableSetId: props.session.variableSetId,
       variableSetScope: fixedVariableSetScope,
       rigId: props.session.rigId,

@@ -209,8 +209,15 @@ const budgets = {
   // guard's one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance by
   // advancing each to its next compliant whole-KiB envelope. Every file-count,
   // initial, per-file, lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2124 * kib,
-  directSessionGzip: 595 * kib,
+  // Ordered session Variable Sets add the plural contract and SDK mutation
+  // surface plus the direct-session personal-authority scope resolver. The
+  // exact Linux/x64 production graph measures 2,185,738 raw / 610,320 gzip
+  // bytes. Preserve the same one-KiB raw headroom and 1.5-KiB gzip platform
+  // skew by advancing only these aggregate envelopes to their next compliant
+  // whole-KiB boundaries. Initial, per-file, file-count, lazy-chunk, and CSS
+  // limits remain unchanged.
+  directSessionRaw: 2136 * kib,
+  directSessionGzip: 598 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

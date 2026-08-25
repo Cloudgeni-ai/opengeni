@@ -1459,6 +1459,7 @@ export const SessionTenancyBlocker = z.enum([
 export type SessionTenancyBlocker = z.infer<typeof SessionTenancyBlocker>;
 
 export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
+export const MAX_SELECTED_VARIABLE_SETS = 25;
 const SessionTenancyIdempotencyKey = z.string().trim().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
 
 export const UpdateSessionVisibilityRequest = z
@@ -1505,6 +1506,10 @@ export const ForkSessionRequest = z
     idempotencyKey: SessionTenancyIdempotencyKey,
     visibility: SessionVisibility,
     workspaceSharedAcknowledged: z.boolean(),
+    // Optional fresh-session runtime setup. Omission preserves the historical
+    // content-only fork; explicit null/[] creates a rigless, set-free restart.
+    rigId: z.string().uuid().nullable().optional(),
+    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -1513,6 +1518,16 @@ export const ForkSessionRequest = z
         code: "custom",
         path: ["workspaceSharedAcknowledged"],
         message: "workspaceSharedAcknowledged must be false for a private destination",
+      });
+    }
+    if (
+      value.variableSetIds &&
+      new Set(value.variableSetIds).size !== value.variableSetIds.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["variableSetIds"],
+        message: "variableSetIds must not contain duplicates",
       });
     }
   });
@@ -5744,6 +5759,22 @@ export const UpdateSessionRequest = z.object({
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
+export const UpdateSessionVariableSetsRequest = z
+  .object({
+    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["variableSetIds"],
+        message: "variableSetIds must not contain duplicates",
+      });
+    }
+  });
+export type UpdateSessionVariableSetsRequest = z.infer<typeof UpdateSessionVariableSetsRequest>;
+
 /**
  * Replace the complete durable session tool policy, or explicitly opt back in
  * to current workspace defaults. MCP servers and individual OpenGeni tools
@@ -6261,6 +6292,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.write",
   "session.title.write",
   "session.channel.write",
+  "session.variable_sets.write",
   "session.mcp.approval_policy.write",
   "session.tool_policy.write",
   "session.goal.read",
@@ -6876,6 +6908,7 @@ export const NewSessionDraftOptions = z.object({
   targetSandboxId: z.string().uuid().optional(),
   workingDir: z.string().min(1).optional(),
   variableSetId: z.string().uuid().optional(),
+  variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
   rigId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
   firstPartyMcpPermissions: z.array(Permission).optional(),
@@ -7519,17 +7552,49 @@ function withVariableSetIdAlias<T extends z.ZodRawShape>(
   shape: T,
   options: { rejectKeys?: readonly string[] } = {},
 ) {
-  return z.preprocess((input) => {
-    if (!input || typeof input !== "object" || Array.isArray(input)) {
-      return input;
-    }
-    const record = input as Record<string, unknown>;
-    if (options.rejectKeys?.some((key) => Object.hasOwn(record, key))) return null;
-    if (record.variableSetId !== undefined || record.environmentId === undefined) {
-      return record;
-    }
-    return { ...record, variableSetId: record.environmentId };
-  }, z.object(shape));
+  return z.preprocess(
+    (input) => {
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        return input;
+      }
+      const record = input as Record<string, unknown>;
+      if (options.rejectKeys?.some((key) => Object.hasOwn(record, key))) return null;
+      const aliased =
+        record.variableSetId !== undefined || record.environmentId === undefined
+          ? record
+          : { ...record, variableSetId: record.environmentId };
+      if (aliased.variableSetIds === undefined && aliased.variableSetId !== undefined) {
+        return {
+          ...aliased,
+          variableSetIds: aliased.variableSetId === null ? [] : [aliased.variableSetId],
+        };
+      }
+      return aliased;
+    },
+    z.object(shape).superRefine((value, context) => {
+      const record = value as Record<string, unknown>;
+      if (!Array.isArray(record.variableSetIds)) return;
+      if (new Set(record.variableSetIds).size !== record.variableSetIds.length) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["variableSetIds"],
+          message: "variableSetIds must not contain duplicates",
+        });
+      }
+      if (record.variableSetId === undefined) return;
+      const expected =
+        record.variableSetIds.length > 0
+          ? record.variableSetIds[record.variableSetIds.length - 1]
+          : null;
+      if (record.variableSetId !== expected) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["variableSetId"],
+          message: "variableSetId must match the last variableSetIds entry",
+        });
+      }
+    }),
+  );
 }
 
 // Generic variable-set reads remain metadata-only. Exact plaintext has one
@@ -8486,6 +8551,17 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
           .array(z.string().min(1).max(256))
           .max(SCHEDULED_TASK_TOOL_MAX_COUNT),
         toolPolicyVersion: z.number().int().nonnegative(),
+        variableSets: z
+          .array(
+            z
+              .object({
+                id: z.string().uuid(),
+                generation: z.number().int().positive(),
+              })
+              .strict(),
+          )
+          .max(MAX_SELECTED_VARIABLE_SETS)
+          .default([]),
         variableSetId: z.string().uuid().nullable(),
         variableSetGeneration: z.number().int().positive().nullable(),
         rigId: z.string().uuid().nullable(),
@@ -11318,6 +11394,9 @@ export const Session = z.object({
   // The explicit connected-machine project root selected for this session.
   // Null means the enrolled agent's launch workspace root.
   workingDir: z.string().nullable().default(null),
+  // Ordered low-to-high precedence. The legacy singular aliases below expose
+  // the final (highest-precedence) entry for older clients.
+  variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).default([]),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
@@ -11535,6 +11614,8 @@ export type SessionLineageResponse = z.infer<typeof SessionLineageResponse>;
 
 export const SessionEventType = z.enum([
   "session.created",
+  "session.variable_sets.updated",
+  "session.runtime.configured",
   "session.personal_resources.attached",
   "session.visibility.changed",
   // Defensive read/transport projection for a malformed or historically
@@ -13787,8 +13868,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // plane has no authenticated home-directory fact. Only valid WITH
     // targetSandboxId; omitted selects the reported root.
     workingDir: z.string().min(1).optional(),
-    // Variable set attachment is fixed at session creation; follow-up
-    // user.message events cannot switch or add one.
+    // Ordered low-to-high precedence. A legacy singular selection is normalized
+    // into one entry by withVariableSetIdAlias; when both are present the
+    // singular value must match the final (highest-precedence) entry.
+    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
     variableSetId: z.string().uuid().optional(),
     environmentId: z.string().uuid().optional(),
     // The rig to bind this session to (M3). Its ACTIVE version is resolved and

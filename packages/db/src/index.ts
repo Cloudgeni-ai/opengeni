@@ -15893,17 +15893,31 @@ async function validateScheduledTargetExecutionAtClaim(
       ),
     )
     .orderBy(asc(schema.sessionMcpServers.serverId));
-  const variableSet = target.variableSetId
-    ? await getVariableSet(
+  const targetVariableSets =
+    target.variableSets.length > 0
+      ? target.variableSets
+      : target.variableSetId && target.variableSetGeneration
+        ? [
+            {
+              id: target.variableSetId,
+              generation: target.variableSetGeneration,
+            },
+          ]
+        : [];
+  const liveVariableSets = await Promise.all(
+    targetVariableSets.map(async (selected) => {
+      const variableSet = await getVariableSet(
         tx,
         {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
         },
-        target.variableSetId,
-      )
-    : null;
+        selected.id,
+      );
+      return variableSet ? { id: variableSet.id, generation: variableSet.generation } : null;
+    }),
+  );
   const [rigVersion] =
     target.rigId && target.rigVersionId
       ? await tx
@@ -15944,8 +15958,10 @@ async function validateScheduledTargetExecutionAtClaim(
     stableJson(target.toolPolicy) !== stableJson(input.session.toolPolicy) ||
     stableJson(target.mcpServerIds) !== stableJson(mcpServers.map((server) => server.id)) ||
     target.toolPolicyVersion !== input.session.toolPolicyVersion ||
-    target.variableSetId !== (input.session.variableSetId ?? null) ||
-    target.variableSetGeneration !== (variableSet?.generation ?? null) ||
+    stableJson(targetVariableSets) !==
+      stableJson(liveVariableSets.filter((value) => value !== null)) ||
+    stableJson(targetVariableSets.map((variableSet) => variableSet.id)) !==
+      stableJson((input.session.variableSetIds as string[]) ?? []) ||
     target.rigId !== (input.session.rigId ?? null) ||
     target.rigVersionId !== (input.session.rigVersionId ?? null) ||
     stableJson(target.rigDefaultVariableSets) !==
@@ -16333,7 +16349,7 @@ export class VariableSetAttachedError extends Error {
 
   constructor(cause?: unknown) {
     super(
-      "variable set remains attached to a scheduled task or active session",
+      "variable set remains attached to a scheduled task or session",
       cause === undefined ? undefined : { cause },
     );
   }
@@ -16412,12 +16428,25 @@ export async function countActiveSessionsUsingVariableSet(
       .select({
         count: sql<number>`count(*)::int`,
       })
-      .from(schema.sessions)
+      .from(schema.sessionVariableSetAttachments)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionVariableSetAttachments.workspaceId),
+          eq(schema.sessions.id, schema.sessionVariableSetAttachments.sessionId),
+        ),
+      )
       .where(
         and(
-          eq(schema.sessions.workspaceId, workspaceId),
-          eq(schema.sessions.variableSetId, variableSetId),
-          inArray(schema.sessions.status, ["queued", "running", "requires_action"]),
+          eq(schema.sessionVariableSetAttachments.workspaceId, workspaceId),
+          eq(schema.sessionVariableSetAttachments.variableSetId, variableSetId),
+          inArray(schema.sessions.status, [
+            "queued",
+            "running",
+            "requires_action",
+            "recovering",
+            "waiting_capacity",
+          ]),
         ),
       );
     return Number(count);
@@ -17414,6 +17443,200 @@ export async function setSessionChannel(
       throw error;
     }
   });
+}
+
+export type UpdateSessionVariableSetsResult =
+  | { status: "updated"; event: SessionEvent }
+  | { status: "unchanged" }
+  | {
+      status: "blocked";
+      reason: "turn_in_flight" | "shared_sandbox_group" | "live_sandbox_holders";
+    }
+  | { status: "not_found" };
+
+/**
+ * Replace the complete ordered session Variable Set selection at a quiescent
+ * turn boundary. The session row + FK-backed attachment trigger + audit/event
+ * evidence commit together. A live managed box is fenced for rotation so its
+ * baked environment can never serve the next turn after a detach.
+ */
+export async function updateSessionVariableSets(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    variableSets: Array<{
+      id: string;
+      name: string;
+      scope: VariableSet["scope"];
+    }>;
+  },
+): Promise<UpdateSessionVariableSetsResult> {
+  return await withWorkspaceSubjectSessionActivityRls(
+    db,
+    input.workspaceId,
+    input.subjectId,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (rawTx) => {
+        const tx = rawTx as unknown as Database;
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session || session.accountId !== input.accountId) return { status: "not_found" };
+        if (session.activeTurnId !== null) {
+          return { status: "blocked", reason: "turn_in_flight" };
+        }
+        const [groupCount] = await rawRows<{ count: number }>(
+          tx,
+          sql`select count(*)::int as count
+          from sessions
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${session.sandboxGroupId}`,
+        );
+        if (Number(groupCount?.count ?? 0) > 1) {
+          return { status: "blocked", reason: "shared_sandbox_group" };
+        }
+        // Serialize with the get-or-create admission path even when this group
+        // has never materialized a lease row. Once a row exists, lock it too:
+        // every ordinary holder acquire and retained-process promotion takes
+        // that row lock before publishing its holder.
+        await lockSandboxLeaseAdmission(tx, input.workspaceId, session.sandboxGroupId);
+        await tx.execute(sql`select id
+          from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${session.sandboxGroupId}
+          for update`);
+        const [holderCount] = await rawRows<{ count: number }>(
+          tx,
+          sql`select count(*)::int as count
+          from sandbox_lease_holders holder
+          join sandbox_leases lease on lease.id = holder.lease_id
+          where lease.workspace_id = ${input.workspaceId}
+            and lease.sandbox_group_id = ${session.sandboxGroupId}`,
+        );
+        if (Number(holderCount?.count ?? 0) > 0) {
+          return { status: "blocked", reason: "live_sandbox_holders" };
+        }
+
+        const previousIds =
+          (session.variableSetIds as string[]) ??
+          (session.variableSetId ? [session.variableSetId] : []);
+        const nextIds = input.variableSets.map((variableSet) => variableSet.id);
+        if (stableJson(previousIds) === stableJson(nextIds)) {
+          return { status: "unchanged" };
+        }
+
+        const now = new Date();
+        await tx
+          .update(schema.sessions)
+          .set({
+            variableSetIds: nextIds,
+            variableSetId: nextIds.at(-1) ?? null,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        await tx.execute(sql`update sandbox_leases set
+          rotation_requested_at = coalesce(rotation_requested_at, now()),
+          rotation_reason = coalesce(rotation_reason, 'operator'),
+          expires_at = least(expires_at, now()),
+          updated_at = now()
+        where workspace_id = ${input.workspaceId}
+          and sandbox_group_id = ${session.sandboxGroupId}
+          and liveness <> 'cold'`);
+
+        const previous = new Set(previousIds);
+        const next = new Set(nextIds);
+        const addedIds = nextIds.filter((id) => !previous.has(id));
+        const removedIds = previousIds.filter((id) => !next.has(id));
+        const sequence = session.lastSequence + 1;
+        const [eventRow] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence,
+                type: "session.variable_sets.updated",
+                payload: {
+                  actor: input.subjectId,
+                  variableSets: input.variableSets,
+                  addedIds,
+                  removedIds,
+                  collisionPolicy: "later_selected_set_wins",
+                  effectiveOn: "next_turn_or_sandbox_operation",
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!eventRow) throw new Error("Failed to append session Variable Set update event");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: sequence })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          );
+        const auditChanges = [
+          ...addedIds.map((id) => ({
+            action: "session.variable_set.attached",
+            id,
+          })),
+          ...removedIds.map((id) => ({
+            action: "session.variable_set.detached",
+            id,
+          })),
+          ...(addedIds.length === 0 && removedIds.length === 0
+            ? [
+                {
+                  action: "session.variable_sets.reordered",
+                  id: input.sessionId,
+                },
+              ]
+            : []),
+        ];
+        await tx.insert(schema.auditEvents).values(
+          auditChanges.map(({ action, id }) =>
+            withLosslessContentWriteVersion(
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                subjectId: input.subjectId,
+                action,
+                targetType: "session",
+                targetId: input.sessionId,
+                metadata: {
+                  sessionId: input.sessionId,
+                  ...(action === "session.variable_sets.reordered"
+                    ? { variableSetIds: nextIds }
+                    : { variableSetId: id }),
+                },
+              },
+              "metadata",
+              "metadataCodecVersion",
+            ),
+          ),
+        );
+        return { status: "updated", event: mapEvent(eventRow) };
+      }),
+  );
 }
 
 export async function countRigs(
@@ -26906,6 +27129,7 @@ export type SessionCreateInput = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
   sandboxBackend: SandboxBackend;
+  variableSetIds?: string[];
   variableSetId?: string | null;
   rigId?: string | null;
   rigVersionId?: string | null;
@@ -27286,6 +27510,8 @@ async function createSessionInTransaction(
   input: SessionCreateInput,
   id: string,
 ): Promise<SessionCreateResult> {
+  const variableSetIds = input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : []);
+  const variableSetId = variableSetIds.at(-1) ?? null;
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
   if (createRequestedVisibility === "user_private") {
@@ -27339,6 +27565,9 @@ async function createSessionInTransaction(
         stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
         stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
       ) {
+        throw new SessionCreateIdempotencyConflictError();
+      }
+      if (stableJson(existing.variableSetIds ?? []) !== stableJson(variableSetIds)) {
         throw new SessionCreateIdempotencyConflictError();
       }
       if (existing.createRequestedVisibility !== createRequestedVisibility) {
@@ -27472,7 +27701,8 @@ async function createSessionInTransaction(
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
             sandboxGroupId: input.sandboxGroupId ?? id,
-            variableSetId: input.variableSetId ?? null,
+            variableSetIds,
+            variableSetId,
             rigId: input.rigId ?? null,
             rigVersionId: input.rigVersionId ?? null,
             channelId: input.channelId ?? null,
@@ -27538,6 +27768,9 @@ async function createSessionInTransaction(
           stableJson(existing.initialPersonalResourceAttachmentIntent ?? null) !==
           stableJson(input.initialPersonalResourceAttachmentIntent ?? null)
         ) {
+          throw new SessionCreateIdempotencyConflictError();
+        }
+        if (stableJson(existing.variableSetIds ?? []) !== stableJson(variableSetIds)) {
           throw new SessionCreateIdempotencyConflictError();
         }
         if (existing.createRequestedVisibility !== createRequestedVisibility) {
@@ -28313,6 +28546,26 @@ export async function listDistinctVariableSetIdsInGroup(
         ),
       );
     return rows.map((r) => r.variableSetId ?? null);
+  });
+}
+
+/** Ordered Variable Set selections across every member of a sandbox group. */
+export async function listDistinctVariableSetSelectionsInGroup(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+): Promise<string[][]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .selectDistinct({ variableSetIds: schema.sessions.variableSetIds })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.sandboxGroupId, sandboxGroupId),
+        ),
+      );
+    return rows.map((row) => (row.variableSetIds as string[]) ?? []);
   });
 }
 
@@ -36276,6 +36529,24 @@ async function upsertLeaseHolder(
   `);
 }
 
+/**
+ * Fence first lease materialization against control-plane mutations that must
+ * prove the sandbox group has no holders. The lease-row lock remains the
+ * canonical holder lock once the row exists; this advisory lock covers only
+ * the otherwise-unlockable absent-row window.
+ */
+async function lockSandboxLeaseAdmission(
+  tx: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(
+      ${`sandbox-lease-admission:${workspaceId}:${sandboxGroupId}`}, 0
+    ))`,
+  );
+}
+
 // §4.1 — the get-or-create critical section. ONE transaction:
 // insert-or-nothing -> SELECT … FOR UPDATE (block, not skip) -> branch -> bump.
 // The single most load-bearing function: the sole double-spawn guard.
@@ -36298,6 +36569,7 @@ async function acquireLeaseOnce(
         const tx = txRaw as unknown as Database;
         const image = input.image ?? null;
         const rigVersionId = input.rigVersionId ?? null;
+        await lockSandboxLeaseAdmission(tx, workspaceId, sandboxGroupId);
         // (1) Materialize the singleton row if absent. ON CONFLICT DO NOTHING + the
         // unique index = idempotent under a race; concurrent inserts collapse to
         // one row. expires_at seeded so a never-warmed cold row has a valid TTL. The
@@ -56980,17 +57252,33 @@ export async function claimSessionWorkForAttempt(
                   ),
                 )
                 .orderBy(asc(schema.sessionMcpServers.serverId));
-              const targetVariableSet = targetPolicy.variableSetId
-                ? await getVariableSet(
+              const targetVariableSets =
+                targetPolicy.variableSets.length > 0
+                  ? targetPolicy.variableSets
+                  : targetPolicy.variableSetId && targetPolicy.variableSetGeneration
+                    ? [
+                        {
+                          id: targetPolicy.variableSetId,
+                          generation: targetPolicy.variableSetGeneration,
+                        },
+                      ]
+                    : [];
+              const liveVariableSets = await Promise.all(
+                targetVariableSets.map(async (selected) => {
+                  const variableSet = await getVariableSet(
                     tx as unknown as Database,
                     {
                       accountId: session.accountId,
                       workspaceId,
                       subjectId: accepted.personalResourceAuthoritySubjectId ?? "scheduled-task",
                     },
-                    targetPolicy.variableSetId,
-                  )
-                : null;
+                    selected.id,
+                  );
+                  return variableSet
+                    ? { id: variableSet.id, generation: variableSet.generation }
+                    : null;
+                }),
+              );
               if (
                 targetPolicy.sessionId !== sessionId ||
                 targetPolicy.visibility !== session.visibility ||
@@ -57003,8 +57291,10 @@ export async function claimSessionWorkForAttempt(
                 stableJson(targetPolicy.mcpServerIds) !==
                   stableJson(targetMcpServers.map((server) => server.id)) ||
                 targetPolicy.toolPolicyVersion !== session.toolPolicyVersion ||
-                targetPolicy.variableSetId !== (session.variableSetId ?? null) ||
-                targetPolicy.variableSetGeneration !== (targetVariableSet?.generation ?? null) ||
+                stableJson(targetVariableSets) !==
+                  stableJson(liveVariableSets.filter((value) => value !== null)) ||
+                stableJson(targetVariableSets.map((variableSet) => variableSet.id)) !==
+                  stableJson((session.variableSetIds as string[]) ?? []) ||
                 targetPolicy.rigId !== (session.rigId ?? null) ||
                 targetPolicy.rigVersionId !== (session.rigVersionId ?? null) ||
                 targetPolicy.maxNestedAgentDepthOverride !==
@@ -62472,6 +62762,7 @@ export async function getScheduledTargetSessionExecution(
         firstPartyMcpPermissions: schema.sessions.firstPartyMcpPermissions,
         toolPolicy: schema.sessions.toolPolicy,
         toolPolicyVersion: schema.sessions.toolPolicyVersion,
+        variableSetIds: schema.sessions.variableSetIds,
         variableSetId: schema.sessions.variableSetId,
         rigId: schema.sessions.rigId,
         rigVersionId: schema.sessions.rigVersionId,
@@ -62494,8 +62785,9 @@ export async function getScheduledTargetSessionExecution(
       )
       .orderBy(asc(schema.sessionMcpServers.serverId));
     const latestStarted = await latestStartedSessionTurnRow(scopedDb, workspaceId, sessionId);
-    const variableSet = session.variableSetId
-      ? await getVariableSet(
+    const variableSets = await Promise.all(
+      ((session.variableSetIds as string[]) ?? []).map(async (variableSetId) => {
+        const variableSet = await getVariableSet(
           scopedDb,
           {
             accountId: session.accountId,
@@ -62504,12 +62796,14 @@ export async function getScheduledTargetSessionExecution(
             // user-owned sets resolve only for the frozen causal subject.
             subjectId: authoritySubjectId ?? "scheduled-task",
           },
-          session.variableSetId,
-        )
-      : null;
-    if (session.variableSetId && !variableSet) {
-      throw new Error("scheduled target session variable set is unavailable");
-    }
+          variableSetId,
+        );
+        if (!variableSet) {
+          throw new Error(`scheduled target session Variable Set is unavailable: ${variableSetId}`);
+        }
+        return { id: variableSet.id, generation: variableSet.generation };
+      }),
+    );
     const rigMetadata =
       session.rigId && session.rigVersionId
         ? await getScheduledScopedRigVersionMetadata(
@@ -62567,8 +62861,9 @@ export async function getScheduledTargetSessionExecution(
       mcpServerIds: targetMcpServers.map((server) => server.id),
       effectiveMcpServerIds: targetMcpServers.map((server) => server.id),
       toolPolicyVersion: session.toolPolicyVersion,
+      variableSets,
       variableSetId: session.variableSetId ?? null,
-      variableSetGeneration: variableSet?.generation ?? null,
+      variableSetGeneration: variableSets.at(-1)?.generation ?? null,
       rigId: session.rigId ?? null,
       rigVersionId: session.rigVersionId ?? null,
       rigDefaultVariableSets,
@@ -65903,6 +66198,8 @@ function mapSession(
     activeSandboxId: row.activeSandboxId ?? null,
     activeEpoch: Number(row.activeEpoch),
     workingDir: row.workingDir ?? null,
+    variableSetIds:
+      (row.variableSetIds as string[]) ?? (row.variableSetId ? [row.variableSetId] : []),
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
     // The rig + frozen rig version the session rides (M3). Both null for a

@@ -365,6 +365,23 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("replaces the ordered session Variable Set selection", async () => {
+    const variableSetIds = [
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000012",
+    ];
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, variableSetIds }),
+    );
+    await client.updateSessionVariableSets(WORKSPACE_ID, SESSION_ID, { variableSetIds });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      method: "PUT",
+      url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/variable-sets`,
+    });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({ variableSetIds });
+  });
+
   test("gets and saves the actor-private new-session draft", async () => {
     const draft = {
       revision: 3,

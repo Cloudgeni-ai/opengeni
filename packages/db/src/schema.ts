@@ -3786,6 +3786,10 @@ export const sessions = pgTable(
     // write the result through the epoch-fenced setActiveSandbox CAS. Legacy
     // rows may still be null/relative and are resolved at establishment.
     workingDir: text("working_dir"),
+    // Ordered low-to-high precedence cache for public/session/runtime reads.
+    // session_variable_set_attachments is the FK-backed source of truth; its
+    // trigger maintains this value and the legacy singular alias atomically.
+    variableSetIds: jsonb("variable_set_ids").$type<string[]>().notNull().default([]),
     variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, {
       onDelete: "set null",
     }),
@@ -4019,6 +4023,51 @@ export const sessions = pgTable(
       "sessions_initial_model_context_check",
       sql`${table.initialModelContext} is null
         or opengeni_private.model_context_value_valid(${table.initialModelContext})`,
+    ),
+  }),
+);
+
+export const sessionVariableSetAttachments = pgTable(
+  "session_variable_set_attachments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull(),
+    variableSetId: uuid("variable_set_id")
+      .notNull()
+      .references(() => workspaceVariableSets.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    session: foreignKey({
+      name: "session_variable_set_attachments_session_fk",
+      columns: [table.accountId, table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.accountId, sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    sessionPosition: uniqueIndex("session_variable_set_attachments_session_position_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.position,
+    ),
+    sessionVariableSet: uniqueIndex("session_variable_set_attachments_session_set_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.variableSetId,
+    ),
+    variableSetSessions: index("session_variable_set_attachments_set_sessions_idx").on(
+      table.variableSetId,
+      table.workspaceId,
+      table.sessionId,
+    ),
+    positionValid: check(
+      "session_variable_set_attachments_position_check",
+      sql`${table.position} >= 0 and ${table.position} < 25`,
     ),
   }),
 );
@@ -5997,7 +6046,7 @@ export const turnPersonalResourceAttachmentReceipts = pgTable(
       sql`${table.sessionAuthorityEpoch} > 0
         and octet_length(${table.initiatingHumanSubjectId}) between 1 and 512
         and ${table.membershipAuthorizationRevision} > 0
-        and ${table.resourceCount} between 1 and 28
+        and ${table.resourceCount} between 1 and 52
         and ${table.grantMode} in ('once', 'session', 'always')
         and ${table.sessionVisibility} in ('user_private', 'workspace_shared')
         and ${table.sharedOutputWarningVersion} = 1
@@ -6063,7 +6112,7 @@ export const turnPersonalResourceSnapshots = pgTable(
       sql`${table.membershipAuthorizationRevision} > 0
         and ${table.authorityGeneration} > 0
         and ${table.grantGeneration} > 0
-        and cardinality(${table.selectionSources}) between 1 and 26`,
+        and cardinality(${table.selectionSources}) between 1 and 50`,
     ),
     grantShape: check(
       "turn_personal_resource_snapshots_grant_chk",
