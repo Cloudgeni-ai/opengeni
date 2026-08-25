@@ -16,6 +16,7 @@ import {
   appendSessionEvents,
   bindScheduledTaskRunSessionInTransaction,
   bootstrapWorkspace,
+  claimAutomaticSessionTitleFanout,
   createDb,
   createScheduledTask,
   createScheduledTaskRun,
@@ -25,6 +26,7 @@ import {
   getScheduledTaskRevisionAuthority,
   getScheduledTaskRunAcceptedExecution,
   getSession,
+  markAutomaticSessionTitleFanoutDelivered,
   settleScheduledTaskRunInTransaction,
   updateSessionTitle,
   type DbClient,
@@ -255,6 +257,14 @@ describe("migrations 0348-0350 automatic session title policy fence", () => {
     expect(fence).toContain("sessions_automatic_title_quarantine_v1");
     expect(fence).toContain("session_events_automatic_title_quarantine_v1");
     expect(fence).toContain("'session_events'::regclass");
+    expect(fence).toContain("CREATE TABLE automatic_session_title_fanout_outbox_v1");
+    expect(fence).toContain("automatic_title_fanout_workspace_event_fk");
+    expect(fence).toContain("automatic_title_fanout_pending_idx");
+    expect(fence).toContain("enqueue_automatic_session_title_fanout_v1");
+    expect(fence).toContain("claim_automatic_session_title_fanout_v1");
+    expect(fence).toContain("mark_automatic_session_title_fanout_delivered_v1");
+    expect(fence).toContain("mark_automatic_session_title_fanout_failed_v1");
+    expect(fence).toContain("FOR UPDATE SKIP LOCKED");
     expect(fence).toContain("pg_catalog.pg_get_userbyid(relation.relowner)");
     expect(fence).toContain("opengeni.automatic_session_title_quarantine_v1");
     expect(fence).toContain(
@@ -318,7 +328,8 @@ describe("migrations 0348-0350 automatic session title policy fence", () => {
     expect(quarantine).toContain("last_sequence = session.last_sequence + 1");
     expect(quarantine).toContain("INSERT INTO session_events");
     expect(quarantine).toContain("'session.title_set'");
-    expect(quarantine).toContain("RETURNING session_id AS id");
+    expect(quarantine).toContain("opengeni_private.enqueue_automatic_session_title_fanout_v1");
+    expect(quarantine).toContain("SELECT session_id AS id");
     expect(quarantine).not.toContain("updated_at");
     expect(quarantine).not.toContain("SKIP LOCKED");
     expect(quarantine).not.toContain("ALTER TABLE");
@@ -462,6 +473,21 @@ describe("migrations 0348-0350 automatic session title policy fence", () => {
         quarantined?.title ?? null,
       ),
     ).toBe("New conversation");
+
+    const [fanout] = await claimAutomaticSessionTitleFanout(client.db, 10);
+    expect(fanout).toMatchObject({
+      event: {
+        workspaceId: grant.workspaceId,
+        sessionId: legacy.id,
+        sequence: quarantined?.lastSequence,
+        type: "session.title_set",
+        payload: { title: "New conversation", source: "agent" },
+      },
+    });
+    expect(fanout && (await markAutomaticSessionTitleFanoutDelivered(client.db, fanout))).toBe(
+      true,
+    );
+    expect(await claimAutomaticSessionTitleFanout(client.db, 10)).toEqual([]);
   }, 180_000);
 
   test("quarantines under the non-superuser, non-BYPASSRLS migration owner", async () => {
@@ -605,6 +631,12 @@ describe("migrations 0348-0350 automatic session title policy fence", () => {
         and title_source = 'agent'
     `;
     expect(safeAfterFirst[0]?.count).toBe(1);
+    const fanoutAfterFirst = await database.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from automatic_session_title_fanout_outbox_v1
+      where session_id = any(${ids}::uuid[])
+    `;
+    expect(fanoutAfterFirst[0]?.count).toBe(1);
 
     await expect(runQuarantineBatch(database, oneRowBatch, true)).rejects.toThrow(
       "forced title quarantine batch failure",
@@ -617,6 +649,12 @@ describe("migrations 0348-0350 automatic session title policy fence", () => {
         and title_source = 'agent'
     `;
     expect(safeAfterFailure[0]?.count).toBe(1);
+    const fanoutAfterFailure = await database.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from automatic_session_title_fanout_outbox_v1
+      where session_id = any(${ids}::uuid[])
+    `;
+    expect(fanoutAfterFailure[0]?.count).toBe(1);
 
     expect(await drainQuarantine(database, oneRowBatch)).toBe(2);
     const remaining = await database.admin<Array<{ count: number }>>`
@@ -626,6 +664,12 @@ describe("migrations 0348-0350 automatic session title policy fence", () => {
         and (title <> 'New conversation' or title_source <> 'agent')
     `;
     expect(remaining[0]?.count).toBe(0);
+    const finalFanout = await database.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from automatic_session_title_fanout_outbox_v1
+      where session_id = any(${ids}::uuid[])
+    `;
+    expect(finalFanout[0]?.count).toBe(3);
   }, 180_000);
 
   test("quarantine batches do not wait for concurrent readers", async () => {

@@ -187,6 +187,49 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
   });
 });
 
+describe("confirmed durable fan-out", () => {
+  test("rejects a broker flush failure while ordinary live publish remains best-effort", async () => {
+    const emptyAsyncIterable = () => (async function* () {})();
+    const bus = await createNatsEventBus("nats://confirmed-publish.test:4222", undefined, {
+      connect: async () =>
+        ({
+          status: emptyAsyncIterable,
+          subscribe: () => Object.assign(emptyAsyncIterable(), { unsubscribe() {} }),
+          publish() {},
+          async flush() {
+            throw new Error("CONNECTION_CLOSED");
+          },
+          async drain() {},
+          async request() {
+            return { data: new Uint8Array() };
+          },
+          isClosed: () => false,
+          isDraining: () => false,
+        }) as never,
+    });
+    const events = [
+      {
+        id: "00000000-0000-4000-8000-000000000011",
+        workspaceId: SENTINEL_WS,
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        sequence: 11,
+        type: "session.title_set",
+        payload: { title: "New conversation", source: "agent" },
+        occurredAt: "2026-08-25T00:00:00.000Z",
+        clientEventId: null,
+        turnId: null,
+      },
+    ];
+
+    await expect(
+      bus.publish(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", events as never),
+    ).resolves.toBeUndefined();
+    await expect(
+      bus.publishConfirmed!(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", events as never),
+    ).rejects.toThrow("CONNECTION_CLOSED");
+  });
+});
+
 // NOTE: the append/publish TIMING observer wired into `appendAndPublishEvents` is
 // exercised via `observeSince` in observe-timing.test.ts, NOT here — in the full
 // suite another test file installs a process-global `mock.module("@opengeni/events")`

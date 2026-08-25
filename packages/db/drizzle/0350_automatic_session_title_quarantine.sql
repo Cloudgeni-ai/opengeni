@@ -51,26 +51,42 @@ quarantined AS (
     session.account_id,
     session.workspace_id,
     session.last_sequence
+),
+inserted_events AS (
+  INSERT INTO session_events (
+    account_id,
+    workspace_id,
+    session_id,
+    sequence,
+    type,
+    payload,
+    occurred_at
+  )
+  SELECT
+    quarantined.account_id,
+    quarantined.workspace_id,
+    quarantined.id,
+    quarantined.last_sequence,
+    'session.title_set',
+    pg_catalog.jsonb_build_object(
+      'title', 'New conversation',
+      'source', 'agent'
+    ),
+    pg_catalog.clock_timestamp()
+  FROM quarantined
+  RETURNING id, account_id, workspace_id, session_id
+),
+enqueued AS (
+  SELECT
+    inserted.session_id,
+    opengeni_private.enqueue_automatic_session_title_fanout_v1(
+      inserted.account_id,
+      inserted.workspace_id,
+      inserted.session_id,
+      inserted.id
+    ) AS accepted
+  FROM inserted_events inserted
 )
-INSERT INTO session_events (
-  account_id,
-  workspace_id,
-  session_id,
-  sequence,
-  type,
-  payload,
-  occurred_at
-)
-SELECT
-  quarantined.account_id,
-  quarantined.workspace_id,
-  quarantined.id,
-  quarantined.last_sequence,
-  'session.title_set',
-  pg_catalog.jsonb_build_object(
-    'title', 'New conversation',
-    'source', 'agent'
-  ),
-  pg_catalog.clock_timestamp()
-FROM quarantined
-RETURNING session_id AS id;
+SELECT session_id AS id
+FROM enqueued
+WHERE accepted;

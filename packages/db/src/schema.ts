@@ -7823,6 +7823,50 @@ export const sessionEvents = pgTable(
   }),
 );
 
+/**
+ * Durable fanout obligation for the migration-owned automatic-title
+ * quarantine event. The deployment-wide workflow-wake dispatcher publishes
+ * these exact committed events and marks them delivered; duplicate publication
+ * after a process crash is safe because consumers sequence-fence every event.
+ */
+export const automaticSessionTitleFanoutOutboxV1 = pgTable(
+  "automatic_session_title_fanout_outbox_v1",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    eventId: uuid("event_id").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    attemptsValid: check("automatic_title_fanout_attempts_chk", sql`${table.attempts} >= 0`),
+    workspaceAccount: foreignKey({
+      name: "automatic_title_fanout_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "automatic_title_fanout_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    workspaceEvent: foreignKey({
+      name: "automatic_title_fanout_workspace_event_fk",
+      columns: [table.workspaceId, table.eventId],
+      foreignColumns: [sessionEvents.workspaceId, sessionEvents.id],
+    }).onDelete("cascade"),
+    event: uniqueIndex("automatic_title_fanout_event_uq").on(table.eventId),
+    pending: index("automatic_title_fanout_pending_idx")
+      .on(table.createdAt, table.id)
+      .where(sql`${table.deliveredAt} is null`),
+  }),
+);
+
 export const agentRunStates = pgTable("agent_run_states", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id")

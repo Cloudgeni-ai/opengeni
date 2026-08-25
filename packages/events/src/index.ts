@@ -127,6 +127,29 @@ async function flushWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<
 }
 
 /**
+ * Flush a durable outbox publication and reject unless the NATS server confirms
+ * the write within the bounded wait. A timeout can still leave the original
+ * bytes buffered for reconnect, so callers must remain duplicate-safe when they
+ * retry the durable obligation.
+ */
+async function flushConfirmedWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`NATS publish confirmation timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    await Promise.race([nc.flush(), timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * Drain a long-lived connection's status async-iterator to the log so a future
  * broker outage is OBSERVABLE (disconnect → reconnecting → reconnect → update).
  * Fire-and-forget for the connection's lifetime; the loop ends when the
@@ -230,6 +253,16 @@ export type RequestHandler = (
 
 export type EventBus = {
   publish: (workspaceId: string, sessionId: string, events: SessionEvent[]) => Promise<void>;
+  /**
+   * Publish an already-durable batch and reject unless the transport confirms
+   * acceptance. Optional for embedding-host buses; durable fanout reconcilers
+   * must not acknowledge their outbox when this capability is unavailable.
+   */
+  publishConfirmed?: (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ) => Promise<void>;
   subscribe: (
     workspaceId: string,
     sessionId: string,
@@ -333,6 +366,29 @@ export async function createNatsEventBus(
     },
     flush: () => nc.flush(),
   };
+  const publishSessionEvents = (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ): void => {
+    const batches = sessionEventBatchesByBytes(workspaceId, sessionId, events);
+    for (const batch of batches) {
+      nc.publish(
+        sessionSubject(workspaceId, sessionId),
+        codec.encode({ workspaceId, sessionId, events: batch }),
+      );
+    }
+    if (batches.length > 1) {
+      (options.logger?.debug ?? silentLogger.debug)("NATS session event batch chunked", {
+        workspaceId,
+        sessionId,
+        eventCount: events.length,
+        batchCount: batches.length,
+        maxMessageBytes: SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
+      });
+    }
+    observeEventBoundaries(batches.flat(), options.logger);
+  };
   return {
     publish: async (workspaceId, sessionId, events) => {
       if (events.length === 0) {
@@ -347,23 +403,7 @@ export async function createNatsEventBus(
       // next successful publish's gap-backfill, or a stream reconnect); it must
       // never throw the in-flight turn to death.
       try {
-        const batches = sessionEventBatchesByBytes(workspaceId, sessionId, events);
-        for (const batch of batches) {
-          nc.publish(
-            sessionSubject(workspaceId, sessionId),
-            codec.encode({ workspaceId, sessionId, events: batch }),
-          );
-        }
-        if (batches.length > 1) {
-          (options.logger?.debug ?? silentLogger.debug)("NATS session event batch chunked", {
-            workspaceId,
-            sessionId,
-            eventCount: events.length,
-            batchCount: batches.length,
-            maxMessageBytes: SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
-          });
-        }
-        observeEventBoundaries(batches.flat(), options.logger);
+        publishSessionEvents(workspaceId, sessionId, events);
       } catch (error) {
         // `publish()` throws synchronously only when the connection is fully
         // CLOSED (with infinite reconnect, effectively never outside shutdown).
@@ -378,6 +418,13 @@ export async function createNatsEventBus(
         return;
       }
       await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
+    },
+    publishConfirmed: async (workspaceId, sessionId, events) => {
+      if (events.length === 0) {
+        return;
+      }
+      publishSessionEvents(workspaceId, sessionId, events);
+      await flushConfirmedWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
     },
     subscribe: async (workspaceId, sessionId, onEvents) =>
       subscribeSession(nc, workspaceId, sessionId, onEvents),

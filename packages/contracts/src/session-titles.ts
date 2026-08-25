@@ -54,6 +54,17 @@ const FILE_LIKE_HOST_SUFFIXES = new Set([
   "yml",
 ]);
 
+// These authorities are established framework/namespace notation whose exact
+// casing is meaningful. Keep this exception deliberately narrow: generic
+// PascalCase or uppercase authorities remain host-like because an uppercase
+// real domain (for example MICROSOFT.COM/Admin) must not bypass the URL gate.
+const DOTTED_TECHNOLOGY_PATH_AUTHORITIES = new Set([
+  "ASP.NET",
+  "AWS.SDK",
+  "Microsoft.Extensions",
+  "System.IO",
+]);
+
 const SECRET_ASSIGNMENT_CANDIDATE_PATTERN =
   /(?:^|[^A-Za-z0-9])(?:(['"])([A-Za-z][A-Za-z0-9_. -]*)\1|([A-Za-z][A-Za-z0-9_.-]*))\s*[=:]\s*[^\s,;]+/gu;
 
@@ -122,6 +133,21 @@ function containsSensitiveAssignment(value: string): boolean {
   return false;
 }
 
+function isDottedTechnologyPath(candidate: string): boolean {
+  if (/[?:#]/u.test(candidate)) return false;
+  const [authority, ...pathSegments] = candidate.split("/");
+  if (!authority || pathSegments.length === 0 || pathSegments.some((segment) => !segment)) {
+    return false;
+  }
+  if (
+    !DOTTED_TECHNOLOGY_PATH_AUTHORITIES.has(authority) ||
+    pathSegments.some((segment) => !/^[A-Z][A-Za-z0-9_-]*$/u.test(segment))
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function containsSchemelessUrl(value: string): boolean {
   if (SCHEMELESS_LOCAL_NETWORK_PATTERNS.some((pattern) => pattern.test(value))) return true;
 
@@ -134,6 +160,7 @@ function containsSchemelessUrl(value: string): boolean {
     const hostname = authority.replace(/:\d{1,5}$/u, "");
     const suffix = hostname.split(".").at(-1)?.toLowerCase();
     if (suffix && FILE_LIKE_HOST_SUFFIXES.has(suffix)) continue;
+    if (isDottedTechnologyPath(candidate)) continue;
     return true;
   }
   return false;

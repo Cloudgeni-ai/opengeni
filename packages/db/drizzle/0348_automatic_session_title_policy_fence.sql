@@ -69,6 +69,233 @@ WITH CHECK (
   ) = '1'
 );
 
+-- Migration-created title events have no application process available to
+-- perform the ordinary post-commit NATS publish. Persist that obligation next
+-- to the event so the existing deployment-wide workflow-wake dispatcher can
+-- fan it out after any migration/worker crash. This is deliberately one
+-- bounded global outbox, not one durable poll per open SSE connection.
+CREATE TABLE automatic_session_title_fanout_outbox_v1 (
+  id uuid PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+  account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  event_id uuid NOT NULL,
+  attempts integer NOT NULL DEFAULT 0,
+  last_error text,
+  delivered_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT pg_catalog.now(),
+  updated_at timestamptz NOT NULL DEFAULT pg_catalog.now(),
+  CONSTRAINT automatic_title_fanout_attempts_chk CHECK (attempts >= 0),
+  CONSTRAINT automatic_title_fanout_workspace_account_fk
+    FOREIGN KEY (workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
+  CONSTRAINT automatic_title_fanout_workspace_session_fk
+    FOREIGN KEY (workspace_id, session_id)
+    REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
+  CONSTRAINT automatic_title_fanout_workspace_event_fk
+    FOREIGN KEY (workspace_id, event_id)
+    REFERENCES session_events(workspace_id, id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX automatic_title_fanout_event_uq
+  ON automatic_session_title_fanout_outbox_v1(event_id);
+CREATE INDEX automatic_title_fanout_pending_idx
+  ON automatic_session_title_fanout_outbox_v1(created_at, id)
+  WHERE delivered_at IS NULL;
+
+ALTER TABLE automatic_session_title_fanout_outbox_v1 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE automatic_session_title_fanout_outbox_v1 FORCE ROW LEVEL SECURITY;
+CREATE POLICY automatic_title_fanout_owner_v1
+ON automatic_session_title_fanout_outbox_v1
+FOR ALL
+USING (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'automatic_session_title_fanout_outbox_v1'::regclass
+  )
+)
+WITH CHECK (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'automatic_session_title_fanout_outbox_v1'::regclass
+  )
+);
+
+-- The bounded backfill remains one WITH statement by migration-runner
+-- contract. Route only its exact event identity through this ungranted definer
+-- seam so the non-superuser table owner can write the FORCE-RLS outbox without
+-- opening a tenant-spoofable GUC policy or taking an ACCESS EXCLUSIVE posture
+-- window for every batch.
+CREATE OR REPLACE FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(
+  p_account_id uuid,
+  p_workspace_id uuid,
+  p_session_id uuid,
+  p_event_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $automatic_title_fanout_enqueue$
+  WITH enqueued AS (
+    INSERT INTO automatic_session_title_fanout_outbox_v1 (
+      account_id,
+      workspace_id,
+      session_id,
+      event_id
+    ) VALUES (
+      p_account_id,
+      p_workspace_id,
+      p_session_id,
+      p_event_id
+    )
+    ON CONFLICT (event_id) DO NOTHING
+    RETURNING true AS changed
+  )
+  SELECT coalesce((SELECT changed FROM enqueued), false);
+$automatic_title_fanout_enqueue$;
+
+CREATE OR REPLACE FUNCTION opengeni_private.claim_automatic_session_title_fanout_v1(
+  p_limit integer
+)
+RETURNS TABLE (
+  outbox_id uuid,
+  account_id uuid,
+  workspace_id uuid,
+  session_id uuid,
+  event_id uuid,
+  sequence integer,
+  type text,
+  payload jsonb,
+  payload_codec_version integer,
+  occurred_at timestamptz,
+  client_event_id text,
+  turn_id uuid,
+  turn_generation integer,
+  turn_attempt_id uuid,
+  turn_association text,
+  duplicate_of_event_id uuid,
+  duplicate_reason text
+)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $automatic_title_fanout_claim$
+  WITH candidates AS MATERIALIZED (
+    SELECT pending.id
+    FROM automatic_session_title_fanout_outbox_v1 pending
+    WHERE pending.delivered_at IS NULL
+    ORDER BY pending.created_at, pending.id
+    FOR UPDATE SKIP LOCKED
+    LIMIT greatest(1, least(coalesce(p_limit, 100), 1000))
+  ),
+  claimed AS (
+    UPDATE automatic_session_title_fanout_outbox_v1 pending
+    SET attempts = pending.attempts + 1,
+        updated_at = pg_catalog.clock_timestamp()
+    FROM candidates
+    WHERE pending.id = candidates.id
+      AND pending.delivered_at IS NULL
+    RETURNING pending.id, pending.event_id
+  )
+  SELECT
+    claimed.id,
+    event.account_id,
+    event.workspace_id,
+    event.session_id,
+    event.id,
+    event.sequence,
+    event.type,
+    event.payload,
+    event.payload_codec_version,
+    event.occurred_at,
+    event.client_event_id,
+    event.turn_id,
+    event.turn_generation,
+    event.turn_attempt_id,
+    event.turn_association,
+    event.duplicate_of_event_id,
+    event.duplicate_reason
+  FROM claimed
+  JOIN session_events event ON event.id = claimed.event_id
+  ORDER BY event.workspace_id, event.session_id, event.sequence;
+$automatic_title_fanout_claim$;
+
+CREATE OR REPLACE FUNCTION opengeni_private.mark_automatic_session_title_fanout_delivered_v1(
+  p_outbox_id uuid,
+  p_event_id uuid
+)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $automatic_title_fanout_delivered$
+  WITH delivered AS (
+    UPDATE automatic_session_title_fanout_outbox_v1 pending
+    SET delivered_at = pg_catalog.clock_timestamp(),
+        last_error = NULL,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE pending.id = p_outbox_id
+      AND pending.event_id = p_event_id
+      AND pending.delivered_at IS NULL
+    RETURNING true AS changed
+  )
+  SELECT coalesce((SELECT changed FROM delivered), false);
+$automatic_title_fanout_delivered$;
+
+CREATE OR REPLACE FUNCTION opengeni_private.mark_automatic_session_title_fanout_failed_v1(
+  p_outbox_id uuid,
+  p_event_id uuid,
+  p_error text
+)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $automatic_title_fanout_failed$
+  WITH failed AS (
+    UPDATE automatic_session_title_fanout_outbox_v1 pending
+    SET last_error = pg_catalog.left(coalesce(p_error, 'unknown failure'), 500),
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE pending.id = p_outbox_id
+      AND pending.event_id = p_event_id
+      AND pending.delivered_at IS NULL
+    RETURNING true AS changed
+  )
+  SELECT coalesce((SELECT changed FROM failed), false);
+$automatic_title_fanout_failed$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_private.claim_automatic_session_title_fanout_v1(integer)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_private.mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)
+  FROM PUBLIC;
+REVOKE ALL ON FUNCTION
+  opengeni_private.mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)
+  FROM PUBLIC;
+
+DO $automatic_title_fanout_grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.claim_automatic_session_title_fanout_v1(integer)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)
+      TO opengeni_app;
+  END IF;
+END
+$automatic_title_fanout_grants$;
+
 -- The 0345 session-tenancy trigger requires every non-superuser migration
 -- owner to hold the affected workspace fence before PostgreSQL takes a session
 -- row lock. Discover only the workspaces represented by the next bounded id

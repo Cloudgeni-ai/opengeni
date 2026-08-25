@@ -33,6 +33,14 @@ export class MemoryEventBus implements EventBus {
     await Promise.all([...subscribers].map((subscriber) => subscriber(events)));
   }
 
+  async publishConfirmed(
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ): Promise<void> {
+    await this.publish(workspaceId, sessionId, events);
+  }
+
   async subscribe(
     workspaceId: string,
     sessionId: string,

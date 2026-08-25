@@ -317,12 +317,22 @@ test("session SSE coalesces long durable delta runs before they reach the browse
   await reader.cancel();
 });
 
-test("an open session stream reconciles a quarantine title event without bus fanout", async () => {
+test("an open session stream reconciles a quarantine title event from durable fanout", async () => {
   durableEvents = [];
   durableReads.length = 0;
+  let subscriber: ((events: SessionEvent[]) => void | Promise<void>) | null = null;
   const response = await sseSessionStream(
     fakeDb as never,
-    { subscribe: async () => () => {} } as unknown as EventBus,
+    {
+      subscribe: async (
+        _workspaceId: string,
+        _sessionId: string,
+        onEvents: (events: SessionEvent[]) => void | Promise<void>,
+      ) => {
+        subscriber = onEvents;
+        return () => {};
+      },
+    } as unknown as EventBus,
     WORKSPACE_ID,
     SESSION_ID,
     0,
@@ -333,6 +343,7 @@ test("an open session stream reconciles a quarantine title event without bus fan
   expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
 
   durableEvents = [titleEvent(1, "New conversation")];
+  await subscriber?.(durableEvents);
   const [quarantineEvent] = await readSessionEvents(reader, 1);
   expect(quarantineEvent).toMatchObject({
     sequence: 1,
@@ -341,9 +352,42 @@ test("an open session stream reconciles a quarantine title event without bus fan
   });
   expect(durableReads).toEqual([
     { after: 0, limit: 100 },
-    { after: 0, limit: 100 },
+    { after: 0, limit: 1 },
   ]);
   await reader.cancel();
+});
+
+test("idle session stream count does not multiply durable reads on heartbeat", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  const streamCount = 24;
+  const responses = await Promise.all(
+    Array.from({ length: streamCount }, () =>
+      sseSessionStream(
+        fakeDb as never,
+        { subscribe: async () => () => {} } as unknown as EventBus,
+        WORKSPACE_ID,
+        SESSION_ID,
+        0,
+        new AbortController().signal,
+        { heartbeatIntervalMs: 1_000, stallTimeoutMs: 100 },
+      ),
+    ),
+  );
+  const readers = responses.map((response) => response.body!.getReader());
+  const connected = await Promise.all(readers.map(async (reader) => await reader.read()));
+  expect(connected.map((frame) => new TextDecoder().decode(frame.value))).toEqual(
+    Array.from({ length: streamCount }, () => ": connected\n\n"),
+  );
+  expect(durableReads).toHaveLength(streamCount);
+
+  const heartbeats = await Promise.all(readers.map(async (reader) => await reader.read()));
+  expect(heartbeats.map((frame) => new TextDecoder().decode(frame.value))).toEqual(
+    Array.from({ length: streamCount }, () => ": heartbeat\n\n"),
+  );
+  expect(durableReads).toHaveLength(streamCount);
+
+  await Promise.all(readers.map(async (reader) => await reader.cancel()));
 });
 
 test("a session stream fails closed before its first frame when host authorization is revoked", async () => {

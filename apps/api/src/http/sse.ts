@@ -368,8 +368,7 @@ export async function sseSessionStream(
     if (channel.stopped()) return;
     heartbeatTimer = setTimeout(() => {
       heartbeatTimer = null;
-      void reconcileDurableThrough()
-        .then(() => writeFrame(": heartbeat\n\n"))
+      void writeFrame(": heartbeat\n\n")
         .then(scheduleHeartbeat)
         .catch((error) => {
           if (!(error instanceof SseStreamStoppedError)) fail(error);

@@ -108,6 +108,22 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("Review package.json/scripts migration")).toBe(
       "Review package.json/scripts migration",
     );
+    expect(normalizeAutomaticSessionTitle("ASP.NET/Core authentication")).toBe(
+      "ASP.NET/Core authentication",
+    );
+    expect(normalizeAutomaticSessionTitle("System.IO/File handling")).toBe(
+      "System.IO/File handling",
+    );
+    expect(normalizeAutomaticSessionTitle("Microsoft.Extensions/Logging setup")).toBe(
+      "Microsoft.Extensions/Logging setup",
+    );
+    expect(normalizeAutomaticSessionTitle("AWS.SDK/Client migration")).toBe(
+      "AWS.SDK/Client migration",
+    );
+    expect(normalizeAutomaticSessionTitle("Open EXAMPLE.COM/account")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Open IBM.COM/Admin")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Open MICROSOFT.COM/Admin")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Open System.COM/Admin")).toBeNull();
   });
 
   test("rejects non-HTTP schemes and local network URL forms", () => {

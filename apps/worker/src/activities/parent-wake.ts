@@ -11,9 +11,12 @@ import {
   childRequiresActionDedupeKey,
   getSessionSystemUpdateOutboxByDedupeKey,
   getOrCreateSessionSystemUpdateOutbox,
+  claimAutomaticSessionTitleFanout,
   markSessionWorkflowWakeFailed,
   markSessionSystemUpdateOutboxDeliveredInTransaction,
   markSessionSystemUpdateOutboxFailed,
+  markAutomaticSessionTitleFanoutDelivered,
+  markAutomaticSessionTitleFanoutFailed,
   sessionSystemUpdateOutboxKindPayload,
   type Database,
   type SessionSystemUpdateOutboxDelivery,
@@ -35,6 +38,12 @@ export type ReconcileParentSystemUpdateOverrides = Partial<{
 
 export type ReconcileSessionWorkflowWakeOverrides = Partial<{
   claimPendingSessionWorkflowWakes: typeof claimPendingSessionWorkflowWakes;
+}>;
+
+export type ReconcileAutomaticSessionTitleFanoutOverrides = Partial<{
+  claimAutomaticSessionTitleFanout: typeof claimAutomaticSessionTitleFanout;
+  markAutomaticSessionTitleFanoutDelivered: typeof markAutomaticSessionTitleFanoutDelivered;
+  markAutomaticSessionTitleFanoutFailed: typeof markAutomaticSessionTitleFanoutFailed;
 }>;
 
 /**
@@ -264,6 +273,52 @@ export async function reconcilePendingParentSystemUpdates(
       failed += 1;
     }
   }
+  return { claimed: rows.length, delivered, failed };
+}
+
+/**
+ * Publish migration-created safe title events through the ordinary NATS session
+ * subject. The outbox is durable and deployment-global; a crash after publish
+ * but before acknowledgement can duplicate a notification, which is safe
+ * because SSE consumers sequence-fence and gap-fill from the durable log.
+ */
+export async function reconcileAutomaticSessionTitleFanout(
+  svc: NotifyServices,
+  limit = 100,
+  overrides: ReconcileAutomaticSessionTitleFanoutOverrides = {},
+): Promise<{ claimed: number; delivered: number; failed: number }> {
+  const claim = overrides.claimAutomaticSessionTitleFanout ?? claimAutomaticSessionTitleFanout;
+  const markDelivered =
+    overrides.markAutomaticSessionTitleFanoutDelivered ?? markAutomaticSessionTitleFanoutDelivered;
+  const markFailed =
+    overrides.markAutomaticSessionTitleFanoutFailed ?? markAutomaticSessionTitleFanoutFailed;
+  const rows = await claim(svc.db, limit);
+  let delivered = 0;
+  let failed = 0;
+  const queue = [...rows];
+  const workers = Array.from({ length: Math.min(20, queue.length) }, async () => {
+    for (;;) {
+      const row = queue.shift();
+      if (!row) return;
+      try {
+        if (svc.bus.isConnected?.() === false) {
+          throw new Error("session event bus is disconnected");
+        }
+        if (!svc.bus.publishConfirmed) {
+          throw new Error("session event bus does not support confirmed publish");
+        }
+        await svc.bus.publishConfirmed(row.event.workspaceId, row.event.sessionId, [row.event]);
+        await markDelivered(svc.db, row);
+        delivered += 1;
+      } catch (error) {
+        failed += 1;
+        await markFailed(svc.db, row, error instanceof Error ? error.message : String(error)).catch(
+          () => undefined,
+        );
+      }
+    }
+  });
+  await Promise.all(workers);
   return { claimed: rows.length, delivered, failed };
 }
 

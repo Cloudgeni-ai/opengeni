@@ -63509,6 +63509,93 @@ export async function claimPendingSessionSystemUpdateOutbox(
   return deliveries;
 }
 
+export type AutomaticSessionTitleFanoutDelivery = {
+  outboxId: string;
+  event: SessionEvent;
+};
+
+/**
+ * Claim migration-created title events for deployment-wide NATS fanout. The
+ * function is SECURITY DEFINER because one control worker drains obligations
+ * across workspaces; callers receive only the exact already-public event
+ * projection, never arbitrary session rows.
+ */
+export async function claimAutomaticSessionTitleFanout(
+  db: Database,
+  limit = 100,
+): Promise<AutomaticSessionTitleFanoutDelivery[]> {
+  const rows = await rawRows<{
+    outbox_id: string;
+    workspace_id: string;
+    session_id: string;
+    event_id: string;
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payload_codec_version: number | null;
+    occurred_at: Date | string;
+    client_event_id: string | null;
+    turn_id: string | null;
+    turn_generation: number | null;
+    turn_attempt_id: string | null;
+    turn_association: string | null;
+    duplicate_of_event_id: string | null;
+    duplicate_reason: string | null;
+  }>(db, sql`select * from opengeni_private.claim_automatic_session_title_fanout_v1(${limit})`);
+  return rows.map((row) => ({
+    outboxId: row.outbox_id,
+    event: {
+      id: row.event_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      sequence: row.sequence,
+      type: row.type as SessionEventType,
+      payload: fromPostgresLosslessJson(row.payload, row.payload_codec_version),
+      occurredAt:
+        row.occurred_at instanceof Date
+          ? row.occurred_at.toISOString()
+          : new Date(row.occurred_at).toISOString(),
+      clientEventId: row.client_event_id,
+      turnId: row.turn_id,
+      turnGeneration: row.turn_generation,
+      turnAttemptId: row.turn_attempt_id,
+      turnAssociation: row.turn_association as SessionEvent["turnAssociation"],
+      duplicateOfEventId: row.duplicate_of_event_id,
+      duplicateReason: row.duplicate_reason,
+    },
+  }));
+}
+
+export async function markAutomaticSessionTitleFanoutDelivered(
+  db: Database,
+  delivery: AutomaticSessionTitleFanoutDelivery,
+): Promise<boolean> {
+  const [row] = await rawRows<{ changed: boolean }>(
+    db,
+    sql`select opengeni_private.mark_automatic_session_title_fanout_delivered_v1(
+      ${delivery.outboxId}::uuid,
+      ${delivery.event.id}::uuid
+    ) as changed`,
+  );
+  return row?.changed === true;
+}
+
+export async function markAutomaticSessionTitleFanoutFailed(
+  db: Database,
+  delivery: AutomaticSessionTitleFanoutDelivery,
+  error: string,
+): Promise<boolean> {
+  const [row] = await rawRows<{ changed: boolean }>(
+    db,
+    sql`select opengeni_private.mark_automatic_session_title_fanout_failed_v1(
+      ${delivery.outboxId}::uuid,
+      ${delivery.event.id}::uuid,
+      ${error}
+    ) as changed`,
+  );
+  return row?.changed === true;
+}
+
 export type SessionWorkflowWake = {
   accountId: string;
   workspaceId: string;
