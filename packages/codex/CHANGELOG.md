@@ -1,5 +1,12 @@
 # @opengeni/codex
 
+## 0.2.19
+
+### Patch Changes
+
+- Updated dependencies [16387c3]
+  - @opengeni/network@0.2.3
+
 ## 0.2.18
 
 ### Patch Changes

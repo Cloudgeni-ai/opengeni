@@ -1,5 +1,12 @@
 # @opengeni/ogtool
 
+## 0.3.17
+
+### Patch Changes
+
+- a78124f: Adopt the canonical Bun 1.4 toolchain, build the standalone ogtool CLI with Bun, and use Bun 1.4's corrected UTF-8 byte-length behavior in runtime context compaction.
+  - @opengeni/codemode@0.4.13
+
 ## 0.3.16
 
 ### Patch Changes
