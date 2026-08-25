@@ -596,20 +596,45 @@ capabilities are the only application seams.
 The prepare capability writes the stable bearer and payload digests and the
 `provider_started` marker before provider I/O. A stable provider idempotency key
 belongs to the delivery rather than an HTTP attempt, so exact create replays and
-explicit retries send byte-identical content under the same key. Clear provider
-refusals settle as `failed`; network/server ambiguity settles as
-`outcome_unknown` and is never blindly retried by the server. Owners and
-administrators may explicitly retry those terminal delivery states from People
-& invitations. Every retry appends an attempt and preserves the delivery id,
-bearer, frozen snapshot, payload digest, and provider key. Revocation wins over
-an in-flight provider result.
+explicit retries send byte-identical content under the same key. The digest
+includes the effective provider sender as well as recipient, subject, text, and
+HTML plus an immutable provider/account/policy idempotency scope, so changing
+`OPENGENI_EMAIL_FROM`, provider, provider account, or key-retention policy cannot
+silently change a retry under an old key. Clear provider refusals settle as
+`failed`; network/server ambiguity settles as `outcome_unknown` and is never
+blindly retried by the server. Each transport declares a conservative key-
+retention guarantee. The prepare boundary persists the resulting absolute safe-
+until fence, and an ambiguous retry cannot extend it. Resend declares its
+documented 24-hour retention; another injected transport supplies its own bound
+scope and retention. Once the durable fence expires, `retryState` becomes
+`reconciliation_required`, the API rejects a new send, and People & invitations
+instructs an administrator to reconcile provider state instead of offering a
+retry. Every allowed retry appends an attempt and preserves the delivery id,
+bearer, frozen snapshot, payload digest, provider scope, safe-until fence, and
+provider key. A prior unresolved outcome also survives a later render/prepare
+failure or pre-provider lease expiry; only a same-scope idempotent provider
+settlement or revocation clears it. Revocation wins over an in-flight provider
+result and atomically closes its claim and attempt.
+
+Invitation creation and provider delivery intentionally remain separate
+transactions. If the process exits after the invitation commits but before its
+delivery journal is created, the invitation list shows `Delivery not started`
+and offers `Send invitation`. That authenticated retry resolves the immutable
+invite operation receipt server-side, creates the missing ledger while keeping
+the original creator binding, and sends through the ordinary prepare/settle
+path. An exact expired pre-provider claim becomes `failed`; an expired
+provider-started claim becomes `outcome_unknown`. Neither can remain a hidden
+permanent `pending` row.
 
 `OPENGENI_RESEND_API_KEY` selects the standalone Resend adapter, while embedded
-hosts may inject another provider-neutral `ManagedEmailTransport`. Local/test
-mode uses a process-local capture transport whose entries are count- and TTL-
-bounded and one-time readable; it has no route, database, disk, or log surface.
-Production managed-mode configuration validation still requires a provider
-key; the injectable seam does not relax that deployment preflight.
+hosts may inject another provider-neutral `ManagedEmailTransport`. An injected
+transport must declare a bounded sender, a stable non-secret idempotency scope
+that identifies provider/account/policy, and an integer retention guarantee;
+composition rejects malformed metadata before any invitation can commit.
+Local/test mode uses a process-local capture transport whose entries are count-
+and TTL-bounded and one-time readable; it has no route, database, disk, or log
+surface. Production managed-mode configuration validation still requires a
+provider key; the injectable seam does not relax that deployment preflight.
 
 Because the bearer is derived from the invitation id, the URL and signing
 configuration (`OPENGENI_PUBLIC_BASE_URL` and

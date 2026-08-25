@@ -317,9 +317,9 @@ function betterAuthTrustedOrigins(settings: Settings): string[] {
 
 export async function sendManagedAuthEmail(
   transport: ManagedEmailTransport,
-  input: ManagedEmailMessage,
+  input: Omit<ManagedEmailMessage, "from">,
 ): Promise<void> {
-  const result = await transport.send(input);
+  const result = await transport.send({ ...input, from: transport.sender });
   if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
 }
 

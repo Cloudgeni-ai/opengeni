@@ -870,6 +870,7 @@ describe("runtime database posture evaluator", () => {
       "prepare_organization_user_setup_delivery(jsonb)",
       "settle_organization_user_setup_delivery(jsonb)",
       "preview_organization_user_setup(text)",
+      "get_organization_invitation_for_administration(uuid, text, uuid)",
     ] as const) {
       expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(routine);
     }

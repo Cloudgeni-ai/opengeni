@@ -44,6 +44,7 @@ import {
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getOrganizationAdministrationOverview,
+  getOrganizationInvitationForAdministration,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
@@ -462,7 +463,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     // Bearer construction configuration must fail before the invitation
     // commits. Provider outcomes are journaled durably after this boundary.
     try {
-      assertOrganizationUserSetupDeliveryConfigured(deps.settings);
+      assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);
     } catch {
       throw new HTTPException(503, {
         message: "invited-user account setup delivery is not configured on this deployment",
@@ -482,14 +483,23 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           expiresAt: payload.expiresAt,
         }),
       );
-      const delivery = await deliverOrganizationUserSetup(deps, {
+      await deliverOrganizationUserSetup(deps, {
         organizationId,
         actorSubjectId: subjectId,
         invitationId: invitation.id,
         invitationOperationId: payload.operationId,
         operationId: payload.operationId,
       });
-      return context.json(OrganizationInvitation.parse({ ...invitation, delivery }), 201);
+      return context.json(
+        OrganizationInvitation.parse(
+          await getOrganizationInvitationForAdministration(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
+            invitationId: invitation.id,
+          }),
+        ),
+        201,
+      );
     } catch (error) {
       if (error instanceof HTTPException) throw error;
       rethrowMembershipError(error);
@@ -541,7 +551,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
       const payload = await parseBody(context, RetryOrganizationUserSetupDeliveryRequest);
       try {
-        assertOrganizationUserSetupDeliveryConfigured(deps.settings);
+        assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);
       } catch {
         throw new HTTPException(503, {
           message: "invited-user account setup delivery is not configured on this deployment",
@@ -741,6 +751,7 @@ async function deliverOrganizationUserSetup(
     deliveryId: claim.delivery.id,
   });
   const message = renderOrganizationUserSetupEmail({
+    senderEmail: deps.managedEmailTransport.sender,
     recipientEmail: claim.recipientEmail,
     recipientName: claim.recipientName,
     organizationName: claim.organizationName,
@@ -755,7 +766,12 @@ async function deliverOrganizationUserSetup(
     attemptId: claim.attemptId,
     claimHolderId: claim.claimHolderId,
     tokenDigest: setup.digest,
-    payloadDigest: await organizationUserSetupPayloadDigest(message),
+    payloadDigest: await organizationUserSetupPayloadDigest({
+      ...message,
+      providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    }),
+    providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    providerIdempotencyRetentionSeconds: deps.managedEmailTransport.idempotency.retentionSeconds,
   });
   let outcome:
     | { status: "sent"; providerMessageId: string | null }

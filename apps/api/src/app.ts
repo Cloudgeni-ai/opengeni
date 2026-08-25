@@ -64,6 +64,7 @@ import {
 } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
 import { createManagedEmailTransport } from "./auth/managed-email";
+import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
@@ -197,6 +198,7 @@ export function createAppComposition(deps: AppDependencies): {
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
   const managedEmailTransport =
     deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
+  assertManagedEmailTransportMetadata(managedEmailTransport);
   const managedAuth =
     deps.managedAuth ?? createManagedAuth(deps.settings, deps.db, managedEmailTransport);
   const objectStorage =

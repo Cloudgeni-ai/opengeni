@@ -6,4 +6,4 @@
 "@opengeni/sdk": patch
 ---
 
-Add durable provider-neutral invited-user email delivery, digest-only setup preview, stable idempotent retries, and explicit delivery state across the API, SDK, and organization administration experience.
+Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.

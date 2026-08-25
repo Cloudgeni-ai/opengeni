@@ -4,6 +4,7 @@ import type {
   ManagedEmailMessage,
   ManagedEmailTransport,
 } from "@opengeni/core";
+import { createHmac } from "node:crypto";
 import { Resend } from "resend";
 
 const CAPTURE_MAX_MESSAGES = 250;
@@ -20,14 +21,24 @@ export type CapturedManagedEmail = ManagedEmailMessage & {
  */
 export class InMemoryManagedEmailTransport implements ManagedEmailTransport {
   private readonly messages: CapturedManagedEmail[] = [];
+  readonly sender: string;
+  readonly idempotency: ManagedEmailTransport["idempotency"];
 
   constructor(
     private readonly options: {
       maxMessages?: number;
       ttlMs?: number;
       now?: () => number;
+      sender?: string;
+      idempotency?: ManagedEmailTransport["idempotency"];
     } = {},
-  ) {}
+  ) {
+    this.sender = options.sender ?? "OpenGeni <auth@mail.opengeni.ai>";
+    this.idempotency = options.idempotency ?? {
+      scope: "opengeni-in-memory-v1",
+      retentionSeconds: 86_400,
+    };
+  }
 
   async send(message: ManagedEmailMessage): Promise<ManagedEmailDeliveryResult> {
     this.prune();
@@ -65,6 +76,13 @@ export class InMemoryManagedEmailTransport implements ManagedEmailTransport {
 }
 
 class UnconfiguredManagedEmailTransport implements ManagedEmailTransport {
+  readonly idempotency = {
+    scope: "opengeni-unconfigured-v1",
+    retentionSeconds: 0,
+  } as const;
+
+  constructor(readonly sender: string) {}
+
   async send(): Promise<ManagedEmailDeliveryResult> {
     return { status: "failed", errorClass: "provider_not_configured" };
   }
@@ -72,19 +90,30 @@ class UnconfiguredManagedEmailTransport implements ManagedEmailTransport {
 
 class ResendManagedEmailTransport implements ManagedEmailTransport {
   private readonly client: Resend;
+  readonly idempotency: ManagedEmailTransport["idempotency"];
 
   constructor(
     apiKey: string,
-    private readonly from: string,
+    readonly sender: string,
+    scopeSecret: string,
   ) {
     this.client = new Resend(apiKey);
+    this.idempotency = {
+      // The keyed digest binds this delivery to the Resend account without
+      // persisting an API-key derivative that can be tested offline.
+      scope: `resend-v1-24h:${createHmac("sha256", scopeSecret).update(apiKey).digest("hex")}`,
+      retentionSeconds: 86_400,
+    };
   }
 
   async send(message: ManagedEmailMessage): Promise<ManagedEmailDeliveryResult> {
+    if (message.from !== this.sender) {
+      return { status: "failed", errorClass: "sender_changed" };
+    }
     try {
       const result = await this.client.emails.send(
         {
-          from: this.from,
+          from: message.from,
           to: message.to,
           subject: message.subject,
           text: message.text,
@@ -116,12 +145,19 @@ class ResendManagedEmailTransport implements ManagedEmailTransport {
 
 export function createManagedEmailTransport(settings: Settings): ManagedEmailTransport {
   if (settings.resendApiKey) {
-    return new ResendManagedEmailTransport(settings.resendApiKey, settings.emailFrom);
+    if (!settings.betterAuthSecret) {
+      throw new Error("OPENGENI_BETTER_AUTH_SECRET is required for managed email delivery");
+    }
+    return new ResendManagedEmailTransport(
+      settings.resendApiKey,
+      settings.emailFrom,
+      settings.betterAuthSecret,
+    );
   }
   if (settings.environment === "local" || settings.environment === "test") {
-    return new InMemoryManagedEmailTransport();
+    return new InMemoryManagedEmailTransport({ sender: settings.emailFrom });
   }
-  return new UnconfiguredManagedEmailTransport();
+  return new UnconfiguredManagedEmailTransport(settings.emailFrom);
 }
 
 function clearProviderRefusal(statusCode: number): boolean {

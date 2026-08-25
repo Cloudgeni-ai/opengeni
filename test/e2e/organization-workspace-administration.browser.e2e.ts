@@ -58,7 +58,24 @@ describe("organization workspace administration in Chromium", () => {
     expect(await page.getByText(/Assign another active owner before changing/).count()).toBe(1);
     expect(
       await page
-        .getByText("Provider outcome unknown — reconcile or retry · 1 attempt", { exact: true })
+        .getByText("Provider outcome unknown — safe retry available · 1 attempt", { exact: true })
+        .count(),
+    ).toBe(1);
+    expect(
+      await page
+        .getByText("Provider outcome requires reconciliation — do not resend · 1 attempt", {
+          exact: true,
+        })
+        .count(),
+    ).toBe(1);
+    expect(
+      await page
+        .getByRole("button", { name: "Retry delivery to reconcile-member@example.test" })
+        .count(),
+    ).toBe(0);
+    expect(
+      await page
+        .getByText("Delivery failed — invitation expired · 1 attempt", { exact: true })
         .count(),
     ).toBe(1);
     await page.getByRole("button", { name: "Retry delivery" }).click();

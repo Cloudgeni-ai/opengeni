@@ -91,7 +91,9 @@ function invitationDeliveryOutcome(invitation: OrganizationInvitation): string {
     case "failed":
       return `Invitation recorded for ${invitation.targetEmail}, but delivery failed. Retry is available.`;
     case "outcome_unknown":
-      return `Invitation recorded for ${invitation.targetEmail}; the provider outcome is unknown. Reconcile or retry safely.`;
+      return invitation.delivery.retryState === "reconciliation_required"
+        ? `Invitation recorded for ${invitation.targetEmail}; the provider outcome must be reconciled before any new invitation is sent.`
+        : `Invitation recorded for ${invitation.targetEmail}; the provider outcome is unknown. A safe retry is available.`;
     case "pending":
       return `Invitation recorded for ${invitation.targetEmail}; delivery is still pending.`;
     case "revoked":
@@ -104,13 +106,19 @@ function invitationDeliveryOutcome(invitation: OrganizationInvitation): string {
 function InvitationDeliveryStatus({ invitation }: { invitation: OrganizationInvitation }) {
   const delivery = invitation.delivery;
   if (!delivery) return <p className="mt-0.5 text-fg-subtle">Delivery not started</p>;
-  const label = {
-    pending: "Delivery pending",
-    sent: "Email sent",
-    failed: "Delivery failed — retry available",
-    outcome_unknown: "Provider outcome unknown — reconcile or retry",
-    revoked: "Delivery revoked",
-  }[delivery.state];
+  const label =
+    invitation.status !== "pending" &&
+    (delivery.state === "failed" || delivery.state === "outcome_unknown")
+      ? `Delivery ${delivery.state === "failed" ? "failed" : "outcome unknown"} — invitation ${invitation.status}`
+      : delivery.retryState === "reconciliation_required"
+        ? "Provider outcome requires reconciliation — do not resend"
+        : {
+            pending: "Delivery pending",
+            sent: "Email sent",
+            failed: "Delivery failed — retry available",
+            outcome_unknown: "Provider outcome unknown — safe retry available",
+            revoked: "Delivery revoked",
+          }[delivery.state];
   return (
     <p className="mt-0.5 text-fg-subtle">
       {label} · {delivery.attemptCount} {delivery.attemptCount === 1 ? "attempt" : "attempts"}
@@ -2345,6 +2353,10 @@ export function OrganizationPeopleSection(props: {
             <p role="status" className="text-xs text-fg-muted">
               Loading invitations…
             </p>
+          ) : adminInvites.value.invitations.length === 0 ? (
+            <p className="text-xs text-fg-muted">
+              No organization invitations yet. Invite someone above when you are ready.
+            </p>
           ) : (
             <div className="grid gap-2">
               {adminInvites.value.invitations.map((invite) => (
@@ -2379,17 +2391,17 @@ export function OrganizationPeopleSection(props: {
                   </div>
                   <div className="flex flex-wrap justify-end gap-2">
                     {invite.status === "pending" &&
-                    (invite.delivery?.state === "failed" ||
-                      invite.delivery?.state === "outcome_unknown") ? (
+                    (!invite.delivery || invite.delivery.retryState === "available") ? (
                       <Button
                         type="button"
                         variant="secondary"
                         size="sm"
+                        aria-label={`${invite.delivery ? "Retry delivery" : "Send invitation"} to ${invite.targetEmail}`}
                         disabled={visibleBusyResource !== null || adminInvites.loading}
                         onClick={() => void retryInvitationDelivery(invite)}
                       >
                         <RefreshCwIcon className="size-3.5" />
-                        Retry delivery
+                        {invite.delivery ? "Retry delivery" : "Send invitation"}
                       </Button>
                     ) : null}
                     {invite.status === "pending" &&

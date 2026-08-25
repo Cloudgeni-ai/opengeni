@@ -97,6 +97,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "prepare_organization_user_setup_delivery(jsonb)",
   "settle_organization_user_setup_delivery(jsonb)",
   "preview_organization_user_setup(text)",
+  "get_organization_invitation_for_administration(uuid, text, uuid)",
   "preflight_organization_user_setup(text)",
   "complete_organization_user_setup(jsonb)",
   "organization_membership_command(jsonb)",

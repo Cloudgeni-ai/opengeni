@@ -22,7 +22,11 @@ CREATE TABLE organization_user_setup_deliveries (
   claim_holder_id uuid,
   claim_expires_at timestamptz,
   attempt_count integer NOT NULL DEFAULT 0,
+  provider_idempotency_scope text,
+  provider_retry_safe_until timestamptz,
+  provider_retry_window_started_at timestamptz,
   provider_started_at timestamptz,
+  unresolved_provider_outcome_at timestamptz,
   error_class text,
   provider_message_id text,
   sent_at timestamptz,
@@ -55,6 +59,13 @@ CREATE TABLE organization_user_setup_deliveries (
     AND (recipient_name IS NULL OR octet_length(convert_to(recipient_name, 'UTF8')) BETWEEN 1 AND 120)
     AND octet_length(convert_to(organization_name, 'UTF8')) BETWEEN 1 AND 120
     AND octet_length(convert_to(provider_key, 'UTF8')) BETWEEN 1 AND 200
+    AND (
+      provider_idempotency_scope IS NULL
+      OR (
+        octet_length(convert_to(provider_idempotency_scope, 'UTF8')) BETWEEN 1 AND 200
+        AND provider_idempotency_scope ~ '^[a-z0-9][a-z0-9:._-]*$'
+      )
+    )
     AND jsonb_typeof(shared_workspace_access) = 'array'
     AND jsonb_array_length(shared_workspace_access) <= 100
     AND (error_class IS NULL OR octet_length(convert_to(error_class, 'UTF8')) BETWEEN 1 AND 64)
@@ -65,6 +76,26 @@ CREATE TABLE organization_user_setup_deliveries (
   CONSTRAINT organization_user_setup_deliveries_claim_check CHECK (
     (claim_holder_id IS NULL AND claim_expires_at IS NULL)
     OR (claim_holder_id IS NOT NULL AND claim_expires_at IS NOT NULL)
+  ),
+  CONSTRAINT organization_user_setup_deliveries_provider_fence_check CHECK (
+    (
+      provider_idempotency_scope IS NULL
+      AND provider_retry_safe_until IS NULL
+      AND provider_retry_window_started_at IS NULL
+    )
+    OR (
+      provider_idempotency_scope IS NOT NULL
+      AND provider_retry_safe_until IS NOT NULL
+      AND provider_retry_window_started_at IS NOT NULL
+      AND provider_retry_safe_until >= provider_retry_window_started_at
+    )
+  ),
+  CONSTRAINT organization_user_setup_deliveries_unresolved_outcome_check CHECK (
+    unresolved_provider_outcome_at IS NULL
+    OR (
+      provider_idempotency_scope IS NOT NULL
+      AND state IN ('pending', 'outcome_unknown')
+    )
   ),
   CONSTRAINT organization_user_setup_deliveries_terminal_check CHECK (
     (state = 'pending' AND sent_at IS NULL AND failed_at IS NULL
@@ -144,19 +175,55 @@ AS $body$
     'id', p_delivery.id,
     'state', CASE
       WHEN p_delivery.state = 'pending'
-        AND p_delivery.provider_started_at IS NOT NULL
         AND p_delivery.claim_expires_at <= pg_catalog.clock_timestamp()
-      THEN 'outcome_unknown'
+      THEN CASE
+        WHEN p_delivery.provider_started_at IS NULL
+          AND p_delivery.unresolved_provider_outcome_at IS NULL
+        THEN 'failed'
+        ELSE 'outcome_unknown'
+      END
       ELSE p_delivery.state
     END,
     'attemptCount', p_delivery.attempt_count,
     'revision', p_delivery.revision,
     'errorClass', CASE
       WHEN p_delivery.state = 'pending'
-        AND p_delivery.provider_started_at IS NOT NULL
         AND p_delivery.claim_expires_at <= pg_catalog.clock_timestamp()
-      THEN 'provider_started_claim_expired'
+      THEN CASE
+        WHEN p_delivery.provider_started_at IS NULL
+          AND p_delivery.unresolved_provider_outcome_at IS NULL
+        THEN 'claim_expired_before_provider'
+        WHEN p_delivery.provider_started_at IS NULL
+        THEN 'prior_provider_outcome_unresolved'
+        ELSE 'provider_started_claim_expired'
+      END
       ELSE p_delivery.error_class
+    END,
+    'retryState', CASE
+      WHEN p_delivery.state = 'failed' THEN 'available'
+      WHEN p_delivery.state = 'pending'
+        AND p_delivery.claim_expires_at <= pg_catalog.clock_timestamp()
+        AND p_delivery.provider_started_at IS NULL
+        AND p_delivery.unresolved_provider_outcome_at IS NULL
+      THEN 'available'
+      WHEN (
+        p_delivery.state = 'outcome_unknown'
+        OR (
+          p_delivery.state = 'pending'
+          AND p_delivery.claim_expires_at <= pg_catalog.clock_timestamp()
+          AND (
+            p_delivery.provider_started_at IS NOT NULL
+            OR p_delivery.unresolved_provider_outcome_at IS NOT NULL
+          )
+        )
+      )
+      THEN CASE
+        WHEN p_delivery.provider_retry_safe_until IS NOT NULL
+          AND p_delivery.provider_retry_safe_until > pg_catalog.clock_timestamp()
+        THEN 'available'
+        ELSE 'reconciliation_required'
+      END
+      ELSE 'unavailable'
     END,
     'sentAt', p_delivery.sent_at,
     'updatedAt', p_delivery.updated_at
@@ -215,6 +282,7 @@ DECLARE
   workspace_snapshot jsonb;
   now_value timestamptz := clock_timestamp();
   delivery_id_value uuid;
+  verified_invitation_operation_id uuid;
 BEGIN
   IF account_id_value IS NULL
     OR account_id_value IS DISTINCT FROM opengeni_private.current_account_id()
@@ -281,16 +349,24 @@ BEGIN
   WHERE candidate.account_id = account_id_value
     AND candidate.invitation_id = invitation_id_value FOR UPDATE;
   IF NOT FOUND THEN
-    IF invitation_operation_id_value IS NULL OR NOT EXISTS (
-      SELECT 1 FROM organization_membership_operation_receipts receipt
+    -- An authorized retry can recover a crash after the invitation commit but
+    -- before this journal was created. Resolve the immutable invite receipt
+    -- server-side; a supplied operation id must still match it exactly.
+    SELECT receipt.operation_id INTO verified_invitation_operation_id
+      FROM organization_membership_operation_receipts receipt
       WHERE receipt.account_id = account_id_value
-        AND receipt.operation_id = invitation_operation_id_value
         AND receipt.action = 'invite'
         AND receipt.result ->> 'id' = invitation_id_value::text
-    ) THEN
+        AND (
+          invitation_operation_id_value IS NULL
+          OR receipt.operation_id = invitation_operation_id_value
+        )
+      LIMIT 1;
+    IF verified_invitation_operation_id IS NULL THEN
       RAISE EXCEPTION 'organization invitation operation is unavailable'
         USING ERRCODE = '42501';
     END IF;
+    invitation_operation_id_value := verified_invitation_operation_id;
     delivery_id_value := gen_random_uuid();
     INSERT INTO organization_user_setup_deliveries (
       id, account_id, invitation_id, invitation_operation_id,
@@ -298,7 +374,8 @@ BEGIN
       organization_name, organization_role, shared_workspace_access
     ) SELECT
       delivery_id_value, account_id_value, invitation.id, invitation_operation_id_value,
-      actor.id, 'opengeni-organization-setup-v1-' || delivery_id_value::text,
+      invitation.created_by_membership_id,
+      'opengeni-organization-setup-v1-' || delivery_id_value::text,
       normalized_email, invitation.target_name, account.name, invitation.role,
       workspace_snapshot
     FROM managed_accounts account WHERE account.id = account_id_value
@@ -309,11 +386,58 @@ BEGIN
     RAISE EXCEPTION 'organization setup delivery identity changed' USING ERRCODE = '23505';
   END IF;
 
+  -- Reconcile an expired lease before returning a terminal invitation. An
+  -- invitation can expire or be accepted after a worker has claimed it; once
+  -- that lease expires, leaving the attempt open would permanently retain a
+  -- live-looking claim that no administrator can safely recover.
+  IF delivery.claim_holder_id IS NOT NULL AND delivery.claim_expires_at <= now_value THEN
+    UPDATE organization_user_setup_delivery_attempts SET
+      result = CASE WHEN provider_started_at IS NULL THEN 'failed' ELSE 'outcome_unknown' END,
+      error_class = CASE
+        WHEN provider_started_at IS NULL THEN 'claim_expired_before_provider'
+        ELSE 'provider_started_claim_expired'
+      END,
+      settled_at = now_value
+    WHERE delivery_id = delivery.id AND claim_holder_id = delivery.claim_holder_id
+      AND result IS NULL;
+    UPDATE organization_user_setup_deliveries SET
+      state = CASE
+        WHEN provider_started_at IS NULL AND unresolved_provider_outcome_at IS NULL
+        THEN 'failed'
+        ELSE 'outcome_unknown'
+      END,
+      failed_at = CASE
+        WHEN provider_started_at IS NULL AND unresolved_provider_outcome_at IS NULL
+        THEN now_value
+        ELSE NULL
+      END,
+      outcome_unknown_at = CASE
+        WHEN provider_started_at IS NOT NULL OR unresolved_provider_outcome_at IS NOT NULL
+        THEN coalesce(unresolved_provider_outcome_at, now_value)
+        ELSE NULL
+      END,
+      unresolved_provider_outcome_at = CASE
+        WHEN provider_started_at IS NOT NULL
+        THEN coalesce(unresolved_provider_outcome_at, now_value)
+        ELSE unresolved_provider_outcome_at
+      END,
+      error_class = CASE
+        WHEN provider_started_at IS NULL AND unresolved_provider_outcome_at IS NULL
+        THEN 'claim_expired_before_provider'
+        WHEN provider_started_at IS NULL THEN 'prior_provider_outcome_unresolved'
+        ELSE 'provider_started_claim_expired'
+      END,
+      claim_holder_id = NULL, claim_expires_at = NULL,
+      revision = revision + 1, updated_at = now_value
+    WHERE id = delivery.id RETURNING * INTO delivery;
+  END IF;
+
   IF invitation.status <> 'pending' OR invitation.expires_at <= now_value THEN
     IF invitation.status = 'revoked' AND delivery.state <> 'revoked' THEN
       UPDATE organization_user_setup_deliveries SET
         state = 'revoked', revision = revision + 1, revoked_at = now_value,
         claim_holder_id = NULL, claim_expires_at = NULL,
+        unresolved_provider_outcome_at = NULL,
         error_class = NULL, updated_at = now_value
       WHERE id = delivery.id RETURNING * INTO delivery;
     END IF;
@@ -348,30 +472,18 @@ BEGIN
     );
   END IF;
 
-  IF delivery.claim_holder_id IS NOT NULL AND delivery.claim_expires_at > now_value THEN
-    RAISE EXCEPTION 'organization setup delivery is already claimed' USING ERRCODE = '55P03';
+  IF delivery.unresolved_provider_outcome_at IS NOT NULL
+    AND (
+      delivery.provider_retry_safe_until IS NULL
+      OR delivery.provider_retry_safe_until <= now_value
+    )
+  THEN
+    RAISE EXCEPTION 'organization setup delivery requires provider reconciliation'
+      USING ERRCODE = '55000';
   END IF;
+
   IF delivery.claim_holder_id IS NOT NULL THEN
-    UPDATE organization_user_setup_delivery_attempts SET
-      result = CASE WHEN provider_started_at IS NULL THEN 'failed' ELSE 'outcome_unknown' END,
-      error_class = CASE
-        WHEN provider_started_at IS NULL THEN 'claim_expired_before_provider'
-        ELSE 'provider_started_claim_expired'
-      END,
-      settled_at = now_value
-    WHERE delivery_id = delivery.id AND claim_holder_id = delivery.claim_holder_id
-      AND result IS NULL;
-    UPDATE organization_user_setup_deliveries SET
-      state = CASE WHEN provider_started_at IS NULL THEN 'failed' ELSE 'outcome_unknown' END,
-      failed_at = CASE WHEN provider_started_at IS NULL THEN now_value ELSE NULL END,
-      outcome_unknown_at = CASE WHEN provider_started_at IS NULL THEN NULL ELSE now_value END,
-      error_class = CASE
-        WHEN provider_started_at IS NULL THEN 'claim_expired_before_provider'
-        ELSE 'provider_started_claim_expired'
-      END,
-      claim_holder_id = NULL, claim_expires_at = NULL,
-      revision = revision + 1, updated_at = now_value
-    WHERE id = delivery.id RETURNING * INTO delivery;
+    RAISE EXCEPTION 'organization setup delivery is already claimed' USING ERRCODE = '55000';
   END IF;
 
   INSERT INTO organization_user_setup_delivery_attempts (
@@ -419,24 +531,34 @@ DECLARE
   actor_subject text := p_command ->> 'actorSubjectId';
   token_digest_value text := p_command ->> 'tokenDigest';
   payload_digest_value text := p_command ->> 'payloadDigest';
+  provider_idempotency_scope_value text := btrim(p_command ->> 'providerIdempotencyScope');
+  provider_idempotency_retention_seconds_value integer :=
+    nullif(p_command ->> 'providerIdempotencyRetentionSeconds', '')::integer;
   delivery organization_user_setup_deliveries%ROWTYPE;
   invitation organization_membership_invitations%ROWTYPE;
   setup organization_user_setup_intents%ROWTYPE;
   normalized_email text;
   account_id_value uuid;
+  invitation_id_value uuid;
   now_value timestamptz := clock_timestamp();
 BEGIN
   IF delivery_id_value IS NULL OR attempt_id_value IS NULL OR claim_holder_id_value IS NULL
     OR actor_subject IS NULL OR actor_subject IS DISTINCT FROM opengeni_private.current_subject_id()
     OR token_digest_value !~ '^[0-9a-f]{64}$'
     OR payload_digest_value !~ '^[0-9a-f]{64}$'
+    OR provider_idempotency_scope_value IS NULL
+    OR provider_idempotency_scope_value !~ '^[a-z0-9][a-z0-9:._-]*$'
+    OR octet_length(convert_to(provider_idempotency_scope_value, 'UTF8')) > 200
+    OR provider_idempotency_retention_seconds_value IS NULL
+    OR provider_idempotency_retention_seconds_value NOT BETWEEN 0 AND 31536000
   THEN
     RAISE EXCEPTION 'organization setup delivery preparation is invalid' USING ERRCODE = '42501';
   END IF;
   PERFORM set_config(
     'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
   );
-  SELECT recipient_email, account_id INTO normalized_email, account_id_value
+  SELECT recipient_email, account_id, invitation_id
+  INTO normalized_email, account_id_value, invitation_id_value
   FROM organization_user_setup_deliveries WHERE id = delivery_id_value;
   IF normalized_email IS NULL THEN
     RAISE EXCEPTION 'organization setup delivery is unavailable' USING ERRCODE = 'P0002';
@@ -457,11 +579,20 @@ BEGIN
   IF NOT FOUND THEN
     RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
   END IF;
-  SELECT * INTO delivery FROM organization_user_setup_deliveries candidate
-  WHERE candidate.id = delivery_id_value FOR UPDATE;
   SELECT * INTO invitation FROM organization_membership_invitations candidate
-  WHERE candidate.account_id = delivery.account_id AND candidate.id = delivery.invitation_id
+  WHERE candidate.account_id = account_id_value AND candidate.id = invitation_id_value
   FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'organization invitation is unavailable' USING ERRCODE = 'P0002';
+  END IF;
+  SELECT * INTO delivery FROM organization_user_setup_deliveries candidate
+  WHERE candidate.account_id = account_id_value
+    AND candidate.id = delivery_id_value
+    AND candidate.invitation_id = invitation.id
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'organization setup delivery is unavailable' USING ERRCODE = 'P0002';
+  END IF;
   IF delivery.state <> 'pending'
     OR delivery.claim_holder_id IS DISTINCT FROM claim_holder_id_value
     OR delivery.claim_expires_at <= now_value
@@ -482,25 +613,60 @@ BEGIN
   THEN
     RAISE EXCEPTION 'organization setup bearer changed under retry' USING ERRCODE = '23505';
   END IF;
+  IF delivery.provider_idempotency_scope IS NOT NULL
+    AND delivery.provider_idempotency_scope IS DISTINCT FROM provider_idempotency_scope_value
+  THEN
+    RAISE EXCEPTION 'organization setup provider scope changed under retry'
+      USING ERRCODE = '23505';
+  END IF;
   IF delivery.payload_digest IS NOT NULL
     AND delivery.payload_digest IS DISTINCT FROM payload_digest_value
   THEN
     RAISE EXCEPTION 'organization setup payload changed under retry' USING ERRCODE = '23505';
   END IF;
-  PERFORM ensure_organization_user_setup_intent(jsonb_build_object(
-    'organizationId', delivery.account_id,
-    'actorSubjectId', actor_subject,
-    'invitationId', delivery.invitation_id,
-    'tokenDigest', token_digest_value,
-    'expiresAt', invitation.expires_at
-  ));
+  IF delivery.unresolved_provider_outcome_at IS NOT NULL
+    AND (
+      delivery.provider_retry_safe_until IS NULL
+      OR delivery.provider_retry_safe_until <= now_value
+    )
+  THEN
+    RAISE EXCEPTION 'organization setup delivery requires provider reconciliation'
+      USING ERRCODE = '55000';
+  END IF;
+  -- The public 0348 seam remains creator-bound. A later active administrator
+  -- may retry this creator-bound durable delivery, so create its immutable
+  -- setup intent only after the invitation -> delivery -> attempt locks above.
+  INSERT INTO organization_user_setup_intents (
+    account_id, invitation_id, token_digest, expires_at
+  ) VALUES (
+    delivery.account_id, delivery.invitation_id, token_digest_value, invitation.expires_at
+  ) ON CONFLICT (account_id, invitation_id) DO NOTHING;
   SELECT * INTO setup FROM organization_user_setup_intents candidate
   WHERE candidate.account_id = delivery.account_id
     AND candidate.invitation_id = delivery.invitation_id;
+  IF NOT FOUND
+    OR setup.token_digest IS DISTINCT FROM token_digest_value
+    OR setup.expires_at IS DISTINCT FROM invitation.expires_at
+  THEN
+    RAISE EXCEPTION 'organization user setup intent changed under retry'
+      USING ERRCODE = '23505';
+  END IF;
   UPDATE organization_user_setup_deliveries SET
     setup_intent_id = setup.id,
     token_digest = token_digest_value,
     payload_digest = payload_digest_value,
+    provider_idempotency_scope = coalesce(
+      provider_idempotency_scope, provider_idempotency_scope_value
+    ),
+    provider_retry_safe_until = CASE
+      WHEN unresolved_provider_outcome_at IS NULL
+      THEN now_value + make_interval(secs => provider_idempotency_retention_seconds_value)
+      ELSE provider_retry_safe_until
+    END,
+    provider_retry_window_started_at = CASE
+      WHEN unresolved_provider_outcome_at IS NULL THEN now_value
+      ELSE coalesce(provider_retry_window_started_at, now_value)
+    END,
     provider_started_at = now_value,
     revision = revision + 1,
     updated_at = now_value
@@ -575,6 +741,14 @@ BEGIN
   FOR UPDATE;
   SELECT * INTO delivery FROM organization_user_setup_deliveries candidate
   WHERE candidate.id = delivery_id_value FOR UPDATE;
+  IF delivery.state = 'revoked' AND delivery.claim_holder_id IS NULL THEN
+    PERFORM 1 FROM organization_user_setup_delivery_attempts attempt
+    WHERE attempt.id = attempt_id_value AND attempt.delivery_id = delivery.id
+      AND attempt.claim_holder_id = claim_holder_id_value AND attempt.result = 'revoked';
+    IF FOUND THEN
+      RETURN opengeni_private.organization_user_setup_delivery_json(delivery);
+    END IF;
+  END IF;
   IF delivery.claim_holder_id IS DISTINCT FROM claim_holder_id_value THEN
     RAISE EXCEPTION 'organization setup delivery claim changed' USING ERRCODE = '40001';
   END IF;
@@ -595,6 +769,7 @@ BEGIN
   IF invitation.status <> 'pending' OR delivery.state = 'revoked' THEN
     UPDATE organization_user_setup_deliveries SET
       state = 'revoked', revoked_at = coalesce(revoked_at, now_value),
+      unresolved_provider_outcome_at = NULL,
       claim_holder_id = NULL, claim_expires_at = NULL,
       revision = revision + 1, updated_at = now_value
     WHERE id = delivery.id RETURNING * INTO delivery;
@@ -606,12 +781,56 @@ BEGIN
       sent_at = CASE WHEN outcome_value = 'sent' THEN now_value ELSE NULL END,
       failed_at = CASE WHEN outcome_value = 'failed' THEN now_value ELSE NULL END,
       outcome_unknown_at = CASE WHEN outcome_value = 'outcome_unknown' THEN now_value ELSE NULL END,
+      unresolved_provider_outcome_at = CASE
+        WHEN outcome_value = 'outcome_unknown'
+        THEN coalesce(unresolved_provider_outcome_at, now_value)
+        ELSE NULL
+      END,
       revoked_at = NULL,
       claim_holder_id = NULL, claim_expires_at = NULL,
       revision = revision + 1, updated_at = now_value
     WHERE id = delivery.id RETURNING * INTO delivery;
   END IF;
   RETURN opengeni_private.organization_user_setup_delivery_json(delivery);
+END
+$body$;
+
+CREATE FUNCTION get_organization_invitation_for_administration(
+  p_account_id uuid,
+  p_actor_subject_id text,
+  p_invitation_id uuid
+) RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  invitation organization_membership_invitations%ROWTYPE;
+BEGIN
+  IF p_account_id IS NULL
+    OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+    OR p_actor_subject_id IS NULL
+    OR p_actor_subject_id IS DISTINCT FROM opengeni_private.current_subject_id()
+    OR p_invitation_id IS NULL
+  THEN
+    RAISE EXCEPTION 'organization invitation authority is invalid' USING ERRCODE = '42501';
+  END IF;
+  PERFORM set_config(
+    'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
+  );
+  PERFORM 1 FROM organization_memberships membership
+  WHERE membership.account_id = p_account_id
+    AND membership.subject_id = p_actor_subject_id
+    AND membership.status = 'active'
+    AND membership.role IN ('owner', 'admin');
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'organization administration required' USING ERRCODE = '42501';
+  END IF;
+  SELECT * INTO invitation FROM organization_membership_invitations candidate
+  WHERE candidate.account_id = p_account_id AND candidate.id = p_invitation_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'organization invitation is unavailable' USING ERRCODE = 'P0002';
+  END IF;
+  RETURN opengeni_private.organization_invitation_row_json(invitation);
 END
 $body$;
 
@@ -669,12 +888,26 @@ RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
 AS $body$
+DECLARE
+  delivery organization_user_setup_deliveries%ROWTYPE;
+  now_value timestamptz := clock_timestamp();
 BEGIN
   IF NEW.status = 'revoked' AND OLD.status IS DISTINCT FROM NEW.status THEN
+    SELECT * INTO delivery FROM organization_user_setup_deliveries candidate
+    WHERE candidate.account_id = NEW.account_id AND candidate.invitation_id = NEW.id
+    FOR UPDATE;
+    IF NOT FOUND THEN RETURN NULL; END IF;
+    UPDATE organization_user_setup_delivery_attempts SET
+      result = 'revoked', settled_at = now_value
+    WHERE delivery_id = delivery.id
+      AND claim_holder_id = delivery.claim_holder_id
+      AND result IS NULL;
     UPDATE organization_user_setup_deliveries SET
-      state = 'revoked', revoked_at = coalesce(revoked_at, clock_timestamp()),
-      error_class = NULL, revision = revision + 1, updated_at = clock_timestamp()
-    WHERE account_id = NEW.account_id AND invitation_id = NEW.id AND state <> 'revoked';
+      state = 'revoked', revoked_at = coalesce(revoked_at, now_value),
+      claim_holder_id = NULL, claim_expires_at = NULL,
+      unresolved_provider_outcome_at = NULL,
+      error_class = NULL, revision = revision + 1, updated_at = now_value
+    WHERE id = delivery.id AND state <> 'revoked';
   END IF;
   RETURN NULL;
 END
@@ -708,6 +941,10 @@ BEGIN
     data_schema, data_schema
   );
   EXECUTE format(
+    'ALTER FUNCTION %I.get_organization_invitation_for_administration(uuid,text,uuid) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION %I.sync_organization_user_setup_delivery_revocation() SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
@@ -718,6 +955,7 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.prepare_organization_user_setup_delivery(jsonb) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.settle_organization_user_setup_delivery(jsonb) TO opengeni_app', data_schema);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %I.preview_organization_user_setup(text) TO opengeni_app', data_schema);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_organization_invitation_for_administration(uuid,text,uuid) TO opengeni_app', data_schema);
   END IF;
 END
 $pin_and_grant$;
@@ -731,6 +969,7 @@ REVOKE ALL ON FUNCTION claim_organization_user_setup_delivery(jsonb) FROM PUBLIC
 REVOKE ALL ON FUNCTION prepare_organization_user_setup_delivery(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION settle_organization_user_setup_delivery(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION preview_organization_user_setup(text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION get_organization_invitation_for_administration(uuid,text,uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION sync_organization_user_setup_delivery_revocation() FROM PUBLIC;
 
 COMMENT ON TABLE organization_user_setup_deliveries IS

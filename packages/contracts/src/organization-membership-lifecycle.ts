@@ -28,6 +28,7 @@ export const OrganizationUserSetupDelivery = z.object({
   attemptCount: z.number().int().nonnegative(),
   revision: z.number().int().positive(),
   errorClass: z.string().min(1).max(64).nullable(),
+  retryState: z.enum(["available", "reconciliation_required", "unavailable"]),
   sentAt: z.string().datetime({ offset: true }).nullable(),
   updatedAt: z.string().datetime({ offset: true }),
 });

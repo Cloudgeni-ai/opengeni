@@ -467,12 +467,36 @@ email URL fragment.
 The API records a durable attempt and `provider_started` marker before provider
 I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,
 or released provider-started claim is shown as `outcome_unknown`. Do not repair
-either state with database DML or by crafting a new email. Use the People &
-invitations retry control after inspecting provider state; it reuses the exact
-delivery id, provider idempotency key, bearer digest, and frozen safe payload.
+either state with database DML or by crafting a new email. Resend keeps an
+idempotency key for 24 hours. Its adapter declares that guarantee and a keyed
+provider-account scope; the database persists the resulting absolute safe-until
+fence at the first provider boundary. People & invitations offers a retry for a
+clear failure and for an ambiguous outcome only while that immutable provider-
+specific fence remains open; retries never extend an unresolved fence and reuse
+the exact delivery id, provider scope/key, bearer digest, effective
+`OPENGENI_EMAIL_FROM`, and frozen safe payload. When the fence closes the state
+becomes `reconciliation_required`: inspect Resend/provider history and do not
+resend. A retry that fails before provider I/O cannot downgrade an older
+unresolved outcome to an ordinary failure.
+After confirming provider state, revoke the old invitation before deliberately
+creating a new one if access is still required.
+
+`Delivery not started` is the recoverable crash boundary between the committed
+invitation and its first journal claim. Use its `Send invitation` control; the
+server resolves the original immutable invite receipt, preserves the creator
+binding, and creates the missing journal. Expired pre-provider claims project
+as failed/retryable rather than staying pending. Do not insert or update journal
+rows manually.
 Revoking the invitation is authoritative even if an earlier provider call later
-reports success. The database never stores the setup bearer or rendered email
-body.
+reports success, and revocation closes the active claim/attempt. The database
+never stores the setup bearer or rendered email body.
+
+Embedded `ManagedEmailTransport` implementations must declare a bounded sender,
+a stable non-secret scope that changes with provider, provider account, or
+idempotency policy, and a conservative integer retention in seconds. API
+composition validates this metadata before accepting invitations. Changing the
+scope while an outcome is unresolved is intentionally refused and requires
+operator reconciliation.
 
 ### Canonical organization-tenancy authority activation
 

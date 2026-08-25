@@ -98,6 +98,7 @@ export type DocumentIndexClient = {
 
 export type ManagedEmailMessage = {
   kind: "email_verification" | "password_reset" | "organization_user_setup";
+  from: string;
   to: string;
   subject: string;
   text: string;
@@ -112,6 +113,16 @@ export type ManagedEmailDeliveryResult =
 
 /** Provider-neutral, injectable boundary for every managed-auth email. */
 export type ManagedEmailTransport = {
+  /** Effective provider sender; frozen into any idempotent payload digest. */
+  readonly sender: string;
+  /**
+   * Stable non-secret provider/account/policy namespace plus the provider's
+   * guaranteed key-retention window. Both are durably fenced before I/O.
+   */
+  readonly idempotency: {
+    readonly scope: string;
+    readonly retentionSeconds: number;
+  };
   send(message: ManagedEmailMessage): Promise<ManagedEmailDeliveryResult>;
 };
 

@@ -3692,6 +3692,7 @@ export type OrganizationUserSetupDelivery = {
   attemptCount: number;
   revision: number;
   errorClass: string | null;
+  retryState: "available" | "reconciliation_required" | "unavailable";
   sentAt: string | null;
   updatedAt: string;
 };

@@ -27,6 +27,7 @@ describe("organization user setup SDK", () => {
                 attemptCount: 2,
                 revision: 3,
                 errorClass: null,
+                retryState: "unavailable",
                 sentAt: "2026-08-25T00:00:00.000Z",
                 updatedAt: "2026-08-25T00:00:00.000Z",
               },

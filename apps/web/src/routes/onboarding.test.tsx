@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -14,20 +15,23 @@ const completeSelfServiceSetup = mock(async () => ({
   organizationId: crypto.randomUUID(),
   personalWorkspaceId: crypto.randomUUID(),
 }));
-
-mock.module("@/api", () => ({
-  AuthApiError: class AuthApiError extends Error {},
-  completeOrganizationUserSetup: completeSetup,
-  previewOrganizationUserSetup: mock(async () => ({
-    state: "pending" as const,
+const previewSetup = mock(
+  async (): Promise<OrganizationUserSetupPreview> => ({
+    state: "pending",
     organizationId: "00000000-0000-4000-8000-000000000001",
     organizationName: "Test Organization",
     targetEmail: "invitee@example.test",
     targetName: null,
-    organizationRole: "member" as const,
+    organizationRole: "member",
     sharedWorkspaceAccess: [],
     expiresAt: "2026-09-01T00:00:00.000Z",
-  })),
+  }),
+);
+
+mock.module("@/api", () => ({
+  AuthApiError: class AuthApiError extends Error {},
+  completeOrganizationUserSetup: completeSetup,
+  previewOrganizationUserSetup: previewSetup,
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
   getSelfServiceOrganizationOnboardingStatus: mock(async () => ({
     state: "required" as const,
@@ -256,6 +260,75 @@ describe("organization onboarding UI", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("keeps setup credentials absent across loading, failure, and every terminal preview", async () => {
+    let resolveLoading!: (preview: OrganizationUserSetupPreview) => void;
+    previewSetup.mockImplementationOnce(
+      () =>
+        new Promise<OrganizationUserSetupPreview>((resolve) => {
+          resolveLoading = resolve;
+        }),
+    );
+    const loadingContainer = document.createElement("div");
+    document.body.appendChild(loadingContainer);
+    const loadingRoot = createRoot(loadingContainer);
+    try {
+      await act(async () => loadingRoot.render(<SetupAccountRoute token="loading-token" />));
+      expect(loadingContainer.textContent).toContain("Checking this invitation");
+      expect(loadingContainer.querySelector("form")).toBeNull();
+      expect(loadingContainer.querySelector("#setup-account-password")).toBeNull();
+      await act(async () =>
+        resolveLoading({
+          state: "unavailable",
+        }),
+      );
+      await flush();
+    } finally {
+      await act(async () => loadingRoot.unmount());
+      loadingContainer.remove();
+    }
+
+    previewSetup.mockImplementationOnce(async () => {
+      throw new Error("preview offline");
+    });
+    const failedContainer = document.createElement("div");
+    document.body.appendChild(failedContainer);
+    const failedRoot = createRoot(failedContainer);
+    try {
+      await act(async () => failedRoot.render(<SetupAccountRoute token="failed-token" />));
+      await flush();
+      expect(failedContainer.textContent).toContain("We couldn't check this invitation");
+      expect(failedContainer.querySelector("form")).toBeNull();
+      expect(failedContainer.querySelector("#setup-account-password")).toBeNull();
+    } finally {
+      await act(async () => failedRoot.unmount());
+      failedContainer.remove();
+    }
+
+    for (const [state, title] of [
+      ["unavailable", "This setup link is unavailable"],
+      ["expired", "This setup link has expired"],
+      ["revoked", "This invitation was revoked"],
+      ["completed", "This account is already set up"],
+    ] as const) {
+      previewSetup.mockImplementationOnce(async () => ({ state }));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => root.render(<SetupAccountRoute token={`${state}-token`} />));
+        await flush();
+        expect(container.textContent).toContain(title);
+        expect(container.querySelector("form")).toBeNull();
+        expect(container.querySelector("#setup-account-name")).toBeNull();
+        expect(container.querySelector("#setup-account-password")).toBeNull();
+        expect(container.querySelector("#setup-account-confirm")).toBeNull();
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
     }
   });
 

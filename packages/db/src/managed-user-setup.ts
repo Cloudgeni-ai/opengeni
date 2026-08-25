@@ -188,6 +188,8 @@ export async function prepareOrganizationUserSetupDelivery(
     claimHolderId: string;
     tokenDigest: string;
     payloadDigest: string;
+    providerIdempotencyScope: string;
+    providerIdempotencyRetentionSeconds: number;
   },
 ): Promise<void> {
   await withRlsContext(

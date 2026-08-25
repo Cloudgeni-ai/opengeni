@@ -2,12 +2,14 @@ import { describe, expect, test } from "bun:test";
 
 import { InMemoryManagedEmailTransport } from "../src/auth/managed-email";
 import {
+  assertManagedEmailTransportMetadata,
   organizationUserSetupPayloadDigest,
   renderOrganizationUserSetupEmail,
 } from "../src/auth/organization-user-setup";
 
 const message = {
   kind: "organization_user_setup" as const,
+  from: "OpenGeni <invites@example.test>",
   to: "invited@example.test",
   subject: "Invitation",
   text: "Set up with bearer-only-link",
@@ -16,6 +18,23 @@ const message = {
 };
 
 describe("managed email transport", () => {
+  test("rejects malformed embedded-provider metadata before durable delivery", () => {
+    expect(() =>
+      assertManagedEmailTransportMetadata({
+        sender: "OpenGeni <invites@example.test>",
+        idempotency: { scope: "Other Provider", retentionSeconds: 3_600 },
+        send: async () => ({ status: "sent", providerMessageId: null }),
+      }),
+    ).toThrow("idempotency contract");
+    expect(() =>
+      assertManagedEmailTransportMetadata({
+        sender: " OpenGeni <invites@example.test>",
+        idempotency: { scope: "test-provider-v1:account", retentionSeconds: 3_600.5 },
+        send: async () => ({ status: "sent", providerMessageId: null }),
+      }),
+    ).toThrow("sender");
+  });
+
   test("keeps local captures bounded, TTL-limited, and one-time readable", async () => {
     let now = 0;
     const transport = new InMemoryManagedEmailTransport({
@@ -42,6 +61,7 @@ describe("managed email transport", () => {
 
   test("renders an escaped, frozen safe snapshot with a stable payload digest", async () => {
     const rendered = renderOrganizationUserSetupEmail({
+      senderEmail: "OpenGeni <invites@example.test>",
       recipientEmail: "invited@example.test",
       recipientName: "Ada <Admin>",
       organizationName: "R&D <Labs>",
@@ -62,13 +82,29 @@ describe("managed email transport", () => {
     expect(rendered.html).toContain("R&amp;D &lt;Labs&gt;");
     expect(rendered.html).toContain("Launch &lt;Ops&gt;");
     expect(rendered.html).not.toContain("Ada <Admin>");
-    const first = await organizationUserSetupPayloadDigest(rendered);
+    const digestInput = {
+      ...rendered,
+      providerIdempotencyScope: "test-provider-v1:account-a",
+    };
+    const first = await organizationUserSetupPayloadDigest(digestInput);
     expect(first).toMatch(/^[0-9a-f]{64}$/);
-    expect(await organizationUserSetupPayloadDigest(rendered)).toBe(first);
+    expect(await organizationUserSetupPayloadDigest(digestInput)).toBe(first);
     expect(
       await organizationUserSetupPayloadDigest({
-        ...rendered,
+        ...digestInput,
+        from: "OpenGeni <changed@example.test>",
+      }),
+    ).not.toBe(first);
+    expect(
+      await organizationUserSetupPayloadDigest({
+        ...digestInput,
         subject: `${rendered.subject}!`,
+      }),
+    ).not.toBe(first);
+    expect(
+      await organizationUserSetupPayloadDigest({
+        ...digestInput,
+        providerIdempotencyScope: "test-provider-v1:account-b",
       }),
     ).not.toBe(first);
   });
