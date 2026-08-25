@@ -176,6 +176,8 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_memberships",
     "organization_profile_events",
     "organization_shared_workspace_administration_capabilities",
+    "organization_user_setup_deliveries",
+    "organization_user_setup_delivery_attempts",
     "organization_workspace_lifecycle_events",
     "organization_workspace_operation_receipts",
     "organization_user_resource_authorities",
@@ -464,14 +466,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 295],
+            [FORCE_RLS_TABLES, 297],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 60],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 62],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
@@ -496,7 +498,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 307 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 309 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -852,6 +854,25 @@ describe("runtime database posture evaluator", () => {
     expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(
       "organization_private_sessions_enabled(uuid)",
     );
+  });
+
+  test("classifies organization setup delivery journals as capability-only FORCE-RLS state", () => {
+    for (const table of [
+      "organization_user_setup_deliveries",
+      "organization_user_setup_delivery_attempts",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    for (const routine of [
+      "claim_organization_user_setup_delivery(jsonb)",
+      "prepare_organization_user_setup_delivery(jsonb)",
+      "settle_organization_user_setup_delivery(jsonb)",
+      "preview_organization_user_setup(text)",
+    ] as const) {
+      expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(routine);
+    }
   });
 
   test("keeps tenancy backfill activation evidence owner-only", () => {

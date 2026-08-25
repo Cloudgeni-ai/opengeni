@@ -3,6 +3,8 @@ import {
   CompleteSelfServiceOrganizationSetupResponse,
   CompleteOrganizationUserSetupRequest,
   CompleteOrganizationUserSetupResponse,
+  OrganizationUserSetupPreview,
+  PreviewOrganizationUserSetupRequest,
   SelfServiceOrganizationOnboardingStatus,
 } from "@opengeni/contracts";
 import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
@@ -12,6 +14,7 @@ import {
   getSelfServiceOrganizationOnboardingState,
   nestedPostgresSqlState,
   preflightOrganizationUserSetup,
+  previewOrganizationUserSetup,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -96,6 +99,27 @@ export function registerManagedOnboardingRoutes(
       }
       throw error;
     }
+  });
+
+  app.post("/v1/auth/organization-setup/preview", async (context) => {
+    if (deps.settings.productAccessMode !== "managed" || !deps.managedAuth) {
+      throw new HTTPException(404, { message: "account setup is unavailable" });
+    }
+    enforceAccountSetupRateLimit(context, accountSetupLimiter);
+    const parsed = PreviewOrganizationUserSetupRequest.safeParse(
+      await context.req.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      throw new HTTPException(422, { message: "invalid account setup preview request" });
+    }
+    return context.json(
+      OrganizationUserSetupPreview.parse(
+        await previewOrganizationUserSetup(
+          deps.db,
+          await organizationUserSetupTokenDigest(parsed.data.token),
+        ),
+      ),
+    );
   });
 
   app.post("/v1/auth/organization-setup", async (context) => {
