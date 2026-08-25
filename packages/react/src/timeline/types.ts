@@ -88,6 +88,8 @@ export type AgentMessageItem = {
   id: string;
   turnId: string | null;
   text: string;
+  /** Provider-declared assistant channel. Absent on legacy and non-Responses events. */
+  phase?: "commentary" | "final_answer" | undefined;
   /** Still receiving deltas (no completed/turn-end seen yet). */
   streaming: boolean;
   occurredAt: string;
