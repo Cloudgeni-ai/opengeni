@@ -37,7 +37,7 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl);
   db = client.db;
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();

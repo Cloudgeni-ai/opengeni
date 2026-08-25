@@ -468,6 +468,9 @@ function fullPlan(
       // the governed checkpoint input, so the pinned aggregate only breaks after
       // merge, on protected main.
       "migration-schema-contract",
+      // A ledger-replaying test without an explicit budget is one shard repack
+      // away from being killed at the shard default.
+      "migration-test-budgets",
       "publish-closure",
       ...(examples.length > 0 ? ["example-builds"] : []),
     ],
@@ -648,6 +651,10 @@ export function createImpactPlan(
     "docs-refs",
     "generated-fonts",
     "public-hygiene",
+    // Not gated on `packages/db/drizzle/`: the case this exists for is a NEW
+    // ledger-replaying test, which adds a `*.test.ts` and touches no migration.
+    // It parses every test file in about two seconds, so it runs unconditionally.
+    "migration-test-budgets",
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
     guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");
