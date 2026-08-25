@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import type { Session } from "@/types";
 import {
+  beginSessionChannelMove,
+  commitSessionChannelMove,
+  reconcileSessionChannelMovePointRead,
+} from "./session-channel-move";
+import {
   applySessionChannelProjection,
   applySessionPinProjection,
   applySessionRailProjection,
@@ -61,6 +66,41 @@ describe("session pin reconciliation", () => {
 
     authority.replace(pinsOwner, [stalePinsProjection], 0, 3);
     expect(authority.owns(stalePinsProjection)).toBe(true);
+  });
+
+  test("rejects stale point reads and 404s before they mutate move or context state", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const rootOwner = {};
+    const stalePoint = { ...session, channelId: "channel-g" } as Session;
+    const newer = { ...session, channelId: "channel-c", status: "running" } as Session;
+    const stalePointGeneration = authority.beginRead();
+    const newerGeneration = authority.beginRead();
+    authority.replace(rootOwner, [newer], 0, newerGeneration);
+
+    let overrides = beginSessionChannelMove(new Map(), session.id, "channel-b", 1);
+    overrides = commitSessionChannelMove(overrides, session.id, "channel-b", 1);
+    overrides = reconcileSessionChannelMovePointRead(overrides, session.id, 1, newer);
+    let current = newer;
+
+    const acceptedStalePoint = authority.recordRead(stalePoint, stalePointGeneration);
+    if (acceptedStalePoint) {
+      overrides = reconcileSessionChannelMovePointRead(overrides, session.id, 1, stalePoint);
+      current = applySessionChannelProjection(current, stalePoint)!;
+    }
+    expect(acceptedStalePoint).toBe(false);
+    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    expect(current).toBe(newer);
+
+    const acceptedStaleMissing = authority.recordMissing(
+      { id: session.id, workspaceId: session.workspaceId },
+      stalePointGeneration,
+    );
+    if (acceptedStaleMissing) {
+      overrides = reconcileSessionChannelMovePointRead(overrides, session.id, 1, null);
+    }
+    expect(acceptedStaleMissing).toBe(false);
+    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    expect(current).toBe(newer);
   });
 
   test("merges only authoritative personal pin fields", () => {

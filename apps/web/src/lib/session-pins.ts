@@ -15,7 +15,11 @@ type SessionChannelEvidence = {
   priority: number;
   readGeneration: number;
 };
-type SessionChannelRead = Omit<SessionChannelEvidence, "priority">;
+type SessionChannelRead = {
+  channelId: string | null;
+  present: boolean;
+  readGeneration: number;
+};
 
 function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspaceId">): string {
   return `${projection.workspaceId}\u0000${projection.id}`;
@@ -41,14 +45,29 @@ export class SessionChannelProjectionAuthority {
     priority = 0,
     readGeneration = 0,
   ): void {
-    if (projections.length === 0) {
+    this.replaceEvidence(
+      owner,
+      projections.map((projection) => ({ projection, readGeneration })),
+      priority,
+    );
+  }
+
+  replaceEvidence(
+    owner: object,
+    evidence: readonly {
+      projection: SessionChannelProjection;
+      readGeneration: number;
+    }[],
+    priority = 0,
+  ): void {
+    if (evidence.length === 0) {
       this.clear(owner);
       return;
     }
     this.projectionsByOwner.set(
       owner,
       new Map(
-        projections.map((projection) => [
+        evidence.map(({ projection, readGeneration }) => [
           sessionChannelProjectionKey(projection),
           { channelId: projection.channelId ?? null, priority, readGeneration },
         ]),
@@ -61,24 +80,52 @@ export class SessionChannelProjectionAuthority {
   }
 
   /** Retain an accepted exact/detail read so older list requests cannot revive stale filing. */
-  recordRead(projection: SessionChannelProjection, readGeneration: number): void {
-    if (readGeneration <= 0) return;
+  recordRead(projection: SessionChannelProjection, readGeneration: number): boolean {
+    return this.recordReadObservation(projection, readGeneration, true);
+  }
+
+  /** Fence a not-found point read without treating absence as a channel projection. */
+  recordMissing(
+    projection: Pick<SessionChannelProjection, "id" | "workspaceId">,
+    readGeneration: number,
+  ): boolean {
+    return this.recordReadObservation(projection, readGeneration, false);
+  }
+
+  private recordReadObservation(
+    projection: Pick<SessionChannelProjection, "id" | "workspaceId"> &
+      Partial<Pick<SessionChannelProjection, "channelId">>,
+    readGeneration: number,
+    present: boolean,
+  ): boolean {
+    if (readGeneration <= 0) return false;
     const key = sessionChannelProjectionKey(projection);
-    const current = this.acceptedReads.get(key);
-    if (current && current.readGeneration >= readGeneration) return;
+    if (this.highestReadGeneration(key) > readGeneration) return false;
     this.acceptedReads.set(key, {
       channelId: projection.channelId ?? null,
+      present,
       readGeneration,
     });
     if (this.acceptedReads.size > 512) {
       this.acceptedReads.delete(this.acceptedReads.keys().next().value!);
     }
+    return true;
+  }
+
+  private highestReadGeneration(key: string): number {
+    let generation = this.acceptedReads.get(key)?.readGeneration ?? Number.NEGATIVE_INFINITY;
+    for (const projections of this.projectionsByOwner.values()) {
+      const candidate = projections.get(key);
+      if (candidate) generation = Math.max(generation, candidate.readGeneration);
+    }
+    return generation;
   }
 
   project<T extends SessionChannelProjection>(projection: T, readGeneration: number): T {
     const accepted = this.acceptedReads.get(sessionChannelProjectionKey(projection));
     if (
       !accepted ||
+      !accepted.present ||
       accepted.readGeneration <= readGeneration ||
       accepted.channelId === (projection.channelId ?? null)
     ) {
@@ -94,7 +141,7 @@ export class SessionChannelProjectionAuthority {
     const accepted = this.acceptedReads.get(key);
     let highestPriority = accepted ? 0 : Number.NEGATIVE_INFINITY;
     let highestGeneration = accepted?.readGeneration ?? Number.NEGATIVE_INFINITY;
-    let owned = accepted?.channelId === channelId;
+    let owned = accepted?.present === true && accepted.channelId === channelId;
     for (const projections of this.projectionsByOwner.values()) {
       const candidate = projections.get(key);
       if (!candidate || candidate.priority < highestPriority) continue;

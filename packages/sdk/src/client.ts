@@ -577,6 +577,18 @@ export type GetSessionOptions = {
    * Concurrent callers targeting the same successor generation still share it.
    */
   fresh?: boolean;
+  /**
+   * Invoked immediately before the selected shared network GET starts. A
+   * fresh caller queued behind an active read is notified when its queued
+   * generation actually launches, not when it joins the queue.
+   */
+  onRequestStart?: (() => void) | undefined;
+};
+
+type SingleFlightReadEntry = {
+  generation: number;
+  promise: Promise<unknown>;
+  startListeners: Set<() => void>;
 };
 
 /** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
@@ -646,12 +658,9 @@ export class OpenGeniClient {
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
-  private readonly readInFlight = new Map<string, Promise<unknown>>();
+  private readonly readInFlight = new Map<string, SingleFlightReadEntry>();
   private readonly readGeneration = new Map<string, number>();
-  private readonly readTrailing = new Map<
-    string,
-    { generation: number; promise: Promise<unknown> }
-  >();
+  private readonly readTrailing = new Map<string, SingleFlightReadEntry>();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
 
@@ -1207,36 +1216,62 @@ export class OpenGeniClient {
   ): Promise<T> {
     const existing = this.readInFlight.get(key);
     if (existing) {
-      if (!options.fresh) return existing as Promise<T>;
-      const requiredGeneration = (this.readGeneration.get(key) ?? 0) + 1;
+      if (!options.fresh) return existing.promise as Promise<T>;
+      const requiredGeneration = existing.generation + 1;
       const queued = this.readTrailing.get(key);
       if (queued && queued.generation >= requiredGeneration) {
+        if (options.onRequestStart) queued.startListeners.add(options.onRequestStart);
         return queued.promise as Promise<T>;
       }
-      const predecessor = queued?.promise ?? existing;
-      const trailing = predecessor.then(
-        () => this.singleFlightRead(key, read),
-        () => this.singleFlightRead(key, read),
+      const predecessor = queued?.promise ?? existing.promise;
+      const entry: SingleFlightReadEntry = {
+        generation: requiredGeneration,
+        promise: Promise.resolve(undefined),
+        startListeners: new Set(options.onRequestStart ? [options.onRequestStart] : []),
+      };
+      entry.promise = predecessor.then(
+        () => this.launchSingleFlightRead(key, entry, read),
+        () => this.launchSingleFlightRead(key, entry, read),
       );
-      const entry = { generation: requiredGeneration, promise: trailing };
       this.readTrailing.set(key, entry);
       const clear = () => {
         if (this.readTrailing.get(key) !== entry) return;
         this.readTrailing.delete(key);
         if (!this.readInFlight.has(key)) this.readGeneration.delete(key);
       };
-      void trailing.then(clear, clear);
-      return trailing;
+      void entry.promise.then(clear, clear);
+      return entry.promise as Promise<T>;
     }
     const generation = (this.readGeneration.get(key) ?? 0) + 1;
-    this.readGeneration.set(key, generation);
-    const promise = read().finally(() => {
-      if (this.readInFlight.get(key) !== promise) return;
+    const entry: SingleFlightReadEntry = {
+      generation,
+      promise: Promise.resolve(undefined),
+      startListeners: new Set(options.onRequestStart ? [options.onRequestStart] : []),
+    };
+    entry.promise = this.launchSingleFlightRead(key, entry, read);
+    return entry.promise as Promise<T>;
+  }
+
+  private launchSingleFlightRead<T>(
+    key: string,
+    entry: SingleFlightReadEntry,
+    read: () => Promise<T>,
+  ): Promise<T> {
+    this.readGeneration.set(key, entry.generation);
+    this.readInFlight.set(key, entry);
+    for (const listener of entry.startListeners) {
+      try {
+        listener();
+      } catch {
+        // Read metadata observers cannot cancel or replace the selected GET.
+      }
+    }
+    entry.startListeners.clear();
+    return read().finally(() => {
+      if (this.readInFlight.get(key) !== entry) return;
       this.readInFlight.delete(key);
       if (!this.readTrailing.has(key)) this.readGeneration.delete(key);
     });
-    this.readInFlight.set(key, promise);
-    return promise;
   }
 
   /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */

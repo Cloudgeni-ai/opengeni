@@ -12,6 +12,10 @@ export type SessionContinuationState = {
   failed: boolean;
   /** Page-one read revision whose snapshot produced the retained cursor chain. */
   snapshotReadRevision: number;
+  /** Shared causal generation captured when that snapshot's page-one read started. */
+  snapshotReadGeneration: number;
+  /** Root-hook snapshots and direct cursor-rebase snapshots have independent identities. */
+  snapshotSource: "root" | "rebase";
   /** Rows fetched from that snapshot, excluding display-only rows retained from older snapshots. */
   authoritativeSessionIds: ReadonlySet<string>;
 };
@@ -39,6 +43,8 @@ export function emptySessionContinuation(generation: number): SessionContinuatio
     nextCursor: undefined,
     failed: false,
     snapshotReadRevision: 0,
+    snapshotReadGeneration: 0,
+    snapshotSource: "root",
     authoritativeSessionIds: new Set(),
   };
 }
@@ -57,6 +63,8 @@ export function mergeSessionContinuation(
   requestGeneration: number,
   page: { sessions: Session[]; nextCursor: string | null },
   snapshotReadRevision: number,
+  snapshotReadGeneration = 0,
+  snapshotSource: "root" | "rebase" = "root",
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) {
     return state;
@@ -64,7 +72,7 @@ export function mergeSessionContinuation(
   const active = activeSessionContinuation(state, activeGeneration);
   const rows = new Map(active.sessions.map((session) => [session.id, session]));
   const authoritativeSessionIds =
-    active.snapshotReadRevision === snapshotReadRevision
+    active.snapshotSource === snapshotSource && active.snapshotReadRevision === snapshotReadRevision
       ? new Set(active.authoritativeSessionIds)
       : new Set<string>();
   for (const session of page.sessions) rows.set(session.id, session);
@@ -75,6 +83,8 @@ export function mergeSessionContinuation(
     nextCursor: page.nextCursor,
     failed: false,
     snapshotReadRevision,
+    snapshotReadGeneration,
+    snapshotSource,
     authoritativeSessionIds,
   };
 }
@@ -84,9 +94,16 @@ export function authoritativeSessionContinuation(
   state: SessionContinuationState,
   activeGeneration: number,
   currentReadRevision: number,
+  currentReadGeneration = 0,
 ): Session[] {
   const active = activeSessionContinuation(state, activeGeneration);
-  if (active.snapshotReadRevision !== currentReadRevision) return [];
+  if (
+    active.snapshotSource === "root"
+      ? active.snapshotReadRevision !== currentReadRevision
+      : active.snapshotReadGeneration < currentReadGeneration
+  ) {
+    return [];
+  }
   return active.sessions.filter((session) => active.authoritativeSessionIds.has(session.id));
 }
 
@@ -99,10 +116,13 @@ export function reconcileRetainedSessionContinuationChannel(
   activeGeneration: number,
   currentReadRevision: number,
   projected: Pick<Session, "id" | "workspaceId" | "channelId"> | null,
+  currentReadGeneration = 0,
 ): SessionContinuationState {
   if (!projected || state.generation !== activeGeneration) return state;
   if (
-    state.snapshotReadRevision === currentReadRevision &&
+    (state.snapshotSource === "root"
+      ? state.snapshotReadRevision === currentReadRevision
+      : state.snapshotReadGeneration >= currentReadGeneration) &&
     state.authoritativeSessionIds.has(projected.id)
   ) {
     return state;
@@ -130,6 +150,8 @@ export function rebaseSessionContinuation(
   requestGeneration: number,
   nextCursor: string | null,
   snapshotReadRevision: number,
+  snapshotReadGeneration = 0,
+  snapshotSource: "root" | "rebase" = "root",
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) return state;
   const active = activeSessionContinuation(state, activeGeneration);
@@ -138,6 +160,8 @@ export function rebaseSessionContinuation(
     nextCursor,
     failed: false,
     snapshotReadRevision,
+    snapshotReadGeneration,
+    snapshotSource,
     authoritativeSessionIds: new Set(),
   };
 }

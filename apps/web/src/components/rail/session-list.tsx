@@ -152,6 +152,7 @@ import { formatWaitingSince } from "@/lib/format";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
 import {
+  authoritativeSessionBranchChannels,
   beginSessionBranchRequest,
   commitSessionBranchPage,
   failSessionBranchRequest,
@@ -361,8 +362,14 @@ export function SessionList() {
   const activeContinuation = activeSessionContinuation(continuation, pageGeneration);
   const extraSessions = activeContinuation.sessions;
   const authoritativeExtraSessions = useMemo(
-    () => authoritativeSessionContinuation(activeContinuation, pageGeneration, rootReadRevision),
-    [activeContinuation, pageGeneration, rootReadRevision],
+    () =>
+      authoritativeSessionContinuation(
+        activeContinuation,
+        pageGeneration,
+        rootReadRevision,
+        rootReadGeneration,
+      ),
+    [activeContinuation, pageGeneration, rootReadGeneration, rootReadRevision],
   );
   const continuationCursor =
     activeContinuation.nextCursor === undefined ? nextCursor : activeContinuation.nextCursor;
@@ -370,8 +377,12 @@ export function SessionList() {
     activeContinuation.nextCursor === undefined
       ? rootReadRevision
       : activeContinuation.snapshotReadRevision;
-  const rootReadRevisionRef = useRef(rootReadRevision);
-  rootReadRevisionRef.current = rootReadRevision;
+  const continuationSnapshotReadGeneration =
+    activeContinuation.nextCursor === undefined
+      ? rootReadGeneration
+      : activeContinuation.snapshotReadGeneration;
+  const continuationSnapshotSource =
+    activeContinuation.nextCursor === undefined ? "root" : activeContinuation.snapshotSource;
   const [loadingMoreGeneration, setLoadingMoreGeneration] = useState<number | null>(null);
   const loadingMore = loadingMoreGeneration === pageGeneration;
   const loadMoreAttempt = useRef(0);
@@ -431,6 +442,8 @@ export function SessionList() {
   const [focusRestoreRevision, setFocusRestoreRevision] = useState(0);
   const channelMoveProbes = useRef(new Map<string, string>());
   const rootChannelProjectionOwner = useRef({});
+  const continuationChannelProjectionOwner = useRef({});
+  const branchChannelProjectionOwner = useRef({});
   const pinsChannelProjectionOwner = useRef({});
   const moveChannelProjectionOwner = useRef({});
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
@@ -438,6 +451,10 @@ export function SessionList() {
   });
   const loadedChildren = useMemo(
     () => [...childPages.values()].flatMap((page) => page.sessions),
+    [childPages],
+  );
+  const loadedChildChannelEvidence = useMemo(
+    () => [...childPages.values()].flatMap(authoritativeSessionBranchChannels),
     [childPages],
   );
   const pinnedChannelReadGeneration = hierarchyMode ? globalPinsReadGeneration : rootReadGeneration;
@@ -451,11 +468,17 @@ export function SessionList() {
         }
       }
     };
-    add([...authoritativeExtraSessions, ...sessions], rootReadGeneration);
+    add(authoritativeExtraSessions, continuationSnapshotReadGeneration);
+    add(sessions, rootReadGeneration);
     add(pinned, pinnedChannelReadGeneration);
+    for (const { session, readGeneration } of loadedChildChannelEvidence) {
+      add([session], readGeneration);
+    }
     return evidence;
   }, [
     authoritativeExtraSessions,
+    continuationSnapshotReadGeneration,
+    loadedChildChannelEvidence,
     pinned,
     pinnedChannelReadGeneration,
     rootReadGeneration,
@@ -486,10 +509,7 @@ export function SessionList() {
     pinned,
     sessions,
   ]);
-  const rootChannelAuthoritySessions = useMemo(
-    () => [...authoritativeExtraSessions, ...sessions],
-    [authoritativeExtraSessions, sessions],
-  );
+  const rootChannelAuthoritySessions = useMemo(() => sessions, [sessions]);
   const channelAuthoritySessions = useMemo(
     () =>
       [...currentListChannelEvidence.values()].map(({ session, readGeneration }) =>
@@ -508,9 +528,10 @@ export function SessionList() {
         pageGeneration,
         rootReadRevision,
         context.session,
+        rootReadGeneration,
       ),
     );
-  }, [context.session, pageGeneration, rootReadRevision]);
+  }, [context.session, pageGeneration, rootReadGeneration, rootReadRevision]);
   useLayoutEffect(() => {
     const owner = rootChannelProjectionOwner.current;
     context.sessionChannelProjectionAuthority.replace(
@@ -521,6 +542,31 @@ export function SessionList() {
     );
     return () => context.sessionChannelProjectionAuthority.clear(owner);
   }, [context.sessionChannelProjectionAuthority, rootChannelAuthoritySessions, rootReadGeneration]);
+  useLayoutEffect(() => {
+    const owner = continuationChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      authoritativeExtraSessions,
+      0,
+      continuationSnapshotReadGeneration,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [
+    authoritativeExtraSessions,
+    context.sessionChannelProjectionAuthority,
+    continuationSnapshotReadGeneration,
+  ]);
+  useLayoutEffect(() => {
+    const owner = branchChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replaceEvidence(
+      owner,
+      loadedChildChannelEvidence.map(({ session, readGeneration }) => ({
+        projection: session,
+        readGeneration,
+      })),
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [context.sessionChannelProjectionAuthority, loadedChildChannelEvidence]);
   useLayoutEffect(() => {
     const owner = pinsChannelProjectionOwner.current;
     context.sessionChannelProjectionAuthority.replace(
@@ -621,11 +667,17 @@ export function SessionList() {
       const key = `${override.operation}:${listed?.channelId ?? "absent"}`;
       if (channelMoveProbes.current.get(sessionId) === key) continue;
       channelMoveProbes.current.set(sessionId, key);
-      const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
-      void readSessionChannelMovePoint(sessionClient, rail.workspaceId, sessionId)
+      let readGeneration = 0;
+      void readSessionChannelMovePoint(sessionClient, rail.workspaceId, sessionId, () => {
+        readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+      })
         .then((authoritative) => {
           if (channelMoveProbes.current.get(sessionId) !== key) return;
-          context.sessionChannelProjectionAuthority.recordRead(authoritative, readGeneration);
+          if (
+            !context.sessionChannelProjectionAuthority.recordRead(authoritative, readGeneration)
+          ) {
+            return;
+          }
           setChannelMoveOverrides((current) =>
             reconcileSessionChannelMovePointRead(
               current,
@@ -642,6 +694,14 @@ export function SessionList() {
             requestError instanceof OpenGeniApiError &&
             requestError.status === 404
           ) {
+            if (
+              !context.sessionChannelProjectionAuthority.recordMissing(
+                { id: sessionId, workspaceId: rail.workspaceId },
+                readGeneration,
+              )
+            ) {
+              return;
+            }
             setChannelMoveOverrides((current) =>
               reconcileSessionChannelMovePointRead(current, sessionId, override.operation, null),
             );
@@ -1213,6 +1273,7 @@ export function SessionList() {
         beginSessionBranchRequest(current, parentSessionId, requestId, cursor),
       );
       try {
+        const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
         const page = await context.client.listSessionPage(rail.workspaceId, {
           limit: 50,
           parentSessionId,
@@ -1232,6 +1293,7 @@ export function SessionList() {
               append: cursor !== undefined,
               preserve,
               requestId,
+              readGeneration,
             },
           ),
         );
@@ -1240,7 +1302,7 @@ export function SessionList() {
         setChildPages((current) => failSessionBranchRequest(current, parentSessionId, requestId));
       }
     },
-    [context.client, rail.workspaceId],
+    [context.client, context.sessionChannelProjectionAuthority, rail.workspaceId],
   );
   // The active route supplies exact child + ancestor detail even before the
   // lazy branch query catches up. Commit that projection into the branch cache
@@ -1526,6 +1588,8 @@ export function SessionList() {
     if (!continuationCursor || loadingMore) return;
     const requestGeneration = pageGeneration;
     let requestSnapshotReadRevision = continuationSnapshotReadRevision;
+    let requestSnapshotReadGeneration = continuationSnapshotReadGeneration;
+    let requestSnapshotSource = continuationSnapshotSource;
     const attempt = ++loadMoreAttempt.current;
     const requestIsCurrent = (): boolean =>
       paginationIdentity.current.generation === requestGeneration &&
@@ -1554,9 +1618,12 @@ export function SessionList() {
         // once, fence it to this query, and continue immediately from its new
         // cursor. A second expiry bubbles to the normal retryable failure path
         // instead of creating an unbounded cursor-refresh loop.
+        const rebaseReadGeneration = context.sessionChannelProjectionAuthority.beginRead();
         const freshFirstPage = await listPage();
         if (!requestIsCurrent()) return;
-        requestSnapshotReadRevision = rootReadRevisionRef.current;
+        requestSnapshotReadRevision = attempt;
+        requestSnapshotReadGeneration = rebaseReadGeneration;
+        requestSnapshotSource = "rebase";
         setContinuation((current) =>
           rebaseSessionContinuation(
             current,
@@ -1564,6 +1631,8 @@ export function SessionList() {
             requestGeneration,
             freshFirstPage.nextCursor,
             requestSnapshotReadRevision,
+            requestSnapshotReadGeneration,
+            requestSnapshotSource,
           ),
         );
         if (!freshFirstPage.nextCursor) {
@@ -1580,6 +1649,8 @@ export function SessionList() {
           requestGeneration,
           page,
           requestSnapshotReadRevision,
+          requestSnapshotReadGeneration,
+          requestSnapshotSource,
         ),
       );
       setAnnouncement(
@@ -1604,7 +1675,10 @@ export function SessionList() {
   }, [
     context.client,
     continuationCursor,
+    continuationSnapshotReadGeneration,
     continuationSnapshotReadRevision,
+    continuationSnapshotSource,
+    context.sessionChannelProjectionAuthority,
     hierarchyMode,
     loadingMore,
     pageGeneration,

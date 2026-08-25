@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Session, SessionEvent } from "@opengeni/sdk";
+import { OpenGeniClient, type Session, type SessionEvent } from "@opengeni/sdk";
 
 import { registerDom, renderHook, flush, actRun } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -74,13 +74,61 @@ describe("useSession", () => {
     await flush();
 
     expect(hook.result.current.readRevision).toBe(1);
-    expect(options).toEqual([{ fresh: true }]);
+    expect(options.map((option) => option?.fresh)).toEqual([true]);
 
     channelId = "channel-new";
     await actRun(async () => await hook.result.current.refresh());
     expect(hook.result.current.readRevision).toBe(2);
     expect(hook.result.current.session?.channelId).toBe("channel-new");
-    expect(options).toEqual([{ fresh: true }, { fresh: true }]);
+    expect(options.map((option) => option?.fresh)).toEqual([true, true]);
+    await hook.unmount();
+  });
+
+  test("captures shared causality when a queued fresh detail GET actually starts", async () => {
+    let requests = 0;
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let channelId = "channel-old";
+    let causalGeneration = 0;
+    const beginRead = () => ++causalGeneration;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const requestChannel = channelId;
+        if (requests === 1) await activeGate;
+        return new Response(JSON.stringify({ ...serverSession, channelId: requestChannel }), {
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    const active = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const hook = await renderHook(
+      () =>
+        useSession(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(requests).toBe(1);
+    expect(hook.result.current.readGeneration).toBe(0);
+
+    const laterListGeneration = beginRead();
+    channelId = "channel-new";
+    releaseActive();
+    await active;
+    await flush();
+
+    expect(requests).toBe(2);
+    expect(hook.result.current.session?.channelId).toBe("channel-new");
+    expect(hook.result.current.readGeneration).toBeGreaterThan(laterListGeneration);
     await hook.unmount();
   });
 });

@@ -22,8 +22,12 @@ export function readSessionChannelMovePoint(
   client: SessionChannelPointReadClient,
   workspaceId: string,
   sessionId: string,
+  onRequestStart?: () => void,
 ): Promise<Session> {
-  return client.getSession(workspaceId, sessionId, { fresh: true });
+  return client.getSession(workspaceId, sessionId, {
+    fresh: true,
+    ...(onRequestStart ? { onRequestStart } : {}),
+  });
 }
 
 /** Project one in-flight or committed move over a possibly stale list row. */

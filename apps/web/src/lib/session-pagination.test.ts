@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Session } from "@/types";
+import { SessionChannelProjectionAuthority } from "./session-pins";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
@@ -62,6 +63,8 @@ describe("session continuation pagination", () => {
       nextCursor: "next",
       failed: true,
       snapshotReadRevision: 4,
+      snapshotReadGeneration: 14,
+      snapshotSource: "root" as const,
       authoritativeSessionIds: new Set(["first", "replace"]),
     };
     const merged = mergeSessionContinuation(
@@ -88,6 +91,8 @@ describe("session continuation pagination", () => {
       nextCursor: "expired",
       failed: true,
       snapshotReadRevision: 6,
+      snapshotReadGeneration: 16,
+      snapshotSource: "root" as const,
       authoritativeSessionIds: new Set(["older-a", "older-b"]),
     };
 
@@ -97,6 +102,8 @@ describe("session continuation pagination", () => {
       nextCursor: "fresh-next",
       failed: false,
       snapshotReadRevision: 8,
+      snapshotReadGeneration: 0,
+      snapshotSource: "root",
       authoritativeSessionIds: new Set(),
     });
   });
@@ -136,6 +143,8 @@ describe("session continuation pagination", () => {
       nextCursor: "current-next",
       failed: false,
       snapshotReadRevision: 9,
+      snapshotReadGeneration: 19,
+      snapshotSource: "root" as const,
       authoritativeSessionIds: new Set(["current"]),
     };
 
@@ -191,5 +200,66 @@ describe("session continuation pagination", () => {
         channelId: "channel-stale-detail",
       }),
     ).toBe(state);
+  });
+
+  test("orders cursor-rebase authority on its own shared causal generation", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const continuationOwner = {};
+    const rootOwner = {};
+    const detailA = { ...row("retained"), channelId: "channel-a" } as Session;
+    const rebasedB = { ...detailA, channelId: "channel-b" } as Session;
+    const rootC = { ...detailA, channelId: "channel-c" } as Session;
+
+    const detailGeneration = authority.beginRead();
+    authority.recordRead(detailA, detailGeneration);
+    const rebaseGeneration = authority.beginRead();
+    let state = rebaseSessionContinuation(
+      emptySessionContinuation(5),
+      5,
+      5,
+      "rebased-next",
+      91,
+      rebaseGeneration,
+      "rebase",
+    );
+    state = mergeSessionContinuation(
+      state,
+      5,
+      5,
+      { sessions: [rebasedB], nextCursor: null },
+      91,
+      rebaseGeneration,
+      "rebase",
+    );
+    const rebasedEvidence = authoritativeSessionContinuation(state, 5, 12, detailGeneration);
+    authority.replace(continuationOwner, rebasedEvidence, 0, state.snapshotReadGeneration);
+    expect(authority.owns(rebasedB)).toBe(true);
+    expect(authority.owns(detailA)).toBe(false);
+
+    // A rebase that actually started earlier cannot borrow the revision or
+    // generation of a later root read when it finally completes.
+    const staleRebaseGeneration = authority.beginRead();
+    const newerRootGeneration = authority.beginRead();
+    authority.replace(rootOwner, [rootC], 0, newerRootGeneration);
+    let staleState = rebaseSessionContinuation(
+      emptySessionContinuation(6),
+      6,
+      6,
+      "stale-next",
+      92,
+      staleRebaseGeneration,
+      "rebase",
+    );
+    staleState = mergeSessionContinuation(
+      staleState,
+      6,
+      6,
+      { sessions: [rebasedB], nextCursor: null },
+      92,
+      staleRebaseGeneration,
+      "rebase",
+    );
+    expect(authoritativeSessionContinuation(staleState, 6, 13, newerRootGeneration)).toEqual([]);
+    expect(authority.owns(rootC)).toBe(true);
   });
 });

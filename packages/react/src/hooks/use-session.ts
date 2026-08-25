@@ -55,8 +55,13 @@ export function useSession(
     if (!sessionId) {
       return null;
     }
-    const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
-    const fetched = await client.getSession(workspaceId, sessionId, { fresh: true });
+    let readGeneration = 0;
+    const fetched = await client.getSession(workspaceId, sessionId, {
+      fresh: true,
+      onRequestStart: () => {
+        readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+      },
+    });
     // A fresh server read supersedes any optimistic/event-driven override.
     setOverride(null);
     return {

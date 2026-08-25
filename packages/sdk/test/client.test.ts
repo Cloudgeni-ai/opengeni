@@ -614,6 +614,44 @@ describe("OpenGeniClient", () => {
     expect(requests).toBe(3);
   });
 
+  test("notifies queued fresh callers only when their shared GET actually starts", async () => {
+    let requests = 0;
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let channelId = "channel-old";
+    let causalGeneration = 0;
+    let queuedReadGeneration = 0;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        if (requests === 1) await activeGate;
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, channelId });
+      },
+    });
+
+    const active = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const queued = client.getSession(WORKSPACE_ID, SESSION_ID, {
+      fresh: true,
+      onRequestStart: () => {
+        queuedReadGeneration = ++causalGeneration;
+      },
+    });
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    expect(queuedReadGeneration).toBe(0);
+
+    const laterListGeneration = ++causalGeneration;
+    channelId = "channel-new";
+    releaseActive();
+    await active;
+    expect((await queued).channelId).toBe("channel-new");
+    expect(requests).toBe(2);
+    expect(queuedReadGeneration).toBeGreaterThan(laterListGeneration);
+  });
+
   test("updates an existing session MCP approval policy through the dedicated route", async () => {
     const response = {
       server: {
