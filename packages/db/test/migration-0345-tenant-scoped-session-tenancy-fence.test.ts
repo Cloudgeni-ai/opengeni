@@ -15,6 +15,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   type DbClient,
 } from "../src";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 const migrationUrl = new URL(
   "../drizzle/0345_tenant_scoped_session_tenancy_fence.sql",
@@ -573,7 +574,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
 
   test("requires an exact fenced-access token in addition to the held workspace lock", async () => {
     if (!owned) return;
-    const runtime = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+    const runtime = postgres(owned.ownerUrl, {
+      max: 1,
+      onnotice: () => undefined,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
     try {
       await runtime.begin(async (transaction) => {
         const workspaceId = crypto.randomUUID();
@@ -615,8 +620,14 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
 
   test("an exclusive fence blocks only writers in the same workspace", async () => {
     if (!owned) return;
-    const holder = postgres(owned.ownerUrl, { max: 1 });
-    const probe = postgres(owned.ownerUrl, { max: 1 });
+    const holder = postgres(owned.ownerUrl, {
+      max: 1,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    const probe = postgres(owned.ownerUrl, {
+      max: 1,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
     const workspaceA = crypto.randomUUID();
     const workspaceB = crypto.randomUUID();
     const connection = await holder.reserve();
@@ -768,8 +779,16 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       availableWorkspaceIds: string[],
       setActorScope = true,
     ) => {
-      const holder = postgres(owned!.ownerUrl, { max: 1, onnotice: () => undefined });
-      const probe = postgres(owned!.ownerUrl, { max: 1, onnotice: () => undefined });
+      const holder = postgres(owned!.ownerUrl, {
+        max: 1,
+        onnotice: () => undefined,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
+      const probe = postgres(owned!.ownerUrl, {
+        max: 1,
+        onnotice: () => undefined,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
       const connection = await holder.reserve();
       try {
         await connection`begin`;
@@ -1003,6 +1022,7 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
     const holder = postgres(owned.ownerUrl, {
       max: 1,
       onnotice: () => undefined,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
     });
     const connection = await holder.reserve();
     try {
@@ -1438,7 +1458,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         throw new Error("target namespace OIDs were not inventoried");
       }
 
-      const ownerRuntime = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+      const ownerRuntime = postgres(owned.ownerUrl, {
+        max: 1,
+        onnotice: () => undefined,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
       try {
         await ownerRuntime.begin(async (transaction) => {
           const [opened] = await transaction<Array<{ capabilityA: string }>>`
