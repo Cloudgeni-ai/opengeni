@@ -46,11 +46,17 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES = [
   "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
 ] as const;
 
+const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
+  "enforce_automatic_session_title_policy_v1()";
+const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
+  "acquire_automatic_session_title_quarantine_fences_v1(integer)";
+
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
   ...AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES,
+  AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
 ]);
 
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
@@ -514,6 +520,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
@@ -2408,6 +2415,37 @@ export function evaluateRuntimeDatabasePosture(
       if (routine.publicExecute) {
         violations.push(
           `PUBLIC has forbidden automatic session title fanout internal routine ${routine.name}`,
+        );
+      }
+    }
+
+    const policyTriggerMatches = posture.privateRoutines.filter(
+      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
+    );
+    if (policyTriggerMatches.length !== 1) {
+      violations.push(
+        `automatic session title policy trigger ${AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE} is missing or ambiguous`,
+      );
+    } else {
+      const routine = policyTriggerMatches[0]!;
+      if (routine.securityDefiner) {
+        violations.push(
+          `automatic session title policy trigger ${routine.name} must be SECURITY INVOKER`,
+        );
+      }
+      if (routine.owner !== automaticTitleFanoutOutbox.owner) {
+        violations.push(
+          `automatic session title policy trigger ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
+        );
+      }
+      if (routine.execute) {
+        violations.push(
+          `runtime role has forbidden automatic session title policy trigger ${routine.name}`,
+        );
+      }
+      if (routine.publicExecute) {
+        violations.push(
+          `PUBLIC has forbidden automatic session title policy trigger ${routine.name}`,
         );
       }
     }

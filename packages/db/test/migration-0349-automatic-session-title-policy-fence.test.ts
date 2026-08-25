@@ -11,7 +11,11 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { migrate, parseConcurrentIndexMigration } from "../src/migrate";
-import { FORCE_RLS_TABLES, PROTECTED_NO_DIRECT_DML_TABLES } from "../src/runtime-posture";
+import {
+  FORCE_RLS_TABLES,
+  PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+} from "../src/runtime-posture";
 import {
   addSessionSystemUpdateWithSourceMutation,
   appendSessionEvents,
@@ -272,6 +276,9 @@ describe("migrations 0349-0351 automatic session title policy fence", () => {
     expect(fence).toContain("opengeni.automatic_session_title_quarantine_v1");
     expect(fence).toContain(
       "DROP FUNCTION IF EXISTS acquire_automatic_session_title_quarantine_fences_v1(integer)",
+    );
+    expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(
+      "acquire_automatic_session_title_quarantine_fences_v1(integer)",
     );
     expect(fence).toContain("CREATE FUNCTION acquire_automatic_session_title_quarantine_fences_v1");
     expect(fence).toContain("RETURNS uuid[]");

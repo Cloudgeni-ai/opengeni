@@ -653,6 +653,13 @@ describe("runtime database posture evaluator", () => {
         publicExecute: false,
         securityDefiner: true,
       },
+      {
+        name: "enforce_automatic_session_title_policy_v1()",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: false,
+      },
     );
     const titleFanoutOptions: RuntimeDatabasePostureOptions = {
       ...options,
@@ -668,10 +675,15 @@ describe("runtime database posture evaluator", () => {
     const claim = posture.privateRoutines.find((routine) =>
       routine.name.startsWith("claim_automatic_session_title_fanout_v1("),
     )!;
+    const policyTrigger = posture.privateRoutines.find(
+      (routine) => routine.name === "enforce_automatic_session_title_policy_v1()",
+    )!;
     enqueue.execute = true;
     claim.execute = false;
     claim.publicExecute = true;
     claim.securityDefiner = false;
+    policyTrigger.publicExecute = true;
+    policyTrigger.securityDefiner = true;
 
     expect(evaluateRuntimeDatabasePosture(posture, titleFanoutOptions)).toEqual(
       expect.arrayContaining([
@@ -681,6 +693,8 @@ describe("runtime database posture evaluator", () => {
         expect.stringContaining("runtime role lacks automatic session title fanout capability"),
         expect.stringContaining("PUBLIC has forbidden automatic session title fanout capability"),
         expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining("PUBLIC has forbidden automatic session title policy trigger"),
+        expect.stringContaining("must be SECURITY INVOKER"),
       ]),
     );
   });
