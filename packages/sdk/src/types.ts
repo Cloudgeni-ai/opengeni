@@ -3899,6 +3899,23 @@ export type SlackReactionChannelListResponse = {
   nextCursor: string | null;
 };
 
+export type SlackChannelRoute = {
+  slackChannelId: string;
+  targetWorkspaceId: string;
+  targetWorkspaceName: string | null;
+  source: "picker" | "admin";
+  updatedAt: string;
+};
+
+export type SlackChannelRouteListResponse = {
+  routes: SlackChannelRoute[];
+};
+
+export type UpdateSlackChannelRoutesRequest = {
+  connectionId: string;
+  routes: Array<{ slackChannelId: string; targetWorkspaceId: string | null }>;
+};
+
 export type WorkspaceVoiceInputSettings = {
   enabled: boolean;
 };

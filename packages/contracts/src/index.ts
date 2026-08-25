@@ -1998,6 +1998,35 @@ export const SlackReactionChannelListResponse = z.object({
 });
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
 
+/** Where one Slack channel starts work. */
+export const SlackChannelRoute = z.object({
+  slackChannelId: z.string().min(1).max(64),
+  targetWorkspaceId: z.string().uuid(),
+  targetWorkspaceName: z.string().min(1).max(256).nullable(),
+  source: z.enum(["picker", "admin"]),
+  updatedAt: z.string(),
+});
+export type SlackChannelRoute = z.infer<typeof SlackChannelRoute>;
+
+export const SlackChannelRouteListResponse = z.object({
+  routes: z.array(SlackChannelRoute).max(500),
+});
+export type SlackChannelRouteListResponse = z.infer<typeof SlackChannelRouteListResponse>;
+
+export const UpdateSlackChannelRoutesRequest = z.object({
+  connectionId: z.string().uuid(),
+  routes: z
+    .array(
+      z.object({
+        slackChannelId: z.string().min(1).max(64),
+        /** Null clears the route, so the channel asks once again. */
+        targetWorkspaceId: z.string().uuid().nullable(),
+      }),
+    )
+    .max(200),
+});
+export type UpdateSlackChannelRoutesRequest = z.infer<typeof UpdateSlackChannelRoutesRequest>;
+
 export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   enabled: false,
   emoji: "genie",

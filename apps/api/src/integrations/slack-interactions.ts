@@ -9,7 +9,9 @@ import {
   evaluateSlackTaskPolicy,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
+  SlackChannelRouteListResponse,
   SlackReactionChannelListResponse,
+  UpdateSlackChannelRoutesRequest,
   SlackUserLinkAccessMutationRequest,
   SlackUserLinkAccessRequest,
   type AccessGrant,
@@ -67,6 +69,9 @@ import {
   answerSlackRoutePrompt,
   type SlackRoutableWorkspace,
   getSlackChannelRoute,
+  listSlackChannelRoutes,
+  upsertSlackChannelRoute,
+  deleteSlackChannelRoute,
   getSlackUserDmRoute,
   listNamedSubjectSlackRoutableWorkspaces,
   getActiveSlackTaskPolicy,
@@ -79,6 +84,7 @@ import {
   listSessionEventPage,
   listSessionHumanInputRequests,
   listPendingSlackUserLinkAccessRequests,
+  listSlackInstallationBindings,
   slackUserLinkAccessRequestTeam,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
@@ -883,6 +889,88 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       });
     },
   );
+
+  app.get("/v1/workspaces/:workspaceId/integrations/slack/channel-routes", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const connectionId = boundedString(c.req.query("connectionId"), 64);
+    if (!connectionId) throw new HTTPException(400, { message: "connectionId is required" });
+    const routes = await listSlackChannelRoutes(
+      deps.db,
+      { accountId: grant.accountId, workspaceId },
+      { connectionId },
+    );
+    // Names are resolved once per distinct target rather than per route.
+    const names = new Map<string, string | null>();
+    for (const route of routes) {
+      if (names.has(route.targetWorkspaceId)) continue;
+      names.set(
+        route.targetWorkspaceId,
+        (await getWorkspace(deps.db, route.targetWorkspaceId))?.name ?? null,
+      );
+    }
+    return c.json(
+      SlackChannelRouteListResponse.parse({
+        routes: routes.map((route) => ({
+          slackChannelId: route.slackChannelId,
+          targetWorkspaceId: route.targetWorkspaceId,
+          targetWorkspaceName: names.get(route.targetWorkspaceId) ?? null,
+          source: route.source,
+          updatedAt: route.updatedAt.toISOString(),
+        })),
+      }),
+    );
+  });
+
+  app.put("/v1/workspaces/:workspaceId/integrations/slack/channel-routes", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    // Same gate as the reaction-channel allowlist this sits beside: pointing a
+    // channel somewhere is an installation-administration act.
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const payload = UpdateSlackChannelRoutesRequest.parse(await c.req.json());
+    const home = { accountId: grant.accountId, workspaceId };
+    const installation = await listSlackInstallationBindings(deps.db, home);
+    if (!installation.some((binding) => binding.connectionId === payload.connectionId)) {
+      throw new HTTPException(404, { message: "Slack installation not found" });
+    }
+    const binding = installation.find(
+      (candidate) => candidate.connectionId === payload.connectionId,
+    );
+    for (const route of payload.routes) {
+      if (route.targetWorkspaceId === null) {
+        await deleteSlackChannelRoute(deps.db, home, {
+          connectionId: payload.connectionId,
+          slackChannelId: route.slackChannelId,
+        });
+        continue;
+      }
+      // An admin may only point a channel at a workspace they could start work
+      // in themselves, and only inside this organization. The table's own CHECK
+      // enforces the second half; this refuses before writing rather than
+      // surfacing a constraint error.
+      const authorized = await resolveSlackTargetAuthority(deps.db, {
+        subjectId: grant.subjectId,
+        targetAccountId: grant.accountId,
+        targetWorkspaceId: route.targetWorkspaceId,
+      });
+      if (!authorized || !hasPermission(authorized.permissions, "sessions:create")) {
+        throw new HTTPException(403, {
+          message: "you cannot start work in the chosen workspace",
+        });
+      }
+      await upsertSlackChannelRoute(deps.db, home, {
+        connectionId: payload.connectionId,
+        slackTeamId: binding?.slackTeamId ?? "",
+        slackChannelId: route.slackChannelId,
+        targetAccountId: grant.accountId,
+        targetWorkspaceId: route.targetWorkspaceId,
+        decidedBySubjectId: grant.subjectId,
+        decidedBySlackUserId: "admin",
+        source: "admin",
+      });
+    }
+    return c.json({ ok: true });
+  });
 
   app.get("/v1/workspaces/:workspaceId/integrations/slack/reaction-channels", async (c) => {
     const workspaceId = c.req.param("workspaceId");
