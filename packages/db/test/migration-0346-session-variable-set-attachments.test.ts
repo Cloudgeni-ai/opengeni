@@ -29,6 +29,8 @@ describe("migration 0346 ordered session Variable Set attachments", () => {
     expect(source).toContain("IF selected_count > 52 THEN");
     expect(source).toContain("targetSessionExecution' -> 'variableSets'");
     expect(source).toContain("session_row.variable_set_ids");
+    expect(source).toContain("function_oid := pg_catalog.to_regprocedure");
+    expect(source).toContain("IF function_oid IS NULL THEN");
     expect(source).toContain(
       "CREATE OR REPLACE FUNCTION sync_session_variable_set_attachment_status",
     );

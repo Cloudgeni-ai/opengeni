@@ -117,6 +117,25 @@ describe("connected machine removal browser e2e", () => {
     return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
   }
 
+  async function waitForMachineCard(page: Page, sandboxId: string): Promise<void> {
+    const card = page.locator(`[data-machine-card="${sandboxId}"]`);
+    try {
+      await card.waitFor({ timeout: 15_000 });
+    } catch (error) {
+      const [title, body] = await Promise.all([
+        page.title().catch(() => "<unavailable>"),
+        page
+          .locator("body")
+          .innerText()
+          .catch(() => "<unavailable>"),
+      ]);
+      throw new Error(
+        `Machine card ${sandboxId} did not become visible. URL: ${page.url()}; title: ${title}; body: ${body.slice(0, 2_000)}; diagnostics: ${(pageDiagnostics.get(page) ?? []).join(" | ")}`,
+        { cause: error },
+      );
+    }
+  }
+
   beforeAll(async () => {
     if (localAdminUrl && localAppUrl) {
       admin = postgres(localAdminUrl, { max: 2, prepare: false });
@@ -200,7 +219,7 @@ describe("connected machine removal browser e2e", () => {
       const machine = await seedMachine(workspaceId, "Jrgens-MacBook-Pro-2.local", "desktop");
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/machines`);
       const card = page.locator(`[data-machine-card="${machine.sandboxId}"]`);
-      await card.waitFor({ timeout: 15_000 });
+      await waitForMachineCard(page, machine.sandboxId);
       await card.focus();
       await page.keyboard.press("Enter");
       const remove = page.getByRole("button", {
@@ -256,7 +275,7 @@ describe("connected machine removal browser e2e", () => {
       const machine = await seedMachine(workspaceId, "Jrgens-MacBook-Pro-2.local", "mobile");
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/machines`);
       const card = page.locator(`[data-machine-card="${machine.sandboxId}"]`);
-      await card.waitFor({ timeout: 15_000 });
+      await waitForMachineCard(page, machine.sandboxId);
       await card.tap();
       const remove = page.getByRole("button", {
         name: "Remove machine Jrgens-MacBook-Pro-2.local",

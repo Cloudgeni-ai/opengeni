@@ -958,19 +958,28 @@ ALTER TABLE session_variable_set_attachments FORCE ROW LEVEL SECURITY;
 DO $extend_scheduled_variable_set_generation_oracle$
 DECLARE
   data_schema text := current_schema();
+  function_oid regprocedure;
   function_source text;
   prior_source text;
 BEGIN
+  function_oid := pg_catalog.to_regprocedure(
+    pg_catalog.format(
+      '%I.scheduled_variable_set_expected_generation_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid)',
+      data_schema
+    )
+  );
+  IF function_oid IS NULL THEN
+    -- Some focused legacy-migration tests deliberately apply a sparse suffix
+    -- that predates the scheduled-attempt oracle. There is nothing to extend
+    -- in that shape; full migration chains always have the function here.
+    RETURN;
+  END IF;
+
   SELECT procedure_value.prosrc INTO STRICT function_source
   FROM pg_proc procedure_value
   JOIN pg_namespace namespace_value ON namespace_value.oid = procedure_value.pronamespace
   WHERE namespace_value.nspname = data_schema
-    AND procedure_value.oid = (
-      pg_catalog.format(
-        '%I.scheduled_variable_set_expected_generation_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid)',
-        data_schema
-      )::regprocedure
-    );
+    AND procedure_value.oid = function_oid;
 
   prior_source := function_source;
   function_source := replace(

@@ -48,6 +48,7 @@ let detailedCredentialId: string;
 let priorNonConsumingAttemptId: string;
 let priorNonConsumingUpstreamKey: string;
 let available = true;
+const pageDiagnostics = new WeakMap<Page, string[]>();
 
 const provider = {
   consumeBodies: [] as Array<{ redeem_request_id: string; credit_id: string }>,
@@ -238,6 +239,43 @@ async function holdFirstAccountList(context: BrowserContext): Promise<() => void
     await route.continue();
   });
   return release;
+}
+
+function trackPageDiagnostics(page: Page): void {
+  const diagnostics: string[] = [];
+  pageDiagnostics.set(page, diagnostics);
+  page.on("console", (message) => diagnostics.push(`console.${message.type()}: ${message.text()}`));
+  page.on("pageerror", (error) => diagnostics.push(`pageerror: ${error.stack ?? error.message}`));
+  page.on("requestfailed", (request) =>
+    diagnostics.push(
+      `requestfailed: ${request.method()} ${request.url()} (${request.failure()?.errorText ?? "unknown"})`,
+    ),
+  );
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      diagnostics.push(
+        `response: ${response.status()} ${response.request().method()} ${response.url()}`,
+      );
+    }
+  });
+}
+
+async function waitForSubscriptionsHeading(page: Page): Promise<void> {
+  try {
+    await page.locator("#codex-subscriptions-heading").waitFor({ timeout: 20_000 });
+  } catch (error) {
+    const [title, body] = await Promise.all([
+      page.title().catch(() => "<unavailable>"),
+      page
+        .locator("body")
+        .innerText()
+        .catch(() => "<unavailable>"),
+    ]);
+    throw new Error(
+      `Codex subscriptions heading did not become visible. URL: ${page.url()}; title: ${title}; body: ${body.slice(0, 2_000)}; diagnostics: ${(pageDiagnostics.get(page) ?? []).join(" | ")}`,
+      { cause: error },
+    );
+  }
 }
 
 async function expandAccountDetails(
@@ -510,6 +548,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const page = await context.newPage();
+    trackPageDiagnostics(page);
     await page.goto(
       `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
       {
@@ -517,7 +556,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     );
     const subscriptionsHeading = page.locator("#codex-subscriptions-heading");
-    await subscriptionsHeading.waitFor({ timeout: 20_000 });
+    await waitForSubscriptionsHeading(page);
     await subscriptionsHeading.scrollIntoViewIfNeeded();
     const initialAccountCount = await page
       .getByRole("article", { name: "Detailed account Codex subscription" })
@@ -618,6 +657,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     ]);
     const mobile = await mobileContext.newPage();
+    trackPageDiagnostics(mobile);
     await mobile.goto(
       `http://127.0.0.1:${publicPort}/workspaces/${workspaceId}/settings?section=models`,
       {
@@ -625,7 +665,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
       },
     );
     const mobileSubscriptionsHeading = mobile.locator("#codex-subscriptions-heading");
-    await mobileSubscriptionsHeading.waitFor({ timeout: 20_000 });
+    await waitForSubscriptionsHeading(mobile);
     await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
     const initialMobileAccountCount = await mobile
       .getByRole("article", { name: "Detailed account Codex subscription" })
