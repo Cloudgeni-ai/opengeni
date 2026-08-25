@@ -791,7 +791,7 @@ export function MessageTimeline({
       // Every underfill request owns the ordinary sentinel too, even if reader
       // intent had not armed it yet when this short-window request began.
       const settle = () => {
-        if (olderLoadAttemptRef.current === attempt) {
+        if (scrollRef.current && olderLoadAttemptRef.current === attempt) {
           setUnderfillSettledAttempt(attempt);
         }
       };
@@ -935,14 +935,7 @@ export function MessageTimeline({
   driveFollowRef.current = driveFollow;
 
   useEffect(() => stopFollow, [stopFollow]);
-  useEffect(
-    () => () => {
-      cancelLeaveFallback();
-      // Fence every late promise settlement from an unmounted timeline.
-      olderLoadAttemptRef.current = null;
-    },
-    [cancelLeaveFallback],
-  );
+  useEffect(() => () => cancelLeaveFallback(), [cancelLeaveFallback]);
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
   // list): any commit may change content height, and the decision is cheap.
@@ -1235,7 +1228,7 @@ export function MessageTimeline({
         const attempt: OlderLoadAttempt = [olderBoundaryKey, 1];
         olderLoadAttemptRef.current = attempt;
         const settle = () => {
-          if (olderLoadAttemptRef.current !== attempt) {
+          if (!scrollRef.current || olderLoadAttemptRef.current !== attempt) {
             return;
           }
           attempt[1] = 2;
@@ -1245,7 +1238,9 @@ export function MessageTimeline({
         };
         // Preserve legacy fire-and-forget top-band retries: the callback has
         // synchronously returned, but this visit remains cooling until exit.
-        attempt[1] += +!invokeOlderLoad(onLoadOlder, settle);
+        if (!invokeOlderLoad(onLoadOlder, settle) && olderLoadAttemptRef.current === attempt) {
+          attempt[1] = 2;
+        }
       },
       { root, rootMargin: OLDER_PREFETCH_ROOT_MARGIN },
     );

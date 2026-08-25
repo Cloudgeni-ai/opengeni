@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -106,12 +106,20 @@ function olderConversation(): TimelineItem[] {
   ).flat();
 }
 
+function prefetchWindow(): TimelineItem[] {
+  return Array.from({ length: 40 }, (_, index) => userMessage(500 + index));
+}
+
+const search = new URLSearchParams(window.location.search);
+
 function Harness() {
-  const search = new URLSearchParams(window.location.search);
   const dynamicCollapse = search.has("dynamic-collapse");
   const manualLoad = search.has("manual-load");
   const overlapLoads = search.has("overlap-loads");
-  const [items, setItems] = useState<TimelineItem[]>(initialCollapsedTail);
+  const syncCachedPrefetch = search.has("sync-cached-prefetch");
+  const [items, setItems] = useState<TimelineItem[]>(
+    syncCachedPrefetch ? prefetchWindow : initialCollapsedTail,
+  );
   const [hasOlder, setHasOlder] = useState(!dynamicCollapse);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadCalls, setLoadCalls] = useState(0);
@@ -207,7 +215,18 @@ function Harness() {
     [],
   );
 
-  const loadOlder = useCallback((): Promise<boolean> => {
+  const loadOlder = useCallback((): Promise<boolean> | void => {
+    if (syncCachedPrefetch) {
+      const call = ++loadCallsRef.current;
+      flushSync(() => {
+        setLoadCalls(call);
+        if (call === 1) {
+          setItems((current) => [userMessage(499), ...current]);
+        }
+      });
+      flushSync(() => undefined);
+      return;
+    }
     if (overlapLoads) {
       const call = ++loadCallsRef.current;
       setLoadCalls(call);
@@ -237,7 +256,7 @@ function Harness() {
       window.setTimeout(() => settleOlder("success"), 250);
     }
     return load;
-  }, [manualLoad, overlapLoads, settleOlder]);
+  }, [manualLoad, overlapLoads, settleOlder, syncCachedPrefetch]);
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
@@ -296,4 +315,7 @@ function Harness() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<Harness />);
+const harness = <Harness />;
+createRoot(document.getElementById("root")!).render(
+  search.has("strict-mode") ? <StrictMode>{harness}</StrictMode> : harness,
+);

@@ -369,6 +369,42 @@ describe("timeline scroll ownership browser regression", () => {
     );
   }, 30_000);
 
+  test("keeps one pending underfill callback through StrictMode effect replay", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&overlap-loads&strict-mode`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() >= 1);
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+  }, 30_000);
+
+  test("releases synchronous cached prefetch progress after a void callback return", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?sync-cached-prefetch`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 800,
+    );
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await scroller.evaluate((node) => {
+      node.scrollTop = 800;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop > 400,
+    );
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("keeps the live tail fixed when a delayed underfill page resolves", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);

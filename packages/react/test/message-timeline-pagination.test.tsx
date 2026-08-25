@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
+import { StrictMode, useState } from "react";
+import { flushSync } from "react-dom";
 import {
   MessageTimeline,
   type MessageTimelineProps,
@@ -1202,6 +1204,67 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("StrictMode effect replay retains one pending underfill owner", async () => {
+    const originalClientHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "clientHeight",
+    );
+    const originalScrollHeight = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollHeight",
+    );
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        return this.hasAttribute("data-og-timeline-scroller") ? 400 : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        return this.hasAttribute("data-og-timeline-scroller") ? 240 : 0;
+      },
+    });
+
+    const pending = deferred<boolean>();
+    let calls = 0;
+    let r: Awaited<ReturnType<typeof renderComponent>> | null = null;
+    try {
+      r = await renderComponent(
+        <StrictMode>
+          <MessageTimeline
+            items={[reasoningItem("collapsed-step", "collapsed step")]}
+            hasOlder
+            onLoadOlder={() => {
+              calls += 1;
+              return pending.promise;
+            }}
+          />
+        </StrictMode>,
+      );
+      await flush();
+      expect(calls).toBe(1);
+
+      await r.unmount();
+      r = null;
+      await actRun(() => pending.resolve(false));
+      await flush();
+      expect(calls).toBe(1);
+    } finally {
+      await r?.unmount();
+      if (originalClientHeight) {
+        Object.defineProperty(HTMLElement.prototype, "clientHeight", originalClientHeight);
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
+      }
+      if (originalScrollHeight) {
+        Object.defineProperty(HTMLElement.prototype, "scrollHeight", originalScrollHeight);
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, "scrollHeight");
+      }
+    }
+  });
+
   test("a delayed underfill prepend keeps the revealed live tail pinned immediately", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
@@ -1779,6 +1842,70 @@ describe("MessageTimeline pagination affordances", () => {
     );
     await hit();
     expect(calls).toBe(3);
+    await r.unmount();
+  });
+
+  test("synchronous cached prefetch progress with a void return releases its owner", async () => {
+    let callback: IntersectionObserverCallback = () => undefined;
+    let instance: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(cb: IntersectionObserverCallback) {
+        callback = cb;
+        instance = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    let calls = 0;
+    function CachedHistoryHost() {
+      const [events, setEvents] = useState(() => manyEvents(4));
+      return (
+        <MessageTimeline
+          events={events}
+          hasOlder
+          onLoadOlder={() => {
+            calls += 1;
+            if (calls === 1) {
+              flushSync(() => setEvents((current) => [event(0), ...current]));
+              // A second synchronous host flush drains the boundary effect
+              // before this legacy void callback returns.
+              flushSync(() => undefined);
+            }
+          }}
+        />
+      );
+    }
+
+    const r = await renderComponent(<CachedHistoryHost />);
+    await armOlderPrefetch(r.container);
+    const notify = async (isIntersecting: boolean) => {
+      const target = observed.at(-1);
+      if (!target) {
+        throw new Error("expected observed top sentinel");
+      }
+      await actRun(() =>
+        callback([{ isIntersecting, target } as IntersectionObserverEntry], instance!),
+      );
+    };
+
+    await notify(true);
+    expect(calls).toBe(1);
+    await flush();
+    await notify(false);
+    await notify(true);
+    expect(calls).toBe(2);
     await r.unmount();
   });
 
