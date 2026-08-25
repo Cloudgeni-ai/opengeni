@@ -205,12 +205,16 @@ const budgets = {
   // tree-shakeable, tracked separately.
   // Source-aware channel reconciliation adds the browser-only projection
   // authority and fresh-read revision fence to the always-loaded rail/route
-  // graph. The exact Linux/x64 Bun 1.4 production build measures 2,173,204 raw
-  // / 607,228 gzip bytes. Advance only these aggregates: raw to the next
-  // whole-KiB envelope above one KiB of headroom, and gzip by one KiB instead
-  // of retaining a four-byte margin. Every other cap remains fixed.
+  // graph. Its exact Linux/x64 Bun 1.4 production build measured 2,173,204 raw
+  // / 607,228 gzip bytes.
+  // Held-turn commentary projection adds the bounded waiting-state copy to
+  // the shared session graph. The exact Linux/x64 production builds measure
+  // 2,173,426-2,173,468 raw bytes and 607,161-607,169 gzip bytes. Preserve the
+  // larger merged envelope for both changes: one-KiB raw headroom and the
+  // 1.5-KiB gzip platform-skew allowance. Every file-count, initial, per-file,
+  // lazy-chunk, and CSS cap stays fixed.
   directSessionRaw: 2124 * kib,
-  directSessionGzip: 594 * kib,
+  directSessionGzip: 595 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

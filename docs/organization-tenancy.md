@@ -155,6 +155,16 @@ per organization workspace without using collections as authority. A later
 cross-domain migration may consume these receipts as evidence but must not
 perform a second Document reclassification.
 
+Migration `0343_personal_document_force_rls_lock_repair.sql` restores the
+portable mint and exact-attempt admission paths under the real
+NOSUPERUSER/NOBYPASSRLS owner. Migration 0258's capability was open, but its
+membership `FOR SHARE` also required an UPDATE-applicable policy and therefore
+returned no row. The repair drops the redundant lock and makes future
+visibility disagreement abort with SQLSTATE `55000`. It does not bulk-convert
+already affected Documents: they are byte-identical in authority shape to
+deliberately legacy personal Documents. Operators use the explicit 0339
+original-owner-fenced lifecycle when the owner elects portability.
+
 Agent access is separate from human ownership. At exact attempt admission the
 database freezes only ready, agent-enabled personal Documents backed by an
 active `document.read` grant for that target workspace and the session's exact

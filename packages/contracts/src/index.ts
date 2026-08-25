@@ -1998,6 +1998,43 @@ export const SlackReactionChannelListResponse = z.object({
 });
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
 
+/** Where one Slack channel starts work. */
+export const SlackChannelRoute = z.object({
+  slackChannelId: z.string().min(1).max(64),
+  targetWorkspaceId: z.string().uuid(),
+  // Unbounded like `Workspace.name` itself: a cap here would reject a row the
+  // database happily holds.
+  targetWorkspaceName: z.string().min(1).nullable(),
+  source: z.enum(["picker", "admin"]),
+  updatedAt: z.string(),
+});
+export type SlackChannelRoute = z.infer<typeof SlackChannelRoute>;
+
+export const SlackChannelRouteListResponse = z.object({
+  /** Every stored route. Bounded in practice by the channels the bot is in. */
+  routes: z.array(SlackChannelRoute),
+  /**
+   * Whether routing is switched on for this deployment. With it off the stored
+   * routes are inert, so the surface says so instead of implying they apply.
+   */
+  routingEnabled: z.boolean(),
+});
+export type SlackChannelRouteListResponse = z.infer<typeof SlackChannelRouteListResponse>;
+
+export const UpdateSlackChannelRoutesRequest = z.object({
+  connectionId: z.string().uuid(),
+  routes: z
+    .array(
+      z.object({
+        slackChannelId: z.string().min(1).max(64),
+        /** Null clears the route, so the channel asks once again. */
+        targetWorkspaceId: z.string().uuid().nullable(),
+      }),
+    )
+    .max(200),
+});
+export type UpdateSlackChannelRoutesRequest = z.infer<typeof UpdateSlackChannelRoutesRequest>;
+
 export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   enabled: false,
   emoji: "genie",
