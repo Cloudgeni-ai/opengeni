@@ -546,8 +546,8 @@ Migration `0348_named_signup_and_user_setup.sql` makes both onboarding paths
 explicit without widening Better Auth or organization authority. Public
 self-service email signup remains an ordinary Better Auth account create and
 accepts no organization or workspace intent. After the first verified
-managed-cookie sign-in, a user with no organization membership, fallback
-account, or bound invitation may call `POST /v1/auth/organization-onboarding`
+managed-cookie sign-in, a user with no organization membership or bound
+invitation may call `POST /v1/auth/organization-onboarding`
 with only a bounded organization name and operation id. One PUBLIC-revoked
 SECURITY DEFINER lifecycle serializes the exact auth user, binds any
 already-committed verified-email invitation first, and then creates exactly one
@@ -583,20 +583,31 @@ because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
 Pre-registration invitation creation creates a matching
-`organization_user_setup_intents` row and sends the recipient a setup link.
-Only the SHA-256 digest of the deterministic server-signed bearer is stored;
-the email carries it in a URL fragment that the browser consumes and scrubs
-before any API request.
-The table is FORCE RLS with no application-role DML, and its creation capability
-requires the exact invitation creator's live owner/administrator membership.
-Provider delivery is idempotent on the invitation operation id; replaying the
-same create request derives the same bearer without minting another authority.
-Because the bearer is derived from the invitation id, delivery configuration
-(`OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET`) is proven as a
-precondition *before* the invitation commits and reported as `503`; a
-deployment missing either would otherwise fail after the row exists and leave
-the administrator an outcome-unknown result with an invitation nobody was told
-about.
+`organization_user_setup_intents` row, then asks the shared managed-auth email
+transport to send the recipient a setup link. Only the SHA-256 digest of the
+deterministic server-signed bearer is stored; the email carries it in a URL
+fragment that the browser consumes and scrubs before any API request. The table
+is FORCE RLS with no application-role DML, and its creation capability requires
+the exact invitation creator's live owner/administrator membership.
+
+When `OPENGENI_RESEND_API_KEY` is configured, the transport attempts provider
+delivery with an idempotency key derived from the invitation operation id. An
+exact API replay derives the same bearer and provider key without minting
+another authority. In local or test mode without that provider key, the
+transport logs that delivery was skipped and returns successfully; it does not
+provide a capturable setup link. In a non-local deployment, a missing provider
+key or a provider error fails the request after the invitation and setup intent
+may already have committed, so the administrator receives an outcome-unknown
+result. This phase has no durable delivery outcome, retry, or reconciliation
+state.
+
+Because the bearer is derived from the invitation id, the URL and signing
+configuration (`OPENGENI_PUBLIC_BASE_URL` and
+`OPENGENI_BETTER_AUTH_SECRET`) is proven as a precondition *before* the
+invitation commits and reported as `503`; a deployment missing either would
+otherwise fail after the row exists without even being able to construct the
+setup link. This precondition does not prove provider availability or record a
+delivery outcome.
 
 `POST /v1/auth/organization-setup` accepts the unguessable bearer without a
 session. A bounded fail-closed global/per-client application limiter runs
@@ -662,8 +673,9 @@ private sessions, credentials, Connections, or personal resources. Workspace
 access is administered from the organization console: invite the person to the
 organization first, then assign an active organization member to each shared
 workspace. Workspace settings links back to that control plane instead of
-creating an independent invitation path. Provider email delivery remains a
-non-goal.
+creating an independent invitation path. The setup path attempts provider email
+delivery as described above; durable outcome and retry administration remain a
+later delivery phase.
 
 Migration `0331_managed_organization_creation.sql` introduced the
 managed-cookie-only `POST /v1/organizations` factory with a provisional initial
@@ -1230,15 +1242,16 @@ activity-write fence described in the Legacy behavior section, and migration
 reads. The later bounded API/core/SDK activation described above does not widen
 the personal-workspace exception or add another durable membership row.
 
-### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 current)
+### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 + 0348 current)
 
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
 described above are active. The bounded managed web administration surface
 described above is also active. Verified-email invitation binding,
-self-service managed organization creation, and organization-scoped shared
-workspace administration are active. Provider email delivery and automatic
-scheduling of the operator command remain deferred.
+self-service managed organization creation, organization-scoped shared
+workspace administration, and the invited-user setup email attempt are active.
+Durable email delivery outcome/retry reconciliation and automatic scheduling of
+the operator command remain deferred.
 
 ### D. Backfill
 
@@ -2181,7 +2194,7 @@ itself auto-activate new organizations.
 
 ## Remaining non-goals
 
-- provider invitation email delivery;
+- durable invitation-email delivery outcome, retry, and reconciliation state;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;
