@@ -32,8 +32,7 @@ quarantined AS (
   UPDATE sessions session
   SET title = 'New conversation',
       title_source = 'agent',
-      last_sequence = session.last_sequence + 1,
-      updated_at = pg_catalog.clock_timestamp()
+      last_sequence = session.last_sequence + 1
   FROM candidates
   WHERE session.id = candidates.id
   RETURNING

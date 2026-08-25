@@ -294,6 +294,7 @@ describe("migrations 0346-0348 automatic session title policy fence", () => {
     expect(quarantine).toContain("INSERT INTO session_events");
     expect(quarantine).toContain("'session.title_set'");
     expect(quarantine).toContain("RETURNING session_id AS id");
+    expect(quarantine).not.toContain("updated_at");
     expect(quarantine).not.toContain("SKIP LOCKED");
     expect(quarantine).not.toContain("ALTER TABLE");
     expect(quarantine).not.toContain("LOCK TABLE");
