@@ -7,6 +7,21 @@ import { migrate } from "../src/migrate";
 const migrationUrl = new URL("../drizzle/0213_browser_interaction_authority.sql", import.meta.url);
 
 describe("migration 0213 browser interaction authority", () => {
+  // A full-ledger replay against a fresh database, so its cost is the whole
+  // migration history and its only variable is I/O contention. Every co-located
+  // sibling that does the same (0184, 0186, 0188, 0203, 0206) carries `180_000`;
+  // this one carried nothing and so inherited the 30 s cap that
+  // `scripts/ci/run-unit-shard.ts` passes as `--timeout=30000`.
+  //
+  // That cap is not a guarantee about anything asserted here - the assertions are
+  // on the migration source and the resulting columns - and it is not survivable
+  // either. `deterministicShards` packs shards by source-file BYTE SIZE, which is
+  // a poor proxy for a test whose cost is a 351-migration replay, so any file
+  // added anywhere can re-cluster the six full-ledger replays into one shard.
+  // That is what happened at d13a9849b: all six landed in shard 3, four ran
+  // concurrently against the single shared container, each took roughly five
+  // times its usual wall time, and this test was killed at 30000 ms after 6 of
+  // its 9 assertions. Uncontended it takes about 4 s.
   test("snapshots routes and extends interventions without secret material", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/u, 1)[0]).toBe("-- deployment-mode: maintenance");
@@ -58,5 +73,5 @@ describe("migration 0213 browser interaction authority", () => {
       await sql.end();
       await blank.release();
     }
-  });
+  }, 180_000);
 });
