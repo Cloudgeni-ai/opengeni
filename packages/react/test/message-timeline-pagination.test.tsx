@@ -1596,6 +1596,98 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("a fulfilled underfill load retains ownership until its non-final prepend commits", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const retryLoad = deferred<boolean>();
+    const loads = [first, second, retryLoad];
+    let calls = 0;
+    const onLoadOlder = () => loads[calls++]!.promise;
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const r = await renderComponent(
+      <MessageTimeline items={items} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline items={items} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // Fulfillment can precede the parent commit that prepends a successful
+    // non-final page. It is not a no-progress signal and must not expose a
+    // same-boundary Retry, even when loadingOlder is omitted.
+    await actRun(() => first.resolve(false));
+    await flush();
+    await actRun(() => {
+      r.container
+        .querySelector("[data-og-retry]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
+    expect(calls).toBe(1);
+
+    // Boundary progress safely releases A and allows exactly one automatic
+    // request for the still-underfilled non-final page B.
+    const nextItems = [reasoningItem("older-step", "older step"), ...items];
+    await r.rerender(
+      <MessageTimeline items={nextItems} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
+
+    // Rejection is the explicit no-progress signal and authorizes one bounded
+    // retry for B without allowing repeated clicks or resize callbacks to
+    // overlap the replacement request.
+    await actRun(() => second.reject(new Error("transient page B failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(3);
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(3);
+
+    await r.rerender(
+      <MessageTimeline items={nextItems} hasOlder={false} onLoadOlder={onLoadOlder} />,
+    );
+    await actRun(() => retryLoad.resolve(false));
+    await flush();
+    await r.unmount();
+  });
+
   test("underfill rejection exposes one retry without observer loops or duplicates", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {

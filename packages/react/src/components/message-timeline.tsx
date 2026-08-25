@@ -243,15 +243,15 @@ const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 // The tuple identity is the exact ownership fence.
 type OlderLoadAttempt = [boundary: string | null, state: number];
 
-function invokeOlderLoad(load: () => unknown, settle: () => void): 0 | 1 {
+function invokeOlderLoad(load: () => unknown, resolve: () => void, reject: () => void): 0 | 1 {
   try {
     const result = load();
     if (result && typeof (result as PromiseLike<unknown>).then === "function") {
-      void (result as PromiseLike<unknown>).then(settle, settle);
+      void (result as PromiseLike<unknown>).then(resolve, reject);
       return 1;
     }
   } catch {
-    settle();
+    reject();
     return 1;
   }
   return 0;
@@ -798,14 +798,16 @@ export function MessageTimeline({
       setUnderfillSettledAttempt(null);
       // Every underfill request owns the ordinary sentinel too, even if reader
       // intent had not armed it yet when this short-window request began.
-      const settle = () => {
+      const reject = () => {
         if (scrollRef.current && olderLoadAttemptRef.current === attempt) {
           setUnderfillSettledAttempt(attempt);
         }
       };
       // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
       // that return the real promise opt into safe rejection/no-progress retry.
-      invokeOlderLoad(onLoadOlder, settle);
+      // Fulfillment retains this exact owner until its prepend boundary
+      // commits; promise settlement alone cannot prove progress or no-progress.
+      invokeOlderLoad(onLoadOlder, () => undefined, reject);
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder, underfillSettledAttempt],
   );
@@ -1234,7 +1236,7 @@ export function MessageTimeline({
         }
         const attempt: OlderLoadAttempt = [olderBoundaryKey, 1];
         olderLoadAttemptRef.current = attempt;
-        const settle = () => {
+        const reject = () => {
           if (!scrollRef.current || olderLoadAttemptRef.current !== attempt) {
             return;
           }
@@ -1248,7 +1250,12 @@ export function MessageTimeline({
         };
         // Preserve legacy fire-and-forget top-band retries: the callback has
         // synchronously returned, but this visit remains cooling until exit.
-        if (!invokeOlderLoad(onLoadOlder, settle) && olderLoadAttemptRef.current === attempt) {
+        // Fulfilled promises retain their pending owner until boundary commit;
+        // otherwise a delayed prepend could overlap a same-boundary request.
+        if (
+          !invokeOlderLoad(onLoadOlder, () => undefined, reject) &&
+          olderLoadAttemptRef.current === attempt
+        ) {
           attempt[1] = 2;
           requestOlderIfUnderfilled(root);
         }

@@ -625,6 +625,53 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 
+  test("keeps Retry hidden until a fulfilled non-final older page commits", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    // The request fulfills before its successful non-final prepend commits.
+    // A speculative Retry click and viewport resize must not replace its exact
+    // same-boundary owner or start a concurrent request.
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("success"),
+    );
+    await page.evaluate(() => {
+      document.querySelector<HTMLElement>("[data-og-retry]")?.click();
+    });
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.getByRole("button", { name: "Retry earlier activity" }).count()).toBe(0);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    // The delayed prepend advances the oldest boundary while preserving
+    // hasOlder=true. Only that committed progress may start page B.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.prependUnderfilledPage());
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    expect(await page.getByRole("button", { name: "Retry earlier activity" }).count()).toBe(0);
+
+    // B rejection confirms no progress and exposes exactly one bounded retry.
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("failure"),
+    );
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+    await retry.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 3);
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(3);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
+  }, 30_000);
+
   test("keeps an empty rejected page behind one explicit retry", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(
