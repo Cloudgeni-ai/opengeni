@@ -166,6 +166,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 3,
     contract: "canonical",
   },
+  "packages/db/src/index.ts#updateSessionVariableSets": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#recordSessionGoalProgressWithEvent": {
     inserts: 1,
     contract: "canonical",
