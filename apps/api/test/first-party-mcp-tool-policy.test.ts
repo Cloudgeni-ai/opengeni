@@ -330,7 +330,15 @@ describe("first-party MCP tool visibility policy", () => {
       initialMessage: "must not attach",
       variableSetIds: [firstVariableSetId, secondVariableSetId],
     });
-    expect(rejected.isError).toBe(true);
+    expect(rejected).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "session_create_forbidden",
+          message: "missing permission: variable-sets:attach",
+        },
+      },
+    });
     expect(databaseTouches).toBe(databaseTouchesBeforeDeniedCall);
   });
 

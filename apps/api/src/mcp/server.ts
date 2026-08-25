@@ -5381,10 +5381,10 @@ function requireVariableSetsUseForMcpAttachments(
   const variableSetIds = selection.variableSetIds ?? (singular ? [singular] : undefined);
   if (variableSetIds === undefined) return;
   if (!hasPermission(grant.permissions, "variable-sets:attach")) {
-    throw new Error("missing permission: variable-sets:attach");
+    throw new HTTPException(403, { message: "missing permission: variable-sets:attach" });
   }
   if (variableSetIds.length > 0 && !hasPermission(grant.permissions, "variable-sets:use")) {
-    throw new Error("missing permission: variable-sets:use");
+    throw new HTTPException(403, { message: "missing permission: variable-sets:use" });
   }
 }
 
