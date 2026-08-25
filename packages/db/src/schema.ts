@@ -2060,6 +2060,19 @@ export const slackRoutePrompts = pgTable(
     pending: index("slack_route_prompts_pending_idx")
       .on(table.expiresAt, table.id)
       .where(sql`${table.status} = 'pending'`),
+    // One live card per person per conversation. The existing uniques are keyed
+    // to the originating event, so they stop Slack's retries of ONE event from
+    // posting twice but not two different messages. `slackUserId` is in the key
+    // on purpose: a shared channel has many people in it, and asking one of them
+    // must not swallow another's request. A direct message is already one
+    // channel per person, so the same index covers both surfaces.
+    //
+    // Expiry is not in the predicate because `now()` is not immutable. A
+    // timed-out row is settled `expired` by the writer before it opens a new
+    // prompt.
+    pendingConversation: uniqueIndex("slack_route_prompts_pending_conversation_uq")
+      .on(table.connectionId, table.slackChannelId, table.slackUserId)
+      .where(sql`${table.status} = 'pending'`),
     statusValid: check(
       "slack_route_prompts_status_check",
       sql`${table.status} in ('pending', 'answered', 'expired', 'cancelled')`,
