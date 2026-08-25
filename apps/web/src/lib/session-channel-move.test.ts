@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { OpenGeniCoreClient } from "@opengeni/sdk/core";
 
 import {
   applySessionChannelMove,
   beginSessionChannelMove,
   commitSessionChannelMove,
+  readSessionChannelMovePoint,
   reconcileSessionChannelMovePointRead,
   reconcileSessionChannelMoves,
   rollbackSessionChannelMove,
@@ -58,6 +60,41 @@ function sectionSessionIds(sessions: readonly Session[]): Record<string, string[
 }
 
 describe("optimistic session channel moves", () => {
+  test("queues the post-write point read behind a pre-write session read", async () => {
+    let requests = 0;
+    let releasePreWrite!: () => void;
+    const preWriteGate = new Promise<void>((resolve) => {
+      releasePreWrite = resolve;
+    });
+    const client = new OpenGeniCoreClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await preWriteGate;
+        return new Response(
+          JSON.stringify(
+            session({
+              id: "session-1",
+              channelId: request === 1 ? "channel-old" : "channel-new",
+            }),
+          ),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    const preWrite = client.getSession("workspace-1", "session-1");
+    const postWrite = readSessionChannelMovePoint(client, "workspace-1", "session-1");
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+
+    releasePreWrite();
+    expect((await preWrite).channelId).toBe("channel-old");
+    expect((await postWrite).channelId).toBe("channel-new");
+    expect(requests).toBe(2);
+  });
+
   test("moves the row to the destination immediately without leaving an old-folder duplicate", () => {
     const original = session({ id: "session-1" });
     const overrides = beginSessionChannelMove(new Map(), original.id, "channel-new", 1);

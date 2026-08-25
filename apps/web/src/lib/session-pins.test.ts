@@ -8,6 +8,7 @@ import {
   mergeSessionContextProjection,
   notifySessionPinChanged,
   reconcileFailedSessionPin,
+  SessionChannelProjectionAuthority,
   subscribeToSessionPinChanges,
 } from "./session-pins";
 
@@ -220,7 +221,12 @@ describe("session pin reconciliation", () => {
       pinVersion: 1,
     } as Session;
 
-    const merged = mergeSessionContextProjection(current, staleDetail);
+    const merged = mergeSessionContextProjection(
+      current,
+      staleDetail,
+      new SessionChannelProjectionAuthority(),
+      "detail",
+    );
 
     expect(merged).toMatchObject({
       title: "Stale detail title",
@@ -244,7 +250,12 @@ describe("session pin reconciliation", () => {
       effectiveControl: { ...current.effectiveControl },
     };
 
-    const merged = mergeSessionContextProjection(current, detail);
+    const merged = mergeSessionContextProjection(
+      current,
+      detail,
+      new SessionChannelProjectionAuthority(),
+      "detail",
+    );
 
     expect(merged).toBe(detail);
   });
@@ -255,7 +266,12 @@ describe("session pin reconciliation", () => {
       title: "Title from session.title_set",
       effectiveControl: { ...session.effectiveControl },
     } as Session;
-    const afterTitle = mergeSessionContextProjection(null, titleSetDetail);
+    const afterTitle = mergeSessionContextProjection(
+      null,
+      titleSetDetail,
+      new SessionChannelProjectionAuthority(),
+      "detail",
+    );
     const afterPin = applySessionPinProjection(afterTitle, {
       id: session.id,
       workspaceId: session.workspaceId,

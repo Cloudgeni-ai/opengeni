@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Session, SessionEvent } from "@opengeni/sdk";
 
-import { registerDom, renderHook, flush } from "./render-hook";
+import { registerDom, renderHook, flush, actRun } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { useSession } from "../src/hooks/use-session";
 
@@ -42,17 +42,45 @@ describe("useSession", () => {
       [] as SessionEvent[],
     );
     await flush();
+    expect(hook.result.current.readRevision).toBe(1);
 
     await hook.rerender([titleEvent("Renamed")]);
     await flush();
     const renamed = hook.result.current.session;
     expect(renamed?.title).toBe("Renamed");
+    expect(hook.result.current.readRevision).toBe(1);
 
     // The route/context bridge may re-render the hook after applying the
     // title. Reusing the projection prevents that render from retriggering its
     // session synchronization effect indefinitely.
     await hook.rerender([titleEvent("Renamed")]);
     expect(hook.result.current.session).toBe(renamed);
+    await hook.unmount();
+  });
+
+  test("increments its authoritative read revision only after a trailing fresh detail read", async () => {
+    const options: Array<{ fresh?: boolean } | undefined> = [];
+    let channelId = "channel-old";
+    const client = fakeClient({
+      getSession: async (_workspaceId, _sessionId, requestOptions) => {
+        options.push(requestOptions);
+        return { ...serverSession, channelId };
+      },
+    });
+    const hook = await renderHook(
+      () => useSession(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: [] }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.readRevision).toBe(1);
+    expect(options).toEqual([{ fresh: true }]);
+
+    channelId = "channel-new";
+    await actRun(async () => await hook.result.current.refresh());
+    expect(hook.result.current.readRevision).toBe(2);
+    expect(hook.result.current.session?.channelId).toBe("channel-new");
+    expect(options).toEqual([{ fresh: true }, { fresh: true }]);
     await hook.unmount();
   });
 });

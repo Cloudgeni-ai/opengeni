@@ -1,5 +1,5 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
 import {
   useMutationRunner,
@@ -18,6 +18,8 @@ export type UseSessionResult = {
   session: Session | null;
   loading: boolean;
   error: Error | null;
+  /** Monotonic revision of accepted authoritative detail reads. */
+  readRevision: number;
   refresh: () => Promise<void>;
   /** Manually rename the session (PATCH, source='user'). Returns the updated session, or null on failure. */
   updateTitle: (title: string) => Promise<Session | null>;
@@ -41,15 +43,16 @@ export function useSession(
     useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [override, setOverride] = useState<Session | null>(null);
+  const nextReadRevision = useRef(0);
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const load = useCallback(async () => {
     if (!sessionId) {
       return null;
     }
-    const fetched = await client.getSession(workspaceId, sessionId);
+    const fetched = await client.getSession(workspaceId, sessionId, { fresh: true });
     // A fresh server read supersedes any optimistic/event-driven override.
     setOverride(null);
-    return fetched;
+    return { session: fetched, revision: ++nextReadRevision.current };
   }, [client, workspaceId, sessionId]);
   const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
@@ -63,7 +66,8 @@ export function useSession(
     return registerSessionReconciler(sessionId, "session", refresh);
   }, [enabled, refresh, registerSessionReconciler, sessionId]);
 
-  const base = data ?? null;
+  const base = data?.session ?? null;
+  const readRevision = data?.revision ?? 0;
   // The override only ever carries title/titleSource patches; it is reset on
   // every fresh load so it can never go stale against the server snapshot.
   const session = useMemo(
@@ -118,6 +122,7 @@ export function useSession(
     session,
     loading,
     error,
+    readRevision,
     refresh,
     updateTitle,
     updating: mutating,

@@ -87,6 +87,7 @@ import {
   applySessionChannelMove,
   beginSessionChannelMove,
   commitSessionChannelMove,
+  readSessionChannelMovePoint,
   reconcileSessionChannelMovePointRead,
   reconcileSessionChannelMoves,
   rollbackSessionChannelMove,
@@ -406,6 +407,8 @@ export function SessionList() {
   const pendingSessionFocus = useRef<PendingSessionFocus | null>(null);
   const [focusRestoreRevision, setFocusRestoreRevision] = useState(0);
   const channelMoveProbes = useRef(new Map<string, string>());
+  const listChannelProjectionOwner = useRef({});
+  const moveChannelProjectionOwner = useRef({});
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
     pollIntervalMs: 30_000,
   });
@@ -421,6 +424,24 @@ export function SessionList() {
     }
     return [...source.values()];
   }, [extraSessions, loadedChildren, pinned, sessions]);
+  useLayoutEffect(() => {
+    const owner = listChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(owner, listedSessions);
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [context.sessionChannelProjectionAuthority, listedSessions]);
+  useLayoutEffect(() => {
+    const owner = moveChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      [...channelMoveOverrides].map(([id, override]) => ({
+        id,
+        workspaceId: rail.workspaceId,
+        channelId: override.channelId,
+      })),
+      1,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [channelMoveOverrides, context.sessionChannelProjectionAuthority, rail.workspaceId]);
   const serverSessions = useMemo(() => {
     const source = new Map(listedSessions.map((session) => [session.id, session]));
     // Search is intentionally flat. Normal navigation starts with real roots,
@@ -480,8 +501,7 @@ export function SessionList() {
       const key = `${override.operation}:${listed?.channelId ?? "absent"}`;
       if (channelMoveProbes.current.get(sessionId) === key) continue;
       channelMoveProbes.current.set(sessionId, key);
-      void sessionClient
-        .getSession(rail.workspaceId, sessionId)
+      void readSessionChannelMovePoint(sessionClient, rail.workspaceId, sessionId)
         .then((authoritative) => {
           if (channelMoveProbes.current.get(sessionId) !== key) return;
           setChannelMoveOverrides((current) =>

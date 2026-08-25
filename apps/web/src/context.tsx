@@ -65,6 +65,7 @@ import {
   applySessionPinProjection,
   notifySessionPinChanged,
   reconcileFailedSessionPin,
+  SessionChannelProjectionAuthority,
 } from "@/lib/session-pins";
 import {
   buildResources,
@@ -175,6 +176,8 @@ export type AppContextValue = {
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
   session: Session | null;
   setSession: Dispatch<SetStateAction<Session | null>>;
+  /** Browser-only ownership of list/point-read channel projections. */
+  sessionChannelProjectionAuthority: SessionChannelProjectionAuthority;
   /**
    * Exact successful create result carried across the index -> session route.
    * It keeps the accepted first prompt visible while the durable event tail
@@ -471,6 +474,9 @@ export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): s
 
 export function RootRouteComponent() {
   const [session, setSessionState] = useState<Session | null>(null);
+  const [sessionChannelProjectionAuthority] = useState(
+    () => new SessionChannelProjectionAuthority(),
+  );
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
@@ -1876,6 +1882,7 @@ export function RootRouteComponent() {
           setInspectorOpen,
           session,
           setSession,
+          sessionChannelProjectionAuthority,
           sessionCreationHandoff,
           connectionState,
           setConnectionState,
@@ -1994,6 +2001,7 @@ export function RootRouteComponent() {
     selectedRepoIds,
     selectedRepoRefs,
     session,
+    sessionChannelProjectionAuthority,
     sessionCreationHandoff,
     sessionEventFeedStore,
     setSession,

@@ -9,6 +9,61 @@ const SESSION_PIN_STORAGE_PREFIX = "opengeni.session-pins.changed";
 const outboundChannels = new Map<string, BroadcastChannel>();
 
 type SessionTreeStats = NonNullable<Session["treeStats"]>;
+type SessionChannelProjection = Pick<Session, "id" | "workspaceId" | "channelId">;
+
+function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspaceId">): string {
+  return `${projection.workspaceId}\u0000${projection.id}`;
+}
+
+/**
+ * Tracks exact list/point-read ownership of channel projections without
+ * putting browser-only provenance onto the public Session contract.
+ */
+export class SessionChannelProjectionAuthority {
+  private readonly projectionsByOwner = new Map<
+    object,
+    ReadonlyMap<string, { channelId: string | null; priority: number }>
+  >();
+
+  replace(owner: object, projections: readonly SessionChannelProjection[], priority = 0): void {
+    if (projections.length === 0) {
+      this.projectionsByOwner.delete(owner);
+      return;
+    }
+    this.projectionsByOwner.set(
+      owner,
+      new Map(
+        projections.map((projection) => [
+          sessionChannelProjectionKey(projection),
+          { channelId: projection.channelId ?? null, priority },
+        ]),
+      ),
+    );
+  }
+
+  clear(owner: object): void {
+    this.projectionsByOwner.delete(owner);
+  }
+
+  owns(projection: SessionChannelProjection | null): boolean {
+    if (!projection) return false;
+    const key = sessionChannelProjectionKey(projection);
+    const channelId = projection.channelId ?? null;
+    let highestPriority = Number.NEGATIVE_INFINITY;
+    let owned = false;
+    for (const projections of this.projectionsByOwner.values()) {
+      const candidate = projections.get(key);
+      if (!candidate || candidate.priority < highestPriority) continue;
+      if (candidate.priority > highestPriority) {
+        highestPriority = candidate.priority;
+        owned = candidate.channelId === channelId;
+      } else if (candidate.channelId === channelId) {
+        owned = true;
+      }
+    }
+    return owned;
+  }
+}
 
 type SessionPinChangeMessage = {
   type: "session-pin.changed";
@@ -116,12 +171,16 @@ export function applySessionChannelProjection(
 export function mergeSessionContextProjection(
   current: Session | null,
   projected: Session | null,
+  channelAuthority: SessionChannelProjectionAuthority,
+  source: "detail" | "live",
 ): Session | null {
   if (!projected) {
     return null;
   }
   const pinned = applySessionPinProjection(projected, current ?? projected) ?? projected;
-  return applySessionChannelProjection(pinned, current ?? projected) ?? pinned;
+  return source === "live" || channelAuthority.owns(current)
+    ? (applySessionChannelProjection(pinned, current ?? projected) ?? pinned)
+    : pinned;
 }
 
 /**

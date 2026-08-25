@@ -105,10 +105,19 @@ describe("session control surface architecture", () => {
 
   test("reconciles the open session project without regressing an owned optimistic move", async () => {
     const list = await source("components/rail/session-list.tsx");
+    const move = await source("lib/session-channel-move.ts");
+    const route = await source("routes/session.tsx");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
+    expect(list).toContain("readSessionChannelMovePoint(sessionClient");
+    expect(list).toContain("sessionChannelProjectionAuthority.replace(");
+    expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
     expect(list).toContain("reconcileSessionChannelMovePointRead(");
     expect(list).toContain("requestError.status === 404");
+    expect(move).toContain("getSession(workspaceId, sessionId, { fresh: true })");
+    expect(route).toContain("readRevision: sessionReadRevision");
+    expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "detail"');
+    expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "live"');
   });
 
   test("keeps the loaded creator picker identifiable and reachable", async () => {

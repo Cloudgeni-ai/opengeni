@@ -198,6 +198,7 @@ export function SessionRoute({
     session: fetchedSession,
     loading,
     error: loadError,
+    readRevision: sessionReadRevision,
     refresh: refreshSession,
   } = useSession(sessionId, { events });
   const creationHandoff =
@@ -297,9 +298,41 @@ export function SessionRoute({
     windowFocused: document.hasFocus(),
   }));
   const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
+  const reconciledSessionRead = useRef<{ sessionId: string; revision: number } | null>(null);
   useEffect(() => {
-    setContextSession((current) => mergeSessionContextProjection(current, session));
-  }, [session, setContextSession]);
+    if (!fetchedSession || sessionReadRevision === 0) return;
+    if (
+      reconciledSessionRead.current?.sessionId === sessionId &&
+      reconciledSessionRead.current.revision === sessionReadRevision
+    ) {
+      return;
+    }
+    reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
+    setContextSession((current) =>
+      mergeSessionContextProjection(
+        current,
+        fetchedSession,
+        context.sessionChannelProjectionAuthority,
+        "detail",
+      ),
+    );
+  }, [
+    context.sessionChannelProjectionAuthority,
+    fetchedSession,
+    sessionId,
+    sessionReadRevision,
+    setContextSession,
+  ]);
+  useEffect(() => {
+    setContextSession((current) =>
+      mergeSessionContextProjection(
+        current,
+        session,
+        context.sessionChannelProjectionAuthority,
+        "live",
+      ),
+    );
+  }, [context.sessionChannelProjectionAuthority, session, setContextSession]);
   useEffect(() => {
     const reconcileForeground = () => {
       setForeground({

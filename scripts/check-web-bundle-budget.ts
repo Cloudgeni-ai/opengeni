@@ -203,8 +203,14 @@ const budgets = {
   // above mandates, so this advances to 2122 KiB. Every other cap stays fixed.
   // It remains a stopgap; the real fix is to make the client
   // tree-shakeable, tracked separately.
-  directSessionRaw: 2122 * kib,
-  directSessionGzip: 593 * kib,
+  // Source-aware channel reconciliation adds the browser-only projection
+  // authority and fresh-read revision fence to the always-loaded rail/route
+  // graph. The exact Linux/x64 Bun 1.4 production build measures 2,173,204 raw
+  // / 607,228 gzip bytes. Advance only these aggregates: raw to the next
+  // whole-KiB envelope above one KiB of headroom, and gzip by one KiB instead
+  // of retaining a four-byte margin. Every other cap remains fixed.
+  directSessionRaw: 2124 * kib,
+  directSessionGzip: 594 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

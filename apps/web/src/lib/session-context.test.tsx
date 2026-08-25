@@ -4,7 +4,12 @@ import { createElement, useEffect, useState } from "react";
 import { registerDom, renderComponent } from "../../../../packages/react/test/render-hook";
 import type { Session } from "@/types";
 import { sameSessionForContext } from "./session-context";
-import { applySessionPinProjection, mergeSessionContextProjection } from "./session-pins";
+import {
+  applySessionPinProjection,
+  mergeSessionContextProjection,
+  SessionChannelProjectionAuthority,
+} from "./session-pins";
+import { beginSessionChannelMove, rollbackSessionChannelMove } from "./session-channel-move";
 
 registerDom();
 
@@ -74,11 +79,113 @@ describe("session context equality", () => {
       },
     } as Session;
 
-    const reconciled = mergeSessionContextProjection(pointReadAfterMove, liveRouteProjection);
+    const authority = new SessionChannelProjectionAuthority();
+    authority.replace({}, [pointReadAfterMove]);
+    const reconciled = mergeSessionContextProjection(
+      pointReadAfterMove,
+      liveRouteProjection,
+      authority,
+      "live",
+    );
 
     expect(reconciled?.channelId).toBe(pointReadAfterMove.channelId);
     expect(reconciled?.status).toBe("running");
     expect(reconciled?.effectiveControl).toEqual(liveRouteProjection.effectiveControl);
+  });
+
+  test("adopts a fresh detail project when no list or point-read projection owns it", () => {
+    const staleContext = {
+      ...session(false, 0),
+      channelId: "00000000-0000-4000-8000-000000000201",
+      status: "idle",
+    } as Session;
+    const freshDetail = {
+      ...staleContext,
+      channelId: "00000000-0000-4000-8000-000000000202",
+      status: "running",
+    } as Session;
+
+    const reconciled = mergeSessionContextProjection(
+      staleContext,
+      freshDetail,
+      new SessionChannelProjectionAuthority(),
+      "detail",
+    );
+
+    expect(reconciled).toBe(freshDetail);
+    expect(reconciled?.channelId).toBe(freshDetail.channelId);
+  });
+
+  test("keeps a loaded list project over a conflicting detail read", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const listProjection = {
+      ...session(false, 0),
+      channelId: "00000000-0000-4000-8000-000000000202",
+      status: "idle",
+    } as Session;
+    const freshDetail = {
+      ...listProjection,
+      channelId: "00000000-0000-4000-8000-000000000203",
+      status: "running",
+    } as Session;
+    authority.replace({}, [listProjection]);
+
+    const reconciled = mergeSessionContextProjection(
+      listProjection,
+      freshDetail,
+      authority,
+      "detail",
+    );
+
+    expect(reconciled?.channelId).toBe(listProjection.channelId);
+    expect(reconciled?.status).toBe("running");
+  });
+
+  test("releases a rolled-back move fence so detail can restore the prior project", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const owner = {};
+    const optimistic = {
+      ...session(false, 0),
+      channelId: "00000000-0000-4000-8000-000000000202",
+    } as Session;
+    const staleRoute = {
+      ...optimistic,
+      channelId: "00000000-0000-4000-8000-000000000201",
+      status: "running",
+    } as Session;
+    let overrides = beginSessionChannelMove(
+      new Map(),
+      optimistic.id,
+      optimistic.channelId ?? null,
+      1,
+    );
+    authority.replace(
+      owner,
+      [...overrides].map(([id, override]) => ({
+        id,
+        workspaceId: optimistic.workspaceId,
+        channelId: override.channelId,
+      })),
+      1,
+    );
+
+    expect(
+      mergeSessionContextProjection(optimistic, staleRoute, authority, "live")?.channelId,
+    ).toBe(optimistic.channelId);
+
+    overrides = rollbackSessionChannelMove(overrides, optimistic.id, 1);
+    authority.replace(
+      owner,
+      [...overrides].map(([id, override]) => ({
+        id,
+        workspaceId: optimistic.workspaceId,
+        channelId: override.channelId,
+      })),
+      1,
+    );
+    expect(
+      mergeSessionContextProjection(optimistic, staleRoute, authority, "detail")?.channelId,
+    ).toBe(staleRoute.channelId);
   });
 
   test("bounds route and rail reconciliation after an optimistic pin", async () => {
@@ -96,7 +203,12 @@ describe("session context equality", () => {
         writes += 1;
         const routeProjection = { ...staleDetail, effectiveControl: { ...effectiveControl } };
         setCurrent((previous) => {
-          const next = mergeSessionContextProjection(previous, routeProjection);
+          const next = mergeSessionContextProjection(
+            previous,
+            routeProjection,
+            new SessionChannelProjectionAuthority(),
+            "live",
+          );
           return !next || sameSessionForContext(previous, next) ? previous : next;
         });
       }, [current]);

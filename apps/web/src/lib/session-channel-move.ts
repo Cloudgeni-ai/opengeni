@@ -1,5 +1,13 @@
 import type { Session } from "@/types";
 
+type SessionChannelPointReadClient = {
+  getSession: (
+    workspaceId: string,
+    sessionId: string,
+    options?: { fresh?: boolean },
+  ) => Promise<Session>;
+};
+
 export type SessionChannelMoveOverride = Readonly<{
   channelId: string | null;
   operation: number;
@@ -7,6 +15,15 @@ export type SessionChannelMoveOverride = Readonly<{
 }>;
 
 export type SessionChannelMoveOverrides = ReadonlyMap<string, SessionChannelMoveOverride>;
+
+/** Queue a trailing detail read behind any pre-write single-flight request. */
+export function readSessionChannelMovePoint(
+  client: SessionChannelPointReadClient,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Session> {
+  return client.getSession(workspaceId, sessionId, { fresh: true });
+}
 
 /** Project one in-flight or committed move over a possibly stale list row. */
 export function applySessionChannelMove(
