@@ -5,6 +5,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   addSessionSystemUpdateWithSourceMutation,
   appendSessionEvents,
@@ -24,8 +25,12 @@ import {
   type DbClient,
 } from "../src/index";
 
-const migrationUrl = new URL(
+const fenceMigrationUrl = new URL(
   "../drizzle/0344_automatic_session_title_policy_fence.sql",
+  import.meta.url,
+);
+const quarantineMigrationUrl = new URL(
+  "../drizzle/0345_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
 
@@ -42,6 +47,27 @@ afterAll(async () => {
   await client?.close().catch(() => undefined);
   await shared?.release();
 });
+
+async function quarantineStatement(batchSize = 500): Promise<string> {
+  const source = await readFile(quarantineMigrationUrl, "utf8");
+  const statement = source
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .slice(2)
+    .filter((line) => !line.trim().startsWith("--"))
+    .join("\n")
+    .trim();
+  return batchSize === 500 ? statement : statement.replace("LIMIT 500", `LIMIT ${batchSize}`);
+}
+
+async function drainQuarantine(database: SharedTestDatabase, statement: string): Promise<number> {
+  let quarantined = 0;
+  for (;;) {
+    const rows = await database.admin.unsafe(statement);
+    quarantined += rows.length;
+    if (rows.length === 0) return quarantined;
+  }
+}
 
 async function addAcceptedScheduledOccurrence(input: {
   accountId: string;
@@ -182,28 +208,44 @@ async function addAcceptedScheduledOccurrence(input: {
   );
 }
 
-describe("migration 0344 automatic session title policy fence", () => {
-  test("is a rolling legacy-safe fence with quarantine and INSERT safety", async () => {
-    const source = await readFile(migrationUrl, "utf8");
-    expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
-    expect(source).toContain("LOCK TABLE sessions IN SHARE ROW EXCLUSIVE MODE");
-    expect(source).toContain("ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY");
-    expect(source).toContain("WHERE title_source IS DISTINCT FROM 'user'");
-    expect(source).toContain("ALTER TABLE sessions FORCE ROW LEVEL SECURITY");
-    expect(source).toContain("opengeni.automatic_session_title_v1_candidate");
-    expect(source).toContain("candidate IS DISTINCT FROM NEW.title");
-    expect(source).toContain("NEW.title IS DISTINCT FROM 'New conversation'");
-    expect(source).toContain("TG_OP = 'INSERT'");
-    expect(source).toContain("NEW.title := OLD.title");
-    expect(source).toContain("NEW.title_source := OLD.title_source");
-    expect(source).toContain("BEFORE INSERT OR UPDATE OF title, title_source");
-    expect(source).toContain("ON sessions");
-    expect(source).not.toContain("public.sessions");
-    expect(source).not.toContain("RAISE EXCEPTION");
-    expect(source).toContain(
+describe("migrations 0344-0345 automatic session title policy fence", () => {
+  test("use a short rolling fence followed by a bounded resumable quarantine", async () => {
+    const fence = await readFile(fenceMigrationUrl, "utf8");
+    const quarantine = await readFile(quarantineMigrationUrl, "utf8");
+    expect(fence.startsWith("-- deployment-mode: rolling\n")).toBe(true);
+    expect(fence).not.toContain("LOCK TABLE sessions");
+    expect(fence).not.toContain("ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY");
+    expect(fence).not.toContain("ALTER TABLE sessions FORCE ROW LEVEL SECURITY");
+    expect(fence).not.toMatch(/\bUPDATE sessions\b/i);
+    expect(fence).toContain("sessions_automatic_title_quarantine_v1");
+    expect(fence).toContain("pg_catalog.pg_get_userbyid(relation.relowner)");
+    expect(fence).toContain("opengeni.automatic_session_title_quarantine_v1");
+    expect(fence).toContain("opengeni.automatic_session_title_v1_candidate");
+    expect(fence).toContain("candidate IS DISTINCT FROM NEW.title");
+    expect(fence).toContain("NEW.title IS DISTINCT FROM 'New conversation'");
+    expect(fence).toContain("TG_OP = 'INSERT'");
+    expect(fence).toContain("NEW.title := OLD.title");
+    expect(fence).toContain("NEW.title_source := OLD.title_source");
+    expect(fence).toContain("BEFORE INSERT OR UPDATE OF title, title_source");
+    expect(fence).toContain("ON sessions");
+    expect(fence).not.toContain("public.sessions");
+    expect(fence).not.toContain("RAISE EXCEPTION");
+    expect(fence).toContain(
       "REVOKE ALL ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()",
     );
-    expect(source).toContain("FROM PUBLIC");
+    expect(fence).toContain("FROM PUBLIC");
+
+    expect(
+      quarantine.startsWith(
+        "-- deployment-mode: rolling\n-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s\n",
+      ),
+    ).toBe(true);
+    expect(quarantine).toContain("LIMIT 500");
+    expect(quarantine).toContain("FOR UPDATE OF session");
+    expect(quarantine).toContain("RETURNING session.id");
+    expect(quarantine).not.toContain("SKIP LOCKED");
+    expect(quarantine).not.toContain("ALTER TABLE");
+    expect(quarantine).not.toContain("LOCK TABLE");
   });
 
   test("quarantines legacy automatic titles while preserving user-edited titles", async () => {
@@ -259,7 +301,7 @@ describe("migration 0344 automatic session title policy fence", () => {
       await database.admin`alter table sessions enable trigger sessions_automatic_title_policy_v1_fence`;
     }
 
-    await database.admin.unsafe(await readFile(migrationUrl, "utf8"));
+    expect(await drainQuarantine(database, await quarantineStatement())).toBe(1);
     expect(await getSession(client.db, grant.workspaceId!, legacy.id)).toMatchObject({
       title: "New conversation",
       titleSource: "agent",
@@ -267,6 +309,150 @@ describe("migration 0344 automatic session title policy fence", () => {
     expect(await getSession(client.db, grant.workspaceId!, human.id)).toMatchObject({
       title: "Human incident review",
       titleSource: "user",
+    });
+  }, 180_000);
+
+  test("commits bounded progress, rolls back a failed batch, and resumes safely", async () => {
+    const database = shared;
+    if (!database) return;
+
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `title-quarantine-rollback-account-${suffix}`,
+      accountName: "Title quarantine rollback",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `title-quarantine-rollback-workspace-${suffix}`,
+      workspaceName: "Title quarantine rollback",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const sessions = await Promise.all(
+      Array.from({ length: 3 }, (_, index) =>
+        createSession(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          initialMessage: `legacy automatic title ${index}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        }),
+      ),
+    );
+    const ids = sessions.map((session) => session.id);
+    await database.admin`alter table sessions disable trigger sessions_automatic_title_policy_v1_fence`;
+    try {
+      await database.admin`
+        update sessions
+        set title = 'CLIENT_SECRET=secretword', title_source = 'agent'
+        where id = any(${ids}::uuid[])
+      `;
+    } finally {
+      await database.admin`alter table sessions enable trigger sessions_automatic_title_policy_v1_fence`;
+    }
+
+    const oneRowBatch = await quarantineStatement(1);
+    expect((await database.admin.unsafe(oneRowBatch)).length).toBe(1);
+    const safeAfterFirst = await database.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from sessions
+      where id = any(${ids}::uuid[])
+        and title = 'New conversation'
+        and title_source = 'agent'
+    `;
+    expect(safeAfterFirst[0]?.count).toBe(1);
+
+    const failingBatch = oneRowBatch.replace(
+      "SET title = 'New conversation', title_source = 'agent'",
+      "SET title = 'New conversation', title_source = 'invalid'",
+    );
+    await expect(database.admin.unsafe(failingBatch)).rejects.toThrow();
+    const safeAfterFailure = await database.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from sessions
+      where id = any(${ids}::uuid[])
+        and title = 'New conversation'
+        and title_source = 'agent'
+    `;
+    expect(safeAfterFailure[0]?.count).toBe(1);
+
+    expect(await drainQuarantine(database, oneRowBatch)).toBe(2);
+    const remaining = await database.admin<Array<{ count: number }>>`
+      select count(*)::int as count
+      from sessions
+      where id = any(${ids}::uuid[])
+        and (title <> 'New conversation' or title_source <> 'agent')
+    `;
+    expect(remaining[0]?.count).toBe(0);
+  }, 180_000);
+
+  test("quarantine batches do not wait for concurrent readers", async () => {
+    const database = shared;
+    if (!database) return;
+
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `title-quarantine-reader-account-${suffix}`,
+      accountName: "Title quarantine reader",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `title-quarantine-reader-workspace-${suffix}`,
+      workspaceName: "Title quarantine reader",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "legacy reader title",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await database.admin`alter table sessions disable trigger sessions_automatic_title_policy_v1_fence`;
+    try {
+      await database.admin`
+        update sessions
+        set title = 'GITHUB_TOKEN=sesame', title_source = 'agent'
+        where id = ${session.id}
+      `;
+    } finally {
+      await database.admin`alter table sessions enable trigger sessions_automatic_title_policy_v1_fence`;
+    }
+
+    const reader = postgres(database.adminUrl, { max: 1, prepare: false });
+    const writer = postgres(database.adminUrl, { max: 1, prepare: false });
+    let readerReady!: () => void;
+    let releaseReader!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      readerReady = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseReader = resolve;
+    });
+    const heldReader = reader.begin(async (transaction) => {
+      await transaction`select title from sessions where id = ${session.id}`;
+      readerReady();
+      await release;
+    });
+    await ready;
+    try {
+      await writer`select set_config('statement_timeout', '2s', false)`;
+      expect((await writer.unsafe(await quarantineStatement())).length).toBeGreaterThan(0);
+    } finally {
+      releaseReader();
+      await heldReader;
+      await Promise.all([reader.end(), writer.end()]);
+    }
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      title: "New conversation",
+      titleSource: "agent",
     });
   }, 180_000);
 

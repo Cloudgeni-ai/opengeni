@@ -1,32 +1,44 @@
 -- deployment-mode: rolling
--- Automatic session titles are normalized in application code. A bounded table
--- lock closes the quarantine/trigger-install race while old binaries remain
--- connected. Unfenced old UPDATE writers are converted to a no-op rather than
--- raising, so a pre-policy scheduler still reaches scheduled-occurrence delivery.
--- Unfenced old create/fork/clone INSERTs receive the neutral fallback.
+-- Automatic session titles are normalized in application code. Trigger DDL is
+-- committed before the separately batched quarantine starts, so no heavyweight
+-- table lock is held across a row scan. Unfenced old UPDATE writers are converted
+-- to a no-op rather than raising, so a pre-policy scheduler still reaches
+-- scheduled-occurrence delivery. Unfenced old create/fork/clone INSERTs receive
+-- the neutral fallback.
 
 SET LOCAL lock_timeout = '5s';
 
-LOCK TABLE sessions IN SHARE ROW EXCLUSIVE MODE;
-
 DROP TRIGGER IF EXISTS sessions_automatic_title_policy_v1_fence ON sessions;
 
--- Existing non-user titles predate the normalization policy and have no durable
--- proof that they are safe. Preserve explicit human edits and quarantine every
--- automatic/unversioned row before the trigger boundary becomes active.
--- The migration owner has no BYPASSRLS, so temporarily relax FORCE RLS for the
--- owner only; application roles remain policy-bound throughout the transaction.
-ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
-
-UPDATE sessions
-SET title = 'New conversation', title_source = 'agent'
-WHERE title_source IS DISTINCT FROM 'user'
-  AND (
-    title IS DISTINCT FROM 'New conversation'
-    OR title_source IS DISTINCT FROM 'agent'
-  );
-
-ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+-- FORCE RLS also binds the non-superuser table owner used by production
+-- migrations. This persistent policy opens only an exact owner + transaction-
+-- local capability seam; ordinary application roles cannot activate it. The
+-- following migration uses that seam in one bounded statement per transaction.
+DROP POLICY IF EXISTS sessions_automatic_title_quarantine_v1 ON sessions;
+CREATE POLICY sessions_automatic_title_quarantine_v1 ON sessions
+FOR ALL
+USING (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'sessions'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.automatic_session_title_quarantine_v1',
+    true
+  ) = '1'
+)
+WITH CHECK (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'sessions'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.automatic_session_title_quarantine_v1',
+    true
+  ) = '1'
+);
 
 CREATE OR REPLACE FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()
 RETURNS trigger

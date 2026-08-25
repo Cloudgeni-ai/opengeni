@@ -29,11 +29,46 @@ const KNOWN_SENSITIVE_VALUE_PATTERNS = [
   /[?&](?:access_token|api_key|apikey|password|secret|token)=[^\s&#]+/iu,
 ] as const;
 
-const SECRET_ASSIGNMENT_PATTERN =
-  /\b(?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|credential|password|passwd|private[_ -]?key|secret|token)\b\s*=\s*[^\s,;]+/iu;
+const SECRET_ASSIGNMENT_CANDIDATE_PATTERN =
+  /(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9_.-]*)\s*[=:]\s*[^\s,;]+/gu;
 
-const SECRET_COLON_PATTERN =
-  /\b(?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|credential|password|passwd|private[_ -]?key|secret|token)\b\s*:\s*[^\s,;]+/iu;
+const SECRET_LABEL_ASSIGNMENT_PATTERN =
+  /\b(?:api[ _-]?key|access[ _-]?token|auth[ _-]?token|credential|credentials|password|passwd|private[ _-]?key|secret|token)\b\s*[=:]\s*[^\s,;]+/iu;
+
+const SENSITIVE_ASSIGNMENT_KEY_SUFFIXES = new Set([
+  "credential",
+  "credentials",
+  "password",
+  "passwd",
+  "secret",
+  "token",
+]);
+
+function containsSensitiveAssignment(value: string): boolean {
+  for (const match of value.matchAll(SECRET_ASSIGNMENT_CANDIDATE_PATTERN)) {
+    const key = match[1];
+    if (!key) continue;
+    const words = key
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean);
+    const last = words.at(-1);
+    if (last && SENSITIVE_ASSIGNMENT_KEY_SUFFIXES.has(last)) return true;
+
+    const suffix = words.slice(-2).join(" ");
+    if (
+      suffix === "api key" ||
+      suffix === "access token" ||
+      suffix === "auth token" ||
+      suffix === "private key"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 const OPAQUE_IDENTIFIER_PATTERN =
   /\b(?=[A-Za-z0-9_-]{32,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b/u;
@@ -60,8 +95,8 @@ function containsSensitiveAutomaticTitleValue(value: string): boolean {
   const detectionValue = value.normalize("NFKC").replace(DEFAULT_IGNORABLE_CODE_POINTS, "");
 
   if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(detectionValue))) return true;
-  if (SECRET_ASSIGNMENT_PATTERN.test(detectionValue)) return true;
-  if (SECRET_COLON_PATTERN.test(detectionValue)) return true;
+  if (SECRET_LABEL_ASSIGNMENT_PATTERN.test(detectionValue)) return true;
+  if (containsSensitiveAssignment(detectionValue)) return true;
   if (OPAQUE_IDENTIFIER_PATTERN.test(detectionValue)) return true;
   return false;
 }

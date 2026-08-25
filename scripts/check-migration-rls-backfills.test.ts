@@ -178,6 +178,106 @@ UPDATE "widgets" SET "origin_workspace_id" = "workspace_id";
     expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(0);
   });
 
+  test("accepts a transaction-local capability pinned to the exact table owner", () => {
+    const directory = fixture({
+      "0001_base.sql": FORCED_TABLE,
+      "0002_capability.sql": `
+CREATE POLICY widgets_owner_repair ON widgets
+FOR ALL
+USING (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'widgets'::regclass
+  )
+  AND pg_catalog.current_setting('opengeni.widgets_owner_repair', true) = '1'
+)
+WITH CHECK (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'widgets'::regclass
+  )
+  AND pg_catalog.current_setting('opengeni.widgets_owner_repair', true) = '1'
+);
+`,
+      "0003_backfill.sql": `
+WITH capability AS MATERIALIZED (
+  SELECT set_config('opengeni.widgets_owner_repair', '1', true) AS enabled
+)
+UPDATE widgets
+SET origin_workspace_id = workspace_id
+FROM capability
+WHERE capability.enabled = '1';
+`,
+    });
+    expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(0);
+  });
+
+  test("does not trust a custom capability without an exact owner-pinned policy", () => {
+    const directory = fixture({
+      "0001_base.sql": FORCED_TABLE,
+      "0002_backfill.sql": `
+WITH capability AS MATERIALIZED (
+  SELECT set_config('opengeni.widgets_owner_repair', '1', true) AS enabled
+)
+UPDATE widgets
+SET origin_workspace_id = workspace_id
+FROM capability
+WHERE capability.enabled = '1';
+`,
+    });
+    expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(1);
+  });
+
+  test("does not trust a capability policy that is not pinned to the table owner", () => {
+    const directory = fixture({
+      "0001_base.sql": FORCED_TABLE,
+      "0002_capability.sql": `
+CREATE POLICY widgets_repair ON widgets
+USING (pg_catalog.current_setting('opengeni.widgets_owner_repair', true) = '1');
+`,
+      "0003_backfill.sql": `
+WITH capability AS MATERIALIZED (
+  SELECT set_config('opengeni.widgets_owner_repair', '1', true) AS enabled
+)
+UPDATE widgets
+SET origin_workspace_id = workspace_id
+FROM capability
+WHERE capability.enabled = '1';
+`,
+    });
+    expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(1);
+  });
+
+  test("does not trust a read-only owner capability for a write backfill", () => {
+    const directory = fixture({
+      "0001_base.sql": FORCED_TABLE,
+      "0002_capability.sql": `
+CREATE POLICY widgets_owner_read ON widgets
+FOR SELECT
+USING (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'widgets'::regclass
+  )
+  AND pg_catalog.current_setting('opengeni.widgets_owner_repair', true) = '1'
+);
+`,
+      "0003_backfill.sql": `
+WITH capability AS MATERIALIZED (
+  SELECT set_config('opengeni.widgets_owner_repair', '1', true) AS enabled
+)
+UPDATE widgets
+SET origin_workspace_id = workspace_id
+FROM capability
+WHERE capability.enabled = '1';
+`,
+    });
+    expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(1);
+  });
+
   test("ignores a table that only ENABLEd RLS without FORCE", () => {
     const directory = fixture({
       "0001_base.sql": `CREATE TABLE "widgets" ("id" uuid);\nALTER TABLE "widgets" ENABLE ROW LEVEL SECURITY;`,

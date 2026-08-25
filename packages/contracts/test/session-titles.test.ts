@@ -47,6 +47,15 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("Token：sesame")).toBeNull();
   });
 
+  test("rejects sensitive suffixes in snake-case, camel-case, and dotted assignment keys", () => {
+    expect(normalizeAutomaticSessionTitle("DATABASE_PASSWORD=swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("CLIENT_SECRET=secretword")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("GITHUB_TOKEN=sesame")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("oauth.clientSecret: swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("prod.private_key=secretword")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Title: DATABASE_PASSWORD=swordfish")).toBeNull();
+  });
+
   test("does not reject benign discussion of secret-management concepts", () => {
     expect(normalizeAutomaticSessionTitle("Password reset flow")).toBe("Password reset flow");
     expect(normalizeAutomaticSessionTitle("API key rotation policy")).toBe(
@@ -54,6 +63,12 @@ describe("automatic session titles", () => {
     );
     expect(normalizeAutomaticSessionTitle("Secret management rollout")).toBe(
       "Secret management rollout",
+    );
+    expect(normalizeAutomaticSessionTitle("Database password migration")).toBe(
+      "Database password migration",
+    );
+    expect(normalizeAutomaticSessionTitle("Secret sauce: recipe review")).toBe(
+      "Secret sauce: recipe review",
     );
   });
 

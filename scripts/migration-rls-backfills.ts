@@ -11,7 +11,7 @@
  * `INSERT ... SELECT` / `DO $$ ... $$` backfill loop touches ZERO rows and
  * reports success.
  *
- * The house mitigation is the owner-only posture window already used by
+ * One mitigation is the owner-only posture window already used by
  * `0009_goal_sessions_first_party_goals_manage.sql` and
  * `0120_durable_goal_wake.sql`:
  *
@@ -24,7 +24,8 @@
  * failure rolls back the posture change with the data repair.
  *
  * Alternatives this analyzer also accepts: setting the tenant GUC around the
- * statement, or disabling RLS on the table for the window.
+ * statement, disabling RLS on the table for the window, or activating a policy
+ * that is pinned to the exact table owner and a transaction-local capability.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -293,6 +294,56 @@ const DDL_ONLY =
 const NON_DML =
   /^(DROP|ALTER|GRANT|REVOKE|COMMENT|SET|RESET|LOCK|ANALYZE|VACUUM|REASSIGN|SECURITY)\b/i;
 
+type OwnerCapabilityPolicy = { guc: string; table: string };
+
+function ownerCapabilityPolicy(statement: string): OwnerCapabilityPolicy | null {
+  const target =
+    /^CREATE\s+POLICY\s+(?:"[^"]+"|[a-z0-9_]+)\s+ON\s+(?:(?:"[^"]+"|[a-z0-9_]+)\.)?"?([a-z0-9_]+)"?/i.exec(
+      statement.trim(),
+    );
+  const guc = /current_setting\s*\(\s*'opengeni\.([a-z0-9_]+)'\s*,\s*true\s*\)/i.exec(statement);
+  if (
+    !target ||
+    !guc ||
+    !/\bFOR\s+ALL\b/i.test(statement) ||
+    !/\bWITH\s+CHECK\b/i.test(statement)
+  ) {
+    return null;
+  }
+
+  const table = target[1]!;
+  const exactOwner = new RegExp(
+    String.raw`current_user\s*=\s*\(\s*SELECT\s+pg_catalog\.pg_get_userbyid\s*\(\s*[a-z0-9_]+\.relowner\s*\)\s+FROM\s+pg_catalog\.pg_class\s+[a-z0-9_]+\s+WHERE\s+[a-z0-9_]+\.oid\s*=\s*'${table}'::regclass\s*\)`,
+    "gi",
+  );
+  const exactOwnerChecks = statement.match(exactOwner)?.length ?? 0;
+  const capabilityChecks = statement.match(
+    new RegExp(
+      String.raw`current_setting\s*\(\s*'opengeni\.${guc[1]}'\s*,\s*true\s*\)\s*=\s*'1'`,
+      "gi",
+    ),
+  )?.length;
+  if (exactOwnerChecks < 2 || (capabilityChecks ?? 0) < 2) return null;
+  return { guc: guc[1]!, table };
+}
+
+function activatedOwnerCapabilityTables(
+  statement: string,
+  policies: ReadonlyMap<string, OwnerCapabilityPolicy>,
+): Set<string> {
+  const activeGucs = new Set<string>();
+  for (const match of statement.matchAll(
+    /set_config\s*\(\s*'opengeni\.([a-z0-9_]+)'\s*,\s*'1'\s*,\s*true\s*\)/gi,
+  )) {
+    activeGucs.add(match[1]!);
+  }
+  return new Set(
+    [...policies.values()]
+      .filter((policy) => activeGucs.has(policy.guc))
+      .map((policy) => policy.table),
+  );
+}
+
 /**
  * Walk the whole ordered migration ledger, tracking which tables have RLS
  * enabled + forced at each point, and report top-level writes that would match
@@ -305,6 +356,7 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
 
   const forced = new Set<string>();
   const enabled = new Set<string>();
+  const ownerCapabilityPolicies = new Map<string, OwnerCapabilityPolicy>();
   const findings: BackfillFinding[] = [];
 
   for (const file of files) {
@@ -319,6 +371,18 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       statementNumber += 1;
       const statement = stripComments(rawStatement);
       const head = statement.trim().replace(/\s+/g, " ");
+
+      const createdPolicy = ownerCapabilityPolicy(statement);
+      if (createdPolicy) {
+        const policyName =
+          /^CREATE\s+POLICY\s+(?:"([^"]+)"|([a-z0-9_]+))/i.exec(head)?.slice(1).find(Boolean) ?? "";
+        ownerCapabilityPolicies.set(policyName.toLowerCase(), createdPolicy);
+      }
+      const droppedPolicy =
+        /^DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|([a-z0-9_]+))\s+ON\b/i.exec(head);
+      if (droppedPolicy) {
+        ownerCapabilityPolicies.delete((droppedPolicy[1] ?? droppedPolicy[2]!).toLowerCase());
+      }
 
       // A DDL statement that merely *defines* a routine whose body mentions
       // set_config must not latch this: the GUC is set when that routine is
@@ -389,10 +453,12 @@ export function analyzeMigrationRlsBackfills(migrationsDir: string): BackfillFin
       if (tenantGuc) continue;
 
       const executable = isBlock ? stripRoutineBodies(statement) : statement;
+      const ownerVisible = activatedOwnerCapabilityTables(executable, ownerCapabilityPolicies);
       const opaque = [...forced].filter(
         (table) =>
           enabled.has(table) &&
           !unforced.has(table) &&
+          !ownerVisible.has(table) &&
           // A DO block that relaxes the posture itself is protected.
           !new RegExp(
             String.raw`ALTER TABLE\s+${TABLE_REF(table)}\s+(NO FORCE|DISABLE) ROW LEVEL SECURITY`,
