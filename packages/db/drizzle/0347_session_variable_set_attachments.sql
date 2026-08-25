@@ -75,6 +75,19 @@ ALTER TABLE sessions
   ADD COLUMN variable_set_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
 
 ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+DO $session_variable_set_backfill_workspace_fences$
+DECLARE
+  workspace_id_value uuid;
+BEGIN
+  FOR workspace_id_value IN
+    SELECT DISTINCT session_value.workspace_id
+    FROM sessions session_value
+    ORDER BY session_value.workspace_id
+  LOOP
+    PERFORM acquire_session_tenancy_fence(workspace_id_value);
+  END LOOP;
+END
+$session_variable_set_backfill_workspace_fences$;
 UPDATE sessions
 SET variable_set_ids = CASE
   WHEN variable_set_id IS NULL THEN '[]'::jsonb

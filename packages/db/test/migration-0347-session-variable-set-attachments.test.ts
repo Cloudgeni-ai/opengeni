@@ -8,6 +8,12 @@ describe("migration 0347 ordered session Variable Set attachments", () => {
 
     expect(source).toStartWith("-- deployment-mode: maintenance");
     expect(source).toContain("ADD COLUMN variable_set_ids jsonb NOT NULL DEFAULT '[]'::jsonb");
+    const backfillFence = source.indexOf(
+      "PERFORM acquire_session_tenancy_fence(workspace_id_value);",
+    );
+    const backfill = source.indexOf("UPDATE sessions\nSET variable_set_ids = CASE");
+    expect(backfillFence).toBeGreaterThanOrEqual(0);
+    expect(backfill).toBeGreaterThan(backfillFence);
     expect(source).toContain("CREATE TABLE session_variable_set_attachments");
     expect(source).toContain("CHECK (position >= 0 AND position < 25)");
     expect(source).toContain("session_status text NOT NULL");
