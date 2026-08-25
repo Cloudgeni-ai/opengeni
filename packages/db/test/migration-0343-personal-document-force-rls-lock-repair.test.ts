@@ -148,6 +148,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     const prepare = async () =>
       await runtimeOwner.begin(async (tx) => {
         await tx`select
+          set_config('opengeni.session_variable_set_attachments_v1', '1', true),
           set_config('opengeni.account_id', ${accountId}, true),
           set_config('opengeni.workspace_id', ${sharedWorkspaceId}, true),
           set_config('opengeni.subject_id', ${subjectId}, true)`;
