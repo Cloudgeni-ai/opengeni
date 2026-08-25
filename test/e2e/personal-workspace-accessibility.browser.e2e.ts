@@ -191,6 +191,11 @@ describe("Personal workspace accessibility in Chromium", () => {
     expect(await inactive.getByRole("radio").count()).toBe(0);
     expect((await inactive.textContent()) ?? "").toBe("");
 
+    const disabled = page.locator("#disabled-session-visibility-picker");
+    expect(await disabled.getByRole("radio", { name: /Workspace/ }).isDisabled()).toBe(true);
+    expect(await disabled.getByRole("radio", { name: /Only me/ }).isDisabled()).toBe(true);
+    expect(await disabled.textContent()).toContain("Only you can open this session.");
+
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
