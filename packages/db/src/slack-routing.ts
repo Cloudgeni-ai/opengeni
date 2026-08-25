@@ -24,7 +24,7 @@
 import { and, eq, sql } from "drizzle-orm";
 
 import { rawRows, withRlsContext, type Database } from "./database";
-import { personalWorkspaceIdForSubject } from "./slack-routing-personal-workspace";
+import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
 import * as schema from "./schema";
 import { workspaceMembershipPermissionsAllowSlackLink } from "./slack-user-link-access";
 
@@ -139,7 +139,7 @@ function mapUserDmRoute(row: typeof schema.slackUserDmRoutes.$inferSelect): Slac
  */
 export async function probeSlackInteractionTenancy(
   db: Database,
-  input: { connectionId: string; routeKey: string },
+  input: { accountId: string; connectionId: string; routeKey: string },
 ): Promise<SlackInteractionTenancy | null> {
   const rows = await rawRows<{
     account_id: string;
@@ -149,6 +149,7 @@ export async function probeSlackInteractionTenancy(
     db,
     sql`select account_id, workspace_id, interaction_id
       from opengeni_private.resolve_slack_interaction_tenancy(
+        ${input.accountId}::uuid,
         ${input.connectionId}::uuid,
         ${input.routeKey}
       )`,
@@ -174,12 +175,13 @@ export async function probeSlackInteractionTenancy(
  */
 export async function probeSlackActionHandleTenancy(
   db: Database,
-  input: { connectionId: string; handleId: string },
+  input: { accountId: string; connectionId: string; handleId: string },
 ): Promise<SlackRouteHome | null> {
   const rows = await rawRows<{ account_id: string; workspace_id: string }>(
     db,
     sql`select account_id, workspace_id
       from opengeni_private.resolve_slack_action_handle_tenancy(
+        ${input.accountId}::uuid,
         ${input.connectionId}::uuid,
         ${input.handleId}::uuid
       )`,
@@ -390,8 +392,14 @@ export async function deleteSlackUserDmRoute(
  *
  * Ordered stably by label then workspace id, with plain code-unit comparison so
  * two hosts with different ICU data cannot render a picker differently.
+ *
+ * ORACLE, NOT AN AUTHORIZATION. This answers "what could this named subject use"
+ * for whatever subject it is handed; it does not establish that the caller IS
+ * that subject. Pass only a subject authenticated out of band - for Slack, one
+ * named by a durable `slack_bot_user_links` row. Never pass a subject taken
+ * from a request payload.
  */
-export async function listSlackRoutableWorkspacesForSubject(
+export async function listNamedSubjectSlackRoutableWorkspaces(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<SlackRoutableWorkspace[]> {
@@ -422,7 +430,7 @@ export async function listSlackRoutableWorkspacesForSubject(
     });
   }
 
-  const personalWorkspaceId = await personalWorkspaceIdForSubject(db, input);
+  const personalWorkspaceId = await namedSubjectPersonalWorkspaceId(db, input);
   if (personalWorkspaceId) {
     const [row] = await db
       .select({

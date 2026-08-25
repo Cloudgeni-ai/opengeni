@@ -19,8 +19,14 @@ import { rlsSubjectIdOrEmpty } from "./workspace-authority";
  * local principals) can never own an organization membership, so they
  * short-circuit rather than tripping `list_self_organization_memberships`'
  * `42501` guard.
+ *
+ * ORACLE, NOT AN AUTHORIZATION. This answers "which workspace is this named
+ * subject's own" for whatever subject it is handed; it does not establish that
+ * the caller IS that subject. Pass only a subject authenticated out of band -
+ * for Slack, one named by a durable `slack_bot_user_links` row. Never pass a
+ * subject taken from a request payload.
  */
-export async function personalWorkspaceIdForSubject(
+export async function namedSubjectPersonalWorkspaceId(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<string | null> {

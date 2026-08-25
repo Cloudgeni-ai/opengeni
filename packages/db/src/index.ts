@@ -432,7 +432,7 @@ export * from "./slack-user-link-access";
 export * from "./slack-routing";
 export * from "./slack-routing-personal-workspace";
 import { probeSlackInteractionTenancy } from "./slack-routing";
-import { personalWorkspaceIdForSubject } from "./slack-routing-personal-workspace";
+import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
 export * from "./workspace-membership-permissions";
 export * from "./video-generation";
 export * from "./user-resource-authority";
@@ -10190,6 +10190,7 @@ export async function getOrCreateSlackInteraction(
   // here. Re-probe the connection-global route and adopt the existing row's
   // tenancy: a mapped thread keeps the workspace it was created in.
   const probed = await probeSlackInteractionTenancy(db, {
+    accountId: input.accountId,
     connectionId: input.connectionId,
     routeKey: input.routeKey,
   });
@@ -10210,10 +10211,14 @@ export async function getOrCreateSlackInteraction(
  * interaction across every workspace this installation can address. The
  * content-free tenancy probe resolves which workspace that is; the full row is
  * then read under that workspace's own RLS scope, so nothing is widened.
+ *
+ * `accountId` is the organization the caller is acting for, and the probe is
+ * fenced on it: crossing workspaces within one organization is the whole point,
+ * crossing organizations never is.
  */
 export async function getSlackInteractionByConnectionRoute(
   db: Database,
-  input: { connectionId: string; routeKey: string },
+  input: { accountId: string; connectionId: string; routeKey: string },
 ): Promise<SlackInteraction | null> {
   const probed = await probeSlackInteractionTenancy(db, input);
   if (!probed) return null;
@@ -18627,13 +18632,22 @@ export async function resolveSlackTargetAuthority(
   const grant = await getWorkspaceGrant(db, input.subjectId, input.targetWorkspaceId, {
     principalKind: "human_session",
   });
-  if (grant && grant.accountId === input.targetAccountId) return grant;
+  const membershipGrant = grant && grant.accountId === input.targetAccountId ? grant : null;
 
-  const personalWorkspaceId = await personalWorkspaceIdForSubject(db, {
-    accountId: input.targetAccountId,
-    subjectId: input.subjectId,
-  });
-  if (!personalWorkspaceId || personalWorkspaceId !== input.targetWorkspaceId) return null;
+  // Both arms answer to the same rule. `getWorkspaceGrant` is a bare membership
+  // join: it cannot see that the organization membership behind that row was
+  // suspended or offboarded, so returning it verbatim would keep serving a
+  // person the organization has already removed. `namedSubjectHasLiveWorkspaceAuthority`
+  // is the canonical implementation of "does this subject hold authority here",
+  // and it covers both a persisted membership row and the personal-workspace
+  // pointer, so it is applied before either grant shape is returned.
+  const personalWorkspaceId = membershipGrant
+    ? null
+    : await namedSubjectPersonalWorkspaceId(db, {
+        accountId: input.targetAccountId,
+        subjectId: input.subjectId,
+      });
+  if (!membershipGrant && personalWorkspaceId !== input.targetWorkspaceId) return null;
 
   const live = await namedSubjectHasLiveWorkspaceAuthority(db, {
     accountId: input.targetAccountId,
@@ -18641,6 +18655,7 @@ export async function resolveSlackTargetAuthority(
     subjectId: input.subjectId,
   });
   if (!live) return null;
+  if (membershipGrant) return membershipGrant;
 
   return {
     workspaceId: input.targetWorkspaceId,
