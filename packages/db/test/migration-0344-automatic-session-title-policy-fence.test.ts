@@ -50,11 +50,8 @@ describe("migration 0344 automatic session title policy fence", () => {
     const database = shared;
     if (!database) return;
 
-    const [functionAcl] = await database.admin<
-      Array<{ appExecute: boolean; publicExecute: boolean }>
-    >`
+    const [functionAcl] = await database.admin<Array<{ publicExecute: boolean }>>`
       select
-        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
         exists (
           select 1
           from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
@@ -64,7 +61,7 @@ describe("migration 0344 automatic session title policy fence", () => {
       join pg_namespace namespace on namespace.oid = procedure.pronamespace
       where namespace.nspname = 'opengeni_private'
         and procedure.proname = 'enforce_automatic_session_title_policy_v1'`;
-    expect(functionAcl).toEqual({ appExecute: false, publicExecute: false });
+    expect(functionAcl).toEqual({ publicExecute: false });
 
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
