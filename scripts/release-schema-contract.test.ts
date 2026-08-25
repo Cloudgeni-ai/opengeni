@@ -179,10 +179,10 @@ describe("release schema contract", () => {
       "0343_personal_document_force_rls_lock_repair.sql",
       "0344_private_session_visibility_transition_gate.sql",
       "0345_tenant_scoped_session_tenancy_fence.sql",
-      "0346_automatic_session_title_policy_fence.sql",
       "0346_document_migration_audit_surface.sql",
-      "0347_automatic_session_title_quarantine_index.sql",
-      "0348_automatic_session_title_quarantine.sql",
+      "0347_automatic_session_title_policy_fence.sql",
+      "0348_automatic_session_title_quarantine_index.sql",
+      "0349_automatic_session_title_quarantine.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -219,16 +219,16 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0345_tenant_scoped_session_tenancy_fence.sql",
     );
     const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0346_automatic_session_title_policy_fence.sql",
+      (migration) => migration.path === "0347_automatic_session_title_policy_fence.sql",
     );
     const documentMigrationAuditSurface = completeSourceContract.migrations.some(
       (migration) => migration.path === "0346_document_migration_audit_surface.sql",
     );
     const automaticSessionTitleQuarantineIndex = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0347_automatic_session_title_quarantine_index.sql",
+      (migration) => migration.path === "0348_automatic_session_title_quarantine_index.sql",
     );
     const automaticSessionTitleQuarantine = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0348_automatic_session_title_quarantine.sql",
+      (migration) => migration.path === "0349_automatic_session_title_quarantine.sql",
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -245,13 +245,13 @@ describe("release schema contract", () => {
         (automaticSessionTitleQuarantineIndex ? 1 : 0) +
         (automaticSessionTitleQuarantine ? 1 : 0),
       latestMigration: automaticSessionTitleQuarantine
-        ? "0348_automatic_session_title_quarantine.sql"
+        ? "0349_automatic_session_title_quarantine.sql"
         : automaticSessionTitleQuarantineIndex
-          ? "0347_automatic_session_title_quarantine_index.sql"
+          ? "0348_automatic_session_title_quarantine_index.sql"
           : documentMigrationAuditSurface
             ? "0346_document_migration_audit_surface.sql"
             : automaticSessionTitlePolicyFence
-              ? "0346_automatic_session_title_policy_fence.sql"
+              ? "0347_automatic_session_title_policy_fence.sql"
               : tenantScopedSessionTenancyFence
                 ? "0345_tenant_scoped_session_tenancy_fence.sql"
                 : privateSessionVisibilityTransitionGate
