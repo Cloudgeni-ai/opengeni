@@ -80,6 +80,44 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
     expect(agents).toContain("never restart a pre-0345 image");
   });
 
+  test("the cross-workspace sandbox reaper enters shared fences before row locks", async () => {
+    const migration = await readFile(migrationUrl, "utf8");
+    expect(migration).toContain("acquire_sandbox_reaper_session_tenancy_fences");
+    expect(migration).toMatch(
+      /SELECT DISTINCT holder\.workspace_id[\s\S]*ORDER BY holder\.workspace_id[\s\S]*pg_advisory_xact_lock_shared/u,
+    );
+    expect(migration).toContain("0345 interaction reaper definition drift");
+    expect(migration).toContain("0345 lease reaper definition drift");
+    if (owned) {
+      const functions = await owned.admin<Array<{ name: string; source: string }>>`
+        select proc.proname as name, proc.prosrc as source
+        from pg_proc proc
+        join pg_namespace namespace on namespace.oid = proc.pronamespace
+        where namespace.nspname = 'opengeni_private'
+          and proc.proname in (
+            'reap_stale_interaction_transitions',
+            'reap_sandbox_leases'
+          )
+          and pg_catalog.oidvectortypes(proc.proargtypes) in (
+            'bigint',
+            'bigint, bigint, bigint, bigint'
+          )
+        order by proc.proname`;
+      expect(functions).toHaveLength(2);
+      for (const installed of functions) {
+        expect(
+          installed.source.indexOf("acquire_sandbox_reaper_session_tenancy_fences"),
+        ).toBeLessThan(
+          installed.source.indexOf(
+            installed.name === "reap_sandbox_leases"
+              ? "set_config('opengeni.sandbox_recovery_protocol_v2'"
+              : "IF p_interaction_holder_ttl_ms <= 0",
+          ),
+        );
+      }
+    }
+  });
+
   test("an exclusive fence blocks only writers in the same workspace", async () => {
     if (!owned) return;
     const holder = postgres(owned.ownerUrl, { max: 1 });
@@ -201,7 +239,10 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       create(grant.accountId, sharedWorkspaceId, subjectId, `source-${crypto.randomUUID()}`),
       "source production writer",
     );
-    const holder = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+    const holder = postgres(owned.ownerUrl, {
+      max: 1,
+      onnotice: () => undefined,
+    });
     const connection = await holder.reserve();
     try {
       await connection`begin`;

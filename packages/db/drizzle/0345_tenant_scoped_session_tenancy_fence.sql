@@ -55,6 +55,107 @@ $fence$;
 
 REVOKE ALL ON FUNCTION opengeni_private.require_session_tenancy_fence() FROM PUBLIC;
 
+-- The lifecycle reaper is deliberately cross-workspace, but it still mutates
+-- sandbox_lease_holders and therefore participates in the same quiescence
+-- protocol. Acquire every currently represented holder workspace in stable
+-- order before the reaper locks any operation, lease, or holder row. These are
+-- shared advisory locks: ordinary tenant writers continue concurrently, while
+-- a fork/visibility transition waits only when its workspace has live holder
+-- state that the global sweep may inspect or remove.
+CREATE OR REPLACE FUNCTION opengeni_private.acquire_sandbox_reaper_session_tenancy_fences()
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $reaper_fences$
+DECLARE
+  workspace_id_value uuid;
+  locked_count integer := 0;
+BEGIN
+  FOR workspace_id_value IN
+    SELECT DISTINCT holder.workspace_id
+    FROM sandbox_lease_holders holder
+    WHERE holder.workspace_id IS NOT NULL
+    ORDER BY holder.workspace_id
+  LOOP
+    PERFORM pg_catalog.pg_advisory_xact_lock_shared(
+      pg_catalog.hashtextextended(
+        'session-tenancy:' || workspace_id_value::text,
+        0
+      )
+    );
+    locked_count := locked_count + 1;
+  END LOOP;
+  RETURN locked_count;
+END
+$reaper_fences$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.acquire_sandbox_reaper_session_tenancy_fences()
+  FROM PUBLIC;
+
+-- Both shipped global reapers are SECURITY-DEFINER routines that take row
+-- locks internally. Inject the shared-fence entry at the start of their exact
+-- frozen definitions so every call path, including a direct SQL invocation,
+-- enters the protocol before those row locks. Refuse definition drift instead
+-- of silently producing an unfenced partial repair.
+DO $repair_global_sandbox_reapers$
+DECLARE
+  interaction_definition text;
+  lease_definition text;
+  interaction_prefix constant text := E'    BEGIN\n      IF p_interaction_holder_ttl_ms <= 0 THEN';
+  lease_prefix constant text := E'    BEGIN\n      PERFORM pg_catalog.set_config(''opengeni.sandbox_recovery_protocol_v2'', ''1'', true);';
+  fenced_prefix constant text := E'    BEGIN\n      PERFORM opengeni_private.acquire_sandbox_reaper_session_tenancy_fences();\n';
+BEGIN
+  SELECT pg_catalog.pg_get_functiondef(
+    'opengeni_private.reap_stale_interaction_transitions(bigint)'::regprocedure
+  ) INTO interaction_definition;
+  IF pg_catalog.strpos(interaction_definition, interaction_prefix) = 0
+    OR pg_catalog.strpos(
+      pg_catalog.substr(
+        interaction_definition,
+        pg_catalog.strpos(interaction_definition, interaction_prefix)
+          + pg_catalog.length(interaction_prefix)
+      ),
+      interaction_prefix
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0345 interaction reaper definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+
+  EXECUTE pg_catalog.replace(
+    interaction_definition,
+    interaction_prefix,
+    fenced_prefix || E'      IF p_interaction_holder_ttl_ms <= 0 THEN'
+  );
+
+  SELECT pg_catalog.pg_get_functiondef(
+    'opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)'::regprocedure
+  ) INTO lease_definition;
+  IF pg_catalog.strpos(lease_definition, lease_prefix) = 0
+    OR pg_catalog.strpos(
+      pg_catalog.substr(
+        lease_definition,
+        pg_catalog.strpos(lease_definition, lease_prefix)
+          + pg_catalog.length(lease_prefix)
+      ),
+      lease_prefix
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0345 lease reaper definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+
+  EXECUTE pg_catalog.replace(
+    lease_definition,
+    lease_prefix,
+    fenced_prefix
+      || E'      PERFORM pg_catalog.set_config(''opengeni.sandbox_recovery_protocol_v2'', ''1'', true);'
+  );
+END
+$repair_global_sandbox_reapers$;
+
 DO $install_session_tenancy_fences$
 DECLARE
   table_name text;
@@ -868,6 +969,11 @@ DO $pin_session_tenancy_definers$
 DECLARE
   target_schema text := current_schema();
 BEGIN
+  EXECUTE format(
+    'ALTER FUNCTION opengeni_private.acquire_sandbox_reaper_session_tenancy_fences() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    target_schema
+  );
   EXECUTE format(
     'ALTER FUNCTION %I.assert_session_tenancy_quiescent(uuid,uuid,uuid,boolean) '
       || 'SET search_path = pg_catalog, %I, pg_temp',
