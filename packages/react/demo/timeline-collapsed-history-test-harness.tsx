@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { MessageTimeline, type TimelineItem } from "@opengeni/react";
@@ -6,6 +7,8 @@ import "./styles.css";
 
 type TimelineCollapsedHistoryHarness = {
   appendLiveItem: () => void;
+  appendLivePage: () => void;
+  appendLivePageAndSettleOlder: () => void;
   armOlder: () => void;
   loadCalls: () => number;
   prependUnderfilledPage: () => void;
@@ -114,6 +117,7 @@ function Harness() {
   const [loadCalls, setLoadCalls] = useState(0);
   const loadCallsRef = useRef(0);
   const liveAppendRef = useRef(0);
+  const livePageRef = useRef(0);
   const pendingLoadRef = useRef<{
     promise: Promise<boolean>;
     resolve: (value: boolean) => void;
@@ -165,6 +169,22 @@ function Harness() {
     setItems((current) => [...current, userMessage(1_000 + append)]);
   }, []);
 
+  const appendLivePage = useCallback(() => {
+    const append = ++livePageRef.current;
+    const sequence = 1_100 + append * 100;
+    setItems((current) => [
+      ...current,
+      ...Array.from({ length: 30 }, (_, index) => userMessage(sequence + index)),
+    ]);
+  }, []);
+
+  const appendLivePageAndSettleOlder = useCallback(() => {
+    // Two synchronous commits with no animation frame between them reproduce
+    // an older response landing while tip-follow still owns large live debt.
+    flushSync(() => appendLivePage());
+    flushSync(() => settleOlder("success"));
+  }, [appendLivePage, settleOlder]);
+
   const settleLoad = useCallback(
     (call: number, outcome: "success" | "failure", complete = false) => {
       const pending = overlappingLoadsRef.current.get(call);
@@ -177,8 +197,10 @@ function Harness() {
         return;
       }
       if (complete) {
-        setItems((current) => [...olderConversation(), ...current]);
-        setHasOlder(false);
+        flushSync(() => {
+          setItems((current) => [...olderConversation(), ...current]);
+          setHasOlder(false);
+        });
       }
       pending.resolve(false);
     },
@@ -220,6 +242,8 @@ function Harness() {
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
       appendLiveItem,
+      appendLivePage,
+      appendLivePageAndSettleOlder,
       armOlder: () => setHasOlder(true),
       loadCalls: () => loadCallsRef.current,
       prependUnderfilledPage,
@@ -245,7 +269,16 @@ function Harness() {
     return () => {
       delete window.timelineCollapsedHistoryHarness;
     };
-  }, [appendLiveItem, loadCalls, prependUnderfilledPage, scroller, settleLoad, settleOlder]);
+  }, [
+    appendLiveItem,
+    appendLivePage,
+    appendLivePageAndSettleOlder,
+    loadCalls,
+    prependUnderfilledPage,
+    scroller,
+    settleLoad,
+    settleOlder,
+  ]);
 
   return (
     <main style={{ padding: 32 }} data-og-theme="light">

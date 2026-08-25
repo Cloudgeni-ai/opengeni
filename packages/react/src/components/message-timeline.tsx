@@ -239,6 +239,24 @@ const PIN_THRESHOLD_PX = 48;
 const OLDER_PREFETCH_MARGIN_PX = 400;
 const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 
+// State: 0 underfill pending, 1 underfill settled, 2 prefetch pending,
+// 3 prefetch settled. The tuple identity is the exact ownership fence.
+type OlderLoadAttempt = [boundary: string | null, state: number];
+
+function invokeOlderLoad(load: () => unknown, settle: () => void): 0 | 1 {
+  try {
+    const result = load();
+    if (result && typeof (result as PromiseLike<unknown>).then === "function") {
+      void (result as PromiseLike<unknown>).then(settle, settle);
+      return 1;
+    }
+  } catch {
+    settle();
+    return 1;
+  }
+  return 0;
+}
+
 /**
  * Pinned = the viewport bottom is within PIN_THRESHOLD_PX of the content
  * bottom. When the scroll range itself is shorter than the threshold, the
@@ -373,17 +391,18 @@ export function MessageTimeline({
   // One loadOlder per visit to the top band. Re-arm only after the reader
   // leaves that band (scrolls down / sentinel exits) — never from scrolling
   // further toward y=0 (that was the batch-top load loop).
-  const olderLoadGateRef = useRef<"armed" | "cooling">("armed");
+  const olderLoadGateRef = useRef(true);
   // A collapsed history tail can be shorter than the viewport. In that state
   // there is no upward scroll range, so reader intent can never arm the top
   // sentinel. Request one older page per loaded window until history either
   // fills the viewport or the host reports that no older rows remain. Each
-  // attempt owns the oldest loaded item boundary; live-tail appends do not
-  // advance older pagination or release that owner.
-  const underfillLoadAttemptRef = useRef<readonly [string | null] | null>(null);
-  const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<
-    readonly [string | null] | null
-  >(null);
+  // attempt owns the oldest loaded item boundary across BOTH the automatic
+  // underfill and reader-driven sentinel paths. Live-tail appends do not
+  // advance older pagination or release that exact owner.
+  const olderLoadAttemptRef = useRef<OlderLoadAttempt | null>(null);
+  const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<OlderLoadAttempt | null>(
+    null,
+  );
   const underfillRetryReadyRef = useRef(false);
   const [underfillRetryReady, setUnderfillRetryReady] = useState(false);
   const resizeFollowRafRef = useRef<number | null>(null);
@@ -481,6 +500,30 @@ export function MessageTimeline({
     }
   }, []);
 
+  const clearOlderLoadOwner = useCallback(() => {
+    olderLoadAttemptRef.current = null;
+    underfillRetryReadyRef.current = false;
+    setUnderfillRetryReady(false);
+  }, []);
+
+  const rearmOlderPrefetchAfterLeavingTop = useCallback(
+    (node: HTMLElement) => {
+      if (node.scrollTop <= OLDER_PREFETCH_MARGIN_PX) {
+        return;
+      }
+      const attempt = olderLoadAttemptRef.current;
+      if (attempt?.[1] === 3) {
+        clearOlderLoadOwner();
+      }
+      // A pending promise keeps the whole older-load boundary cooling. A
+      // settled/legacy callback gets one retry on the reader's next approach.
+      if (!olderLoadAttemptRef.current) {
+        olderLoadGateRef.current = true;
+      }
+    },
+    [clearOlderLoadOwner],
+  );
+
   const revealedRef = useRef(revealed);
   revealedRef.current = revealed;
 
@@ -576,11 +619,9 @@ export function MessageTimeline({
         return;
       }
       releasePinFromReader(node);
-      if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
-        olderLoadGateRef.current = "armed";
-      }
+      rearmOlderPrefetchAfterLeavingTop(node);
     },
-    [autoFollow, clearPendingReaderLeave, releasePinFromReader],
+    [autoFollow, clearPendingReaderLeave, rearmOlderPrefetchAfterLeavingTop, releasePinFromReader],
   );
 
   const scheduleLeaveFallback = useCallback(() => {
@@ -746,14 +787,12 @@ export function MessageTimeline({
         // handler cannot authorize a second concurrent request.
         return;
       }
-      let attempt = underfillLoadAttemptRef.current;
-      if (attempt && (attempt[0] !== olderBoundaryKey || !hasOlder)) {
-        // The requested page landed. Ordinary sentinel prefetch may own the
-        // next approach to the top once this window has a usable scroll range.
-        underfillLoadAttemptRef.current = null;
-        underfillRetryReadyRef.current = false;
-        setUnderfillRetryReady(false);
-        olderLoadGateRef.current = "armed";
+      const currentAttempt = olderLoadAttemptRef.current;
+      if (
+        retry &&
+        (!currentAttempt || currentAttempt[1] >= 2 || currentAttempt[0] !== olderBoundaryKey)
+      ) {
+        return;
       }
       // clientHeight=0 is pre-layout/headless, not evidence that the rendered
       // history underfills a real viewport.
@@ -763,37 +802,25 @@ export function MessageTimeline({
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
-        (attempt?.[0] === olderBoundaryKey && !retry)
+        (currentAttempt !== null && !retry)
       ) {
         return;
       }
-      attempt = [olderBoundaryKey];
-      underfillLoadAttemptRef.current = attempt;
+      const attempt: OlderLoadAttempt = [olderBoundaryKey, 0];
+      olderLoadAttemptRef.current = attempt;
       underfillRetryReadyRef.current = false;
       setUnderfillRetryReady(false);
-      // If the reader had already armed ordinary prefetch, do not let its
-      // sentinel duplicate this request while the same short page is loading.
-      if (olderPrefetchArmedRef.current) {
-        olderLoadGateRef.current = "cooling";
-      }
+      // Every underfill request owns the ordinary sentinel too, even if reader
+      // intent had not armed it yet when this short-window request began.
       const settle = () => {
-        if (underfillLoadAttemptRef.current === attempt) {
+        if (olderLoadAttemptRef.current === attempt) {
+          attempt[1] = 1;
           setUnderfillSettledAttempt(attempt);
         }
       };
-      let result: unknown;
-      try {
-        result = onLoadOlder();
-      } catch {
-        settle();
-        return;
-      }
-      if (!result || typeof (result as PromiseLike<unknown>).then !== "function") {
-        // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
-        // that return the real promise opt into safe rejection/no-progress retry.
-        return;
-      }
-      void Promise.resolve(result).then(settle, settle);
+      // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
+      // that return the real promise opt into safe rejection/no-progress retry.
+      invokeOlderLoad(onLoadOlder, settle);
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
@@ -802,22 +829,17 @@ export function MessageTimeline({
   // be about to commit a successful prepend. Once loading has settled, expose
   // one explicit retry only if this exact window still has older history.
   useEffect(() => {
-    const attempt = underfillSettledAttempt;
-    if (!attempt || underfillLoadAttemptRef.current !== attempt) {
+    const attempt = olderLoadAttemptRef.current;
+    if (!attempt) {
       return;
     }
-    if (olderBoundaryKey !== attempt[0] || !hasOlder) {
-      underfillLoadAttemptRef.current = null;
-      underfillRetryReadyRef.current = false;
-      setUnderfillRetryReady(false);
-      return;
+    if (attempt[0] !== olderBoundaryKey || !hasOlder) {
+      clearOlderLoadOwner();
+    } else if (attempt === underfillSettledAttempt && !loadingOlder) {
+      underfillRetryReadyRef.current = true;
+      setUnderfillRetryReady(true);
     }
-    if (loadingOlder) {
-      return;
-    }
-    underfillRetryReadyRef.current = true;
-    setUnderfillRetryReady(true);
-  }, [hasOlder, loadingOlder, olderBoundaryKey, underfillSettledAttempt]);
+  }, [clearOlderLoadOwner, hasOlder, loadingOlder, olderBoundaryKey, underfillSettledAttempt]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
   const driveFollow = useCallback(
@@ -930,7 +952,14 @@ export function MessageTimeline({
   driveFollowRef.current = driveFollow;
 
   useEffect(() => stopFollow, [stopFollow]);
-  useEffect(() => () => cancelLeaveFallback(), [cancelLeaveFallback]);
+  useEffect(
+    () => () => {
+      cancelLeaveFallback();
+      // Fence every late promise settlement from an unmounted timeline.
+      olderLoadAttemptRef.current = null;
+    },
+    [cancelLeaveFallback],
+  );
 
   // The single post-commit scroll authority. Runs after EVERY commit (no dep
   // list): any commit may change content height, and the decision is cheap.
@@ -1016,12 +1045,13 @@ export function MessageTimeline({
         autoFollow &&
         pinnedRef.current &&
         !hasNewer &&
-        wasAtLiveTailBeforeCommit &&
-        !pendingReaderLeaveRef.current
+        !pendingReaderLeaveRef.current &&
+        (wasAtLiveTailBeforeCommit || olderLoadAttemptRef.current)
       ) {
-        // The reader is at the live tail now, even if they were browsing
-        // history when loadOlder started. Hard-park before paint so the
-        // prepend is never treated as hot growth.
+        // A pending short-window load owns the prepend even when live growth
+        // has left its still-pinned camera with raw geometry debt. Unrelated
+        // prepends retain the prior-tip fallback so a stale pin after an
+        // extension/programmatic history jump still restores its row anchor.
         clearPendingReaderLeave();
         snapToBottom(node);
       } else {
@@ -1052,13 +1082,8 @@ export function MessageTimeline({
     // After a prepend, if restore left us below the top prefetch band,
     // re-arm so a later approach can load again. Still cooling while parked
     // inside the band (short pages) — that stops the y=0 load loop.
-    if (
-      prepended &&
-      !pinnedRef.current &&
-      olderLoadGateRef.current === "cooling" &&
-      node.scrollTop > OLDER_PREFETCH_MARGIN_PX
-    ) {
-      olderLoadGateRef.current = "armed";
+    if (prepended && !pinnedRef.current && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+      rearmOlderPrefetchAfterLeavingTop(node);
     }
     previousFirstItemIdRef.current = firstItemId;
     previousScrollHeightRef.current = node.scrollHeight;
@@ -1145,7 +1170,7 @@ export function MessageTimeline({
       olderPrefetchArmedRef.current = false;
       setOlderPrefetchArmed(false);
     }
-    olderLoadGateRef.current = "armed";
+    olderLoadGateRef.current = true;
     wantPinRef.current = false;
     pendingJumpToStartRef.current = false;
     previousFirstItemIdRef.current = null;
@@ -1160,8 +1185,7 @@ export function MessageTimeline({
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
-    underfillLoadAttemptRef.current = null;
-    underfillRetryReadyRef.current = false;
+    olderLoadAttemptRef.current = null;
     setUnderfillRetryReady(false);
     seenActivityIdsRef.current.clear();
     applyPinned(true);
@@ -1211,21 +1235,54 @@ export function MessageTimeline({
       (entries) => {
         const intersecting = entries.some((entry) => entry.isIntersecting);
         if (!intersecting) {
-          // Left the top band — next approach may load once.
-          olderLoadGateRef.current = "armed";
+          // Left the top band. A settled ordinary prefetch releases its exact
+          // owner here; a still-pending request remains cooling so a quick
+          // leave/re-enter cannot overlap it.
+          const attempt = olderLoadAttemptRef.current;
+          if (attempt?.[1] === 3) {
+            clearOlderLoadOwner();
+          }
+          if (!olderLoadAttemptRef.current) {
+            olderLoadGateRef.current = true;
+          }
           return;
         }
-        if (olderLoadGateRef.current !== "armed") {
+        // Both automatic underfill and ordinary prefetch use one boundary
+        // owner. In particular, live growth cannot arm a second sentinel load
+        // while the short-window request that preceded it is still pending.
+        if (olderLoadAttemptRef.current || !olderLoadGateRef.current) {
           return;
         }
-        olderLoadGateRef.current = "cooling";
-        onLoadOlder();
+        const attempt: OlderLoadAttempt = [olderBoundaryKey, 2];
+        olderLoadAttemptRef.current = attempt;
+        olderLoadGateRef.current = false;
+        const settle = () => {
+          if (olderLoadAttemptRef.current !== attempt) {
+            return;
+          }
+          attempt[1] = 3;
+          if (root.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+            clearOlderLoadOwner();
+            olderLoadGateRef.current = true;
+          }
+        };
+        // Preserve legacy fire-and-forget top-band retries: the callback has
+        // synchronously returned, but this visit remains cooling until exit.
+        attempt[1] += +!invokeOlderLoad(onLoadOlder, settle);
       },
       { root, rootMargin: OLDER_PREFETCH_ROOT_MARGIN },
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [olderPrefetchArmed, hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
+  }, [
+    clearOlderLoadOwner,
+    firstGroupKey,
+    hasOlder,
+    loadingOlder,
+    olderBoundaryKey,
+    olderPrefetchArmed,
+    onLoadOlder,
+  ]);
 
   // History view: page forward when the reader nears the bottom of the current
   // non-tip window. Does not pull the whole gap — one density-bounded page.
@@ -1393,9 +1450,7 @@ export function MessageTimeline({
       if (readerArmed && readerUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
         readerIntentArmRef.current = false;
         releasePinFromReader(node);
-        if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
-          olderLoadGateRef.current = "armed";
-        }
+        rearmOlderPrefetchAfterLeavingTop(node);
         return;
       }
       // Tip grew under a still viewport (no reader-up): ease back to the tip.
@@ -1445,9 +1500,7 @@ export function MessageTimeline({
     }
     // Re-arm older prefetch only after leaving the top band (scroll down into
     // content). Never re-arm/load from continued scroll toward y=0.
-    if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
-      olderLoadGateRef.current = "armed";
-    }
+    rearmOlderPrefetchAfterLeavingTop(node);
   };
 
   const onScrollEnd = () => {

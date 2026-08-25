@@ -1262,6 +1262,165 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("camera debt from live growth cannot strand a pinned underfill prepend", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const load = deferred<boolean>();
+    let calls = 0;
+    const tail = [userItem("tail", "live tail")];
+    const onLoadOlder = () => {
+      calls += 1;
+      return load.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={tail} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 240,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <MessageTimeline items={tail} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // A large streamed append creates real scroll range and starts the camera,
+    // but no reader leave occurred. Commit the older page before its next rAF.
+    const liveItems = [...tail, userItem("live-growth", "large live growth")];
+    layout.setContentHeight(1_600);
+    await r.rerender(
+      <MessageTimeline items={liveItems} status="running" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+
+    layout.setContentHeight(2_200);
+    await r.rerender(
+      <MessageTimeline
+        items={[userItem("older", "older history"), ...liveItems]}
+        status="running"
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(layout.tipBottomGap()).toBeLessThan(2);
+
+    await actRun(() => load.resolve(false));
+    await drainFrames(frames);
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("a pending underfill owner blocks top prefetch after live growth", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    const load = deferred<boolean>();
+    let calls = 0;
+    const tail = [reasoningItem("collapsed-step", "collapsed step")];
+    const onLoadOlder = () => {
+      calls += 1;
+      return load.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={tail} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 240,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <MessageTimeline items={tail} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    const liveItems = [...tail, userItem("live-growth", "large live growth")];
+    layout.setContentHeight(1_600);
+    await r.rerender(
+      <MessageTimeline items={liveItems} status="running" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await readerScrollUp(scroller, 0);
+    expect(observed).toHaveLength(1);
+
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target: observed[0]! } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    expect(calls).toBe(1);
+
+    // The same overlap must still respect explicit reader ownership when the
+    // older page lands: preserve the retained rows instead of snapping to tip.
+    layout.setContentHeight(2_200);
+    await r.rerender(
+      <MessageTimeline
+        items={[userItem("older", "older history"), ...liveItems]}
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    // Happy DOM reports the retained first item's content coordinate unchanged,
+    // so the exact anchor correction is a no-op here. The browser regression
+    // below verifies row/pixel preservation; this unit fence proves no tip snap.
+    expect(scroller.scrollTop).toBe(0);
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+
+    await actRun(() => load.resolve(false));
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+    layout.restore();
+    await r.unmount();
+  });
+
   test("a late underfill settlement cannot clear the newer window attempt", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
