@@ -129,8 +129,9 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   that, together with the 0303 readiness receipt, gates new Only-me creates in
   shared workspaces; migration 0336 applies the same product decision to a
   private fork destination in a shared workspace, after keyed replay so a
-  committed fork still replays once an owner disables the setting. The setting
-  grants no access. Owner derivation reads STATED
+  committed fork still replays once an owner disables the setting; and migration
+  0344 gates a fresh transition to Only me while preserving the same replay and
+  Personal-workspace exemption. The setting grants no access. Owner derivation reads STATED
   authority only: an active membership's own `personal_workspace_id` pointer or
   an explicit `workspace_memberships` row (migration 0302). Never widen it to a
   default workspace, `created_by`, or current access, and never let an
