@@ -2060,6 +2060,13 @@ export const slackRoutePrompts = pgTable(
     pending: index("slack_route_prompts_pending_idx")
       .on(table.expiresAt, table.id)
       .where(sql`${table.status} = 'pending'`),
+    // One live card per conversation. The existing uniques are keyed to the
+    // originating event, so they stop Slack's retries of ONE event from posting
+    // twice but not two different messages in the same channel. A direct
+    // message needs no separate index: its channel id is already one per person.
+    pendingChannel: uniqueIndex("slack_route_prompts_pending_channel_uq")
+      .on(table.connectionId, table.slackChannelId)
+      .where(sql`${table.status} = 'pending'`),
     statusValid: check(
       "slack_route_prompts_status_check",
       sql`${table.status} in ('pending', 'answered', 'expired', 'cancelled')`,

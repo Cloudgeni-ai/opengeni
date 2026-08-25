@@ -61,6 +61,11 @@ import {
   getSlackInteractionById,
   getSlackInteractionByConnectionRoute,
   probeSlackActionHandleTenancy,
+  openSlackRoutePrompt,
+  getSlackRoutePromptByOption,
+  settleSlackRoutePrompt,
+  answerSlackRoutePrompt,
+  type SlackRoutableWorkspace,
   getSlackChannelRoute,
   getSlackUserDmRoute,
   listNamedSubjectSlackRoutableWorkspaces,
@@ -1369,6 +1374,195 @@ async function postSlackRouteRefusal(
   });
 }
 
+/** How long a first-use picker stays answerable. */
+const SLACK_ROUTE_PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Buttons a card can carry before it stops being readable. */
+const MAX_SLACK_ROUTE_PROMPT_BUTTONS = 5;
+
+/**
+ * Ask, once, where this conversation should work.
+ *
+ * The card is a bot DM rather than an ephemeral message: `chat.postEphemeral`
+ * returns no durable `(channel, ts)` and no `client_msg_id` echo, and the whole
+ * post ledger and its reconciliation are built on both.
+ *
+ * Nothing is created in any workspace here. The request is parked on the prompt
+ * row and re-queued only once the person answers, so a picker that is never
+ * answered leaves no session, no interaction and no half-started work.
+ */
+async function askSlackRouteChoice(
+  deps: ApiRouteDeps,
+  client: OpenGeniSlackBotClient,
+  home: SlackRouteTenancy,
+  entry: SlackInteractionInboxEntry,
+  candidates: readonly SlackRoutableWorkspace[],
+): Promise<void> {
+  const offered = candidates.slice(0, MAX_SLACK_ROUTE_PROMPT_BUTTONS);
+  const opened = await openSlackRoutePrompt(deps.db, home, {
+    connectionId: entry.connectionId,
+    inboxId: entry.id,
+    slackTeamId: entry.slackTeamId,
+    slackUserId: entry.slackUserId,
+    slackChannelId: entry.slackChannelId,
+    slackMessageTs: entry.slackMessageTs,
+    providerEventId: entry.providerEventId,
+    triggerKind: entry.triggerKind,
+    requestText: entry.text,
+    hasFiles: entry.hasFiles,
+    slackThreadTs: entry.slackThreadTs,
+    messageOperationId: deterministicUuid(`slack-route-prompt:${entry.id}`),
+    expiresAt: new Date(Date.now() + SLACK_ROUTE_PROMPT_TTL_MS),
+    candidates: offered,
+  });
+  // Someone is already being asked this exact question in this conversation.
+  // Asking again would put two live cards in front of one person.
+  if (!opened || !opened.opened) return;
+
+  const where = entry.slackChannelId.startsWith("D")
+    ? "your messages with OpenGeni"
+    : `<#${entry.slackChannelId}>`;
+  const blocks: SlackMessageBlock[] = [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `OpenGeni can start this task in more than one workspace. Pick where ${where} should work. This choice is remembered.`,
+      },
+    },
+    {
+      type: "actions",
+      block_id: "opengeni-route-choice",
+      elements: [
+        ...opened.prompt.options.map((option) => ({
+          type: "button" as const,
+          action_id: "opengeni.route.select",
+          value: option.id,
+          text: { type: "plain_text" as const, text: option.candidateLabel },
+        })),
+        {
+          type: "button" as const,
+          action_id: "opengeni.route.cancel",
+          value: opened.prompt.options[0]?.id ?? opened.prompt.id,
+          text: { type: "plain_text" as const, text: "Not now" },
+        },
+      ],
+    },
+  ];
+  if (candidates.length > offered.length) {
+    const url = slackWorkspaceUrl(deps, home.workspaceId);
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: url
+          ? `More workspaces: <${url}|Choose in OpenGeni>`
+          : "More workspaces are available in OpenGeni under Capabilities, then Slack.",
+      },
+    });
+  }
+  await client.postMessage({
+    operationId: opened.prompt.messageOperationId,
+    userId: entry.slackUserId,
+    text: boundedOutput(
+      `OpenGeni can start this task in more than one workspace. Pick where ${where} should work.`,
+    ),
+    blocks,
+  });
+}
+
+/**
+ * Process one click on a picker.
+ *
+ * The stored option row is a prompt-time snapshot and is NEVER authority: the
+ * chosen workspace is re-authorized live, because access can have been revoked
+ * between the question and the answer.
+ */
+async function handleSlackRouteChoice(
+  deps: ApiRouteDeps,
+  home: SlackRouteTenancy,
+  entry: SlackInteractionInboxEntry,
+  actionId: string,
+  optionId: string,
+): Promise<void> {
+  const found = await getSlackRoutePromptByOption(deps.db, home, optionId);
+  if (!found) throw new SlackInteractionPermanentError("slack_route_prompt_invalid");
+  const { prompt, chosen } = found;
+  // The same authorization pinning ordinary action handles use: a different
+  // Slack human clicking someone else's card is ignored, not obeyed.
+  if (prompt.slackUserId !== entry.slackUserId) {
+    throw new SlackInteractionPermanentError("slack_route_prompt_user_mismatch");
+  }
+  const client = await createOpenGeniSlackBotInteractionClient(deps, {
+    ...home,
+    connectionId: entry.connectionId,
+    subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+  });
+  // The post ledger binds one operation id to a digest over the text, so the
+  // outcome has to be part of the seed. A second click on a settled card
+  // renders different bytes than the first, and reusing one id would wedge the
+  // ledger rather than saying so.
+  const replaceCard = async (outcome: string, text: string) => {
+    await client.updateMessage({
+      operationId: deterministicUuid(`slack-route-answered:${prompt.id}:${actionId}:${outcome}`),
+      channelId: entry.slackChannelId,
+      timestamp: entry.slackMessageTs,
+      text,
+      // Every button goes with the card, so a sibling option cannot be pressed
+      // after the question is settled.
+      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+    });
+  };
+
+  if (actionId === "opengeni.route.cancel") {
+    await settleSlackRoutePrompt(deps.db, home, { promptId: prompt.id, status: "cancelled" });
+    await replaceCard("cancelled", "OpenGeni did not start this task. No session was created.");
+    return;
+  }
+
+  const link = await getSlackBotUserLink(
+    deps.db,
+    home.workspaceId,
+    entry.connectionId,
+    entry.slackUserId,
+  );
+  const grant = link
+    ? await resolveSlackTargetAuthority(deps.db, {
+        subjectId: link.subjectId,
+        targetAccountId: chosen.candidateAccountId,
+        targetWorkspaceId: chosen.candidateWorkspaceId,
+      })
+    : null;
+  if (!grant || !hasPermission(grant.permissions, "sessions:create")) {
+    // Fail closed and leave the prompt answerable: the person may still have
+    // another workspace on the same card they can use.
+    await replaceCard(
+      "denied",
+      `OpenGeni cannot start work in *${chosen.candidateLabel}*: you do not have access to it. No session was created.`,
+    );
+    return;
+  }
+
+  const answered = await answerSlackRoutePrompt(deps.db, home, {
+    promptId: prompt.id,
+    targetAccountId: chosen.candidateAccountId,
+    targetWorkspaceId: chosen.candidateWorkspaceId,
+    answeredBySubjectId: grant.subjectId,
+    decidedBySlackUserId: entry.slackUserId,
+  });
+  if (!answered.answered) {
+    await replaceCard(
+      "settled",
+      "OpenGeni already settled this choice. No new session was created.",
+    );
+    return;
+  }
+  await replaceCard(
+    "answered",
+    `OpenGeni will use *${chosen.candidateLabel}* here. You can change this in OpenGeni under Capabilities, then Slack.`,
+  );
+}
+
 async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractionInboxEntry) {
   if (entry.triggerKind === "block_action") {
     await processSlackBlockAction(deps, entry);
@@ -1451,14 +1645,11 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     threadTenancy: existing
       ? { accountId: existing.accountId, workspaceId: existing.workspaceId }
       : null,
-    // The first-use picker does not exist yet, so genuine ambiguity keeps the
-    // installation's workspace rather than inventing an answer.
-    askEnabled: false,
+    askEnabled: true,
   });
   if (resolution.kind === "ask") {
-    // Unreachable: `askEnabled` is false above because the first-use picker
-    // lands in a later change. Fail loudly rather than guessing a workspace.
-    throw new SlackInteractionPermanentError("slack_route_choice_unavailable");
+    await askSlackRouteChoice(deps, client, home, entry, resolution.candidates);
+    return;
   }
   if (resolution.kind === "denied") {
     await postSlackRouteRefusal(deps, client, entry, resolution);
@@ -2714,6 +2905,13 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
     route.connectionId !== entry.connectionId
   ) {
     throw new SlackInteractionPermanentError("slack_action_installation_changed");
+  }
+  // A route choice is not an action handle: the picker exists BEFORE any
+  // session, so there is no handle row to load and the ordinary path below
+  // would refuse it. Branch first.
+  if (actionId === "opengeni.route.select" || actionId === "opengeni.route.cancel") {
+    await handleSlackRouteChoice(deps, home, entry, actionId, handleId);
+    return;
   }
   // A handle lives in the workspace that owns its session, which is not the
   // installation's workspace once routing is on. Learn that scope from the
@@ -4104,6 +4302,8 @@ const SLACK_BLOCK_ACTION_IDS = new Set([
   "opengeni.session.pause",
   "opengeni.session.resume",
   "opengeni.shared_result.publish",
+  "opengeni.route.select",
+  "opengeni.route.cancel",
 ]);
 
 export function normalizedBlockActionInteraction(

@@ -1322,6 +1322,175 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     expect(refusal?.text).toContain("No session was created.");
   });
 
+  test("asks once, remembers the answer, and never asks that channel again", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const channelId = "C_ASK_ONCE";
+    const first = {
+      teamId: value.teamId,
+      eventId: `E_ASK_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user: value.ownerSlackUserId,
+        channel: channelId,
+        ts: "1700000700.0001",
+        text: "audit the terraform",
+      },
+    };
+    expect((await postEvent(value.app, first)).status).toBe(200);
+    await drainAll(value.deps);
+
+    // The question is asked, and NOTHING is started anywhere while it is open.
+    const card = value.slack.posts.at(-1)!;
+    expect(card.text).toContain("more than one workspace");
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await interactions(routed.workspaceId)).toHaveLength(0);
+    const [beforeAnswer] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from sessions
+      where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
+    expect(beforeAnswer!.n).toBe(0);
+
+    // Slack retries the same event: still one card, still one prompt.
+    expect((await postEvent(value.app, first)).status).toBe(200);
+    await drainAll(value.deps);
+    const [prompts] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from slack_route_prompts
+      where connection_id = ${value.connectionId} and status = 'pending'`;
+    expect(prompts!.n).toBe(1);
+
+    const [option] = await shared!.admin<{ id: string }[]>`
+      select o.id from slack_route_prompt_options o
+      join slack_route_prompts p on p.id = o.prompt_id
+      where p.connection_id = ${value.connectionId}
+        and o.candidate_workspace_id = ${routed.workspaceId}`;
+    expect(option?.id).toBeTruthy();
+
+    const click = (actionId: string) =>
+      value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/interactions",
+          new URLSearchParams({
+            payload: JSON.stringify({
+              type: "block_actions",
+              team: { id: value.teamId },
+              user: { id: value.ownerSlackUserId },
+              channel: { id: card.channel },
+              message: { ts: card.timestamp },
+              actions: [{ action_id: actionId, action_ts: "1760000000.000009", value: option!.id }],
+            }),
+          }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+    expect((await click("opengeni.route.select")).status).toBe(200);
+    await drainAll(value.deps);
+
+    // The answer starts the work the person originally asked for, in the
+    // workspace they chose.
+    const [route] = await interactions(routed.workspaceId);
+    expect(route?.session_id).toBeTruthy();
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions
+      where workspace_id = ${routed.workspaceId} and id = ${route!.session_id}`;
+    expect(session!.initial_message).toContain("audit the terraform");
+
+    // The choice is remembered, so the next message never asks again.
+    const stored = await getSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      { connectionId: value.connectionId, slackChannelId: channelId },
+    );
+    expect(stored?.targetWorkspaceId).toBe(routed.workspaceId);
+    expect(stored?.source).toBe("picker");
+
+    const cardsBefore = value.slack.posts.length;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_ASK_NEXT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000700.0002",
+            text: "and the second one",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(routed.workspaceId)).toHaveLength(2);
+    expect(
+      value.slack.posts
+        .slice(cardsBefore)
+        .filter((post) => post.text.includes("more than one workspace")),
+    ).toHaveLength(0);
+  });
+
+  test("a second click on a settled picker cannot start a second session", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DOUBLE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_DOUBLE_CLICK",
+            ts: "1700000800.0001",
+            text: "ship it",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const card = value.slack.posts.at(-1)!;
+    const [option] = await shared!.admin<{ id: string }[]>`
+      select o.id from slack_route_prompt_options o
+      join slack_route_prompts p on p.id = o.prompt_id
+      where p.connection_id = ${value.connectionId}
+        and o.candidate_workspace_id = ${routed.workspaceId}`;
+    const click = () =>
+      value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/interactions",
+          new URLSearchParams({
+            payload: JSON.stringify({
+              type: "block_actions",
+              team: { id: value.teamId },
+              user: { id: value.ownerSlackUserId },
+              channel: { id: card.channel },
+              message: { ts: card.timestamp },
+              actions: [
+                {
+                  action_id: "opengeni.route.select",
+                  action_ts: `176000000${Math.floor(Math.random() * 9)}.000011`,
+                  value: option!.id,
+                },
+              ],
+            }),
+          }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+    expect((await click()).status).toBe(200);
+    expect((await click()).status).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(routed.workspaceId)).toHaveLength(1);
+  });
+
   test("a routed workspace the person cannot reach never falls back to another one", async () => {
     if (!available) return;
     // The headline rule: OpenGeni does not quietly serve this from a workspace
