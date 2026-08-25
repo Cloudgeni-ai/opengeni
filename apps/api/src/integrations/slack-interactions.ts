@@ -892,7 +892,10 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
 
   app.get("/v1/workspaces/:workspaceId/integrations/slack/channel-routes", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    // Same gate as the reaction-channel allowlist beside it. The response names
+    // workspaces across the organization, including ones the reader may hold no
+    // grant in, so it is not an ordinary connections read.
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const connectionId = boundedString(c.req.query("connectionId"), 64);
     if (!connectionId) throw new HTTPException(400, { message: "connectionId is required" });
     const routes = await listSlackChannelRoutes(
@@ -911,6 +914,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     }
     return c.json(
       SlackChannelRouteListResponse.parse({
+        routingEnabled: deps.settings.slackWorkspaceRoutingEnabled,
         routes: routes.map((route) => ({
           slackChannelId: route.slackChannelId,
           targetWorkspaceId: route.targetWorkspaceId,
@@ -930,12 +934,36 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     const payload = UpdateSlackChannelRoutesRequest.parse(await c.req.json());
     const home = { accountId: grant.accountId, workspaceId };
     const installation = await listSlackInstallationBindings(deps.db, home);
-    if (!installation.some((binding) => binding.connectionId === payload.connectionId)) {
-      throw new HTTPException(404, { message: "Slack installation not found" });
-    }
     const binding = installation.find(
       (candidate) => candidate.connectionId === payload.connectionId,
     );
+    // The connection must be this workspace's own installation, and the route
+    // rows carry its team id, so a missing binding is a refusal rather than a
+    // row written with an empty team the column's own bound would reject.
+    if (!binding) {
+      throw new HTTPException(404, { message: "Slack installation not found" });
+    }
+    // Authorize EVERY target before writing anything. Applying routes one at a
+    // time means a refusal partway through would otherwise leave some channels
+    // moved and the rest not, behind an error that says the save failed.
+    //
+    // An admin may only point a channel at a workspace they could start work in
+    // themselves, and only inside this organization. The table's own CHECK
+    // enforces the second half; this refuses before writing rather than
+    // surfacing a constraint error.
+    for (const route of payload.routes) {
+      if (route.targetWorkspaceId === null) continue;
+      const authorized = await resolveSlackTargetAuthority(deps.db, {
+        subjectId: grant.subjectId,
+        targetAccountId: grant.accountId,
+        targetWorkspaceId: route.targetWorkspaceId,
+      });
+      if (!authorized || !hasPermission(authorized.permissions, "sessions:create")) {
+        throw new HTTPException(403, {
+          message: `you cannot start work in the workspace chosen for ${route.slackChannelId}`,
+        });
+      }
+    }
     for (const route of payload.routes) {
       if (route.targetWorkspaceId === null) {
         await deleteSlackChannelRoute(deps.db, home, {
@@ -944,23 +972,9 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         });
         continue;
       }
-      // An admin may only point a channel at a workspace they could start work
-      // in themselves, and only inside this organization. The table's own CHECK
-      // enforces the second half; this refuses before writing rather than
-      // surfacing a constraint error.
-      const authorized = await resolveSlackTargetAuthority(deps.db, {
-        subjectId: grant.subjectId,
-        targetAccountId: grant.accountId,
-        targetWorkspaceId: route.targetWorkspaceId,
-      });
-      if (!authorized || !hasPermission(authorized.permissions, "sessions:create")) {
-        throw new HTTPException(403, {
-          message: "you cannot start work in the chosen workspace",
-        });
-      }
       await upsertSlackChannelRoute(deps.db, home, {
         connectionId: payload.connectionId,
-        slackTeamId: binding?.slackTeamId ?? "",
+        slackTeamId: binding.slackTeamId,
         slackChannelId: route.slackChannelId,
         targetAccountId: grant.accountId,
         targetWorkspaceId: route.targetWorkspaceId,

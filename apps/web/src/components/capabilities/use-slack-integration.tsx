@@ -245,6 +245,9 @@ export function useSlackIntegration({
   const [publicationOpen, setPublicationOpen] = useState(false);
   const [invitedChannels, setInvitedChannels] = useState<SlackReactionChannel[] | null>(null);
   const [channelRoutes, setChannelRoutes] = useState<SlackChannelRoute[] | null>(null);
+  // Null until the read succeeds. With routing off the stored routes are inert,
+  // so the sheet must not advertise a control that changes nothing.
+  const [routingEnabled, setRoutingEnabled] = useState<boolean | null>(null);
   const [routingOpen, setRoutingOpen] = useState(false);
   const [publication, setPublication] = useState<MemorySlackPublicationConfiguration | null>(null);
   const [publicationLoaded, setPublicationLoaded] = useState(false);
@@ -339,12 +342,18 @@ export function useSlackIntegration({
     void (async () => {
       try {
         const result = await client.listOpenGeniSlackChannelRoutes(workspaceId, botConnectionId);
-        if (!cancelled) setChannelRoutes(result.routes);
+        if (!cancelled) {
+          setChannelRoutes(result.routes);
+          setRoutingEnabled(result.routingEnabled);
+        }
       } catch {
         // A workspace with routing switched off has no routes to show, and a
         // reader without `connections:read` should see the rest of the sheet
         // rather than an error.
-        if (!cancelled) setChannelRoutes(null);
+        if (!cancelled) {
+          setChannelRoutes(null);
+          setRoutingEnabled(null);
+        }
       }
     })();
     return () => {
@@ -620,7 +629,7 @@ export function useSlackIntegration({
       botConnection && botMetadata
         ? {
             title: "What OpenGeni can see",
-            ...(canManageReaction && botActive && !readOnly
+            ...(canManageReaction && botActive && !readOnly && routingEnabled === true
               ? {
                   editLabel: "Manage routing",
                   onEdit: () => setRoutingOpen(true),
@@ -633,6 +642,16 @@ export function useSlackIntegration({
                   (candidate) => candidate.slackChannelId === channel.id,
                 );
                 const invited = channel.isPrivate ? "private, invited" : "invited";
+                // With routing off the stored routes do not apply, so saying
+                // where work goes would be untrue.
+                if (routingEnabled !== true) {
+                  return {
+                    name: channel.isPrivate
+                      ? (channel.name ?? channel.id)
+                      : `#${channel.name ?? channel.id}`,
+                    meta: invited,
+                  };
+                }
                 return {
                   name: channel.isPrivate
                     ? (channel.name ?? channel.id)

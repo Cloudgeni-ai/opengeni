@@ -3909,6 +3909,7 @@ export type SlackChannelRoute = {
 
 export type SlackChannelRouteListResponse = {
   routes: SlackChannelRoute[];
+  routingEnabled: boolean;
 };
 
 export type UpdateSlackChannelRoutesRequest = {

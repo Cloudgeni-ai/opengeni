@@ -2002,14 +2002,22 @@ export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChann
 export const SlackChannelRoute = z.object({
   slackChannelId: z.string().min(1).max(64),
   targetWorkspaceId: z.string().uuid(),
-  targetWorkspaceName: z.string().min(1).max(256).nullable(),
+  // Unbounded like `Workspace.name` itself: a cap here would reject a row the
+  // database happily holds.
+  targetWorkspaceName: z.string().min(1).nullable(),
   source: z.enum(["picker", "admin"]),
   updatedAt: z.string(),
 });
 export type SlackChannelRoute = z.infer<typeof SlackChannelRoute>;
 
 export const SlackChannelRouteListResponse = z.object({
-  routes: z.array(SlackChannelRoute).max(500),
+  /** Every stored route. Bounded in practice by the channels the bot is in. */
+  routes: z.array(SlackChannelRoute),
+  /**
+   * Whether routing is switched on for this deployment. With it off the stored
+   * routes are inert, so the surface says so instead of implying they apply.
+   */
+  routingEnabled: z.boolean(),
 });
 export type SlackChannelRouteListResponse = z.infer<typeof SlackChannelRouteListResponse>;
 

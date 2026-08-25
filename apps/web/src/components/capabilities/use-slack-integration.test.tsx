@@ -355,6 +355,7 @@ describe("Slack channel routing", () => {
       nextCursor: null,
     }));
     const listRoutes = mock(async () => ({
+      routingEnabled: true,
       routes: [
         {
           slackChannelId: "C_ROUTED",
@@ -415,7 +416,7 @@ describe("Slack channel routing", () => {
       ...appContext(["connections:write"]),
       client: {
         listOpenGeniSlackReactionChannels: mock(async () => ({ channels: [], nextCursor: null })),
-        listOpenGeniSlackChannelRoutes: mock(async () => ({ routes: [] })),
+        listOpenGeniSlackChannelRoutes: mock(async () => ({ routes: [], routingEnabled: true })),
       },
       accessContext: accessContext(["connections:write"]),
     };
@@ -442,6 +443,63 @@ describe("Slack channel routing", () => {
         await Promise.resolve();
       });
       expect(adapter!.model.access?.editLabel).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("advertises no routing control when routing is switched off", async () => {
+    const { bot, binding } = installedBot();
+    mutableContext.current = {
+      ...appContext(["workspace:admin"]),
+      client: {
+        listOpenGeniSlackReactionChannels: mock(async () => ({
+          channels: [{ id: "C_OFF", name: "general", isPrivate: false }],
+          nextCursor: null,
+        })),
+        // Stored routes exist but do not apply, so the sheet must not imply
+        // they do.
+        listOpenGeniSlackChannelRoutes: mock(async () => ({
+          routingEnabled: false,
+          routes: [
+            {
+              slackChannelId: "C_OFF",
+              targetWorkspaceId: "11111111-1111-4111-8111-111111111111",
+              targetWorkspaceName: "Platform",
+              source: "admin" as const,
+              updatedAt: new Date(0).toISOString(),
+            },
+          ],
+        })),
+      },
+      accessContext: accessContext(["workspace:admin"]),
+    };
+    let adapter: ReturnType<typeof useSlackIntegration> | null = null;
+    function Probe() {
+      adapter = useSlackIntegration({
+        workspaceId: WORKSPACE_ID,
+        items: [],
+        connections: [bot],
+        connectionsLoaded: true,
+        slackInstallationBindings: [binding],
+        sheetOpen: true,
+        refresh: async () => {},
+        onRuntimeChanged: () => {},
+      });
+      return <>{adapter.dialogs}</>;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Probe />));
+    try {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(adapter!.model.access?.editLabel).toBeUndefined();
+      const row = adapter!.model.access?.items.find((item) => item.name === "#general");
+      expect(row?.meta).toBe("invited");
     } finally {
       await act(async () => root.unmount());
       container.remove();

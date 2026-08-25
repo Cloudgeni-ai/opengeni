@@ -75,11 +75,20 @@ function SlackChannelRoutingDialogBody({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // Save must never run on a draft built from a failed load, and it sends only
+  // what changed, so it needs the loaded set to compare against.
+  const [loadedRoutes, setLoadedRoutes] = useState<Record<string, SlackChannelRoute> | null>(null);
 
   // Only workspaces this admin could start work in themselves. The API refuses
   // anything else, so offering it here would be a promise it cannot keep.
-  const choices = context.workspaces.filter((candidate) =>
-    hasWorkspacePermission(context.accessContext, candidate.id, "sessions:create"),
+  // Only workspaces in this installation's own organization, and only ones this
+  // admin could start work in themselves. The API refuses anything else, so
+  // offering it here would be a promise it cannot keep.
+  const account = context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId;
+  const choices = context.workspaces.filter(
+    (candidate) =>
+      candidate.accountId === account &&
+      hasWorkspacePermission(context.accessContext, candidate.id, "sessions:create"),
   );
 
   useEffect(() => {
@@ -106,16 +115,23 @@ function SlackChannelRoutingDialogBody({
         );
         if (cancelled) return;
         setChannels([...new Map(collected.map((channel) => [channel.id, channel])).values()]);
+        const byChannel = Object.fromEntries(
+          routes.routes.map((route: SlackChannelRoute) => [route.slackChannelId, route]),
+        );
+        setLoadedRoutes(byChannel);
         setDraft(
           Object.fromEntries(
-            routes.routes.map((route: SlackChannelRoute) => [
-              route.slackChannelId,
+            Object.entries(byChannel).map(([channelId, route]) => [
+              channelId,
               route.targetWorkspaceId,
             ]),
           ),
         );
       } catch (caught) {
-        if (!cancelled) setError(caught instanceof Error ? caught.message : String(caught));
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : String(caught));
+          setLoadedRoutes(null);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -125,15 +141,46 @@ function SlackChannelRoutingDialogBody({
     };
   }, [connectionId, context.client, workspaceId]);
 
+  /**
+   * Only what the admin actually changed.
+   *
+   * Resending every channel would rewrite the provenance of routes nobody
+   * touched, turning somebody else's picker answer into an admin decision, and
+   * would make the payload grow with the installation rather than with the
+   * edit. A route pointing somewhere this admin cannot reach is deliberately
+   * never in here.
+   */
+  function changedRoutes() {
+    return channels
+      .filter((channel) => reachable(channel.id))
+      .map((channel) => ({
+        slackChannelId: channel.id,
+        targetWorkspaceId: draft[channel.id] ? draft[channel.id]! : null,
+      }))
+      .filter((entry) => {
+        const stored = loadedRoutes?.[entry.slackChannelId]?.targetWorkspaceId ?? null;
+        return stored !== entry.targetWorkspaceId;
+      });
+  }
+
+  /** False when a route points at a workspace this admin cannot choose. */
+  function reachable(channelId: string) {
+    const stored = loadedRoutes?.[channelId];
+    if (!stored) return true;
+    return choices.some((candidate) => candidate.id === stored.targetWorkspaceId);
+  }
+
   async function save() {
+    const routes = changedRoutes();
+    if (routes.length === 0) {
+      onClose();
+      return;
+    }
     setSaving(true);
     try {
       await context.client.updateOpenGeniSlackChannelRoutes(workspaceId, {
         connectionId,
-        routes: channels.map((channel) => ({
-          slackChannelId: channel.id,
-          targetWorkspaceId: draft[channel.id] ? draft[channel.id]! : null,
-        })),
+        routes,
       });
       toast.success("Slack channel routing saved");
       onSaved();
@@ -180,18 +227,28 @@ function SlackChannelRoutingDialogBody({
                   {channel.isPrivate ? "Private · " : "#"}
                   {channel.name ?? channel.id}
                 </span>
-                <Select
-                  value={draft[channel.id] ?? ASK_ONCE}
-                  disabled={!canManage || saving}
-                  onChange={(event) => setDraft({ ...draft, [channel.id]: event.target.value })}
-                >
-                  <option value={ASK_ONCE}>Ask me</option>
-                  {choices.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.name}
-                    </option>
-                  ))}
-                </Select>
+                {reachable(channel.id) ? (
+                  <Select
+                    value={draft[channel.id] ?? ASK_ONCE}
+                    disabled={!canManage || saving}
+                    onChange={(event) => setDraft({ ...draft, [channel.id]: event.target.value })}
+                  >
+                    <option value={ASK_ONCE}>Ask me</option>
+                    {choices.map((candidate) => (
+                      <option key={candidate.id} value={candidate.id}>
+                        {candidate.name}
+                      </option>
+                    ))}
+                  </Select>
+                ) : (
+                  // Somebody with access this admin does not have pointed this
+                  // channel somewhere. Say so rather than rendering a blank
+                  // control that cannot be saved.
+                  <span className="text-2xs text-fg-subtle">
+                    {loadedRoutes?.[channel.id]?.targetWorkspaceName ?? "another workspace"} · set
+                    by someone else
+                  </span>
+                )}
               </label>
             ))}
           </div>
@@ -204,7 +261,7 @@ function SlackChannelRoutingDialogBody({
         </Button>
         <Button
           type="button"
-          disabled={!canManage || saving || loading}
+          disabled={!canManage || saving || loading || loadedRoutes === null}
           onClick={() => void save()}
         >
           {saving ? <Loader2Icon className="animate-spin" /> : null}
