@@ -87,6 +87,7 @@ import {
   applySessionChannelMove,
   beginSessionChannelMove,
   commitSessionChannelMove,
+  reconcileSessionChannelMovePointRead,
   reconcileSessionChannelMoves,
   rollbackSessionChannelMove,
   type SessionChannelMoveOverrides,
@@ -109,6 +110,7 @@ import {
   type SessionFocusTarget,
 } from "@/lib/session-focus";
 import {
+  applySessionChannelProjection,
   applySessionPinProjection,
   applySessionRailProjection,
   subscribeToSessionPinChanges,
@@ -196,13 +198,16 @@ export function NewSessionLink(props: {
 }
 
 type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
-type PinFocusTarget = SessionFocusTarget;
 type PinFn = (
   session: Session,
   pinned: boolean,
-  restoreFocusTo?: PinFocusTarget,
+  restoreFocusTo?: SessionFocusTarget,
 ) => Promise<Session | null>;
-type MoveToChannelFn = (session: Session, channelId: string | null) => Promise<void>;
+type MoveToChannelFn = (
+  session: Session,
+  channelId: string | null,
+  restoreFocusTo?: SessionFocusTarget,
+) => Promise<void>;
 type UpdateAttentionFn = (
   session: Session,
   update: { unread?: boolean; activelyWorking?: boolean },
@@ -210,10 +215,10 @@ type UpdateAttentionFn = (
 type ArchiveFn = (session: Session, archived: boolean) => Promise<void>;
 type RequestDeleteFn = (session: Session) => void;
 type PinOverride = { session: Session; operation: number };
-type PendingPinFocus = {
+type PendingSessionFocus = {
   sessionId: string;
   operation: number;
-  target: PinFocusTarget;
+  target: SessionFocusTarget;
   settled: boolean;
 };
 type ChildPageState = SessionBranchPage;
@@ -236,6 +241,8 @@ function findSessionTreeNode(
 export function SessionList() {
   const rail = useRail();
   const context = useAppContext();
+  const sessionClient = context.client;
+  const setContextSession = context.setSession;
   const navigate = useNavigate();
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
@@ -393,9 +400,12 @@ export function SessionList() {
   const movingSessions = useRef(new Map<string, number>());
   const channelMoveOperation = useRef(0);
   const pinOperation = useRef(0);
+  const focusRestoreOperation = useRef(0);
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
-  const pendingPinFocus = useRef<PendingPinFocus | null>(null);
+  const pendingSessionFocus = useRef<PendingSessionFocus | null>(null);
+  const [focusRestoreRevision, setFocusRestoreRevision] = useState(0);
+  const channelMoveProbes = useRef(new Map<string, string>());
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
     pollIntervalMs: 30_000,
   });
@@ -403,8 +413,16 @@ export function SessionList() {
     () => [...childPages.values()].flatMap((page) => page.sessions),
     [childPages],
   );
-  const serverSessions = useMemo(() => {
+  const listedSessions = useMemo(() => {
     const source = new Map<string, Session>();
+    for (const session of [...extraSessions, ...sessions, ...loadedChildren, ...pinned]) {
+      const current = source.get(session.id);
+      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
+    }
+    return [...source.values()];
+  }, [extraSessions, loadedChildren, pinned, sessions]);
+  const serverSessions = useMemo(() => {
+    const source = new Map(listedSessions.map((session) => [session.id, session]));
     // Search is intentionally flat. Normal navigation starts with real roots,
     // then adds only explicitly loaded child pages and the active session's
     // lineage. A child can therefore never become a fake root merely because
@@ -412,10 +430,6 @@ export function SessionList() {
     // List/page projections own personal pin revisions and server treeStats.
     // Insert those first, with the current pinned section last so an older
     // ordinary continuation cannot overwrite a newer pin projection.
-    for (const session of [...extraSessions, ...sessions, ...loadedChildren, ...pinned]) {
-      const current = source.get(session.id);
-      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
-    }
     // Route/lineage projections own lifecycle and content. Merge list-owned
     // fields into them rather than replacing either domain wholesale; in
     // particular, a stale route object must not resurrect a cross-device pin.
@@ -427,15 +441,7 @@ export function SessionList() {
       source.set(session.id, projected ? applySessionRailProjection(session, projected) : session);
     }
     return [...source.values()];
-  }, [
-    activeLineage.lineage?.ancestors,
-    context.session,
-    extraSessions,
-    hierarchyMode,
-    loadedChildren,
-    pinned,
-    sessions,
-  ]);
+  }, [activeLineage.lineage?.ancestors, context.session, hierarchyMode, listedSessions]);
   const allSessions = useMemo(() => {
     const source = new Map(serverSessions.map((session) => [session.id, session]));
     for (const [id, override] of pinOverrides) {
@@ -458,22 +464,59 @@ export function SessionList() {
     return [...source.values()];
   }, [attentionOverrides, channelMoveOverrides, pinOverrides, serverSessions]);
 
-  // Successful writes stay layered over stale list requests until one of the
-  // server-owned pages confirms the destination. Pagination may omit a row, so
-  // absence alone is never treated as reconciliation.
+  // Matching list state confirms the optimistic destination. A different or
+  // absent row is ambiguous because a pre-write request may have completed
+  // late or pagination may have omitted it, so resolve that disagreement with
+  // an exact point read started after the write. That point read can preserve
+  // the optimistic move, supersede it with a newer cross-client move, or retire
+  // it after deletion without requiring a database schema revision.
   useEffect(() => {
-    setChannelMoveOverrides((current) =>
-      reconcileSessionChannelMoves(current, [
-        ...extraSessions,
-        ...sessions,
-        ...loadedChildren,
-        ...pinned,
-      ]),
-    );
-  }, [extraSessions, loadedChildren, pinned, sessions]);
+    setChannelMoveOverrides((current) => reconcileSessionChannelMoves(current, listedSessions));
+    const listedById = new Map(listedSessions.map((session) => [session.id, session]));
+    for (const [sessionId, override] of channelMoveOverrides) {
+      if (!override.committed) continue;
+      const listed = listedById.get(sessionId);
+      if (listed && (listed.channelId ?? null) === override.channelId) continue;
+      const key = `${override.operation}:${listed?.channelId ?? "absent"}`;
+      if (channelMoveProbes.current.get(sessionId) === key) continue;
+      channelMoveProbes.current.set(sessionId, key);
+      void sessionClient
+        .getSession(rail.workspaceId, sessionId)
+        .then((authoritative) => {
+          if (channelMoveProbes.current.get(sessionId) !== key) return;
+          setChannelMoveOverrides((current) =>
+            reconcileSessionChannelMovePointRead(
+              current,
+              sessionId,
+              override.operation,
+              authoritative,
+            ),
+          );
+          setContextSession((current) => applySessionChannelProjection(current, authoritative));
+        })
+        .catch((requestError: unknown) => {
+          if (
+            channelMoveProbes.current.get(sessionId) === key &&
+            requestError instanceof OpenGeniApiError &&
+            requestError.status === 404
+          ) {
+            setChannelMoveOverrides((current) =>
+              reconcileSessionChannelMovePointRead(current, sessionId, override.operation, null),
+            );
+          }
+        })
+        .finally(() => {
+          if (channelMoveProbes.current.get(sessionId) === key) {
+            channelMoveProbes.current.delete(sessionId);
+          }
+        });
+    }
+  }, [channelMoveOverrides, listedSessions, rail.workspaceId, sessionClient, setContextSession]);
 
   useEffect(() => {
     movingSessions.current.clear();
+    channelMoveProbes.current.clear();
+    pendingSessionFocus.current = null;
     setChannelMoveOverrides(new Map());
   }, [rail.workspaceId]);
   const branchParentsById = useRef<ReadonlyMap<string, Session>>(new Map());
@@ -594,12 +637,11 @@ export function SessionList() {
   const openSessionWorkspaceId = context.session?.workspaceId;
   const openSessionPinned = Boolean(context.session?.pinned);
   const openSessionPinVersion = context.session?.pinVersion ?? 0;
-  const setContextSession = context.setSession;
-
   // The route header and rail intentionally keep separate projections. Merge
-  // the canonical pin fields from each successful page poll into the open
-  // session so a pin changed on another device cannot leave those affordances
-  // disagreeing. Preserve the route/SSE-owned lifecycle and content fields.
+  // list-owned pin and project fields into the open session while preserving
+  // route/SSE-owned lifecycle and content. Project reconciliation is paused
+  // only while an optimistic move owns the row; its point-read fence updates
+  // the context directly and prevents a pre-write list response from winning.
   useEffect(() => {
     if (!openSessionId || openSessionWorkspaceId !== rail.workspaceId) return;
     // Do not feed the rail's short-lived optimistic override into the route
@@ -608,8 +650,20 @@ export function SessionList() {
     // rejected as stale and leaving the header pinned forever.
     const projected = serverSessions.find((candidate) => candidate.id === openSessionId);
     if (!projected) return;
-    setContextSession((current) => applySessionPinProjection(current, projected));
-  }, [openSessionId, openSessionWorkspaceId, rail.workspaceId, serverSessions, setContextSession]);
+    setContextSession((current) => {
+      const pinProjected = applySessionPinProjection(current, projected);
+      return channelMoveOverrides.has(openSessionId)
+        ? pinProjected
+        : applySessionChannelProjection(pinProjected, projected);
+    });
+  }, [
+    channelMoveOverrides,
+    openSessionId,
+    openSessionWorkspaceId,
+    rail.workspaceId,
+    serverSessions,
+    setContextSession,
+  ]);
 
   const activePinProbe = useRef<{ key: string | null; operation: number }>({
     key: null,
@@ -742,12 +796,23 @@ export function SessionList() {
     }
   }, [channelNameDraft, requestCreateChannel]);
   const onMoveToChannel = useCallback(
-    async (session: Session, channelId: string | null) => {
+    async (
+      session: Session,
+      channelId: string | null,
+      restoreFocusTo: SessionFocusTarget = "row",
+    ) => {
       if (movingSessions.current.has(session.id) || session.channelId === channelId) return;
       const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
       if (!acceptedTransition) return;
       const operation = ++channelMoveOperation.current;
+      const focusOperation = ++focusRestoreOperation.current;
       movingSessions.current.set(session.id, operation);
+      pendingSessionFocus.current = {
+        sessionId: session.id,
+        operation: focusOperation,
+        target: restoreFocusTo,
+        settled: false,
+      };
       setCollapsedChannelSections((current) => {
         const destinationKey = channelId ?? "default";
         if (!current.has(destinationKey)) return current;
@@ -780,6 +845,11 @@ export function SessionList() {
       } finally {
         if (movingSessions.current.get(session.id) === operation) {
           movingSessions.current.delete(session.id);
+        }
+        const pending = pendingSessionFocus.current;
+        if (pending?.sessionId === session.id && pending.operation === focusOperation) {
+          pending.settled = true;
+          setFocusRestoreRevision((current) => current + 1);
         }
       }
     },
@@ -1168,7 +1238,7 @@ export function SessionList() {
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
 
   useLayoutEffect(() => {
-    const pending = pendingPinFocus.current;
+    const pending = pendingSessionFocus.current;
     const root = listRef.current;
     if (!pending || !root) return;
     const operation = pending.operation;
@@ -1177,7 +1247,7 @@ export function SessionList() {
     let timeout: ReturnType<typeof setTimeout> | null = null;
     const restore = () => {
       if (cancelled) return;
-      const current = pendingPinFocus.current;
+      const current = pendingSessionFocus.current;
       if (!current || current.operation !== operation) return;
       const attribute = sessionFocusAttribute(current.target);
       const destination = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].find(
@@ -1203,9 +1273,9 @@ export function SessionList() {
     };
     const finish = () => {
       restore();
-      const current = pendingPinFocus.current;
+      const current = pendingSessionFocus.current;
       if (current?.operation === operation && current.settled) {
-        pendingPinFocus.current = null;
+        pendingSessionFocus.current = null;
       }
     };
 
@@ -1228,7 +1298,7 @@ export function SessionList() {
       if (frame !== null) window.cancelAnimationFrame(frame);
       if (timeout !== null) clearTimeout(timeout);
     };
-  }, [flat]);
+  }, [flat, focusRestoreRevision]);
 
   const onPin = useCallback<PinFn>(
     async (target, nextPinned, restoreFocusTo = "row") => {
@@ -1239,13 +1309,14 @@ export function SessionList() {
       if (!acceptedTransition) return null;
       pinning.current.add(target.id);
       const operation = ++pinOperation.current;
+      const focusOperation = ++focusRestoreOperation.current;
       // An optimistic pin moves the row between different group subtrees. That
       // remounts the Radix menu trigger before Radix can restore keyboard focus.
       // Keep the intended destination through the whole request so a failed
       // mutation that rolls the row back also restores focus after its remount.
-      pendingPinFocus.current = {
+      pendingSessionFocus.current = {
         sessionId: target.id,
-        operation,
+        operation: focusOperation,
         target: restoreFocusTo,
         settled: false,
       };
@@ -1286,9 +1357,10 @@ export function SessionList() {
         return updated;
       } finally {
         pinning.current.delete(target.id);
-        const pending = pendingPinFocus.current;
-        if (pending?.sessionId === target.id && pending.operation === operation) {
+        const pending = pendingSessionFocus.current;
+        if (pending?.sessionId === target.id && pending.operation === focusOperation) {
           pending.settled = true;
+          setFocusRestoreRevision((current) => current + 1);
         }
         setPinOverrides((current) => {
           if (current.get(target.id)?.operation !== operation) return current;
@@ -1496,7 +1568,7 @@ export function SessionList() {
     if (requestedFocusId) {
       const renderedSessionId = flat[focusIndex]?.id ?? null;
       if (
-        pendingPinFocus.current ||
+        pendingSessionFocus.current ||
         !root.contains(document.activeElement) ||
         !shouldMoveSessionRowFocus(requestedFocusId, renderedSessionId)
       ) {
@@ -2634,7 +2706,7 @@ function RowActionsMenu({
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
 }) {
-  const pinSelection = useRef(false);
+  const remountSelection = useRef(false);
   // Filing is a root-session concept: the rail groups a whole tree by its
   // root's channel, so children offer no move affordance.
   const canMove = channels.length > 0 && session.parentSessionId === null && !session.archived;
@@ -2661,11 +2733,11 @@ function RowActionsMenu({
         data-session-menu={session.id}
         onClick={(event) => event.stopPropagation()}
         onCloseAutoFocus={(event) => {
-          if (!pinSelection.current) return;
+          if (!remountSelection.current) return;
           // The optimistic projection remounts the trigger under another
           // SessionGroup; the list-level focus owner targets that new node.
           event.preventDefault();
-          pinSelection.current = false;
+          remountSelection.current = false;
         }}
       >
         <DropdownMenuItem
@@ -2683,7 +2755,7 @@ function RowActionsMenu({
             <DropdownMenuItem
               className="pointer-coarse:min-h-11"
               onSelect={() => {
-                pinSelection.current = true;
+                remountSelection.current = true;
                 void onPin(session, !session.pinned, "actions");
               }}
               onClick={(event) => event.stopPropagation()}
@@ -2749,7 +2821,10 @@ function RowActionsMenu({
                 key={channel.id}
                 className="pointer-coarse:min-h-11"
                 disabled={session.channelId === channel.id}
-                onSelect={() => void onMoveToChannel(session, channel.id)}
+                onSelect={() => {
+                  remountSelection.current = true;
+                  void onMoveToChannel(session, channel.id, "actions");
+                }}
                 onClick={(event) => event.stopPropagation()}
               >
                 <span className="truncate">{channel.name}</span>
@@ -2758,7 +2833,10 @@ function RowActionsMenu({
             <DropdownMenuItem
               className="pointer-coarse:min-h-11"
               disabled={session.channelId === null}
-              onSelect={() => void onMoveToChannel(session, null)}
+              onSelect={() => {
+                remountSelection.current = true;
+                void onMoveToChannel(session, null, "actions");
+              }}
               onClick={(event) => event.stopPropagation()}
             >
               <Clock3Icon className="size-4" />

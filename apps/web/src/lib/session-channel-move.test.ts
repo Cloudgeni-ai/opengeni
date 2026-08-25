@@ -4,6 +4,7 @@ import {
   applySessionChannelMove,
   beginSessionChannelMove,
   commitSessionChannelMove,
+  reconcileSessionChannelMovePointRead,
   reconcileSessionChannelMoves,
   rollbackSessionChannelMove,
   type SessionChannelMoveOverrides,
@@ -80,6 +81,14 @@ describe("optimistic session channel moves", () => {
 
     const afterStaleRefetch = reconcileSessionChannelMoves(overrides, [stale]);
     expect(afterStaleRefetch).toBe(overrides);
+    expect(
+      reconcileSessionChannelMovePointRead(
+        afterStaleRefetch,
+        stale.id,
+        1,
+        session({ id: stale.id, channelId: "channel-new" }),
+      ),
+    ).toBe(afterStaleRefetch);
     expect(applySessionChannelMove(stale, afterStaleRefetch.get(stale.id)).channelId).toBe(
       "channel-new",
     );
@@ -88,6 +97,29 @@ describe("optimistic session channel moves", () => {
     const reconciled = reconcileSessionChannelMoves(afterStaleRefetch, [authoritative]);
     expect(reconciled.size).toBe(0);
     expect(applySessionChannelMove(authoritative, reconciled.get(stale.id))).toBe(authoritative);
+  });
+
+  test("lets an exact post-write read supersede a move that another client changed again", () => {
+    const stale = session({ id: "session-1", channelId: "channel-old" });
+    let overrides = beginSessionChannelMove(new Map(), stale.id, "channel-new", 1);
+    overrides = commitSessionChannelMove(overrides, stale.id, "channel-new", 1);
+
+    const movedAgain = session({ id: stale.id, channelId: "channel-latest" });
+    const superseded = reconcileSessionChannelMovePointRead(overrides, stale.id, 1, movedAgain);
+    expect(applySessionChannelMove(stale, superseded.get(stale.id)).channelId).toBe(
+      "channel-latest",
+    );
+
+    const reconciled = reconcileSessionChannelMoves(superseded, [movedAgain]);
+    expect(reconciled.size).toBe(0);
+  });
+
+  test("retires a committed override when a post-write point read confirms deletion", () => {
+    const original = session({ id: "session-1" });
+    let overrides = beginSessionChannelMove(new Map(), original.id, "channel-new", 1);
+    overrides = commitSessionChannelMove(overrides, original.id, "channel-new", 1);
+
+    expect(reconcileSessionChannelMovePointRead(overrides, original.id, 1, null).size).toBe(0);
   });
 
   test("rolls a failed move back to the authoritative old folder", () => {

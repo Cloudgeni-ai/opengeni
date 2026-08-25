@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import type { Session } from "@/types";
 import {
+  applySessionChannelProjection,
   applySessionPinProjection,
   applySessionRailProjection,
   mergeSessionContextProjection,
@@ -23,6 +24,27 @@ const session = {
 } as Session;
 
 describe("session pin reconciliation", () => {
+  test("merges the list-owned channel without replacing route lifecycle fields", () => {
+    const updated = applySessionChannelProjection(session, {
+      id: session.id,
+      workspaceId: session.workspaceId,
+      channelId: "channel-new",
+    });
+
+    expect(updated).toMatchObject({
+      status: "running",
+      initialMessage: "Keep this lifecycle projection",
+      channelId: "channel-new",
+    });
+    expect(
+      applySessionChannelProjection(updated, {
+        id: session.id,
+        workspaceId: session.workspaceId,
+        channelId: "channel-new",
+      }),
+    ).toBe(updated);
+  });
+
   test("merges only authoritative personal pin fields", () => {
     const updated = applySessionPinProjection(session, {
       id: session.id,
@@ -141,6 +163,7 @@ describe("session pin reconciliation", () => {
       pinned: true,
       pinnedAt: "2026-07-10T00:05:00.000Z",
       pinVersion: 5,
+      channelId: "channel-new",
       treeStats: {
         directChildren: 2,
         totalDescendants: 4,
@@ -158,6 +181,7 @@ describe("session pin reconciliation", () => {
       pinned: true,
       pinnedAt: "2026-07-10T00:05:00.000Z",
       pinVersion: 5,
+      channelId: "channel-new",
       treeStats: projected.treeStats,
     });
   });

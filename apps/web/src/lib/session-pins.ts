@@ -95,6 +95,18 @@ export function applySessionPinProjection(
   return { ...current, pinned, pinnedAt, pinVersion };
 }
 
+/** Merge the list-owned project filing without replacing route/SSE content. */
+export function applySessionChannelProjection(
+  current: Session | null,
+  projected: Pick<Session, "id" | "workspaceId" | "channelId">,
+): Session | null {
+  if (!current || current.id !== projected.id || current.workspaceId !== projected.workspaceId) {
+    return current;
+  }
+  const channelId = projected.channelId ?? null;
+  return (current.channelId ?? null) === channelId ? current : { ...current, channelId };
+}
+
 /**
  * Merge a detail/SSE projection into the root context without allowing a
  * slower detail read to erase a newer list or optimistic pin projection.
@@ -117,7 +129,8 @@ export function mergeSessionContextProjection(
  * while a list poll must never regress lifecycle state or message content.
  */
 export function applySessionRailProjection(current: Session, projected: Session): Session {
-  const merged = applySessionPinProjection(current, projected) ?? current;
+  const pinned = applySessionPinProjection(current, projected) ?? current;
+  const merged = applySessionChannelProjection(pinned, projected) ?? pinned;
   if (sameTreeStats(merged.treeStats, projected.treeStats)) {
     return merged;
   }

@@ -92,6 +92,25 @@ describe("session control surface architecture", () => {
     expect(paginationKey).not.toContain("serverSessions");
   });
 
+  test("hands keyboard focus across optimistic project-move remounts", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain('void onMoveToChannel(session, channel.id, "actions")');
+    expect(list).toContain('void onMoveToChannel(session, null, "actions")');
+    expect(list).toContain("pendingSessionFocus.current = {");
+    expect(list).toContain("if (!remountSelection.current) return;");
+    expect(list).toContain("event.preventDefault();");
+    expect(list).toContain("pending.settled = true;");
+    expect(list).toContain("setFocusRestoreRevision((current) => current + 1)");
+  });
+
+  test("reconciles the open session project without regressing an owned optimistic move", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
+    expect(list).toContain("channelMoveOverrides.has(openSessionId)");
+    expect(list).toContain("reconcileSessionChannelMovePointRead(");
+    expect(list).toContain("requestError.status === 404");
+  });
+
   test("keeps the loaded creator picker identifiable and reachable", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain("sessionCreatorLabelMap(allSessions)");

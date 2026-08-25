@@ -159,10 +159,10 @@ describe("session pin focus restoration", () => {
     expect(shouldRecordSessionRowFocusIntent(null, 0)).toBe(false);
   });
 
-  test("does not turn a pin remount reorder into a roving row-focus request", () => {
-    // The actions trigger is restored by the pin operation after its row
-    // remount. The subsequent focus-index effect has no keyboard intent and
-    // must leave that restored destination alone.
+  test("does not turn a pin or project remount reorder into a roving row-focus request", () => {
+    // The actions trigger is restored by the group-changing operation after
+    // its row remount. The subsequent focus-index effect has no keyboard intent
+    // and must leave that restored destination alone.
     expect(shouldMoveSessionRowFocus(null, SESSION_ID)).toBe(false);
     expect(shouldMoveSessionRowFocus(SESSION_ID, SESSION_ID)).toBe(true);
     expect(shouldMoveSessionRowFocus(SESSION_ID, "other-session")).toBe(false);
