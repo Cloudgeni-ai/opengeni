@@ -462,9 +462,9 @@ describe("timeline scroll ownership browser regression", () => {
       return node.style.visibility !== "hidden";
     });
 
-    const immediate = await page.evaluate(() => {
+    const immediate = await page.evaluate(async () => {
       const harness = window.timelineCollapsedHistoryHarness!;
-      harness.appendLivePageMarkNoOlderAndSettleOlder();
+      await harness.appendLivePageMarkNoOlderAndSettleOlder();
       return harness.metrics();
     });
     await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
@@ -475,6 +475,43 @@ describe("timeline scroll ownership browser regression", () => {
       const metrics = window.timelineCollapsedHistoryHarness!.metrics();
       return metrics.maxScroll - metrics.scrollTop < 2;
     });
+    expect(await page.getByRole("button", { name: "Jump to latest" }).count()).toBe(0);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+  }, 30_000);
+
+  test("keeps a returned live tail pinned when ordinary prefetch settles before prepend", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&prefetch-window&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 800,
+    );
+
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await scroller.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+      node.dispatchEvent(new Event("scroll"));
+    });
+    await page.waitForFunction(() => {
+      const metrics = window.timelineCollapsedHistoryHarness!.metrics();
+      return metrics.maxScroll - metrics.scrollTop < 2;
+    });
+
+    const immediate = await page.evaluate(async () => {
+      const harness = window.timelineCollapsedHistoryHarness!;
+      await harness.appendLivePageMarkNoOlderAndSettleOlder();
+      return harness.metrics();
+    });
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+
+    expect(immediate.maxScroll - immediate.scrollTop).toBeLessThan(2);
+    expect(immediate.liveTailGap).toBeLessThan(48);
     expect(await page.getByRole("button", { name: "Jump to latest" }).count()).toBe(0);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
   }, 30_000);
@@ -585,6 +622,70 @@ describe("timeline scroll ownership browser regression", () => {
     await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
     await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
     expect(await retry.count()).toBe(0);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
+  test("keeps an empty rejected page behind one explicit retry", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&empty-window&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("failure"),
+    );
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    await retry.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
+  test("promotes a settled prefetch after viewport collapse to bounded retry", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&prefetch-window&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 800,
+    );
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await page.locator(".timeline-collapsed-history-shell").evaluate((node) => {
+      (node as HTMLElement).style.height = "10000px";
+    });
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll <= 1,
+    );
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("failure"),
+    );
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    await retry.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    await page.locator(".timeline-collapsed-history-shell").evaluate((node) => {
+      (node as HTMLElement).style.height = "9999px";
+      (node as HTMLElement).style.height = "10000px";
+    });
+    await page.waitForTimeout(250);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 

@@ -8,13 +8,14 @@ import "./styles.css";
 type TimelineCollapsedHistoryHarness = {
   appendLiveItem: () => void;
   appendLivePage: () => void;
-  appendLivePageMarkNoOlderAndSettleOlder: () => void;
+  appendLivePageMarkNoOlderAndSettleOlder: () => Promise<void>;
   armOlder: () => void;
   loadCalls: () => number;
   prependUnderfilledPage: () => void;
   removeLoader: () => void;
   settleLoad: (call: number, outcome: "success" | "failure", complete?: boolean) => void;
   settleOlder: (outcome: "success" | "failure") => void;
+  settleOlderWithoutPrepend: (outcome: "success" | "failure") => void;
   scroller: () => HTMLElement;
   metrics: () => {
     scrollTop: number;
@@ -117,10 +118,17 @@ function Harness() {
   const dynamicCollapse = search.has("dynamic-collapse");
   const manualLoad = search.has("manual-load");
   const overlapLoads = search.has("overlap-loads");
+  const emptyWindow = search.has("empty-window");
+  const omitLoadingOlder = search.has("omit-loading-older");
+  const usePrefetchWindow = search.has("prefetch-window");
   const syncCachedPrefetch = search.has("sync-cached-prefetch");
   const syncCachedUnderfill = search.has("sync-cached-underfill");
-  const [items, setItems] = useState<TimelineItem[]>(
-    syncCachedPrefetch || syncCachedUnderfill ? prefetchWindow : initialCollapsedTail,
+  const [items, setItems] = useState<TimelineItem[]>(() =>
+    emptyWindow
+      ? []
+      : syncCachedPrefetch || syncCachedUnderfill || usePrefetchWindow
+        ? prefetchWindow()
+        : initialCollapsedTail(),
   );
   const [hasOlder, setHasOlder] = useState(!dynamicCollapse);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -152,7 +160,7 @@ function Harness() {
     return node;
   }, []);
 
-  const settleOlder = useCallback((outcome: "success" | "failure") => {
+  const settleOlderWithoutPrepend = useCallback((outcome: "success" | "failure") => {
     const pending = pendingLoadRef.current;
     if (!pending) {
       return;
@@ -162,10 +170,26 @@ function Harness() {
       pending.reject(new Error("transient collapsed-history load failure"));
       return;
     }
-    setItems((current) => [...olderConversation(), ...current]);
-    setHasOlder(false);
     pending.resolve(false);
   }, []);
+
+  const prependOlderPage = useCallback(() => {
+    setItems((current) => [...olderConversation(), ...current]);
+    setHasOlder(false);
+  }, []);
+
+  const settleOlder = useCallback(
+    (outcome: "success" | "failure") => {
+      if (!pendingLoadRef.current) {
+        return;
+      }
+      if (outcome === "success") {
+        prependOlderPage();
+      }
+      settleOlderWithoutPrepend(outcome);
+    },
+    [prependOlderPage, settleOlderWithoutPrepend],
+  );
 
   const prependUnderfilledPage = useCallback(() => {
     const call = loadCallsRef.current;
@@ -189,14 +213,18 @@ function Harness() {
     ]);
   }, []);
 
-  const appendLivePageMarkNoOlderAndSettleOlder = useCallback(() => {
-    // Three synchronous commits with no animation frame between them reproduce
-    // final-page availability arriving before its delayed prepend while
-    // tip-follow still owns large live debt.
+  const appendLivePageMarkNoOlderAndSettleOlder = useCallback(async () => {
+    // Availability and promise settlement both arrive before the fetched rows,
+    // with no animation frame available to drain the live-tail camera debt.
     flushSync(() => appendLivePage());
     flushSync(() => setHasOlder(false));
-    flushSync(() => settleOlder("success"));
-  }, [appendLivePage, settleOlder]);
+    settleOlderWithoutPrepend("success");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync(() => undefined);
+    flushSync(() => prependOlderPage());
+  }, [appendLivePage, prependOlderPage, settleOlderWithoutPrepend]);
 
   const settleLoad = useCallback(
     (call: number, outcome: "success" | "failure", complete = false) => {
@@ -276,6 +304,7 @@ function Harness() {
       removeLoader: () => setLoaderAvailable(false),
       settleLoad,
       settleOlder,
+      settleOlderWithoutPrepend,
       scroller,
       metrics: () => {
         const node = scroller();
@@ -305,6 +334,7 @@ function Harness() {
     scroller,
     settleLoad,
     settleOlder,
+    settleOlderWithoutPrepend,
   ]);
 
   return (
@@ -314,7 +344,7 @@ function Harness() {
           className="timeline-collapsed-history-shell"
           items={items}
           hasOlder={hasOlder}
-          loadingOlder={overlapLoads ? false : loadingOlder}
+          loadingOlder={overlapLoads || omitLoadingOlder ? false : loadingOlder}
           onLoadOlder={loaderAvailable ? loadOlder : undefined}
           renderMessageText={(text, item) => <div data-conversation-message={item.id}>{text}</div>}
         />

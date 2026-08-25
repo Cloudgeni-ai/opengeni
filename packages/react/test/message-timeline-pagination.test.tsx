@@ -1381,6 +1381,13 @@ describe("MessageTimeline pagination affordances", () => {
     );
     expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
 
+    // Promise settlement still does not prove that the fetched rows committed.
+    // Keep this exact owner through the settlement-only render as well.
+    await actRun(() => load.resolve(false));
+    await flush();
+    expect(calls).toBe(1);
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+
     layout.setContentHeight(2_200);
     await r.rerender(
       <MessageTimeline
@@ -1393,9 +1400,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(distanceFromBottom(scroller)).toBeLessThan(2);
     expect(layout.tipBottomGap()).toBeLessThan(2);
 
-    await actRun(() => load.resolve(false));
-    await drainFrames(frames);
-    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(calls).toBe(1);
     layout.restore();
     await r.unmount();
   });
@@ -1700,6 +1705,69 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("an empty rendered window keeps a rejected underfill attempt bounded", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const retryLoad = deferred<boolean>();
+    let calls = 0;
+    const onLoadOlder = () => {
+      calls += 1;
+      return calls === 1 ? first.promise : retryLoad.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={[]} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline items={[]} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => first.reject(new Error("transient empty-page failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    expect(calls).toBe(1);
+
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+
+    await actRun(() => retryLoad.resolve(false));
+    await flush();
+    await r.unmount();
+  });
+
   test("an explicit underfill retry remains actionable after resize creates a scroll range", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
@@ -1907,6 +1975,92 @@ describe("MessageTimeline pagination affordances", () => {
     );
     await hit();
     expect(calls).toBe(3);
+    await r.unmount();
+  });
+
+  test("a pending prefetch that settles after collapse exposes one bounded retry", async () => {
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const retryLoad = deferred<boolean>();
+    let calls = 0;
+    const onLoadOlder = () => {
+      calls += 1;
+      return calls === 1 ? first.promise : retryLoad.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline events={manyEvents(4)} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await armOlderPrefetch(r.container);
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    const target = observed.at(-1);
+    if (!(scroller instanceof HTMLElement) || !target) {
+      throw new Error("expected timeline scroller and top sentinel");
+    }
+
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    expect(calls).toBe(1);
+
+    // The viewport collapses while the ordinary prefetch owns the boundary.
+    // Its ResizeObserver pass cannot start another load while that request is
+    // pending, so settlement itself must expose the bounded retry transition.
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    await actRun(() => resizeCallback([], resizeObserver!));
+    expect(calls).toBe(1);
+
+    await actRun(() => first.reject(new Error("transient prefetch failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    expect(calls).toBe(1);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+    });
+    expect(calls).toBe(2);
+
+    await actRun(() => retryLoad.resolve(false));
+    await flush();
     await r.unmount();
   });
 

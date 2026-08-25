@@ -815,37 +815,23 @@ export function MessageTimeline({
   // one explicit retry only if this exact window still has older history.
   useEffect(() => {
     const attempt = olderLoadAttemptRef.current;
-    if (!attempt) {
+    if (!attempt || attempt[0] === olderBoundaryKey) {
       return;
     }
-    const boundaryChanged = attempt[0] !== olderBoundaryKey;
-    if (attempt[1] === 0) {
-      if (boundaryChanged || (!hasOlder && attempt === underfillSettledAttempt && !loadingOlder)) {
-        olderLoadAttemptRef.current = null;
-      }
-      return;
-    }
-    if (!hasOlder) {
+    if (attempt[1] === 0 || !hasOlder) {
       olderLoadAttemptRef.current = null;
-    } else if (boundaryChanged) {
-      // Successful ordinary prefetch stays as this top visit's cooldown owner
-      // until the reader leaves; boundary progress makes it settled even if
-      // the host's promise has not resolved yet.
-      attempt[1] = 2;
-      const node = scrollRef.current;
-      if (node) {
-        rearmOlderPrefetchAfterLeavingTop(node);
-        requestOlderIfUnderfilled(node);
-      }
+      return;
     }
-  }, [
-    hasOlder,
-    loadingOlder,
-    olderBoundaryKey,
-    rearmOlderPrefetchAfterLeavingTop,
-    requestOlderIfUnderfilled,
-    underfillSettledAttempt,
-  ]);
+    // Successful ordinary prefetch stays as this top visit's cooldown owner
+    // until the reader leaves; boundary progress makes it settled even if
+    // the host's promise has not resolved yet.
+    attempt[1] = 2;
+    const node = scrollRef.current;
+    if (node) {
+      rearmOlderPrefetchAfterLeavingTop(node);
+      requestOlderIfUnderfilled(node);
+    }
+  }, [hasOlder, olderBoundaryKey, rearmOlderPrefetchAfterLeavingTop, requestOlderIfUnderfilled]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
   const driveFollow = useCallback(
@@ -1183,8 +1169,6 @@ export function MessageTimeline({
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
-    olderLoadAttemptRef.current = null;
-    setUnderfillSettledAttempt(null);
     seenActivityIdsRef.current.clear();
     applyPinned(true);
   }, [allGroups.length, revealed, applyPinned]);
@@ -1257,6 +1241,9 @@ export function MessageTimeline({
           attempt[1] = 2;
           if (root.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
             olderLoadAttemptRef.current = null;
+          } else if (maxScrollOf(root) <= 1) {
+            attempt[1] = 0;
+            setUnderfillSettledAttempt(attempt);
           }
         };
         // Preserve legacy fire-and-forget top-band retries: the callback has
