@@ -745,9 +745,10 @@ New organization-administration routes use the separate
 `list_organization_administration_members` projection, which exposes safe
 name/email plus shared-workspace access and omits Personal workspace and
 retention metadata. Organization settings is the sole editor for the human
-roster and shared-workspace grants. Workspace settings shows that roster as
-read-only and links back to Organization settings; its separate Slack access
-request queue keeps its existing workspace-admin lifecycle.
+roster and shared-workspace grants. Workspace settings performs no raw human
+roster read or edit; it shows only the notice/link back to Organization
+settings, while its separate Slack access-request queue keeps its existing
+workspace-admin lifecycle.
 
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, terminally cancels
