@@ -49,6 +49,7 @@ const quarantineMigrationUrl = new URL(
   "../drizzle/0351_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
+const provisionRolesUrl = new URL("../src/provision-roles.ts", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let shared: SharedTestDatabase | null = null;
@@ -254,6 +255,7 @@ describe("migrations 0349-0351 automatic session title policy fence", () => {
     const fence = await readFile(fenceMigrationUrl, "utf8");
     const quarantineIndex = await readFile(quarantineIndexMigrationUrl, "utf8");
     const quarantine = await readFile(quarantineMigrationUrl, "utf8");
+    const provisionRoles = await readFile(provisionRolesUrl, "utf8");
     expect(fence.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(fence).not.toContain("LOCK TABLE sessions");
     expect(fence).not.toContain("ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY");
@@ -271,6 +273,15 @@ describe("migrations 0349-0351 automatic session title policy fence", () => {
     expect(fence).toContain("claim_automatic_session_title_fanout_v1");
     expect(fence).toContain("mark_automatic_session_title_fanout_delivered_v1");
     expect(fence).toContain("mark_automatic_session_title_fanout_failed_v1");
+    expect(provisionRoles).toContain(
+      "REVOKE EXECUTE ON FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid) FROM %I",
+    );
+    expect(provisionRoles).toContain(
+      "REVOKE EXECUTE ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1() FROM %I",
+    );
+    expect(provisionRoles).not.toContain(
+      "REVOKE EXECUTE ON FUNCTION opengeni_private.claim_automatic_session_title_fanout_v1(integer) FROM %I",
+    );
     expect(fence).toContain("FOR UPDATE SKIP LOCKED");
     expect(fence).toContain("pg_catalog.pg_get_userbyid(relation.relowner)");
     expect(fence).toContain("opengeni.automatic_session_title_quarantine_v1");

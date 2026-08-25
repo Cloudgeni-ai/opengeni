@@ -1936,6 +1936,20 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- The automatic-title enqueue seam and policy trigger are migration/owner
+    -- internals. Keep the three claim/mark dispatcher routines available to
+    -- the worker role, but remove these two helpers from the historical blanket
+    -- private-schema grant.
+    IF to_regprocedure('opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid,uuid,uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid) FROM %I',
+        ${literal(role)}
+      );
+      EXECUTE format(
+        'REVOKE EXECUTE ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1() FROM %I',
+        ${literal(role)}
+      );
+    END IF;
     -- Global cross-workspace artifact workers are separate capabilities. Never
     -- let the generic tenant-scoped app role inherit them from the historical
     -- blanket grant of already-installed helpers.
