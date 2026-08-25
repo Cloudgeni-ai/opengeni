@@ -391,6 +391,7 @@ describe("embedded worker lifecycle contract", () => {
           "organization_private_session_setting_events",
           "organization_private_session_settings",
           "organization_profile_events",
+          "organization_shared_workspace_administration_capabilities",
           "organization_user_resource_authorities",
           "organization_user_resource_grants",
           "organization_user_retention_deletion_events",
@@ -470,6 +471,22 @@ describe("embedded worker lifecycle contract", () => {
           can_update: false,
           can_delete: false,
         },
+        {
+          name: "document_migration_capabilities",
+          owner: "opengeni_migrator",
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+        },
+        {
+          name: "connection_tenancy_backfill_capabilities",
+          owner: "opengeni_migrator",
+          can_select: false,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+        },
       ],
       [
         ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
@@ -511,6 +528,20 @@ describe("embedded worker lifecycle contract", () => {
         },
         {
           name: "personal_document_authority_capability_active(text)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+        {
+          name: "document_migration_capability_active(text)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+        },
+        {
+          name: "connection_tenancy_backfill_capability_active(uuid)",
           owner: "opengeni_migrator",
           can_execute: true,
           public_execute: false,

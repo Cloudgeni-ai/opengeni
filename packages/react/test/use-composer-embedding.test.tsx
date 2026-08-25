@@ -8,9 +8,10 @@ import { actRun, flush, registerDom, renderHook } from "./render-hook";
 registerDom();
 
 describe("useComposer embedding policy", () => {
-  test("ordinary Send clears immediately and preserves rapid distinct messages in order", async () => {
+  test("ordinary Send clears the draft immediately and preserves rapid messages through handoff", async () => {
     const sessionId = crypto.randomUUID();
     const attempts: SendMessageInput[] = [];
+    const acceptedEvents: SessionEvent[] = [];
     let releaseFirst!: () => void;
     const firstPending = new Promise<void>((resolve) => {
       releaseFirst = resolve;
@@ -20,7 +21,7 @@ describe("useComposer embedding policy", () => {
         const submitted = typeof input === "string" ? { text: input } : input;
         attempts.push(submitted);
         if (attempts.length === 1) await firstPending;
-        return {
+        const accepted: SessionEvent = {
           id: crypto.randomUUID(),
           workspaceId: WORKSPACE_ID,
           sessionId,
@@ -30,6 +31,8 @@ describe("useComposer embedding policy", () => {
           payload: submitted,
           occurredAt: new Date().toISOString(),
         };
+        acceptedEvents.push(accepted);
+        return accepted;
       },
     });
     const hook = await renderHook(
@@ -67,21 +70,33 @@ describe("useComposer embedding policy", () => {
     await flush();
     expect(attempts.map((attempt) => attempt.text)).toEqual(["first", "second"]);
 
-    const accepted = attempts.map((attempt, index) => ({
+    expect(acceptedEvents).toHaveLength(2);
+    const accepted = acceptedEvents;
+    await hook.rerender([accepted[0]!]);
+    expect(hook.result.current.optimisticMessages?.map((message) => message.text)).toEqual([
+      "first",
+      "second",
+    ]);
+    const started = accepted.map((event, index) => ({
       id: crypto.randomUUID(),
       workspaceId: WORKSPACE_ID,
       sessionId,
-      sequence: index + 1,
-      type: "user.message" as const,
-      clientEventId: attempt.clientEventId,
-      payload: attempt,
+      sequence: accepted.length + index + 1,
+      type: "turn.started" as const,
+      turnId: crypto.randomUUID(),
+      clientEventId: null,
+      payload: { triggerEventId: event.id },
       occurredAt: new Date().toISOString(),
     }));
-    await hook.rerender([accepted[0]!]);
+    await hook.rerender([accepted[0]!, started[0]!]);
     expect(hook.result.current.optimisticMessages?.map((message) => message.text)).toEqual([
       "second",
     ]);
-    await hook.rerender(accepted);
+    await hook.rerender([...accepted, started[0]!]);
+    expect(hook.result.current.optimisticMessages?.map((message) => message.text)).toEqual([
+      "second",
+    ]);
+    await hook.rerender([...accepted, ...started]);
     expect(hook.result.current.optimisticMessages).toEqual([]);
     await hook.unmount();
   });

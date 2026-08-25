@@ -1333,6 +1333,7 @@ describe("session realtime ledger", () => {
       reasoningEffort: "high",
       latencyMode: "fast",
       delivery: "steer",
+      routing: "accepted_for_steering",
       initiator: expect.any(Object),
     });
     expect(persisted.calls[0]!.turnId).toBe(persisted.turns[0]!.id);
@@ -1837,6 +1838,8 @@ describe("session realtime ledger", () => {
         ),
     );
     const mirroredText = String(mirrored?.text);
+    expect(human.routing).toBe("accepted_for_execution");
+    expect(human.receipt.result.routing).toBe("accepted_for_execution");
     expect(mirroredText).toContain("<status>accepted_for_execution</status>");
     expect(mirroredText).toContain("Use &lt;human&gt; steering &amp; keep context");
     expect(mirroredText).toContain("do not delegate this message again");
@@ -1922,6 +1925,8 @@ describe("session realtime ledger", () => {
         ),
     );
 
+    expect(second.routing).toBe("queued_for_execution");
+    expect(second.receipt.result.routing).toBe("queued_for_execution");
     expect(mirrored).toMatchObject({
       text: expect.stringContaining("<status>queued_for_execution</status>"),
       payload: {
@@ -2635,7 +2640,7 @@ describe("session realtime ledger", () => {
 });
 
 describe("realtime ledger admission on a paused branch", () => {
-  test("a delegation Send re-enters the exclusive admission held by the sync", async () => {
+  test("a delegation Steer re-enters the exclusive admission held by the sync", async () => {
     const value = await fixture();
     const { claimed } = await claimInitial(value);
     await complete(value, claimed.connection);
@@ -2651,7 +2656,7 @@ describe("realtime ledger admission on a paused branch", () => {
       }),
     );
     // The sync admission observes the paused branch and escalates to the
-    // exclusive prefix; the inner delegation Send takes its shared savepoint
+    // exclusive prefix; the inner delegation Steer takes its shared savepoint
     // against that held exclusive prefix, rolls it back, and auto-resumes.
     const admitted = await transaction(value.owner.workspaceId, (tx) =>
       syncSessionRealtimeLedgerInTransaction(tx, delegationSyncInput(value, claimed.connection)),

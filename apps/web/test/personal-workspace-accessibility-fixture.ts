@@ -155,6 +155,22 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           onChange: () => undefined,
         }),
       ),
+      createElement(
+        "section",
+        { id: "disabled-session-visibility-picker" },
+        createElement(SessionVisibilityPicker, {
+          id: "disabled-session",
+          personalWorkspace: false,
+          value: "workspace",
+          capabilities: {
+            activated: true,
+            canCreatePrivate: true,
+            reason: "available",
+          },
+          disabled: true,
+          onChange: () => undefined,
+        }),
+      ),
     ),
   );
 }

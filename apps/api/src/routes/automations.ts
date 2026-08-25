@@ -315,7 +315,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "automation source is disabled",
       });
     }
-    const rawBody = await readBoundedBody(c.req.raw, AUTOMATION_WEBHOOK_MAX_BYTES);
+    const rawBody = await readAutomationWebhookBody(c.req.raw, AUTOMATION_WEBHOOK_MAX_BYTES);
     const adapter = requireAutomationAdapter(source.adapterId);
     const secret = decryptVariableSetValue(
       requireEncryptionKey(deps),
@@ -498,7 +498,10 @@ function requireEncryptionKey(deps: ApiRouteDeps): Uint8Array {
   return key;
 }
 
-async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array> {
+export async function readAutomationWebhookBody(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array> {
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new HTTPException(413, {
@@ -509,21 +512,17 @@ async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > maxBytes) {
-        await reader.cancel();
-        throw new HTTPException(413, {
-          message: "automation webhook payload is too large",
-        });
-      }
-      chunks.push(value);
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > maxBytes) {
+      await reader.cancel();
+      throw new HTTPException(413, {
+        message: "automation webhook payload is too large",
+      });
     }
-  } finally {
-    reader.releaseLock();
+    chunks.push(value);
   }
   const result = new Uint8Array(length);
   let offset = 0;

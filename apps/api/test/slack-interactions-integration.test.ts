@@ -8,9 +8,11 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
   OPENGENI_SLACK_BOT_REQUESTED_SCOPES,
   type Permission,
+  type WorkspaceSlackOrchestrationNoticeSettings,
   type WorkspaceSlackReactionSummonSettings,
 } from "@opengeni/contracts";
 import {
+  addSessionSystemUpdate,
   appendSessionEvents,
   bootstrapWorkspace,
   createConnection,
@@ -21,7 +23,10 @@ import {
   getSlackBotUserLink,
   getSessionForSubject,
   getWorkspaceGrant,
+  createWorkspace,
+  getSlackChannelRoute,
   grantWorkspaceAccess,
+  upsertSlackChannelRoute,
   saveSlackBotUserLink,
   synchronizeCanonicalHumanLoginBindings,
   updateSlackTaskPolicy,
@@ -626,7 +631,13 @@ async function fixture(
     externalOwnerTeamId?: string;
     guestOwner?: boolean;
     slackReactionSummon?: WorkspaceSlackReactionSummonSettings;
+    /** Omitted keeps the shipped default: both orchestration notices off. */
+    slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings;
     slackCommand?: string;
+    /** `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED`. */
+    slackWorkspaceRouting?: boolean;
+    /** Create a second workspace in the same organization the owner can use. */
+    routedWorkspaceName?: string;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -671,6 +682,7 @@ async function fixture(
     environmentsEncryptionKey: encryptionKey,
     slackSigningSecret: signingMaterial,
     slackCommand: options.slackCommand ?? "/opengeni",
+    ...(options.slackWorkspaceRouting ? { slackWorkspaceRoutingEnabled: true } : {}),
     publicBaseUrl: "https://app.example.test",
     webBaseUrl: "https://app.example.test",
     sandboxBackend: "none",
@@ -705,9 +717,12 @@ async function fixture(
     client.db,
     connectionInput as Parameters<typeof createConnection>[1],
   );
-  if (options.slackReactionSummon) {
+  if (options.slackReactionSummon || options.slackOrchestrationNotices) {
     await updateWorkspaceSettings(client.db, owner.workspaceId, {
-      slackReactionSummon: options.slackReactionSummon,
+      ...(options.slackReactionSummon ? { slackReactionSummon: options.slackReactionSummon } : {}),
+      ...(options.slackOrchestrationNotices
+        ? { slackOrchestrationNotices: options.slackOrchestrationNotices }
+        : {}),
     });
   }
   await saveSlackBotUserLink(client.db, {
@@ -729,6 +744,25 @@ async function fixture(
       subjectId: otherSubjectId,
       linkedBySubjectId: otherSubjectId,
     });
+  }
+
+  let routed: { accountId: string; workspaceId: string; name: string } | null = null;
+  if (options.routedWorkspaceName) {
+    const created = await createWorkspace(client.db, {
+      accountId: owner.accountId,
+      name: options.routedWorkspaceName,
+    });
+    await grantWorkspaceAccess(client.db, {
+      accountId: owner.accountId,
+      workspaceId: created.id,
+      subjectId: owner.subjectId,
+      permissions,
+    });
+    routed = {
+      accountId: owner.accountId,
+      workspaceId: created.id,
+      name: options.routedWorkspaceName,
+    };
   }
 
   const slack = fakeSlack(new Set(options.deniedChannels ?? []), {
@@ -777,6 +811,7 @@ async function fixture(
     ownerSlackUserId,
     otherSlackUserId,
     connectionId: connection.id,
+    routed,
   };
 }
 
@@ -1050,6 +1085,715 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     const revoked = JSON.stringify(value.slack.homePublications.at(-1)!.view.blocks);
     expect(revoked).toContain("Connect your OpenGeni account");
     expect(revoked).not.toContain("Must disappear after unlink");
+  });
+
+  // Per-channel and per-DM Slack workspace routing. Everything here needs the
+  // flag ON; the whole rest of this file is the proof that the flag OFF is
+  // byte-identical to single-workspace behaviour.
+  test("routes a channel to its chosen workspace instead of the installation's", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const channelId = "C_ROUTED";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_ROUTED_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000100.0001",
+            text: "ship the release notes",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    // The interaction, the session and its events live in the routed workspace.
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [route] = await interactions(routed.workspaceId);
+    expect(route?.session_id).toBeTruthy();
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions
+      where workspace_id = ${routed.workspaceId} and id = ${route!.session_id}`;
+    expect(session!.initial_message).toContain("ship the release notes");
+
+    // The bot still posts on the installation's own credential.
+    const [posts] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from slack_bot_post_operations
+      where workspace_id = ${value.owner.workspaceId}
+        and connection_id = ${value.connectionId}`;
+    expect(posts!.n).toBeGreaterThan(0);
+    const [routedPosts] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from slack_bot_post_operations
+      where workspace_id = ${routed.workspaceId}`;
+    expect(routedPosts!.n).toBe(0);
+  });
+
+  test("a mapped thread keeps its workspace after the channel is re-pointed", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const channelId = "C_REPOINTED";
+    const upsert = (targetWorkspaceId: string) =>
+      upsertSlackChannelRoute(client.db, home, {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: value.owner.accountId,
+        targetWorkspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      });
+    await upsert(routed.workspaceId);
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_THREAD_ROOT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000200.0001",
+            text: "start here",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [before] = await interactions(routed.workspaceId);
+    expect(before?.session_id).toBeTruthy();
+
+    // Re-point the channel at the installation's workspace. The live thread must
+    // not change tenant underneath the conversation.
+    await upsert(value.owner.workspaceId);
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_THREAD_REPLY_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000200.0002",
+            thread_ts: "1700000200.0001",
+            text: "and continue",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [after] = await interactions(routed.workspaceId);
+    expect(after!.id).toBe(before!.id);
+    expect(after!.session_id).toBe(before!.session_id);
+  });
+
+  test("a strict prefix overrides one message without rewriting the channel", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const home = { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId };
+    const channelId = "C_PREFIX";
+    await upsertSlackChannelRoute(client.db, home, {
+      connectionId: value.connectionId,
+      slackTeamId: value.teamId,
+      slackChannelId: channelId,
+      targetAccountId: value.owner.accountId,
+      targetWorkspaceId: value.owner.workspaceId,
+      decidedBySubjectId: value.owner.subjectId,
+      decidedBySlackUserId: value.ownerSlackUserId,
+      source: "admin",
+    });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFIX_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000300.0001",
+            text: "in Platform: audit the terraform",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const [overridden] = await interactions(routed.workspaceId);
+    expect(overridden?.session_id).toBeTruthy();
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions
+      where workspace_id = ${routed.workspaceId} and id = ${overridden!.session_id}`;
+    // The addressing is stripped; the request is not.
+    expect(session!.initial_message).toContain("audit the terraform");
+    expect(session!.initial_message).not.toContain("in Platform:");
+
+    // The channel's own answer is untouched, so the next plain message goes back.
+    const stored = await getSlackChannelRoute(client.db, home, {
+      connectionId: value.connectionId,
+      slackChannelId: channelId,
+    });
+    expect(stored?.targetWorkspaceId).toBe(value.owner.workspaceId);
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFIX_NEXT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000300.0002",
+            text: "and now the plain one",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(1);
+  });
+
+  test("a prefix naming an unreachable workspace creates no session anywhere", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_PREFIX_DENIED_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_DENIED_PREFIX",
+            ts: "1700000400.0001",
+            text: "in Finance: do the thing",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await interactions(routed.workspaceId)).toHaveLength(0);
+    const [sessions] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from sessions
+      where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
+    expect(sessions!.n).toBe(0);
+    // The refusal names the workspace that was asked for and lands in the
+    // person's own bot DM, not the channel.
+    const refusal = value.slack.posts.find((post) => post.text.includes("Finance"));
+    expect(refusal?.text).toContain("No session was created.");
+  });
+
+  test("asks once, remembers the answer, and never asks that channel again", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const channelId = "C_ASK_ONCE";
+    const first = {
+      teamId: value.teamId,
+      eventId: `E_ASK_${crypto.randomUUID()}`,
+      event: {
+        type: "app_mention",
+        user: value.ownerSlackUserId,
+        channel: channelId,
+        ts: "1700000700.0001",
+        text: "audit the terraform",
+      },
+    };
+    expect((await postEvent(value.app, first)).status).toBe(200);
+    await drainAll(value.deps);
+
+    // The question is asked, and NOTHING is started anywhere while it is open.
+    const card = value.slack.posts.at(-1)!;
+    expect(card.text).toContain("more than one workspace");
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    expect(await interactions(routed.workspaceId)).toHaveLength(0);
+    const [beforeAnswer] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from sessions
+      where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
+    expect(beforeAnswer!.n).toBe(0);
+
+    const cardsAfterFirst = value.slack.posts.length;
+    // Slack retries the same event: the inbox dedupe means there is nothing new
+    // to drain at all.
+    expect((await postEvent(value.app, first)).status).toBe(200);
+    expect(await drainAll(value.deps)).toBe(0);
+
+    // A genuinely DIFFERENT message in the same channel is the case the pending
+    // index governs. It must not open a second prompt or post a second card.
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_ASK_SECOND_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000700.0009",
+            text: "and another thing",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect(await drainAll(value.deps)).toBe(1);
+    const [prompts] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from slack_route_prompts
+      where connection_id = ${value.connectionId} and status = 'pending'`;
+    expect(prompts!.n).toBe(1);
+    // The card is re-posted through the same operation id, so the ledger
+    // returns the completed original rather than putting a second card up.
+    expect(value.slack.posts).toHaveLength(cardsAfterFirst);
+
+    const [option] = await shared!.admin<{ id: string }[]>`
+      select o.id from slack_route_prompt_options o
+      join slack_route_prompts p on p.id = o.prompt_id
+      where p.connection_id = ${value.connectionId}
+        and o.candidate_workspace_id = ${routed.workspaceId}`;
+    expect(option?.id).toBeTruthy();
+
+    const click = (actionId: string) =>
+      value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/interactions",
+          new URLSearchParams({
+            payload: JSON.stringify({
+              type: "block_actions",
+              team: { id: value.teamId },
+              user: { id: value.ownerSlackUserId },
+              channel: { id: card.channel },
+              message: { ts: card.timestamp },
+              actions: [{ action_id: actionId, action_ts: "1760000000.000009", value: option!.id }],
+            }),
+          }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+    expect((await click("opengeni.route.select")).status).toBe(200);
+    await drainAll(value.deps);
+
+    // The answer starts the work the person originally asked for, in the
+    // workspace they chose.
+    const [route] = await interactions(routed.workspaceId);
+    expect(route?.session_id).toBeTruthy();
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [session] = await shared!.admin<{ initial_message: string }[]>`
+      select initial_message from sessions
+      where workspace_id = ${routed.workspaceId} and id = ${route!.session_id}`;
+    expect(session!.initial_message).toContain("audit the terraform");
+
+    // The choice is remembered, so the next message never asks again.
+    const stored = await getSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      { connectionId: value.connectionId, slackChannelId: channelId },
+    );
+    expect(stored?.targetWorkspaceId).toBe(routed.workspaceId);
+    expect(stored?.source).toBe("picker");
+
+    const cardsBefore = value.slack.posts.length;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_ASK_NEXT_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700000700.0002",
+            text: "and the second one",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(routed.workspaceId)).toHaveLength(2);
+    expect(
+      value.slack.posts
+        .slice(cardsBefore)
+        .filter((post) => post.text.includes("more than one workspace")),
+    ).toHaveLength(0);
+  });
+
+  test("a second click on a settled picker cannot start a second session", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DOUBLE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_DOUBLE_CLICK",
+            ts: "1700000800.0001",
+            text: "ship it",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const card = value.slack.posts.at(-1)!;
+    const [option] = await shared!.admin<{ id: string }[]>`
+      select o.id from slack_route_prompt_options o
+      join slack_route_prompts p on p.id = o.prompt_id
+      where p.connection_id = ${value.connectionId}
+        and o.candidate_workspace_id = ${routed.workspaceId}`;
+    const click = (actionTs: string) =>
+      value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/interactions",
+          new URLSearchParams({
+            payload: JSON.stringify({
+              type: "block_actions",
+              team: { id: value.teamId },
+              user: { id: value.ownerSlackUserId },
+              channel: { id: card.channel },
+              message: { ts: card.timestamp },
+              actions: [
+                {
+                  action_id: "opengeni.route.select",
+                  action_ts: actionTs,
+                  value: option!.id,
+                },
+              ],
+            }),
+          }).toString(),
+          "application/x-www-form-urlencoded",
+        ),
+      );
+    // Two distinct clicks, not one deduped by a colliding timestamp.
+    expect((await click("1760000000.000011")).status).toBe(200);
+    expect((await click("1760000000.000012")).status).toBe(200);
+    await drainAll(value.deps);
+    expect(await interactions(routed.workspaceId)).toHaveLength(1);
+    // The second click says so rather than wedging the post ledger.
+    expect(value.slack.calls.filter((call) => call.method === "chat.update").length).toBe(2);
+  });
+
+  test("an unanswered picker expires instead of deadening the conversation", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const channelId = "C_EXPIRING";
+    const ask = (suffix: string, ts: string) =>
+      postEvent(value.app, {
+        teamId: value.teamId,
+        eventId: `E_EXPIRE_${suffix}_${crypto.randomUUID()}`,
+        event: {
+          type: "app_mention",
+          user: value.ownerSlackUserId,
+          channel: channelId,
+          ts,
+          text: "please decide",
+        },
+      });
+    expect((await ask("first", "1700000900.0001")).status).toBe(200);
+    await drainAll(value.deps);
+    const [pending] = await shared!.admin<{ id: string }[]>`
+      select id from slack_route_prompts
+      where connection_id = ${value.connectionId} and status = 'pending'`;
+    expect(pending?.id).toBeTruthy();
+
+    // Nobody clicks, and the card ages out.
+    await shared!.admin`
+      update slack_route_prompts set expires_at = now() - interval '1 minute'
+      where id = ${pending!.id}::uuid`;
+
+    expect((await ask("second", "1700000900.0002")).status).toBe(200);
+    await drainAll(value.deps);
+    const rows = await shared!.admin<{ id: string; status: string }[]>`
+      select id, status from slack_route_prompts
+      where connection_id = ${value.connectionId} order by created_at`;
+    // The dead row is settled and a fresh question is asked, rather than the
+    // channel silently swallowing every later message forever.
+    expect(rows.map((row) => row.status)).toEqual(["expired", "pending"]);
+  });
+
+  test("asking one person in a channel does not swallow another person's request", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+      linkOther: true,
+    });
+    // Both people must be genuinely ambiguous, or the sole-candidate rule
+    // correctly answers for them without asking.
+    await grantWorkspaceAccess(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.routed!.workspaceId,
+      subjectId: value.otherSubjectId,
+      permissions: ["sessions:create", "sessions:read", "sessions:control"],
+    });
+    const channelId = "C_TWO_PEOPLE";
+    for (const [suffix, user, ts] of [
+      ["owner", value.ownerSlackUserId, "1700001000.0001"],
+      ["other", value.otherSlackUserId, "1700001000.0002"],
+    ] as const) {
+      expect(
+        (
+          await postEvent(value.app, {
+            teamId: value.teamId,
+            eventId: `E_TWO_${suffix}_${crypto.randomUUID()}`,
+            event: {
+              type: "app_mention",
+              user,
+              channel: channelId,
+              ts,
+              text: "my own request",
+            },
+          })
+        ).status,
+      ).toBe(200);
+    }
+    await drainAll(value.deps);
+    const asked = await shared!.admin<{ slack_user_id: string }[]>`
+      select slack_user_id from slack_route_prompts
+      where connection_id = ${value.connectionId} and status = 'pending'
+      order by slack_user_id`;
+    expect(asked.map((row) => row.slack_user_id).sort()).toEqual(
+      [value.ownerSlackUserId, value.otherSlackUserId].sort(),
+    );
+  });
+
+  test("says where routed work went, and stays quiet when there was no choice", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const channelId = "C_WORKSPACE_LINE";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_LINE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700001100.0001",
+            text: "do the routed thing",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const routedAck = value.slack.posts.at(-1)!;
+    expect(routedAck.text).toContain("-> Platform");
+    expect(JSON.stringify(routedAck.blocks)).toContain("-> Platform");
+    const [label] = await shared!.admin<{ routed_workspace_label: string | null }[]>`
+      select routed_workspace_label from slack_interactions
+      where workspace_id = ${routed.workspaceId}`;
+    expect(label?.routed_workspace_label).toBe("Platform");
+
+    // An install where the person has exactly one workspace made no choice, so
+    // a constant footer on every message would be noise rather than
+    // information. Same flag, same code path, no line.
+    const single = await fixture({ slackWorkspaceRouting: true });
+    expect(
+      (
+        await postEvent(single.app, {
+          teamId: single.teamId,
+          eventId: `E_QUIET_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: single.ownerSlackUserId,
+            channel: "C_QUIET",
+            ts: "1700001100.0002",
+            text: "and the quiet one",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(single.deps);
+    expect(single.slack.posts.length).toBeGreaterThan(0);
+    expect(single.slack.posts.every((post) => !post.text.includes("->"))).toBe(true);
+    const [quietLabel] = await shared!.admin<{ routed_workspace_label: string | null }[]>`
+      select routed_workspace_label from slack_interactions
+      where workspace_id = ${single.owner.workspaceId}`;
+    expect(quietLabel?.routed_workspace_label).toBeNull();
+  });
+
+  test("a routed workspace the person cannot reach never falls back to another one", async () => {
+    if (!available) return;
+    // The headline rule: OpenGeni does not quietly serve this from a workspace
+    // the person does happen to belong to.
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+      linkOther: true,
+    });
+    const routed = value.routed!;
+    const channelId = "C_NO_ACCESS";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    // The other linked human is a member of the installation's workspace only.
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NO_ACCESS_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.otherSlackUserId,
+            channel: channelId,
+            ts: "1700000600.0001",
+            text: "please do this",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    expect(await interactions(routed.workspaceId)).toHaveLength(0);
+    expect(await interactions(value.owner.workspaceId)).toHaveLength(0);
+    const [sessions] = await shared!.admin<{ n: number }[]>`
+      select count(*)::int as n from sessions
+      where workspace_id in (${value.owner.workspaceId}, ${routed.workspaceId})`;
+    expect(sessions!.n).toBe(0);
+    const refusal = value.slack.posts.find((post) => post.text.includes("No session was created."));
+    expect(refusal?.text).toContain("do not have access");
+    // The access-request link is minted for the workspace they actually need,
+    // not the installation's, or it would send them to a page that refuses them.
+    const url = /https:\/\/\S+/u.exec(refusal!.text)![0].replace(/\.$/u, "");
+    const linkToken = new URLSearchParams(new URL(url).hash.slice(1)).get("slack_link");
+    expect(verifySlackUserLinkToken(signingMaterial, linkToken!)?.workspaceId).toBe(
+      routed.workspaceId,
+    );
+
+    // The message carries a signed token and is posted under a deterministic
+    // operation id, so a retry has to render the SAME bytes. A freshly minted
+    // token would be a different digest under one id, which the post ledger
+    // refuses permanently.
+    const before = value.slack.posts.length;
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_NO_ACCESS_RETRY_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.otherSlackUserId,
+            channel: channelId,
+            ts: "1700000600.0002",
+            text: "please do this again",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const second = value.slack.posts
+      .slice(before)
+      .find((post) => post.text.includes("Request access"));
+    expect(second).toBeTruthy();
+    // Same inbox row would give identical bytes; a different row legitimately
+    // mints its own token, so compare the stable half.
+    expect(second!.text.split("Request access:")[0]).toBe(
+      refusal!.text.split("Request access:")[0],
+    );
+  });
+
+  test("one workspace is not a choice, so an ordinary install never notices the flag", async () => {
+    if (!available) return;
+    // Same event, flag on, but the subject can only use the installation's
+    // workspace. This is what keeps the flag quiet for existing installs.
+    const value = await fixture({ slackWorkspaceRouting: true });
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_SOLE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: "C_SOLE",
+            ts: "1700000500.0001",
+            text: "just do it",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    expect(route?.session_id).toBeTruthy();
   });
 
   test("App Home never publishes task data without Slack's current view hash", async () => {
@@ -6714,4 +7458,566 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       terminal_delivery_state: "completed",
     });
   });
+
+  test("posts one bounded pointer card when a worker the human started needs input", async () => {
+    if (!available) return;
+    const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_CHILD_BLOCKED_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_CHILD_BLOCKED",
+        ts: "1770000000.000001",
+        text: "Orchestrate some workers",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const childSessionId = crypto.randomUUID();
+    const childTurnId = crypto.randomUUID();
+    const added = await addSessionSystemUpdate(client.db, {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: route!.session_id,
+      kind: "child_requires_action",
+      classification: "action_required",
+      sourceId: childSessionId,
+      dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:1`,
+      summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+      payload: {
+        type: "child_requires_action",
+        childSessionId,
+        childTurnId,
+        childTurnGeneration: 1,
+        requests: [
+          {
+            kind: "human_input",
+            requestId: crypto.randomUUID(),
+            questionCount: 2,
+            firstQuestion: "Which environment should I deploy to?",
+            allowSkip: false,
+            expiresAt: null,
+          },
+        ],
+        truncated: false,
+      },
+    });
+    expect(added.added).toBe(true);
+
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const delivered = value.slack.posts.slice(postsBefore);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.text).toBe(
+      [
+        "A worker you started needs input.",
+        "> Which environment should I deploy to? (+1 more)",
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+      ].join("\n"),
+    );
+    expect(delivered[0]!.threadTimestamp).toBe("1770000000.000001");
+    expect(delivered[0]!.text).not.toContain(childTurnId);
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "open",
+    });
+
+    // A reaper retry that lost the delivery cursor reuses the same durable post
+    // operation instead of announcing the blocked worker a second time.
+    await shared!.admin`
+      update slack_interactions
+      set last_delivered_session_event_sequence = 0,
+          delivery_claim_holder_id = null,
+          delivery_claim_expires_at = null,
+          delivery_retry_at = null,
+          updated_at = now()
+      where id = ${route!.id}`;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(1);
+    const [operations] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from slack_bot_post_operations
+      where workspace_id = ${value.owner.workspaceId}
+        and target_id = 'D_CHILD_BLOCKED'`;
+    expect(operations?.count).toBe(2);
+  }, 60_000);
+
+  test("stays quiet for deferred child lifecycle notices", async () => {
+    if (!available) return;
+    // The workspace opted in, so silence here is the notice-kind filter rather
+    // than the per-workspace switch.
+    const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_CHILD_QUIET_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_CHILD_QUIET",
+        ts: "1771000000.000001",
+        text: "Orchestrate some quiet workers",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const childSessionId = crypto.randomUUID();
+    const childTurnId = crypto.randomUUID();
+    const deferred = [
+      {
+        kind: "child_progress" as const,
+        classification: "info" as const,
+        dedupeKey: `child-progress:${childSessionId}:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_progress" as const,
+          childSessionId,
+          goalId: crypto.randomUUID(),
+          objectiveRevision: 1,
+          operationId: crypto.randomUUID(),
+          progressNote: "Halfway through the migration",
+        },
+      },
+      {
+        kind: "child_waiting_capacity" as const,
+        classification: "info" as const,
+        dedupeKey: `child-waiting-capacity:${childSessionId}:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_waiting_capacity" as const,
+          childSessionId,
+          childTurnId,
+          provider: "codex" as const,
+          nextCheckAt: null,
+        },
+      },
+      {
+        kind: "child_requires_action_resolved" as const,
+        classification: "info" as const,
+        dedupeKey: `child-requires-action-resolved:${childSessionId}:${childTurnId}:1:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_requires_action_resolved" as const,
+          childSessionId,
+          childTurnId,
+          childTurnGeneration: 1,
+          requestId: crypto.randomUUID(),
+          approvalId: null,
+          outcome: "answered" as const,
+          respondedByKind: "human" as const,
+        },
+      },
+      {
+        kind: "child_paused" as const,
+        classification: "action_required" as const,
+        dedupeKey: `child-paused:${childSessionId}:${crypto.randomUUID()}`,
+        payload: {
+          type: "child_paused" as const,
+          childSessionId,
+          operationId: crypto.randomUUID(),
+          actorKind: "human" as const,
+          reason: null,
+        },
+      },
+    ];
+    for (const notice of deferred) {
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        sourceId: childSessionId,
+        summary: `Worker ${childSessionId} lifecycle notice.`,
+        ...notice,
+      });
+      expect(added.added).toBe(true);
+    }
+
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(0);
+  }, 60_000);
+
+  test("posts one bounded line when a goal pauses for budget or the continuation cap", async () => {
+    if (!available) return;
+    const value = await fixture({ slackOrchestrationNotices: { goalPaused: true } });
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_GOAL_PAUSED_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_GOAL_PAUSED",
+        ts: "1772000000.000001",
+        text: "Run a long goal",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const goalId = crypto.randomUUID();
+    const sessionLink = `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in OpenGeni>`;
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "limits" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      `Goal paused (budget). ${sessionLink}`,
+    ]);
+
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "goal.paused",
+        payload: { goalId, actor: "system", reason: "max_auto_continuations" },
+      },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      `Goal paused (budget). ${sessionLink}`,
+      `Goal paused (continuation cap). ${sessionLink}`,
+    ]);
+
+    // Human/API/agent pauses are decisions the human already made, no_progress
+    // is not a stop they must act on, and a resume is never announced. The
+    // prototype keys are there because the announced set is a two-reason
+    // invariant and its lookup must not answer for `constructor` or friends.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "goal.paused", payload: { goalId, actor: "api", reason: "api" } },
+      { type: "goal.paused", payload: { goalId, actor: "api", reason: "user_pause" } },
+      { type: "goal.paused", payload: { goalId, actor: "agent", reason: "agent" } },
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "no_progress" } },
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "constructor" } },
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "toString" } },
+      { type: "goal.resumed", payload: { goalId, actor: "api", reason: "api" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(2);
+  }, 60_000);
+
+  test("stays quiet for a blocked worker that was already unblocked", async () => {
+    if (!available) return;
+    const value = await fixture({ slackOrchestrationNotices: { childRequiresAction: true } });
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_CHILD_RESOLVED_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_CHILD_RESOLVED",
+        ts: "1774000000.000001",
+        text: "Orchestrate a worker that answers itself",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const childSessionId = crypto.randomUUID();
+    const childTurnId = crypto.randomUUID();
+    const blocked = async (childTurnGeneration: number) => {
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action",
+        classification: "action_required",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:${childTurnGeneration}`,
+        summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+        payload: {
+          type: "child_requires_action",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration,
+          requests: [
+            {
+              kind: "human_input",
+              requestId: crypto.randomUUID(),
+              questionCount: 1,
+              firstQuestion: "Which environment should I deploy to?",
+              allowSkip: false,
+              expiresAt: null,
+            },
+          ],
+          truncated: false,
+        },
+      });
+      expect(added.added).toBe(true);
+      return added.update.id;
+    };
+
+    const resolve = async (childTurnGeneration: number) => {
+      const resolved = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action_resolved",
+        classification: "info",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action-resolved:${childSessionId}:${childTurnId}:${childTurnGeneration}`,
+        summary: `Worker ${childSessionId} was answered.`,
+        payload: {
+          type: "child_requires_action_resolved",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration,
+          requestId: crypto.randomUUID(),
+          approvalId: null,
+          outcome: "answered",
+          respondedByKind: "human",
+        },
+      });
+      expect(resolved.added).toBe(true);
+    };
+
+    // A resolution supersedes a still-pending notice in the same commit, so the
+    // superseded state alone already says "no longer blocked".
+    const superseded = await blocked(1);
+    await resolve(1);
+    const [supersededRow] = await shared!.admin<{ state: string }[]>`
+      select state from session_system_updates where id = ${superseded}`;
+    expect(supersededRow?.state).toBe("superseded");
+
+    // The state is not sufficient on its own, though: a notice that is not
+    // pending when the resolution lands keeps whatever state it had, and a
+    // notice a parent turn has claimed stays `delivered` forever. Only the
+    // resolution row for that exact boundary proves those stale.
+    const stale = await blocked(2);
+    await shared!.admin`update session_system_updates set state = 'failed' where id = ${stale}`;
+    await resolve(2);
+    const [staleRow] = await shared!.admin<{ state: string }[]>`
+      select state from session_system_updates where id = ${stale}`;
+    expect(staleRow?.state).toBe("failed");
+
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(0);
+    const [budget] = await shared!.admin<{ progress_count: number }[]>`
+      select progress_count from slack_interactions where id = ${route!.id}`;
+    // A notice nobody posts never consumes one of the shared post slots.
+    expect(budget?.progress_count).toBe(0);
+
+    // A re-freeze is a new generation and a new block, and it does post.
+    await blocked(3);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      [
+        "A worker you started needs input.",
+        "> Which environment should I deploy to?",
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+      ].join("\n"),
+    ]);
+  }, 60_000);
+
+  test("caps orchestration notices at the shared per-interaction post budget", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackOrchestrationNotices: { childRequiresAction: true, goalPaused: true },
+    });
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_NOTICE_CAP_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_NOTICE_CAP",
+        ts: "1775000000.000001",
+        text: "Fan out to a lot of workers",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+
+    // Four blocked children, one more than the shared budget allows.
+    for (let index = 0; index < 4; index += 1) {
+      const childSessionId = crypto.randomUUID();
+      const childTurnId = crypto.randomUUID();
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action",
+        classification: "action_required",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:1`,
+        summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+        payload: {
+          type: "child_requires_action",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration: 1,
+          requests: [
+            {
+              kind: "human_input",
+              requestId: crypto.randomUUID(),
+              questionCount: 1,
+              firstQuestion: `Worker ${index} needs a decision`,
+              allowSkip: false,
+              expiresAt: null,
+            },
+          ],
+          truncated: false,
+        },
+      });
+      expect(added.added).toBe(true);
+    }
+    await drainAll(value.deps);
+    const delivered = value.slack.posts.slice(postsBefore);
+    expect(delivered).toHaveLength(3);
+    expect(
+      delivered.every((post) => post.text.startsWith("A worker you started needs input.")),
+    ).toBe(true);
+    const [budget] = await shared!.admin<{ progress_count: number }[]>`
+      select progress_count from slack_interactions where id = ${route!.id}`;
+    expect(budget?.progress_count).toBe(3);
+
+    // The budget is shared across every unsolicited post, so a later goal pause
+    // and a later assistant progress message are both silent as well.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "goal.paused",
+        payload: { goalId: crypto.randomUUID(), actor: "system", reason: "limits" },
+      },
+      { type: "agent.message.completed", payload: { text: "Still working on it" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(3);
+
+    // The terminal result is independent of the budget and still reaches Slack.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output: "Final bounded result" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).at(-1)?.text).toContain("Final bounded result");
+  }, 60_000);
+
+  test("keeps both orchestration notices silent until the workspace turns them on", async () => {
+    if (!available) return;
+    // No slackOrchestrationNotices option: the shipped default for every
+    // workspace is both notices off. An unsolicited Slack post is worse than a
+    // missed one, and the in-app rail and priority feed already carry this.
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_NOTICES_OFF_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_NOTICES_OFF",
+        ts: "1773000000.000001",
+        text: "Run some work quietly",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const postsBefore = value.slack.posts.length;
+    const goalId = crypto.randomUUID();
+    const postOperationCount = async () => {
+      const [row] = await shared!.admin<{ count: number }[]>`
+        select count(*)::int as count
+        from slack_bot_post_operations
+        where workspace_id = ${value.owner.workspaceId}
+          and target_id = 'D_NOTICES_OFF'`;
+      return row?.count ?? 0;
+    };
+    const addBlockedChild = async () => {
+      const childSessionId = crypto.randomUUID();
+      const childTurnId = crypto.randomUUID();
+      const added = await addSessionSystemUpdate(client.db, {
+        accountId: value.owner.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: route!.session_id,
+        kind: "child_requires_action",
+        classification: "action_required",
+        sourceId: childSessionId,
+        dedupeKey: `child-requires-action:${childSessionId}:${childTurnId}:1`,
+        summary: `Worker ${childSessionId} is blocked and needs input (turn ${childTurnId}).`,
+        payload: {
+          type: "child_requires_action",
+          childSessionId,
+          childTurnId,
+          childTurnGeneration: 1,
+          requests: [
+            {
+              kind: "human_input",
+              requestId: crypto.randomUUID(),
+              questionCount: 1,
+              firstQuestion: "Which environment should I deploy to?",
+              allowSkip: false,
+              expiresAt: null,
+            },
+          ],
+          truncated: false,
+        },
+      });
+      expect(added.added).toBe(true);
+      return childSessionId;
+    };
+    const operationsBefore = await postOperationCount();
+
+    await addBlockedChild();
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "goal.paused", payload: { goalId, actor: "system", reason: "limits" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore)).toHaveLength(0);
+    // Silence takes the ordinary "nothing to post for this event" path: the
+    // delivery cursor still advanced past both events, no post operation was
+    // reserved, and the interaction stays open rather than stuck or retrying.
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(await postOperationCount()).toBe(operationsBefore);
+    const [cursor] = await shared!.admin<
+      { last_delivered_session_event_sequence: number; delivery_retry_at: Date | null }[]
+    >`
+      select last_delivered_session_event_sequence, delivery_retry_at
+      from slack_interactions
+      where id = ${route!.id}`;
+    const [pending] = await shared!.admin<{ sequence: number }[]>`
+      select max(sequence)::int as sequence
+      from session_events
+      where session_id = ${route!.session_id}
+        and type in ('system.update.pending', 'goal.paused')`;
+    expect(cursor?.last_delivered_session_event_sequence).toBe(pending!.sequence);
+    expect(cursor?.delivery_retry_at).toBeNull();
+    expect((await interactions(value.owner.workspaceId))[0]).toMatchObject({
+      terminal_delivery_state: "open",
+    });
+
+    // The switch owns only the two orchestration notices; every pre-existing
+    // card type keeps posting exactly as before. This also takes the first of
+    // the three shared per-interaction slots, leaving exactly two for the two
+    // notices posted once the switch is on below.
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "agent.message.completed", payload: { text: "Still working on it" } },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      "Still working on it",
+    ]);
+
+    // Turning both on posts exactly one message for each new notice.
+    await updateWorkspaceSettings(client.db, value.owner.workspaceId, {
+      slackOrchestrationNotices: { childRequiresAction: true, goalPaused: true },
+    });
+    const childSessionId = await addBlockedChild();
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "goal.paused",
+        payload: { goalId, actor: "system", reason: "max_auto_continuations" },
+      },
+    ]);
+    await drainAll(value.deps);
+    expect(value.slack.posts.slice(postsBefore).map((post) => post.text)).toEqual([
+      "Still working on it",
+      [
+        "A worker you started needs input.",
+        "> Which environment should I deploy to?",
+        `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${childSessionId}|Open in OpenGeni>`,
+      ].join("\n"),
+      `Goal paused (continuation cap). <https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route!.session_id}|Open in OpenGeni>`,
+    ]);
+  }, 60_000);
 });

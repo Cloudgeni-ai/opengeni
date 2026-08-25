@@ -3,7 +3,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { canonicalBunVersion } from "../bun-version";
 import { distribution, summarize, type Distribution } from "./summarize-profiles";
+
+const bunVersion = await canonicalBunVersion();
 
 function profile(path: string, wallSeconds: number, exitCode = 0): void {
   writeFileSync(
@@ -29,7 +32,7 @@ function profile(path: string, wallSeconds: number, exitCode = 0): void {
       runner: {
         os: "linux",
         arch: "x64",
-        bunVersion: "1.3.14",
+        bunVersion,
         githubRunnerOs: null,
         githubRunnerArch: null,
       },

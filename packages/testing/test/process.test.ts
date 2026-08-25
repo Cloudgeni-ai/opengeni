@@ -163,15 +163,14 @@ function wrapperWithDetachedDescendantCommand(): string[] {
 
 function wrapperThatExitsWithDetachedPipeOwner(): string[] {
   return [
-    "bun",
-    "-e",
-    [
-      'const child = Bun.spawn(["setsid", "bun", "-e", "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)"], {',
-      '  stdin: "ignore", stdout: "inherit", stderr: "inherit"',
-      "});",
-      "console.log(`child:${child.pid}`);",
-      "child.unref();",
-    ].join("\n"),
+    "sh",
+    "-c",
+    // The shell forks the background child with the command's output pipe
+    // already inherited, so the wrapper cannot race the detached pipe owner
+    // during Bun subprocess startup.
+    'setsid bun -e "$1" & child=$!; echo "child:$child"',
+    "opengeni-detached-pipe-owner",
+    "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)",
   ];
 }
 

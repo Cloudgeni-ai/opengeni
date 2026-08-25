@@ -10,19 +10,19 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "35441ce078a5d5b5710ff2746a5d2d3e6ee0989f6547d3d1bf772c248e3f51ad"
+      "sha256": "1a532e5004b6a09bafb34d77e83d67619470585718a70858778596ef21f28319"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "792b3a37eb60d66c3bca69f12e5c5820a268b5b6e6229b93650a9f243c1e9138"
+      "sha256": "12db03d6711e4cc9f33dd6be5b70738bcf19843f451cbd889fbc17b623bcbd65"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "8c73674389bd6dba5ee5f452bc567076a68966f2f36c0c20787d50e6f6d9afef"
+      "sha256": "f1a0843536e08f2298c4361a73b6ccea630a41b44a11498978b0803a6c70cf6c"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
-      "sha256": "9aae9ecd5dff90589d8fbadb98b4afcfefe433a6c359fac03556f6fc2ba89a45"
+      "sha256": "a739913b5470819b147f4d94633cdbbb7edbe89decfa98888aefa7d24ef3a9e7"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -42,23 +42,23 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "ed111afddcb1980a4c7f7a8b8c0d821a98bc0826b5db2058d2d90e19d5fd5660"
+      "sha256": "35ea669e9119244185608d6b3ba36bd1594b1cf51dc8e7e800fcee91c7b0a495"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
-      "sha256": "b2f3fd253fa2e8fb833e4f7af4d09616ca9feb9233e7528e4d75674bd57e1589"
+      "sha256": "3ac7c7c47aa5aa2f0176634acad4f61832435d9392520d2cc59bdf922d9ad2c0"
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "6270b3a82413ba9c40d7011c653f468e98c33df997bc9ea195367d25bf3f4f96"
+      "sha256": "49d8a518d63f3b11ba8434a1238707831c83d1e8d01f9f37f5681d4d1183b535"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "197b48efce02b7ba6c1fc36f02a626c9fe597e1600f3b5e1b6cf5c7317e286ce"
+      "sha256": "e5b2603dbdeec1a5fe59a8e746f63acfab066f1b2cd3903e3f64cc6238e8f88c"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
-      "sha256": "1e34b409940a9c11d44bf25de320bfc7d8bcbe35d19cf88a27a0f99ad95688bc"
+      "sha256": "3491fd64b0482ec10f70fa36d7530b07bae9fe3dd5783ae8baba8d4728655148"
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
@@ -66,7 +66,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "30a86a0b8f1af49c9c448a19917f56b42ba0d4628631214bbfd35d91c7b1a2df"
+      "sha256": "768babbcc762a889b872aa8548766196aa6cdb93682a5d223689ef70a0cf50b0"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
@@ -78,7 +78,7 @@
     },
     {
       "path": ".github/workflows/source-admission.yml",
-      "sha256": "f18606d2da2fef8dc7726958e5fbe753b4567a7df043f5549f650ef491310673"
+      "sha256": "dff0ac659656f7158bad6936bcc1fdee321beccfdf134944f087612efef37a3f"
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",
@@ -217,7 +217,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (macOS universal)",
-      "sha256": "c6d3fe6759106ce4d97dd131b7cff51174284b2194851234d67f98adfdce70ad"
+      "sha256": "c867bd7327a3eeb76ba10d2d58568856f06af4fc8cfe84eb2495cf055531eb31"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
@@ -379,7 +379,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "musl",
       "step": "Build and smoke in exact musl userspace",
-      "sha256": "720f81713f39dde007ce1f37c62765988bbfcbf1d61f2ac104922b6641c80717"
+      "sha256": "41224291f8ee35f3b73468e40432ab085a7276a0d68163b049fd2336fb307195"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -403,7 +403,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "native",
       "step": "Install pinned Rust toolchain",
-      "sha256": "fe1b6eaabd6d9b517800a2c8355adc2385ed20062328fb604e44990f4efcd6ae"
+      "sha256": "56d2197373be048720d3354d40d73f12eed8a7468a02c7c0b4d21995b1d8bfff"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -427,7 +427,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "wasm",
       "step": "Install pinned WASM toolchain",
-      "sha256": "fd8bfebde6edfa39494abfba5fd1a93a554570025a7f5080def35966db36a160"
+      "sha256": "cca351707a26012784309de7f7e837e4b9108cf4f6fa662d96d4930aa55e977a"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",
@@ -625,7 +625,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "package-contracts",
       "step": "Install pinned artifact-kernel build toolchain",
-      "sha256": "c705850093d508e42e7bbbe77ba9f0af2cd426359d0e7a563e3024b8996a5dbb"
+      "sha256": "4b16355061365f4914d4e87afb8eeb3c12b30cd6bf63573c548e15016bd143f0"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -1291,7 +1291,7 @@
       "workflow": ".github/workflows/source-admission.yml",
       "job": "verify",
       "step": "Execute the exact base-owned admission verifier",
-      "sha256": "48befe1e1f09b43c7f5951b3a31776fe7d28ac20945291a2afe7e8beaa10abdf"
+      "sha256": "1fea293d52d68f63debb78965e555985a4383b85ac96726f688d9ae62d800bb0"
     },
     {
       "workflow": ".github/workflows/staging-canary-dispatch.yml",

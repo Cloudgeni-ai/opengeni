@@ -4,7 +4,7 @@
  * Display-only: never an authorization input.
  */
 
-type CreatorRef = {
+export type CreatorRef = {
   kind: "subject" | "service";
   subjectId: string;
   label?: string | undefined;
@@ -40,6 +40,40 @@ export function creatorInitials(createdBy: CreatorRef): string | null {
     return `${[...words[0]!][0]}${[...words[1]!][0]}`.toUpperCase();
   }
   return [...source].slice(0, 2).join("").toUpperCase();
+}
+
+/**
+ * The creator a rail row should show a monogram for, or null.
+ *
+ * Top-level rows only. A spawned session inherits its parent's creator, so
+ * repeating the chip down a subtree is noise that costs title width on exactly
+ * the rows with the least of it. `parentSessionId` is the session's own lineage
+ * fact, which is why it beats the row's render depth: a collapsed channel
+ * section renders the selected session at depth 0 even when it is nested.
+ */
+export function railRowCreator(session: {
+  parentSessionId: string | null;
+  createdBy: CreatorRef;
+}): CreatorRef | null {
+  return session.parentSessionId === null ? session.createdBy : null;
+}
+
+/** Human-readable creator name for a tooltip or screen-reader announcement. */
+export function creatorLabel(createdBy: CreatorRef): string {
+  return createdBy.label?.trim() || createdBy.subjectId;
+}
+
+/**
+ * How a rail row announces its creator, or null when it shows no chip.
+ *
+ * The chip is `aria-hidden` and the row's own `aria-label` replaces
+ * name-from-content, so the row's accessible name is the only place a screen
+ * reader can hear this. Gate it on exactly the facts that decide whether the
+ * chip renders, so a row never announces a creator it does not show.
+ */
+export function creatorAnnouncement(createdBy: CreatorRef | null): string | null {
+  if (createdBy === null || creatorInitials(createdBy) === null) return null;
+  return creatorLabel(createdBy);
 }
 
 /** Stable hue (0–359) hashed from the subject id, for the monogram chip. */

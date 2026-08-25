@@ -776,15 +776,22 @@ export class MockOpenGeniClient implements SessionClientLike {
     const result =
       request.delivery === "steer"
         ? await this.steerMessage(workspaceId, sessionId, message)
-        : {
-            accepted: await this.sendMessage(workspaceId, sessionId, message),
-            turn: fabricateTurn(sessionId, 1, request.text),
-          };
+        : await (async () => {
+            const accepted = await this.sendMessage(workspaceId, sessionId, message);
+            const turn = fabricateTurn(sessionId, 1, request.text);
+            turn.triggerEventId = accepted.id;
+            return {
+              accepted,
+              turn,
+              receipt: this.receipt("prompt.submit", turn.id),
+              routing: "accepted_for_execution" as const,
+              interruptionCount: 0,
+              replay: false,
+            };
+          })();
     return {
       ...result,
       draft: await this.getComposerDraft(workspaceId, sessionId),
-      interruptionCount: "interruptionCount" in result ? (result.interruptionCount ?? 0) : 0,
-      replay: "replay" in result ? (result.replay ?? false) : false,
     };
   }
 
@@ -909,7 +916,14 @@ export class MockOpenGeniClient implements SessionClientLike {
     const turn = fabricateTurn(sessionId, 1, prompt);
     turn.triggerEventId = accepted.id;
     turns.unshift(turn);
-    return { accepted, turn: { ...turn } };
+    return {
+      accepted,
+      turn: { ...turn },
+      receipt: this.receipt("prompt.submit", turn.id),
+      routing: "accepted_for_steering",
+      interruptionCount: 0,
+      replay: false,
+    };
   }
 
   // --- Goal -------------------------------------------------------------------

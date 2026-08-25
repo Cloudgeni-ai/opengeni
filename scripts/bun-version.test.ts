@@ -1,0 +1,101 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  canonicalBunVersion,
+  verifyMuslAssetChecksums,
+  verifyBunVersionContract,
+  verifyWorkflowBunSetup,
+} from "./bun-version";
+
+describe("canonical Bun version contract", () => {
+  test("keeps runtime, package, workflow, and container pins coherent", async () => {
+    await expect(verifyBunVersionContract({ checkRuntime: false })).resolves.toBeUndefined();
+    expect(await canonicalBunVersion()).toMatch(/^\d+\.\d+\.\d+$/u);
+  });
+
+  test("requires every setup-bun step to consume an owner-specific canonical version file", () => {
+    expect(() =>
+      verifyWorkflowBunSetup(
+        "source.yml",
+        [
+          "steps:",
+          "  - name: Set up source Bun",
+          "    uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .bun-version",
+          "  - run: bun test",
+        ].join("\n"),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyWorkflowBunSetup(
+        "controller.yml",
+        [
+          "steps:",
+          "  - name: Set up controller Bun",
+          "    uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .release/controller/.bun-version",
+          "  - run: cd .release/controller && bun test",
+        ].join("\n"),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyWorkflowBunSetup(
+        "floating.yml",
+        ["steps:", "  - uses: oven-sh/setup-bun@v2", "  - run: bun test"].join("\n"),
+      ),
+    ).toThrow(
+      "floating.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+    );
+
+    expect(() =>
+      verifyWorkflowBunSetup(
+        "source-data.yml",
+        [
+          "steps:",
+          "  - uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .release/source/.bun-version",
+        ].join("\n"),
+      ),
+    ).toThrow(
+      "source-data.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+    );
+
+    expect(() =>
+      verifyWorkflowBunSetup(
+        "mixed.yml",
+        [
+          "steps:",
+          "  - uses: oven-sh/setup-bun@v2",
+          "  - uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .bun-version",
+        ].join("\n"),
+      ),
+    ).toThrow(
+      "mixed.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+    );
+  });
+
+  test("binds musl release checksums to the canonical version", () => {
+    const source = [
+      '-e BUN_VERSION="$BUN_VERSION"',
+      "bun_archive: bun-linux-x64-musl.zip",
+      `bun_sha256: ${"a".repeat(64)} # bun-v1.4.0`,
+      "bun_archive: bun-linux-aarch64-musl.zip",
+      `bun_sha256: ${"b".repeat(64)} # bun-v1.4.0`,
+    ].join("\n");
+    expect(() => verifyMuslAssetChecksums("1.4.0", source)).not.toThrow();
+    expect(() => verifyMuslAssetChecksums("1.4.1", source)).toThrow(
+      "checksum must be annotated for canonical bun-v1.4.1",
+    );
+    expect(() =>
+      verifyMuslAssetChecksums(
+        "1.4.0",
+        source.replace('-e BUN_VERSION="$BUN_VERSION"', "-e BUN_VERSION"),
+      ),
+    ).toThrow("must pass the canonical Bun version into musl containers");
+  });
+});

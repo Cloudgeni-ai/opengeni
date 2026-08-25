@@ -20,6 +20,7 @@ import {
   type SandboxOs,
   type SessionEvent,
   type SessionEventType,
+  type SessionPromptRouting,
   type SessionTurn,
   type SessionTurnSource,
   type SessionTurnStatus,
@@ -120,10 +121,13 @@ export type EditQueueCommandResult = QueueCommandResult & {
 export type SteerQueueCommandResult = QueueCommandResult & {
   interruptionCount: number;
   workspaceControlEventId: string | null;
+  workflowId: string;
+  wakeRevision: number;
 };
 
 export type SubmitHumanPromptResult = {
   receipt: SessionCommandReceiptRow;
+  routing: SessionPromptRouting;
   queueVersion: number;
   accepted: SessionEvent;
   events: SessionEvent[];
@@ -1280,6 +1284,7 @@ export async function steerQueuedTurnInTransaction(
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
+    resumePausedBranch: true,
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
       : {}),
@@ -1312,6 +1317,10 @@ export async function steerQueuedTurnInTransaction(
   });
   if (reserved.replay && reserved.receipt.appliedQueueVersion !== null) {
     const replaySession = await lockSession(db, input.workspaceId, input.sessionId);
+    const wakeRevision = Number(reserved.receipt.result.wakeRevision ?? 0);
+    if (wakeRevision < 1) {
+      throw new SessionControlInvariantError("Replayed queue Steer receipt has no wake revision");
+    }
     return {
       receipt: reserved.receipt,
       queueVersion: replaySession.queueVersion,
@@ -1322,6 +1331,8 @@ export async function steerQueuedTurnInTransaction(
         typeof reserved.receipt.result.workspaceControlEventId === "string"
           ? reserved.receipt.result.workspaceControlEventId
           : null,
+      workflowId: replaySession.temporalWorkflowId ?? `session-${input.sessionId}`,
+      wakeRevision,
       replay: true,
     };
   }
@@ -1501,6 +1512,8 @@ export async function steerQueuedTurnInTransaction(
     eventIds: eventRows.map((event) => event.id),
     interruptionCount,
     workspaceControlEventId: resumed.workspaceControlEventId,
+    workflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+    wakeRevision,
     replay: false,
   };
 }
@@ -1550,12 +1563,12 @@ export async function submitHumanPromptInTransaction(
   },
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
-  // Send/Steer mutate the control row only when they auto-resume a paused
-  // branch. Hold the prefix shared otherwise so concurrent admission on the
-  // workspace is not serialized and genuine mutators are not starved.
+  // Send is inert queue admission while paused; Steer deliberately resumes.
+  // Tell the lock helper which path may need the exclusive control prefix.
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
+    resumePausedBranch: input.delivery === "steer",
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
       : {}),
@@ -1662,6 +1675,17 @@ export async function submitHumanPromptInTransaction(
           });
     return {
       receipt: reserved.receipt,
+      routing:
+        reserved.receipt.result.routing === "accepted_for_execution" ||
+        reserved.receipt.result.routing === "queued_for_execution" ||
+        reserved.receipt.result.routing === "accepted_for_steering"
+          ? reserved.receipt.result.routing
+          : input.delivery === "steer"
+            ? "accepted_for_steering"
+            : // Pre-routing receipts cannot reconstruct admission-time activity
+              // or Pause truth. Queue is the only conservative placement; a
+              // later turn.started event moves it into chat without duplication.
+              "queued_for_execution",
       queueVersion: Number(reserved.receipt.appliedQueueVersion),
       accepted,
       events,
@@ -1687,34 +1711,38 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const resumed = await autoResumeSessionBranchInTransaction(db, {
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    actor:
-      input.actor.type === "agent_attempt"
-        ? `attempt:${input.actor.attemptId}`
-        : input.actor.subjectId,
-    reason:
-      input.actor.type === "service"
-        ? input.delivery === "steer"
-          ? "service_steer"
-          : "service_send"
-        : input.delivery === "steer"
-          ? "human_steer"
-          : "human_send",
-    observedControlEtag: input.controlEtag ?? null,
-    admission,
-  });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
-      "Cancelled session cannot accept work",
-      {
-        queueVersion: session.queueVersion,
-      },
+      "Cancelled session subtree cannot accept work",
+      { queueVersion: session.queueVersion },
     );
   }
+
+  // Send is queue admission, never a hidden control mutation. A paused Send
+  // remains inert behind the existing gate until the user explicitly resumes.
+  // Steer is the intentional exception: it replaces the current direction and
+  // therefore activates the selected branch atomically.
+  const resumed =
+    input.delivery === "send"
+      ? {
+          revision: before.controlVersion,
+          control: before,
+          changed: false,
+          workspaceControlEventId: null,
+        }
+      : await autoResumeSessionBranchInTransaction(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          actor:
+            input.actor.type === "agent_attempt"
+              ? `attempt:${input.actor.attemptId}`
+              : input.actor.subjectId,
+          reason: input.actor.type === "service" ? "service_steer" : "human_steer",
+          observedControlEtag: input.controlEtag ?? null,
+          admission,
+        });
 
   const draft =
     input.expectedDraftRevision === null || input.expectedDraftRevision === undefined
@@ -1886,6 +1914,13 @@ export async function submitHumanPromptInTransaction(
     editedSourceModelContext !== undefined
       ? editedSourceModelContext
       : (input.modelContext ?? null);
+  const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
+  const routing: SessionPromptRouting =
+    input.delivery === "steer"
+      ? "accepted_for_steering"
+      : before.state === "paused" || session.activeTurnId || existingQueued.length > 0
+        ? "queued_for_execution"
+        : "accepted_for_execution";
   let sequence = session.lastSequence;
   const eventValues: SessionEventInsertWithPayload[] = [
     {
@@ -1913,12 +1948,12 @@ export async function submitHumanPromptInTransaction(
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         delivery: input.delivery,
+        routing,
         initiator: frozenInitiator.initiator,
       },
       occurredAt: now,
     },
   ];
-  const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
   const [turn] = await db
     .insert(schema.sessionTurns)
     .values(
@@ -1932,6 +1967,7 @@ export async function submitHumanPromptInTransaction(
           temporalWorkflowId: workflowId,
           status: "queued",
           source: input.source,
+          promptRouting: routing,
           position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
           annotations,
@@ -2017,6 +2053,7 @@ export async function submitHumanPromptInTransaction(
       turnId,
       triggerEventId: acceptedEventId,
       source: input.source,
+      routing,
       initiator: frozenInitiator.initiator,
     },
     occurredAt: now,
@@ -2165,12 +2202,6 @@ export async function submitHumanPromptInTransaction(
     .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
     .returning();
   if (input.actor.type === "human") {
-    const realtimeRouting =
-      input.delivery === "steer"
-        ? "accepted_for_steering"
-        : session.activeTurnId || existingQueued.length > 0
-          ? "queued_for_execution"
-          : "accepted_for_execution";
     await mirrorSessionRealtimeContextInTransaction(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -2181,12 +2212,12 @@ export async function submitHumanPromptInTransaction(
       channel: null,
       text: renderRealtimeHumanInputContext({
         delivery: input.delivery,
-        routing: realtimeRouting,
+        routing,
         text: renderTimelineAnnotationsForModel(input.text, annotations),
       }),
       payload: {
         delivery: input.delivery,
-        routing: realtimeRouting,
+        routing,
         acceptedEventId,
         instruction: "OpenGeni accepted and routed this user input; do not delegate it again.",
       },
@@ -2296,6 +2327,7 @@ export async function submitHumanPromptInTransaction(
       interruptionCount,
       replacedTurnId,
       workspaceControlEventId: resumed.workspaceControlEventId,
+      routing,
       ...(input.turnExecutionPolicy
         ? {
             executionPolicy: turnExecutionPolicyAuditMetadata(input.turnExecutionPolicy, turnId),
@@ -2310,6 +2342,7 @@ export async function submitHumanPromptInTransaction(
   }
   return {
     receipt,
+    routing,
     queueVersion,
     accepted,
     events,
@@ -2588,6 +2621,7 @@ export async function steerAgentSessionInTransaction(
   const admission = await lockWorkspaceInferenceControlForAdmission(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
+    resumePausedBranch: true,
     ...(input.controlLockTimeoutMs !== undefined
       ? { lockTimeoutMs: input.controlLockTimeoutMs }
       : {}),

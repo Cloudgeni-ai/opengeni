@@ -71,6 +71,7 @@ credential location, and one or more model definitions:
     "id": "fireworks",
     "label": "Fireworks AI",
     "api": "chat",
+    "wireProfile": "openai",
     "baseUrl": "https://api.fireworks.ai/inference/v1",
     "apiKeyEnv": "OPENGENI_FIREWORKS_API_KEY",
     "models": [
@@ -86,7 +87,11 @@ credential location, and one or more model definitions:
 ]
 ```
 
-Registry providers default to `kind: "api-key"` and `api: "chat"`. Prefer
+Registry providers default to `kind: "api-key"`, `api: "chat"`, and
+`wireProfile: "openai"`. Set `wireProfile: "azure-openai"` for another Azure
+OpenAI resource: it keeps the ordinary OpenAI-compatible Responses transport
+while applying Azure's stricter computer-call history normalization and native
+Responses tool behavior. Prefer
 `apiKeyEnv` to an inline `apiKey`. A provider that intentionally accepts public,
 unauthenticated inference must set `kind: "anonymous"`; that kind rejects
 `apiKey`, `apiKeyEnv`, and all configured default header/query metadata. This
@@ -267,7 +272,7 @@ credits. The picker hides this rail until the connection is active.
 ### Secret-safe definition versions
 
 `definitionVersion` is a deterministic SHA-256 digest of executable model and
-provider metadata. It changes when routing, wire API, execution limits,
+provider metadata. It changes when routing, wire API, wire profile, execution limits,
 capabilities, pricing, credential class, billing attribution, base URL, or an
 explicitly public request-metadata value changes.
 

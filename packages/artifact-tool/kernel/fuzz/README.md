@@ -4,12 +4,12 @@ These targets are deliberately outside the normal Cargo workspace and never
 run on production inputs with network access.
 
 ```bash
-cargo install cargo-fuzz
-cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz snapshot_decode
-cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz collaboration_snapshot_decode
-cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz operation_sequences
-cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz collaboration_sequences
-cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz binding_protocol_decode
+bun scripts/artifact-kernel-rust.ts cargo install cargo-fuzz
+bun scripts/artifact-kernel-rust.ts cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz snapshot_decode
+bun scripts/artifact-kernel-rust.ts cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz collaboration_snapshot_decode
+bun scripts/artifact-kernel-rust.ts cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz operation_sequences
+bun scripts/artifact-kernel-rust.ts cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz collaboration_sequences
+bun scripts/artifact-kernel-rust.ts cargo fuzz run --fuzz-dir packages/artifact-tool/kernel/fuzz binding_protocol_decode
 ```
 
 `snapshot_decode` and `collaboration_snapshot_decode` assert that every accepted

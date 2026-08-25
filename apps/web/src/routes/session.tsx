@@ -119,7 +119,10 @@ import {
   toolsForPolicySelection,
 } from "@/lib/session-tools";
 import { useFollowUpRepositories } from "@/lib/use-follow-up-repositories";
-import { usePersonalResourceAttachment } from "@/lib/use-personal-resource-attachment";
+import {
+  useFixedResourceScopes,
+  usePersonalResourceAttachment,
+} from "@/lib/use-personal-resource-attachment";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -197,20 +200,25 @@ export function SessionRoute({
     error: loadError,
     refresh: refreshSession,
   } = useSession(sessionId, { events });
+  const creationHandoff =
+    context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
+      ? context.sessionCreationHandoff
+      : null;
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
   const humanInput = useHumanInputRequests(sessionId, { events });
+  const sessionSeed = fetchedSession ?? creationHandoff?.session ?? null;
   const session = useMemo(
     () =>
-      fetchedSession
+      sessionSeed
         ? {
-            ...fetchedSession,
-            status: sessionStatus ?? fetchedSession.status,
-            effectiveControl: queue.effectiveControl ?? fetchedSession.effectiveControl,
+            ...sessionSeed,
+            status: sessionStatus ?? sessionSeed.status,
+            effectiveControl: queue.effectiveControl ?? sessionSeed.effectiveControl,
           }
         : null,
-    [fetchedSession, queue.effectiveControl, sessionStatus],
+    [queue.effectiveControl, sessionSeed, sessionStatus],
   );
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
@@ -243,15 +251,19 @@ export function SessionRoute({
     // that fallback painted the GENESIS message at the top for the whole fetch
     // (user-reported). The fallback is only for genuinely-empty NEW sessions,
     // i.e. after the load settles with no events.
-    if (initialLoading && visibleEvents.length === 0) {
+    if (initialLoading && visibleEvents.length === 0 && !creationHandoff) {
       return [];
     }
-    const projected = projectSessionTimeline(session, visibleEvents);
+    const projected = projectSessionTimeline(
+      session,
+      visibleEvents,
+      creationHandoff?.clientEventId,
+    );
     // projectSessionTimeline falls back to the session's initial message when
     // the projection is empty; after a clear-view that fallback would resurrect
     // the very first message, so suppress it once the view has been cleared.
     return viewClearedAfter !== null && visibleEvents.length === 0 ? [] : projected;
-  }, [session, visibleEvents, viewClearedAfter, initialLoading]);
+  }, [creationHandoff, session, visibleEvents, viewClearedAfter, initialLoading]);
   // Only approvals still awaiting a decision: the durable log replays every
   // historical `session.requiresAction`, so subtract decisions and finished
   // turns instead of rendering decided approvals as live buttons forever.
@@ -913,7 +925,6 @@ function useSessionEditableArtifactSummaries(input: {
   } | null>(null);
 
   useEffect(() => {
-    const controller = new AbortController();
     let current = true;
     setLoaded((previous) =>
       previous?.key === authorityKey && previous.status === "ready"
@@ -934,7 +945,6 @@ function useSessionEditableArtifactSummaries(input: {
           input.sessionId,
           {
             replicaId: createConsoleEditableArtifactReplicaId(),
-            signal: controller.signal,
           },
         );
         if (current) {
@@ -946,7 +956,7 @@ function useSessionEditableArtifactSummaries(input: {
         }
       })
       .catch(() => {
-        if (!current || controller.signal.aborted) return;
+        if (!current) return;
         setLoaded((previous) => ({
           key: authorityKey,
           status: "error",
@@ -954,8 +964,10 @@ function useSessionEditableArtifactSummaries(input: {
         }));
       });
     return () => {
+      // The stale-result fence is sufficient for this bounded metadata GET.
+      // Aborting Chrome fetch during React StrictMode cleanup surfaced an
+      // unhandled AbortError from the SDK/fetch boundary on every mount.
       current = false;
-      controller.abort();
     };
   }, [authorityKey, input.refreshSequence, input.sessionId, input.workspaceId, retrySequence]);
 
@@ -1298,6 +1310,14 @@ function SessionChatPane(props: {
   const composerPolicyValidRef = useRef(false);
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
+  const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
+  const [fixedVariableSetScope, fixedRigScope] = useFixedResourceScopes(
+    context.client,
+    workspace?.id ?? null,
+    props.session.variableSetId,
+    props.session.rigId,
+    fixedResourceCatalogEnabled,
+  );
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -1309,7 +1329,10 @@ function SessionChatPane(props: {
     enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
       variableSetId: props.session.variableSetId,
+      variableSetScope: fixedVariableSetScope,
       rigId: props.session.rigId,
+      rigScope: fixedRigScope,
+      connectedMachine: null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,
@@ -1330,6 +1353,8 @@ function SessionChatPane(props: {
       personalAttachment.loading ||
       personalAttachment.refreshing,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
+    sendDestination: () =>
+      props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
     // Ordinary Send is acknowledged locally. Clear only resources captured in
     // that immutable optimistic operation; later additions belong to the next
     // draft, while retry keeps the original resource refs in the failed bubble.
@@ -1430,7 +1455,8 @@ function SessionChatPane(props: {
       ),
     [props.events],
   );
-  const failedOptimisticMessageCount = (composer.optimisticMessages ?? []).filter(
+  const { optimisticMessages, retryOptimisticMessage, removeOptimisticMessage } = composer;
+  const failedOptimisticMessageCount = (optimisticMessages ?? []).filter(
     (message) => message.state === "failed" && !acceptedClientEventIds.has(message.clientEventId),
   ).length;
   useEffect(() => {
@@ -1441,8 +1467,49 @@ function SessionChatPane(props: {
     });
   }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
   const timelineWithOptimisticSends = useMemo<TimelineItem[]>(() => {
-    const optimisticItems: UserMessageItem[] = (composer.optimisticMessages ?? [])
-      .filter((message) => !acceptedClientEventIds.has(message.clientEventId))
+    const queuedEventIds = new Set(
+      props.queue.queue
+        .filter((turn) => turn.metadata.delivery !== "steer")
+        .map((turn) => turn.triggerEventId),
+    );
+    const optimisticQueuedClientIds = new Set(
+      (optimisticMessages ?? [])
+        .filter(
+          (message) =>
+            message.destination === "queue" &&
+            !(
+              message.turnId &&
+              message.appliedQueueVersion !== null &&
+              message.appliedQueueVersion !== undefined &&
+              props.queue.snapshot &&
+              props.queue.snapshot.version >= message.appliedQueueVersion &&
+              !props.queue.queue.some((turn) => turn.id === message.turnId)
+            ),
+        )
+        .map((message) => message.clientEventId),
+    );
+    const visibleTimeline = props.timeline.filter((item) => {
+      if (item.kind !== "user-message") return true;
+      if (queuedEventIds.has(item.id)) return false;
+      const clientEventId = item.reconciliationKey?.startsWith("user-message:")
+        ? item.reconciliationKey.slice("user-message:".length)
+        : null;
+      return !clientEventId || !optimisticQueuedClientIds.has(clientEventId);
+    });
+    const visibleTimelineClientEventIds = new Set(
+      visibleTimeline
+        .filter((item) => item.kind === "user-message")
+        .flatMap((item) => {
+          const key = item.reconciliationKey;
+          return key?.startsWith("user-message:") ? [key.slice("user-message:".length)] : [];
+        }),
+    );
+    const optimisticItems: UserMessageItem[] = (optimisticMessages ?? [])
+      .filter(
+        (message) =>
+          message.destination === "chat" &&
+          !visibleTimelineClientEventIds.has(message.clientEventId),
+      )
       .map((message) => ({
         kind: "user-message",
         id: `optimistic:${message.clientEventId}`,
@@ -1460,14 +1527,37 @@ function SessionChatPane(props: {
           ...(message.error ? { error: message.error } : {}),
           ...(message.state === "failed"
             ? {
-                onRetry: () => composer.retryOptimisticMessage?.(message.clientEventId),
-                onRemove: () => composer.removeOptimisticMessage?.(message.clientEventId),
+                onRetry: () => retryOptimisticMessage?.(message.clientEventId),
+                onRemove: () => removeOptimisticMessage?.(message.clientEventId),
               }
             : {}),
         },
       }));
-    return [...props.timeline, ...optimisticItems];
-  }, [acceptedClientEventIds, composer, props.timeline]);
+    const visibleTimelineEventIds = new Set(
+      visibleTimeline.filter((item) => item.kind === "user-message").map((item) => item.id),
+    );
+    const acceptedQueueSteers: UserMessageItem[] = (props.queue.acceptedSteers ?? [])
+      .filter((steer) => !visibleTimelineEventIds.has(steer.triggerEventId))
+      .map((steer) => ({
+        kind: "user-message",
+        id: steer.triggerEventId,
+        text: steer.text,
+        annotations: steer.annotations,
+        resources: steer.resources,
+        tools: steer.tools,
+        occurredAt: steer.occurredAt,
+        delivery: { state: steer.state },
+      }));
+    return [...visibleTimeline, ...optimisticItems, ...acceptedQueueSteers];
+  }, [
+    optimisticMessages,
+    removeOptimisticMessage,
+    props.queue.acceptedSteers,
+    props.queue.queue,
+    props.queue.snapshot,
+    props.timeline,
+    retryOptimisticMessage,
+  ]);
   const repositoryPickerProps = repositories.pickerProps(terminal || composer.sending);
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     props.session.status,
@@ -1709,7 +1799,7 @@ function SessionChatPane(props: {
             workspaceId={props.session.workspaceId}
             composer={composer}
             attachments={attachments}
-            effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
+            effectiveControl={composer.effectiveControl}
             queuedAheadCount={props.queue.queue.length}
             canControlWorkspace={workspacePermissions.includes("workspace:admin")}
             controlLinks={{

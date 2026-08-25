@@ -17,14 +17,16 @@ Every catalog item includes a typed `lifecycle` projection and a bounded list of
 
 ## Runtime Behavior
 
-Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. Sessions and scheduled tasks created without an explicit `tools` key are attached to every enabled capability MCP server by default; an explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
+Remote MCP capabilities with a streamable HTTP endpoint are executable. Enabling a remote MCP first performs an MCP initialize/list-tools probe. If the probe succeeds, OpenGeni stores a `capability_installations` row and the API/worker merge that row into the runtime MCP server list for new sessions, follow-ups, and scheduled tasks. A workspace may store an exact `sessionToolDefaults` selection for new sessions and scheduled sessions created without an explicit `tools` key. Workspaces without that override preserve the compatibility default of every enabled capability MCP server. An explicit tools list (even an empty one) is taken verbatim. If the probe fails, the API returns `422` and the capability stays disabled, so a stale, down, or auth-only endpoint never breaks agent turns at runtime.
 
-Tool selection is durable session state. The session tool picker atomically
-updates connected MCP servers and individual OpenGeni tools under one version;
-the next attempt reads that selection. Follow-up Send and Steer requests do not
-carry a private one-turn tool list. OpenGeni's web picker hides its internal
-`opengeni` carrier and the default-on `files` server from the visible count.
-The public API remains exact: an explicit session policy may omit `files`.
+Tool selection is durable session state. The session tool picker presents a
+small product-level list of OpenGeni capabilities and connected apps while it
+atomically persists their exact MCP servers and first-party OpenGeni tools under
+one version; the next attempt reads that selection. Built-in Files and Workspace
+knowledge are shown as OpenGeni capabilities, not connected apps. Follow-up Send
+and Steer requests do not carry a private one-turn tool list. The picker hides
+only its mandatory internal `opengeni` carrier. The public API remains exact:
+an explicit session policy may omit `files`.
 Provider-native web search remains available independently of this MCP policy.
 Its search, open-page, and find-in-page response items settle from their own
 provider status and render before the answer they informed; they do not wait for

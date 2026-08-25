@@ -54,6 +54,33 @@ describe("session context equality", () => {
     expect(sameSessionForContext(current, next)).toBe(false);
   });
 
+  test("keeps a point-read project move through a stale live route update", () => {
+    const staleListAndDetail = {
+      ...session(false, 0),
+      channelId: "00000000-0000-4000-8000-000000000201",
+      status: "idle",
+    } as Session;
+    const pointReadAfterMove = {
+      ...staleListAndDetail,
+      channelId: "00000000-0000-4000-8000-000000000202",
+    } as Session;
+    const liveRouteProjection = {
+      ...staleListAndDetail,
+      status: "running",
+      effectiveControl: {
+        ...effectiveControl,
+        controlVersion: 1,
+        controlEtag: "active-1",
+      },
+    } as Session;
+
+    const reconciled = mergeSessionContextProjection(pointReadAfterMove, liveRouteProjection);
+
+    expect(reconciled?.channelId).toBe(pointReadAfterMove.channelId);
+    expect(reconciled?.status).toBe("running");
+    expect(reconciled?.effectiveControl).toEqual(liveRouteProjection.effectiveControl);
+  });
+
   test("bounds route and rail reconciliation after an optimistic pin", async () => {
     const staleDetail = session(false, 0);
     const authoritativeRail = session(true, 1);

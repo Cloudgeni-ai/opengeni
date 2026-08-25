@@ -6,7 +6,8 @@
 // Idempotent, resumable, and safe to run repeatedly and concurrently. Usage:
 //
 //   bun run db:backfill-organization-memberships --organization-id <uuid> --dry-run
-//   bun run db:backfill-organization-memberships --organization-id <uuid> --limit 25
+//   bun run db:backfill-organization-memberships --organization-id <uuid> \
+//     --limit 25 --run-key <unique-key>
 //
 // `--limit` bounds ONE pass; the command walks the whole organization by
 // chaining bounded passes on a keyset cursor until the ordered subject stream
@@ -16,6 +17,10 @@
 //
 // Every candidate this command cannot resolve from deterministic evidence is
 // reported unresolved with a reason code and left completely untouched.
+// Supplying `--run-key` on a non-dry walk additionally settles one durable
+// migration-0300 receipt. A partial/resumed, contended, or failed walk records
+// a failed receipt; use a fresh run key for the final complete-from-start walk
+// whose receipt can satisfy activation evidence.
 import { dbSearchPath, getSettings } from "@opengeni/config";
 import { createDb, drainOrganizationMembershipBackfill, type DbClient } from "@opengeni/db";
 
@@ -40,6 +45,10 @@ async function main(): Promise<void> {
     throw new Error("--max-passes must be a positive integer");
   }
   const afterSubjectId = argument("--after-subject-id");
+  const runKey = argument("--run-key");
+  if (runKey !== null && (runKey.trim().length === 0 || runKey.length > 200)) {
+    throw new Error("--run-key must be 1..200 non-blank characters");
+  }
   const dryRun = process.argv.includes("--dry-run");
   const settings = getSettings();
   const searchPath = dbSearchPath(settings);
@@ -54,10 +63,11 @@ async function main(): Promise<void> {
       limit,
       dryRun,
       maxPasses,
+      runKey,
       ...(afterSubjectId ? { afterSubjectId } : {}),
     });
     console.log(JSON.stringify(report, null, 2));
-    if (report.counts.failed > 0) process.exitCode = 1;
+    if (report.counts.failed > 0 || report.receiptStatus === "failed") process.exitCode = 1;
   } finally {
     await client.close();
   }

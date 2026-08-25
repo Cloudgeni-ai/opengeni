@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 export type StatusTone = "queued" | "running" | "waiting" | "idle" | "failed" | "cancelled";
 
 export const STATUS_META: Record<StatusTone, { dot: string; text: string; label: string }> = {
-  queued: { dot: "bg-status-queued", text: "text-status-queued", label: "Queued" },
+  queued: { dot: "bg-status-queued", text: "text-status-queued", label: "Starting" },
   running: { dot: "bg-status-running", text: "text-status-running", label: "Running" },
   waiting: { dot: "bg-status-waiting", text: "text-status-waiting", label: "Waiting on you" },
   idle: { dot: "bg-status-idle", text: "text-status-idle", label: "Idle" },

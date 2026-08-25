@@ -3207,15 +3207,38 @@ describe("clean session control plane", () => {
     expect(steeredResult).not.toHaveProperty("status");
   });
 
-  test("Send appends, Steer head-inserts, and the snapshot is server order", async () => {
+  test("accepted Send and Steer stay out of the waiting queue", async () => {
     const { grant, session } = await fixture();
-    await send(grant, session.id, "first");
-    await send(grant, session.id, "second");
-    await send(grant, session.id, "urgent", "steer");
+    const first = await send(grant, session.id, "first");
+    const second = await send(grant, session.id, "second");
+    const urgent = await send(grant, session.id, "urgent", "steer");
+
+    expect(first.routing).toBe("accepted_for_execution");
+    expect(second.routing).toBe("queued_for_execution");
+    expect(urgent.routing).toBe("accepted_for_steering");
 
     const queue = await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id);
-    expect(queue?.items.map((turn) => turn.prompt)).toEqual(["urgent", "first", "second"]);
+    expect(queue?.items.map((turn) => turn.prompt)).toEqual(["second"]);
     expect(queue?.items.every((turn) => ["user", "api"].includes(turn.source))).toBe(true);
+    const routedEvents = await listSessionEvents(client.db, grant.workspaceId!, session.id);
+    const routingByTurnId = new Map(
+      routedEvents
+        .filter((event) => event.type === "turn.queued" && event.turnId)
+        .map(
+          (event) => [event.turnId!, (event.payload as Record<string, unknown>).routing] as const,
+        ),
+    );
+    expect(routingByTurnId.get(first.turn.id)).toBe("accepted_for_execution");
+    expect(routingByTurnId.get(second.turn.id)).toBe("queued_for_execution");
+    expect(routingByTurnId.get(urgent.turn.id)).toBe("accepted_for_steering");
+    const routingByMessageId = new Map(
+      routedEvents
+        .filter((event) => event.type === "user.message")
+        .map((event) => [event.id, (event.payload as Record<string, unknown>).routing] as const),
+    );
+    expect(routingByMessageId.get(first.acceptedEventId)).toBe("accepted_for_execution");
+    expect(routingByMessageId.get(second.acceptedEventId)).toBe("queued_for_execution");
+    expect(routingByMessageId.get(urgent.acceptedEventId)).toBe("accepted_for_steering");
   });
 
   test("workflow enrollment never marks a queued prompt running before turn capacity accepts it", async () => {
@@ -4098,9 +4121,11 @@ describe("clean session control plane", () => {
 
     const steered = await send(grant, session.id, "use this instead", "steer");
     expect(steered.interruptionCount).toBe(1);
+    expect(steered.routing).toBe("accepted_for_steering");
     const stopping = await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id);
     expect(stopping?.stoppingPreviousAttempt).toBe(true);
-    expect(stopping?.items[0]).toMatchObject({
+    expect(stopping?.items).toHaveLength(0);
+    expect(steered.turn).toMatchObject({
       id: steered.turn.id,
       metadata: {
         delivery: "steer",
@@ -4795,11 +4820,14 @@ describe("clean session control plane", () => {
     expect(resumed.control.state).toBe("active");
   });
 
-  test("a human send through Pause writes one automatic Resume invalidation", async () => {
+  test("a human Send through Pause remains queued without a Resume invalidation", async () => {
     const { grant, session } = await fixture();
     const paused = await controlWorkspace(grant, "pause", "maintenance");
     const accepted = await send(grant, session.id, "continue through the pause");
-    expect(accepted.workspaceControlEventId).toEqual(expect.any(String));
+    expect(accepted).toMatchObject({
+      routing: "queued_for_execution",
+      workspaceControlEventId: null,
+    });
     const events = await listWorkspaceControlEvents(client.db, grant.workspaceId!, 0, 10);
     expect(events).toEqual([
       expect.objectContaining({
@@ -4808,14 +4836,6 @@ describe("clean session control plane", () => {
         rootSessionId: null,
         action: "pause",
         automatic: false,
-      }),
-      expect.objectContaining({
-        revision: paused.revision + 1,
-        scope: "session",
-        rootSessionId: session.id,
-        action: "resume",
-        automatic: true,
-        reason: "human_send",
       }),
     ]);
   });
@@ -5079,7 +5099,7 @@ describe("clean session control plane", () => {
     });
   });
 
-  test("Send reopens admission without erasing an unsettled Pause interruption", async () => {
+  test("Send stays queued without erasing or bypassing an unsettled Pause interruption", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "running prompt");
     const attemptId = crypto.randomUUID();
@@ -5125,7 +5145,7 @@ describe("clean session control plane", () => {
         evaluateSessionControl(db, grant.workspaceId!, session.id),
       ),
     ).toMatchObject({
-      state: "active",
+      state: "paused",
       settlement: {
         state: "stopping",
         attemptCount: 1,

@@ -29,7 +29,7 @@ const budgets = {
   // embed a configured VITE_API_BASE_URL; the supported loopback form adds up
   // to 18 raw bytes relative to the same-origin build. Keep a narrow full-KiB
   // envelope above that configured graph instead of a platform/config-specific
-  // one-byte margin. Canonical Bun 1.3.14 Linux/x64 measured the combined
+  // one-byte margin. The pre-migration Bun 1.3.14 Linux/x64 baseline measured the combined
   // Company Brain base at 2,039,311/2,039,328/2,039,329 raw bytes for
   // default/4-digit/5-digit API URLs; that integration already exceeded the old
   // cap. The lazy residual inspector adds 769 raw bytes in every case. The
@@ -125,7 +125,7 @@ const budgets = {
   // Advance only those two aggregate envelopes to their next whole KiB; every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
   // Generic event automations add the shared SDK contracts that let ordinary
-  // session surfaces carry Pack-owned trigger metadata. The exact Bun 1.3.14
+  // session surfaces carry Pack-owned trigger metadata. The pre-migration Bun 1.3.14
   // production graph measures 2,121,826 raw / 588,620 gzip bytes. Advance only
   // the raw aggregate to its next whole-KiB envelope; gzip, file-count, initial,
   // per-file, lazy-chunk, and CSS caps remain unchanged.
@@ -151,9 +151,61 @@ const budgets = {
   // gzip to the next whole KiB above 1.5 KiB of headroom for the Linux/x64
   // skew; every initial, per-file, file-count, lazy-chunk, and CSS cap stays
   // fixed.
-  directSessionRaw: 2086 * kib,
-  directSessionGzip: 581 * kib,
-  directSessionFiles: 19,
+  // The Slack orchestration-notice workspace toggles add two checkbox rows
+  // plus their resolved-settings plumbing to the Capabilities surface. The
+  // same macOS/arm64 production build measures merged main at 2,135,841 raw
+  // / 594,183 gzip bytes and this change at 2,136,237 raw / 594,259 gzip
+  // bytes. Gzip stays comfortably under its existing envelope; advance only
+  // the raw aggregate to its next whole KiB above one KiB of headroom. Every
+  // other cap, including gzip, stays fixed.
+  // Receipt-routed chat/queue placement, finite interactive-command settlement,
+  // local recovery states, and the first-message route handoff measure
+  // 2,147,168 raw / 596,777 gzip bytes on the current merged macOS/arm64 graph.
+  // Advance only those aggregates: raw to the next whole KiB above one KiB of
+  // headroom and gzip above the observed 1.5-KiB Linux/x64 skew. Initial,
+  // per-file, file-count, lazy-chunk, and CSS caps remain fixed.
+  // Capability bundle defaults on that merged graph measure 2,161,915 raw /
+  // 602,728 gzip bytes across 24 files. Advance only these direct-session
+  // envelopes; initial, per-file, lazy-chunk, and CSS caps remain unchanged.
+  // Managed organization bootstrap adds the authenticated principal routing
+  // needed to accept an invitation or create an organization before a user has
+  // any workspace. The sign-in and onboarding surfaces remain lazy; the merged
+  // macOS/arm64 graph measures 2,165,667 raw / 604,766 gzip bytes. Advance only
+  // the raw aggregate to the next whole KiB above one KiB of headroom.
+  // Restoring the rail creator monogram on root rows adds the shared chip
+  // component and the accessible-name composition. The same macOS/arm64
+  // production build measures merged main at 2,165,667 raw / 604,766 gzip bytes
+  // and this change at 2,166,852 raw / 605,187 gzip bytes, clearing both
+  // envelopes. Advance those two aggregates: raw to the next whole KiB above
+  // one KiB of headroom, gzip above the observed 1.5-KiB Linux/x64 skew. Every
+  // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
+  // Atomic personal Connected Machine attachment adds its authority catalog,
+  // create-time consent, and accepted-turn intent to the direct session graph.
+  // The merged macOS/arm64 production build measures 2,169,981 raw bytes.
+  // Advance only that aggregate to the next whole KiB above one KiB of
+  // headroom; gzip, file-count, initial, per-file, lazy-chunk, and CSS caps stay
+  // fixed.
+  //
+  // The document-authority reclassification work adds
+  // `reclassifyDocumentAuthority`,
+  // `listDocumentAuthorityReclassifications` and
+  // `runDocumentDefaultCollectionBackfill` to the SDK. The web app calls none of
+  // them, but they are instance methods on the single `OpenGeniCoreClient` class
+  // the app imports wholesale, so they are retained and the direct-session graph
+  // grows. That is dead weight shipped to every browser session, and it is
+  // structural rather than specific to this change: every future SDK method
+  // taxes the browser bundle whether or not the browser uses it.
+  //
+  // Two independent growths stack in this head - that SDK surface and the
+  // Connected Machine attachment graph above - so the measurement is taken on
+  // the merged tree rather than on either change alone: 2,171,431 raw. The
+  // 2121-KiB cap left only 473 bytes, short of the one KiB of headroom the rule
+  // above mandates, so this advances to 2122 KiB. Every other cap stays fixed.
+  // It remains a stopgap; the real fix is to make the client
+  // tree-shakeable, tracked separately.
+  directSessionRaw: 2122 * kib,
+  directSessionGzip: 593 * kib,
+  directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 31 * kib,

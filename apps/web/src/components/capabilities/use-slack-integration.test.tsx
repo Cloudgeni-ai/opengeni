@@ -432,6 +432,156 @@ describe("Slack reaction shortcut enablement", () => {
   });
 });
 
+describe("Slack orchestration notices", () => {
+  async function renderOptions(
+    settings: Record<string, unknown>,
+    // When supplied, every write blocks on it, so a test can hold one in flight.
+    gate?: Promise<void>,
+  ) {
+    const { bot, binding } = installedBot();
+    const updateWorkspaceSettings = mock(async () => {
+      if (gate) await gate;
+      return true;
+    });
+    mutableContext.current = {
+      ...appContext(["workspace:admin"]),
+      accessContext: accessContext(["workspace:admin"]),
+      workspaces: [{ id: WORKSPACE_ID, settings }],
+      updateWorkspaceSettings,
+    };
+    let adapter: ReturnType<typeof useSlackIntegration> | null = null;
+    function Probe() {
+      adapter = useSlackIntegration({
+        workspaceId: WORKSPACE_ID,
+        items: [],
+        connections: [bot],
+        connectionsLoaded: true,
+        slackInstallationBindings: [binding],
+        sheetOpen: false,
+        refresh: async () => {},
+        onRuntimeChanged: () => {},
+      });
+      return <>{adapter.dialogs}</>;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Probe />));
+    const option = (id: string) =>
+      adapter!.model.options.find((candidate) => candidate.id === id) as IntegrationToggleOption;
+    const flush = async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    };
+    return {
+      updateWorkspaceSettings,
+      flush,
+      // Captured once: these are the handlers a stale render already handed
+      // out, which is exactly what the in-flight guard has to survive.
+      childNotice: option("slack-child-requires-action-notice"),
+      goalNotice: option("slack-goal-paused-notice"),
+      // Re-read from the current render, for the rendered disabled/busy flags.
+      current: (id: string) => option(id),
+      patches: () =>
+        updateWorkspaceSettings.mock.calls.map(
+          (call) =>
+            (call as unknown as [string, { slackOrchestrationNotices: Record<string, boolean> }])[1]
+              .slackOrchestrationNotices,
+        ),
+      cleanup: async () => {
+        await act(async () => root.unmount());
+        container.remove();
+      },
+    };
+  }
+
+  test("both toggles are unchecked for a workspace that never configured them", async () => {
+    const rendered = await renderOptions({});
+    try {
+      expect(rendered.childNotice.label).toBe(
+        "Tell me in Slack when a worker I started needs input",
+      );
+      expect(rendered.goalNotice.label).toBe(
+        "Tell me in Slack when a goal pauses for budget or the continuation cap",
+      );
+      expect(rendered.childNotice.checked).toBe(false);
+      expect(rendered.goalNotice.checked).toBe(false);
+
+      // Turning one on writes the whole resolved pair, so a partially stored
+      // object can never fail closed and silently switch the other one off.
+      await act(async () => rendered.childNotice.onChange(true));
+      expect(rendered.patches()).toEqual([{ childRequiresAction: true, goalPaused: false }]);
+    } finally {
+      await rendered.cleanup();
+    }
+  });
+
+  test("a stored enable renders checked and leaves the other notice off", async () => {
+    const rendered = await renderOptions({ slackOrchestrationNotices: { goalPaused: true } });
+    try {
+      expect(rendered.goalNotice.checked).toBe(true);
+      expect(rendered.childNotice.checked).toBe(false);
+      // Enabling the second notice carries the first one forward untouched.
+      await act(async () => rendered.childNotice.onChange(true));
+      expect(rendered.patches()).toEqual([{ childRequiresAction: true, goalPaused: true }]);
+    } finally {
+      await rendered.cleanup();
+    }
+  });
+
+  test("one in-flight write makes both toggles unavailable", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const rendered = await renderOptions({}, gate);
+    try {
+      expect(rendered.current("slack-child-requires-action-notice").disabled).toBe(false);
+      expect(rendered.current("slack-goal-paused-notice").disabled).toBe(false);
+
+      // Start a write and leave it hanging on the gate.
+      await act(async () => {
+        rendered.childNotice.onChange(true);
+      });
+      const child = rendered.current("slack-child-requires-action-notice");
+      const goal = rendered.current("slack-goal-paused-notice");
+      expect(child.busy).toBe(true);
+      expect(child.disabled).toBe(true);
+      // The notice that is NOT being written is unavailable too: a second write
+      // would carry this one's pre-write value and revert it.
+      expect(goal.busy).toBe(false);
+      expect(goal.disabled).toBe(true);
+
+      // Even a handler captured before the write started cannot slip through.
+      await act(async () => {
+        rendered.goalNotice.onChange(true);
+      });
+      expect(rendered.updateWorkspaceSettings).toHaveBeenCalledTimes(1);
+
+      release();
+      await rendered.flush();
+      expect(rendered.patches()).toEqual([{ childRequiresAction: true, goalPaused: false }]);
+      expect(rendered.current("slack-child-requires-action-notice").disabled).toBe(false);
+      expect(rendered.current("slack-goal-paused-notice").disabled).toBe(false);
+    } finally {
+      await rendered.cleanup();
+    }
+  });
+
+  test("a malformed stored value fails closed to both unchecked", async () => {
+    const rendered = await renderOptions({
+      slackOrchestrationNotices: { childRequiresAction: "true", goalPaused: true },
+    });
+    try {
+      expect(rendered.childNotice.checked).toBe(false);
+      expect(rendered.goalNotice.checked).toBe(false);
+    } finally {
+      await rendered.cleanup();
+    }
+  });
+});
+
 describe("Slack bot knowledge destination coercion", () => {
   test("a legacy stored personal destination displays and persists as workspace", () => {
     expect(

@@ -28,6 +28,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
       OPENGENI_SOURCE_ADMISSION_ACTION: verify_immutable_pr_head
+      ADMISSION_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       ADMISSION_HELPER_SHA256: d7a5619c88a0118348ee923b862ecac6ad9608c696494f42252f89455b5fe55a
     steps:
       - name: Execute the exact base-owned admission verifier
@@ -38,23 +39,44 @@ jobs:
           [[ "$GITHUB_API_URL" == "https://api.github.com" ]]
           [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
           [[ "$GITHUB_EVENT_NAME" == "pull_request_target" ]]
-          [[ "$GITHUB_REF" == "refs/heads/production" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
           [[ "$GITHUB_BASE_REF" == "production" ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/source-admission.yml@refs/heads/main" ]]
+          [[ "$ADMISSION_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
 
-          # The workflow file is the base-owned trust anchor. Fetch the helper
-          # from that same immutable commit and verify its exact reviewed bytes.
+          # pull_request_target loads this controller from protected main even
+          # when the PR base is production. Keep the verifier base-owned: fetch
+          # it from the immutable production event-base SHA, verify its reviewed
+          # bytes, then supply that exact base identity to its context checker.
           helper="$RUNNER_TEMP/source-admission.mjs"
           curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.raw+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/Cloudgeni-ai/opengeni/contents/scripts/check-source-admission.mjs?ref=$GITHUB_WORKFLOW_SHA" \
+            "https://api.github.com/repos/Cloudgeni-ai/opengeni/contents/scripts/check-source-admission.mjs?ref=$ADMISSION_BASE_SHA" \
             --output "$helper"
           actual_sha256="$(sha256sum "$helper" | awk '{print $1}')"
           [[ "$actual_sha256" == "$ADMISSION_HELPER_SHA256" ]]
-          node "$helper"
+          ADMISSION_HELPER_PATH="$helper" node --input-type=module <<'NODE'
+          import { pathToFileURL } from "node:url";
+
+          const helperPath = process.env.ADMISSION_HELPER_PATH;
+          if (!helperPath) throw new Error("ADMISSION_HELPER_PATH is missing");
+          const { verifySourceAdmission } = await import(pathToFileURL(helperPath).href);
+          await verifySourceAdmission({
+            env: {
+              ...process.env,
+              GITHUB_REF: `refs/heads/${process.env.GITHUB_BASE_REF}`,
+              GITHUB_SHA: process.env.ADMISSION_BASE_SHA,
+              GITHUB_WORKFLOW_REF:
+                `${process.env.GITHUB_REPOSITORY}/.github/workflows/source-admission.yml` +
+                `@refs/heads/${process.env.GITHUB_BASE_REF}`,
+              GITHUB_WORKFLOW_SHA: process.env.ADMISSION_BASE_SHA,
+            },
+          });
+          NODE
 
   report:
     name: Current-base source admission

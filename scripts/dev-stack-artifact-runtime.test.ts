@@ -115,6 +115,22 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("bash scripts/run-development-relay.sh");
   });
 
+  test("persists NATS auth-callout defaults for independently restarted components", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    for (const setting of [
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_USER",
+      "OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD",
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_USER",
+      "OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD",
+    ]) {
+      expect(source).toContain(`printf '${setting}=%s\\n'`);
+    }
+  });
+
   test("probes local ports without walking unhealthy mounted filesystems", async () => {
     const source = await Bun.file(scriptPath).text();
     const netcatCapabilityCheck = source.indexOf("nc_help=");
@@ -238,6 +254,17 @@ describe("local artifact runtime stack contract", () => {
       'export OPENGENI_MCP_URL="${sandbox_edge_url}/v1/workspaces/{workspaceId}/mcp"',
     );
     expect(source).toContain("printf 'OPENGENI_MCP_INTERNAL_URL=%s\\n'");
+  });
+
+  test("keeps the browser API hostname aligned with the local web hostname", async () => {
+    const source = await Bun.file(scriptPath).text();
+
+    expect(source).toContain(
+      'browser_base_url="${OPENGENI_WEB_BASE_URL:-${OPENGENI_PUBLIC_BASE_URL:-}}"',
+    );
+    expect(source).toContain(
+      'export VITE_API_BASE_URL="http://${browser_loopback_host}:${OPENGENI_API_PORT}"',
+    );
   });
 
   test("admits only an exact-head runtime in a source-tagged local image", async () => {

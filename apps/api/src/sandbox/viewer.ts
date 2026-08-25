@@ -1344,8 +1344,10 @@ async function tryMintActiveSelfhostedStream(
         sandbox.enrollmentId,
       );
       if (!enrollment?.connectionInstanceId) return null;
+      if (!enrollment.workspaceRoot) return null;
       const client = new SelfhostedSandboxClient({
         workspaceId,
+        workspaceRoot: enrollment.workspaceRoot,
         relay: relayConfigFromSettings(settings),
         controlRpcFactory: () => controlRpc(bus),
         agentId: sandbox.enrollmentId,

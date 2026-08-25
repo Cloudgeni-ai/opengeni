@@ -13,6 +13,7 @@ import postgres from "postgres";
 
 import {
   approveSlackUserLinkAccessRequest,
+  slackUserLinkAccessRequestTeam,
   cancelSlackUserLinkAccessRequest,
   completeSlackUserLinkAccessIfGranted,
   createConnection,
@@ -151,6 +152,76 @@ async function insertOperationReceipt(input: {
 }
 
 describe("Slack user-link access migration and lifecycle", () => {
+  test("files the identity link at the installation when the request is for a routed workspace", async () => {
+    if (!available) return;
+    // Slack workspace routing raises the access request in the workspace the
+    // work would land in, but `slack_bot_user_links` is unique per connection
+    // and Slack user and is read only under the INSTALLATION's tenancy. Writing
+    // it in the routed workspace would file it where the pump cannot see it, so
+    // every later message would ask the person to link again.
+    const label = `routed-${randomUUID().slice(0, 8)}`;
+    const home = await workspace(`${label}-home`);
+    const connection = await slackConnection(home, label);
+    const [routed] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${home.accountId}, ${`Slack access ${label} routed`}) returning id`;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${routed!.id}, ${home.accountId})`;
+
+    const subjectId = `user:${randomUUID()}`;
+    const token = `signed-${label}`;
+    const prepared = await prepareSlackUserLinkAccessRequest(db, {
+      accountId: home.accountId,
+      workspaceId: routed!.id,
+      tokenDigest: digest(token),
+      connectionId: connection.id,
+      slackTeamId: `T_${label}`,
+      slackUserId: `U_${label}`,
+      subjectId,
+      subjectLabel: `${label}@example.test`,
+      expiresAt: new Date(Date.now() + 5 * 60_000),
+    });
+    const team = await slackUserLinkAccessRequestTeam(db, {
+      workspaceId: routed!.id,
+      requestId: prepared.id,
+    });
+    expect(team).toEqual({ slackTeamId: `T_${label}`, connectionId: connection.id });
+
+    const pending = await requestSlackUserLinkWorkspaceAccess(db, {
+      workspaceId: routed!.id,
+      requestId: prepared.id,
+      actorSubjectId: subjectId,
+      expectedVersion: prepared.version,
+      idempotencyKey: randomUUID(),
+    });
+    await approveSlackUserLinkAccessRequest(db, {
+      workspaceId: routed!.id,
+      requestId: prepared.id,
+      actorSubjectId: `user:${randomUUID()}`,
+      expectedVersion: pending.version,
+      idempotencyKey: randomUUID(),
+      permissions: ["sessions:create", "sessions:read"],
+      identityHome: home,
+    });
+
+    // The grant is in the routed workspace, where the work will run.
+    const [membership] = await admin<{ n: number }[]>`
+      select count(*)::int as n from workspace_memberships
+      where workspace_id = ${routed!.id} and subject_id = ${subjectId}`;
+    expect(membership!.n).toBe(1);
+    // The identity link is at home, where the Slack pump reads it.
+    const [link] = await admin<{ workspace_id: string }[]>`
+      select workspace_id from slack_bot_user_links
+      where connection_id = ${connection.id} and slack_user_id = ${`U_${label}`}`;
+    expect(link?.workspace_id).toBe(home.workspaceId);
+    expect(
+      await getSlackBotUserLink(db, home.workspaceId, connection.id, `U_${label}`),
+    ).toMatchObject({
+      subjectId,
+    });
+  });
+
   test("declares rolling FORCE-RLS tables, exact constraints, policies, and runtime DML", async () => {
     const candidates = (await readdir(migrationsDir)).filter((file) =>
       file.endsWith("_slack_user_link_access_requests.sql"),

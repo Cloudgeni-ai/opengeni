@@ -449,8 +449,15 @@ function ownedProcessGroupIsAlive(proc: OwnedProcess): boolean {
     process.kill(-proc.pid, 0);
     return true;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") {
       return false;
+    }
+    // Permission denied still proves the process group exists. Treat it as
+    // alive so failure-path cleanup can continue instead of masking the actual
+    // test failure with a second EPERM exception.
+    if (code === "EPERM") {
+      return true;
     }
     throw error;
   }

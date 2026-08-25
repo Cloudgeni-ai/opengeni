@@ -20,10 +20,25 @@ import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-
 // importers (`app.ts`) keep the same import path.
 export type { ManagedAuth };
 
+export function managedAuthRequiresEmailVerification(
+  settings: Pick<Settings, "environment">,
+): boolean {
+  return settings.environment !== "local";
+}
+
+export function managedAuthUserCreateOverride(
+  settings: Pick<Settings, "environment">,
+  user: { emailVerified: boolean } & Record<string, unknown>,
+): { data: typeof user } | undefined {
+  if (managedAuthRequiresEmailVerification(settings)) return undefined;
+  return { data: { ...user, emailVerified: true } };
+}
+
 export function createManagedAuth(settings: Settings, db: Database): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
     return null;
   }
+  const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
   const pool = new Pool({ connectionString: settings.databaseUrl });
   return betterAuth({
     appName: "OpenGeni",
@@ -124,10 +139,13 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
     },
     emailAndPassword: {
       enabled: true,
-      requireEmailVerification: true,
+      // Local managed mode exists so the complete human/org tenancy flow can
+      // be exercised without first configuring a transactional-email vendor.
+      // Every non-local deployment retains the verified-email boundary.
+      requireEmailVerification,
       revokeSessionsOnPasswordReset: true,
       onExistingUserSignUp: async ({ user }) => {
-        if (!user.emailVerified) {
+        if (requireEmailVerification && !user.emailVerified) {
           const url = await verificationUrl(settings, user.email);
           await sendEmail(settings, {
             to: user.email,
@@ -147,7 +165,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       },
     },
     emailVerification: {
-      sendOnSignUp: true,
+      sendOnSignUp: requireEmailVerification,
       sendVerificationEmail: async ({ user, url }) => {
         await sendEmail(settings, {
           to: user.email,
@@ -240,6 +258,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       },
       user: {
         create: {
+          before: async (user) => managedAuthUserCreateOverride(settings, user),
           after: async (user) => {
             if (!user.emailVerified) return;
             await ensureManagedAccessForUser(db, {

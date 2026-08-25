@@ -56,7 +56,8 @@ export class PersonalResourceAttachmentAcceptanceError extends Error {
 }
 
 /**
- * Issue and freeze the locked session's personal Variable Set/Rig closure on
+ * Issue and freeze the locked session's personal Variable Set/Rig/Connected
+ * Machine closure on
  * one already-inserted logical turn. The caller owns the surrounding accepted-
  * work transaction; this helper must never be called as a standalone grant
  * mutation.
@@ -78,7 +79,7 @@ export async function acceptTurnPersonalResourceAttachmentInTransaction(
         grantMode: "once" | "session" | "always";
         grantContext: "user_private" | "workspace_shared";
         resourceCount: number;
-        resourceKinds: Array<"variable_set" | "rig">;
+        resourceKinds: Array<"variable_set" | "rig" | "connected_machine">;
         sharedOutputWarningVersion: 1;
         replay: boolean;
       }

@@ -37,18 +37,21 @@ client. The matching UI ships in
 | Ownership    | platform-owned, ephemeral        | user-owned, persistent                             |
 | Provisioning | platform provisions + tears down | platform **attaches** to what's already there      |
 | Repos        | cloned into `/workspace`         | **not cloned** — the machine uses its own git auth |
-| Working dir  | `/workspace` (virtual root)      | a real host path you pass per session              |
+| Working dir  | `/workspace`                    | the agent-reported absolute host root, optionally narrowed per session |
 | Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
 "home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
-worktrees under that path as it needs them). Structured cwd/fs ops rewrite the
-virtual `/workspace` frame via `toMachinePath`. Model-facing shell paths are
-cwd-relative (`.opengeni/files/...`); durable receipts and `sandbox:` UI links
-keep `/workspace/...`. `execCommand` returns the SDK banner with combined
-stdout/stderr and exit code.
+worktrees under that path as it needs them). The authoritative runner Hello
+already reports its absolute launch root; OpenGeni persists it and resolves an
+optional relative session folder once against that root. The SDK manifest,
+exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
+Relative operation paths resolve from it and absolute paths stay literal, so
+`/workspace` has no special meaning on a machine. Durable artifact receipts and
+`sandbox:` UI links may still use their provider-independent `/workspace/...`
+identity, projected to cwd-relative paths when shown to the model.
 
 The exact model-visible tool catalog remains available through Codemode without
 installing a machine credential. OpenGeni sends no Codemode manifest pointer or
@@ -109,9 +112,9 @@ recover the machine. The transport failure must not replace the agent loop.
   `MachineView.sandboxId` from `listMachines`). It **seeds the active-sandbox
   pointer at creation**, so the very first turn lands on that machine.
 - **`workingDir`** (host path) — the directory the agent runs the session under
-  (its cwd base for exec, terminal, and the file dock). A launch-root-relative
-  subdir, an absolute machine path, or the current agent user's `~` / `~/...`
-  path both work. Other shell/environment expansion is intentionally not applied.
+  (its cwd base for exec, terminal, and the file dock). It may be absolute or
+  relative to the persisted Hello root. Tilde is rejected because the control
+  plane does not know an authenticated service-user home directory.
 
 ```ts
 import { OpenGeniClient } from "@opengeni/sdk";
@@ -132,16 +135,26 @@ const session = await client.createSession(workspaceId, {
 });
 ```
 
+That API-key example applies to workspace- or organization-scoped machines. A
+user-scoped machine must be selected by its owning managed human. The managed
+web console discovers the machine's personal authority and includes an atomic
+`personalResourceAttachment` in the create command after the owner chooses
+`once`, `session`, or `always` and acknowledges workspace-shared output. The
+server derives the selected enrollment from the locked session, issues
+`connected_machine.use` in the same accepted-turn transaction, and preserves a
+`once` decision across recovery of that logical turn. Callers never nominate a
+machine authority or issue a standalone grant before creating the session.
+
 Rules to keep in mind:
 
 - **`workingDir` requires `targetSandboxId`.** Sending `workingDir` alone (with
   no machine target) is a **422** — a bare working directory has no machine to
   resolve it against.
-- Omit `workingDir` and the session runs under the machine's **default workspace
-  root** (the agent's launch dir).
-- Session detail responses echo the resolved configuration as `workingDir`
-  (`null` when the launch root is in use), so operators can diagnose placement
-  without querying storage directly.
+- Omit `workingDir` and the session runs under the machine's persisted
+  **workspace root** (the agent's launch dir).
+- New attaches store and return the resolved absolute `workingDir`. Legacy rows
+  may remain null/relative until they are reattached; establishment resolves
+  them against the current persisted Hello root.
 - **Repos are not cloned** onto a machine target. `resources` you attach are
   available for context, but the platform never `git clone`s onto the user's
   real filesystem — the machine uses its own git auth.

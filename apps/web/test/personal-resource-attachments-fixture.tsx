@@ -54,6 +54,7 @@ function Fixture() {
       selected: {
         variableSets: resourceCount > 0 ? [variableSet] : [],
         rigs: [],
+        connectedMachines: [],
         resourceCount,
         personalResourceCount: resourceCount,
         closureUnverified: false,

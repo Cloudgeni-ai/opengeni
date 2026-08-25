@@ -37,6 +37,7 @@
     "db:check-tenancy-parity": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/check-tenancy-parity.ts",
     "db:backfill-session-ownership": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-session-ownership.ts",
     "db:backfill-organization-memberships": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-organization-memberships.ts",
+    "db:backfill-connection-authority": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-connection-authority.ts",
     "db:verify-resource-classification": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/verify-resource-classification.ts",
     "db:sweep-organization-retention": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/sweep-organization-retention.ts",
     "db:generate": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; cd packages/db && bun run generate",
@@ -45,6 +46,7 @@
     "catalog:import": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/import-integrations-catalog.ts",
     "slack:manifest": "bun scripts/generate-slack-bot-manifest.ts",
     "typecheck": "bun scripts/typecheck.ts",
+    "check:bun-version": "bun scripts/bun-version.ts",
     "lint": "oxlint --deny-warnings .",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
@@ -120,7 +122,7 @@
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
     "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",
     "release:publish": "bash scripts/release-publish.sh",
-    "check": "bun run check:public-hygiene && bun run typecheck && bun run test:unit && cd packages/sdk && bun run build && cd ../react && bun run build && bun run demo:build && cd ../../apps/web && bun run build && cd ../../examples/northstar-support && bun run build",
+    "check": "bun run check:bun-version && bun run check:public-hygiene && bun run typecheck && bun run test:unit && cd packages/sdk && bun run build && cd ../react && bun run build && bun run demo:build && cd ../../apps/web && bun run build && cd ../../examples/northstar-support && bun run build",
     "check:full": "bun run check && bun run test:integration && bun run test:e2e",
     "check:docs-refs": "bun scripts/check-docs-refs.ts",
     "check:model-pricing": "bun scripts/check-model-pricing.ts",
@@ -129,6 +131,7 @@
     "workflow-graph:refresh": "bun scripts/workflow-execution-graph.ts --write",
     "check:migration-ordinals": "bun scripts/check-migration-ordinals.ts",
     "check:migration-rls-backfills": "bun scripts/check-migration-rls-backfills.ts",
+    "check:migration-schema-contract": "bun scripts/check-migration-schema-contract.ts",
     "migration:renumber": "bun scripts/renumber-migration.ts",
     "check:rename": "bun scripts/check-variable-set-rename.ts",
     "check:workspace-billing": "bun run typecheck && bun run test:unit && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",
@@ -174,7 +177,7 @@
     "@temporalio/activity": "^1.20.2",
     "@temporalio/client": "^1.20.2",
     "@temporalio/worker": "^1.20.2",
-    "@types/bun": "^1.3.14",
+    "@types/bun": "^1.4.0",
     "drizzle-orm": "^0.45.2",
     "hermes-parser": "0.28.1",
     "metro": "0.82.2",
@@ -206,11 +209,12 @@
     "vite": "8.1.4",
     "ws": "8.21.1"
   },
-  "packageManager": "bun@1.3.14",
+  "packageManager": "bun@1.4.0",
   "patchedDependencies": {
     "modal@0.9.0": "patches/modal@0.9.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
     "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
-    "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch"
+    "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
+    "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch"
   }
 }

@@ -1204,6 +1204,8 @@ export type UpdateSessionVisibilityResponse = {
 
 export type ForkSessionRequest = {
   idempotencyKey: string;
+  visibility: SessionVisibility;
+  workspaceSharedAcknowledged: boolean;
 };
 
 export type ForkSessionResponse = {
@@ -1212,7 +1214,7 @@ export type ForkSessionResponse = {
   eventSequence: number;
   sessionId: string;
   workspaceId: string;
-  visibility: "private";
+  visibility: SessionVisibility;
   authorityEpoch: 1;
   copiedHistoryItemCount: number;
   replay: boolean;
@@ -1524,7 +1526,7 @@ export type PersonalResourceAttachmentSummary = {
   mode: "once" | "session" | "always";
   context: "user_private" | "workspace_shared";
   resourceCount: number;
-  resourceKinds: Array<"variable_set" | "rig">;
+  resourceKinds: Array<"variable_set" | "rig" | "connected_machine">;
   sharedOutputWarningVersion: 1;
 };
 
@@ -3204,6 +3206,12 @@ export type CodexAccountOverview = {
     credits: CodexResetCredit[];
   };
   canRedeem: boolean;
+  /** Secret-free reason redemption is owner-actionable or view-only. */
+  redemptionAccess: {
+    ownership: "current_human" | "unowned" | "different_human" | "managed_human_unavailable";
+    /** A direct managed-cookie admin may claim only an unowned same-provider row by reconnecting. */
+    canClaimUnownedViaReconnect: boolean;
+  };
   /** Owning managed-cookie human may replay durable completion without a healthy provider token. */
   canResumeRedemption: boolean;
   /** Durable owner-scoped ambiguity/completion discovery; never redemption authority for agents. */
@@ -3378,11 +3386,16 @@ export type ClientAuthConfig =
   | { mode: "none" }
   | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
   | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
-  | { mode: "managedSession"; session: "cookie" };
+  | {
+      mode: "managedSession";
+      session: "cookie";
+      /** Defaults to true when omitted by an older deployment. */
+      emailVerificationRequired?: boolean;
+    };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-machine-resource-policy-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-atomic-session-fork-visibility-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3688,6 +3701,8 @@ export type OrganizationMember = {
   id: string;
   organizationId: string;
   subjectId: string;
+  name: string | null;
+  email: string | null;
   role: OrganizationMembershipRole;
   status: "provisioning" | "active" | "suspended" | "revoked";
   authorizationRevision: number;
@@ -3731,6 +3746,25 @@ export type OrganizationPrivateSessionSettings = {
   version: number;
   updatedAt: string;
   changed?: boolean;
+};
+export type AddOrganizationWorkspaceMemberRequest = {
+  organizationMembershipId: string;
+  role?: string | undefined;
+  permissions: Permission[];
+};
+export type CreateOrganizationWorkspaceRequest = {
+  name: string;
+  slug?: string | null;
+  agentInstructions?: string | null;
+  operationId: string;
+};
+export type CreateOrganizationRequest = {
+  name: string;
+  operationId: string;
+};
+export type CreateOrganizationResponse = {
+  organization: OrganizationSummary;
+  workspaceId: string;
 };
 export type UpdateOrganizationNameRequest = {
   name: string;
@@ -3812,6 +3846,8 @@ export type WorkspaceSettings = {
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   /** Model policy inherited by new chats and scheduled tasks. */
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
+  /** Exact capability selection inherited by new top-level sessions. */
+  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -3820,6 +3856,8 @@ export type WorkspaceSettings = {
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
+  /** Slack orchestration notices; both default off when absent or invalid. */
+  slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
 };
 
@@ -3828,10 +3866,26 @@ export type WorkspaceSessionDefaults = {
   reasoningEffort: ReasoningEffort;
 };
 
+export type WorkspaceSessionToolDefaults = {
+  mcpServerIds: string[];
+  firstPartyMcpTools: FirstPartyMcpToolName[];
+};
+
 export type WorkspaceSlackReactionSummonSettings = {
   enabled: boolean;
   emoji: "genie";
   channelPolicy: { mode: "bot_member" } | { mode: "allowlist"; channelIds: string[] };
+};
+
+/**
+ * Per-workspace switches for the two Slack orchestration notices. Both are off
+ * unless the workspace explicitly turned them on.
+ */
+export type WorkspaceSlackOrchestrationNoticeSettings = {
+  /** Post a pointer card when a child worker blocks on input or an approval. */
+  childRequiresAction?: boolean | undefined;
+  /** Post one line when a goal pauses for budget or the continuation cap. */
+  goalPaused?: boolean | undefined;
 };
 
 export type SlackReactionChannel = {
@@ -3853,12 +3907,14 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
+  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
+  slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
   [key: string]: unknown;
 };
 
@@ -3886,6 +3942,7 @@ export type ApiKey = {
   accountId: string;
   workspaceId: string | null;
   name: string;
+  description: string | null;
   prefix: string;
   permissions: Permission[];
   expiresAt: string | null;
@@ -3897,6 +3954,7 @@ export type ApiKey = {
 
 export type CreateApiKeyRequest = {
   name: string;
+  description?: string | undefined;
   permissions: Permission[];
   expiresAt?: string | undefined;
 };
@@ -4185,6 +4243,11 @@ export type SessionCommandReceipt = {
   createdAt: string;
 };
 
+export type SessionPromptRouting =
+  | "accepted_for_execution"
+  | "queued_for_execution"
+  | "accepted_for_steering";
+
 export type ComposerDraft = {
   revision: number;
   text: string;
@@ -4401,6 +4464,8 @@ export type SubmitComposerDraftResponse = {
   accepted: SessionEvent;
   turn: SessionTurn;
   draft: ComposerDraft;
+  receipt: SessionCommandReceipt;
+  routing: SessionPromptRouting;
   interruptionCount: number;
   replay: boolean;
 };
@@ -5235,6 +5300,55 @@ export type CreateKnowledgeDropRequest = {
 
 export type MoveDocumentRequest = {
   targetBaseId?: string | undefined;
+};
+
+export type DocumentAuthorityTuple = {
+  kind: DocumentAuthorityKind;
+  workspaceId: string | null;
+  subjectId: string | null;
+  authorityId: string | null;
+};
+
+export type ReclassifyDocumentAuthorityRequest = {
+  operationId: string;
+  expectedAuthority: DocumentAuthorityTuple;
+  targetAuthorityKind: DocumentAuthorityKind;
+};
+
+export type DocumentAuthorityReclassification = {
+  operationId: string;
+  documentId: string;
+  previousAuthority: DocumentAuthorityTuple;
+  authority: DocumentAuthorityTuple;
+  createdAt: string;
+};
+
+export type ListDocumentAuthorityReclassificationsOptions = {
+  limit?: number | undefined;
+  cursor?: string | undefined;
+};
+
+export type ListDocumentAuthorityReclassificationsResponse = {
+  receipts: DocumentAuthorityReclassification[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+export type RunDocumentDefaultCollectionBackfillRequest = {
+  runId: string;
+  operationId: string;
+  batchSize?: number | undefined;
+};
+
+export type DocumentDefaultCollectionBackfill = {
+  runId: string;
+  operationId: string;
+  status: "running" | "completed";
+  lastWorkspaceId: string | null;
+  processedCount: number;
+  createdCount: number;
+  adoptedCount: number;
+  completedAt: string | null;
 };
 
 export type DocumentSearchRequest = {
@@ -6905,7 +7019,10 @@ export type UserMessageEventInput = {
     model?: string | undefined;
     reasoningEffort?: ReasoningEffort | undefined;
     latencyMode?: LatencyMode | undefined;
+    controlEtag?: string | undefined;
+    expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
+    connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };

@@ -1,8 +1,30 @@
 import { CalendarClockIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
+import { useId } from "react";
 
+import { CreatorMonogram } from "@/components/creator-monogram";
+import { type CreatorRef, creatorAnnouncement, creatorInitials } from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { RailAggregateStatus } from "@/lib/sessions-group";
+
+function ActiveWorkMark() {
+  const maskId = `active-work-${useId().replaceAll(":", "")}`;
+  return (
+    <svg aria-hidden="true" viewBox="0 0 108 108" className="size-2.5 shrink-0 text-brand">
+      <defs>
+        <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="108">
+          <circle cx="54" cy="54" r="48" fill="white" />
+          <g fill="none" stroke="black" strokeWidth="21" strokeLinecap="round">
+            <path d="M-8 43 C35 40 71 29 116 16" />
+            <path d="M-8 86 C35 83 71 72 116 59" />
+          </g>
+        </mask>
+      </defs>
+      <circle cx="54" cy="54" r="48" fill="currentColor" mask={`url(#${maskId})`} />
+      <circle cx="54" cy="54" r="48" fill="none" stroke="currentColor" strokeWidth="2.5" />
+    </svg>
+  );
+}
 
 /** The one descendant-aware status marker shared by rows and section headers. */
 function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
@@ -16,16 +38,7 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
     );
   }
   if (summary.kind === "active_work") {
-    return (
-      <span
-        aria-hidden="true"
-        className="inline-flex size-2.5 shrink-0 rounded-full border border-brand"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(-12deg, var(--og-color-accent) 0 2px, transparent 2px 3.5px)",
-        }}
-      />
-    );
+    return <ActiveWorkMark />;
   }
   if (summary.kind === "send_failed") {
     return (
@@ -46,17 +59,54 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
   );
 }
 
+/**
+ * The row's announced name.
+ *
+ * `aria-label` replaces name-from-content, so this string is the whole of what
+ * a screen reader hears for the row: the creator chip is `aria-hidden`, and
+ * even the sr-only state line inside the link is inert for it. Every fact a
+ * sighted user reads off the row belongs here, and in exactly one place.
+ */
+export function sessionRowAccessibleName({
+  title,
+  stateLabel,
+  pinned,
+  statusLabel,
+  spawnedLabel,
+  creator,
+}: {
+  title: string;
+  stateLabel: string;
+  pinned: boolean;
+  statusLabel: string;
+  spawnedLabel?: string | null;
+  creator?: CreatorRef | null | undefined;
+}): string {
+  const spokenCreator = creatorAnnouncement(creator ?? null);
+  return `Open ${title}. ${stateLabel}${pinned ? ". Pinned" : ""}. ${statusLabel}${
+    spawnedLabel ? `. ${spawnedLabel}` : ""
+  }${spokenCreator ? `. Created by ${spokenCreator}` : ""}`;
+}
+
 export function RailTrailingMetadata({
   summary,
   scheduled = false,
   relativeTime,
+  creator,
 }: {
   summary: RailAggregateStatus;
   scheduled?: boolean;
   relativeTime?: string | undefined;
+  /**
+   * Session creator for a top-level row, else null; callers decide which rows
+   * are roots. A chip is its own reason to render this block: a mobile root row
+   * can have no status marker and no time and still name who started it.
+   */
+  creator?: CreatorRef | null | undefined;
 }) {
   const hasStatusMarker = summary.kind !== "neutral";
   const hasRelativeTime = Boolean(relativeTime);
+  const hasMonogram = creator ? creatorInitials(creator) !== null : false;
   // How long the longest-waiting session behind a "needs you" marker has been
   // blocked on a human. A collapsed parent with a child parked for ten hours
   // must say so, not hide it behind a dot.
@@ -64,7 +114,7 @@ export function RailTrailingMetadata({
     summary.kind === "needs_attention" && summary.attentionSince
       ? formatWaitingSince(summary.attentionSince)
       : "";
-  if (!scheduled && !hasStatusMarker && !hasRelativeTime) return null;
+  if (!scheduled && !hasStatusMarker && !hasRelativeTime && !hasMonogram) return null;
   return (
     <span data-session-row-metadata className="inline-flex shrink-0 items-center justify-end gap-1">
       {scheduled ? (
@@ -73,6 +123,7 @@ export function RailTrailingMetadata({
           className="size-3.5 shrink-0 text-fg-subtle"
         />
       ) : null}
+      {creator ? <CreatorMonogram createdBy={creator} /> : null}
       {waitingFor ? (
         <span
           data-session-row-waiting
@@ -105,6 +156,7 @@ export function SessionRowContent({
   summary,
   scheduled = false,
   relativeTime,
+  creator,
 }: {
   title: string;
   stateLabel: string;
@@ -114,9 +166,13 @@ export function SessionRowContent({
   summary: RailAggregateStatus;
   scheduled?: boolean;
   relativeTime?: string;
+  /** Session creator for a top-level row, else null. See RailTrailingMetadata. */
+  creator?: CreatorRef | null | undefined;
 }) {
   return (
     <>
+      {/* Inert for the row's accessible name, which its `aria-label` owns -
+          including the creator. Kept as-is so this change regresses nothing. */}
       <span className="sr-only">{stateLabel}. </span>
       <span className="flex min-w-0 flex-1 flex-col leading-tight">
         <span data-session-row-title className="block min-w-0 truncate">
@@ -128,7 +184,12 @@ export function SessionRowContent({
           </span>
         ) : null}
       </span>
-      <RailTrailingMetadata summary={summary} scheduled={scheduled} relativeTime={relativeTime} />
+      <RailTrailingMetadata
+        summary={summary}
+        scheduled={scheduled}
+        relativeTime={relativeTime}
+        creator={creator}
+      />
     </>
   );
 }

@@ -261,6 +261,7 @@ describe("migration 0290 organization membership backfill", () => {
       candidates: [
         {
           subjectId: legacy.subjectId,
+          evidenceResourceId: expect.any(String),
           resolution: "unresolved",
           reasonCode: "missing_owner_workspace_membership",
           organizationMembershipId: null,
@@ -274,6 +275,90 @@ describe("migration 0290 organization membership backfill", () => {
       dryRun: false,
     });
     expect(await anchorRows(legacy.organizationId)).toEqual([]);
+  }, 180_000);
+
+  test("a run key settles one durable membership receipt with exact unresolved evidence", async () => {
+    if (!available) return;
+    const legacy = await legacyOrganization({ withLoginIdentity: false });
+    const [source] = await admin<{ id: string }[]>`
+      select id from workspace_memberships
+      where account_id = ${legacy.organizationId} and subject_id = ${legacy.subjectId}`;
+    const runKey = `membership-ledger-${crypto.randomUUID()}`;
+    const report = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 25,
+      dryRun: false,
+      runKey,
+    });
+    const receiptId = report.receiptId;
+    if (!receiptId) throw new Error("membership backfill did not return its receipt id");
+    expect(report).toMatchObject({
+      drained: true,
+      receiptStatus: "completed",
+      receiptId: expect.any(String),
+      counts: { unresolved: 1, failed: 0, contended: 0 },
+    });
+    expect(report.unresolved).toEqual([
+      {
+        subjectId: legacy.subjectId,
+        resourceId: source!.id,
+        reasonCode: "missing_login_identity",
+      },
+    ]);
+    const [receipt] = await admin<
+      Array<{
+        id: string;
+        status: string;
+        classified_count: number;
+        skipped_count: number;
+        unresolved_count: number;
+      }>
+    >`
+      select id, status, classified_count::int, skipped_count::int, unresolved_count::int
+      from tenancy_backfill_receipts
+      where account_id = ${legacy.organizationId}
+        and resource_family = 'organization_memberships'
+        and run_key = ${runKey}`;
+    expect(receipt).toEqual({
+      id: receiptId,
+      status: "completed",
+      classified_count: 0,
+      skipped_count: 0,
+      unresolved_count: 1,
+    });
+    expect(
+      Array.from(
+        await admin`
+          select resource_id, reason_code from tenancy_backfill_unresolved_rows
+          where receipt_id = ${receiptId}::uuid`,
+      ),
+    ).toEqual([{ resource_id: source!.id, reason_code: "missing_login_identity" }]);
+  }, 180_000);
+
+  test("partial membership evidence settles failed and dry runs write no receipt", async () => {
+    if (!available) return;
+    const legacy = await legacyOrganization();
+    const dryRunKey = `membership-dry-${crypto.randomUUID()}`;
+    const dry = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 25,
+      dryRun: true,
+      runKey: dryRunKey,
+    });
+    expect(dry).toMatchObject({ receiptId: null, receiptStatus: null });
+    const [dryCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from tenancy_backfill_receipts
+      where account_id = ${legacy.organizationId} and run_key = ${dryRunKey}`;
+    expect(dryCount?.count).toBe(0);
+
+    const partial = await drainOrganizationMembershipBackfill(db, {
+      organizationId: legacy.organizationId,
+      limit: 25,
+      dryRun: false,
+      afterSubjectId: legacy.subjectId,
+      runKey: `membership-partial-${crypto.randomUUID()}`,
+    });
+    expect(partial).toMatchObject({ drained: true, receiptStatus: "failed" });
   }, 180_000);
 
   test("a suspended anchor is reported, never silently reactivated", async () => {

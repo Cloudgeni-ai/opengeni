@@ -122,6 +122,25 @@ afterEach(() => {
 });
 
 describe("MessageTimeline pagination affordances", () => {
+  test("can reveal a known-fresh first message without blanking the scroller", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const r = await renderComponent(
+      <MessageTimeline items={[userItem("c", "accepted first prompt")]} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+
+    expect(scroller).not.toBeNull();
+    expect(scroller?.getAttribute("style") ?? "").not.toContain("visibility");
+    expect(r.container.textContent).toContain("accepted first prompt");
+    await r.unmount();
+  });
+
   test("keeps an optimistic user message mounted through its durable event handoff", async () => {
     const clientEventId = "client-send-1";
     const optimistic: TimelineItem = {
@@ -1089,6 +1108,71 @@ describe("MessageTimeline pagination affordances", () => {
       ),
     );
     expect(calls).toBe(1);
+    await r.unmount();
+  });
+
+  test("requests older history when a collapsed tail underfills the scroller", async () => {
+    let calls = 0;
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const r = await renderComponent(
+      <MessageTimeline
+        items={items}
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    // A child disclosure can shrink without re-rendering MessageTimeline, but
+    // an ordinary parent commit must cover the initial underfilled window too.
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        status="idle"
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    await flush();
+
+    expect(calls).toBe(1);
+
+    // Unrelated commits against the same loaded window do not loop requests.
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        status="running"
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    await flush();
+    expect(calls).toBe(1);
+
+    // A newly prepended window may request the next page if it still does not
+    // fill the viewport.
+    await r.rerender(
+      <MessageTimeline
+        items={[reasoningItem("older-step", "older step"), ...items]}
+        hasOlder
+        onLoadOlder={() => {
+          calls += 1;
+        }}
+      />,
+    );
+    await flush();
+    expect(calls).toBe(2);
     await r.unmount();
   });
 

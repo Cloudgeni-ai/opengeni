@@ -70,28 +70,32 @@ async function fixture(count = 3) {
     sandboxBackend: "none",
   });
   const turns = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
-    const rows = await db
-      .insert(schema.sessionTurns)
-      .values(
-        Array.from({ length: count }, (_, index) => ({
-          accountId: grant.accountId,
-          workspaceId: grant.workspaceId!,
-          sessionId: session.id,
-          triggerEventId: crypto.randomUUID(),
-          temporalWorkflowId: `session-${session.id}`,
-          status: "queued",
-          source: "user",
-          position: index + 1,
-          prompt: `prompt ${index + 1}`,
-          resources: index === 1 ? [{ kind: "file" as const, id: crypto.randomUUID() }] : [],
-          tools: [],
-          model: `model-${index + 1}`,
-          reasoningEffort: index === 1 ? "high" : "low",
-          sandboxBackend: "none",
-          metadata: {},
-        })),
-      )
-      .returning();
+    const rows =
+      count === 0
+        ? []
+        : await db
+            .insert(schema.sessionTurns)
+            .values(
+              Array.from({ length: count }, (_, index) => ({
+                accountId: grant.accountId,
+                workspaceId: grant.workspaceId!,
+                sessionId: session.id,
+                triggerEventId: crypto.randomUUID(),
+                temporalWorkflowId: `session-${session.id}`,
+                status: "queued",
+                source: "user",
+                promptRouting: "queued_for_execution",
+                position: index + 1,
+                prompt: `prompt ${index + 1}`,
+                resources: index === 1 ? [{ kind: "file" as const, id: crypto.randomUUID() }] : [],
+                tools: [],
+                model: `model-${index + 1}`,
+                reasoningEffort: index === 1 ? "high" : "low",
+                sandboxBackend: "none",
+                metadata: {},
+              })),
+            )
+            .returning();
     await db
       .update(schema.sessions)
       .set({ queueVersion: 1, queueHeadPosition: 0, queueTailPosition: count, status: "queued" })
@@ -132,6 +136,65 @@ async function storedEvents(workspaceId: string, eventIds: string[]) {
 }
 
 describe("canonical queue commands", () => {
+  test("projects only prompts admitted to wait behind work into the visible queue", async () => {
+    const value = await fixture(0);
+    const submit = async (text: string, delivery: "send" | "steer") =>
+      await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
+              accountId: value.grant.accountId,
+              workspaceId: value.grant.workspaceId!,
+              sessionId: value.session.id,
+              subjectId: value.grant.subjectId,
+              actor: value.actor,
+              operationKey: crypto.randomUUID(),
+              delivery,
+              text,
+              resources: [],
+              model: "scripted-model",
+              reasoningEffort: "medium",
+              latencyMode: "standard",
+              reasoningEffortFallback: "medium",
+              source: "user",
+            }),
+          ),
+      );
+
+    const direct = await submit("start now", "send");
+    expect(direct.routing).toBe("accepted_for_execution");
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        db
+          .select({ promptRouting: schema.sessionTurns.promptRouting })
+          .from(schema.sessionTurns)
+          .where(eq(schema.sessionTurns.id, direct.turnId)),
+      ),
+    ).toEqual([{ promptRouting: "accepted_for_execution" }]);
+    expect(
+      (await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id))?.items,
+    ).toEqual([]);
+
+    const waiting = await submit("run second", "send");
+    expect(waiting.routing).toBe("queued_for_execution");
+    expect(
+      (
+        await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id)
+      )?.items.map((turn) => turn.id),
+    ).toEqual([waiting.turnId]);
+
+    const steer = await submit("change direction", "steer");
+    expect(steer.routing).toBe("accepted_for_steering");
+    expect(
+      (
+        await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id)
+      )?.items.map((turn) => turn.id),
+    ).toEqual([waiting.turnId]);
+  });
+
   test("Move rewrites one authoritative order and an exact retry replays", async () => {
     const value = await fixture();
     const operationKey = crypto.randomUUID();
@@ -880,7 +943,7 @@ describe("canonical queue commands", () => {
     expect(settledInterruption).toMatchObject({ state: "settled" });
   });
 
-  test("Send atomically resumes a paused branch, submits the exact draft, and replays", async () => {
+  test("Send stays queued behind Pause, submits the exact draft, and replays", async () => {
     const value = await fixture();
     const paused = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db.transaction((tx) =>
@@ -944,7 +1007,11 @@ describe("canonical queue commands", () => {
       await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
         evaluateSessionControl(db, value.grant.workspaceId!, value.session.id),
       ),
-    ).toMatchObject({ state: "active" });
+    ).toMatchObject({ state: "paused" });
+    expect(submitted).toMatchObject({
+      routing: "queued_for_execution",
+      workspaceControlEventId: null,
+    });
     const drafts = await withWorkspaceSubjectRls(
       client.db,
       value.grant.workspaceId!,

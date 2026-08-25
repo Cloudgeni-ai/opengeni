@@ -437,11 +437,11 @@ organization is activated, every subsequently started API and worker must keep
 the switch `true`, and a pre-0303 image or a new image with the switch disabled
 fails closed.
 
-Consequently, a normal local stack can show Workspace session creation while
-Only me is disabled with “not enabled for this organization yet.” That is the
-expected pre-activation posture, not a missing browser feature. Testing Only me
-requires the same explicit version-1 activation receipt and enabled deployment
-switch described below; do not seed the receipt through direct table DML.
+Consequently, a normal local stack creates workspace-visible sessions and omits
+the visibility chooser while Only me is unavailable. That is the expected
+pre-activation posture, not a missing browser feature. Testing Only me requires
+the same explicit version-1 activation receipt and enabled deployment switch
+described below; do not seed the receipt through direct table DML.
 
 The migration deliberately drops the legacy eight-argument visibility/fork
 routines and exposes only nine-argument, activation-versioned routines with no
@@ -462,16 +462,19 @@ activation:
   first two, applying 0303 is inert; the drained operator command performs the
   forward-only per-organization activation.
 
-Both declare `-- deployment-mode: maintenance`, both reject a live application
-with SQLSTATE `55000` from the same `pg_stat_activity` drain guard before taking
-`ACCESS EXCLUSIVE` locks that include `organization_user_resource_grants`, and
-neither has a down-migration. For each subsequent activation:
+The first two migration files declare `-- deployment-mode: maintenance`; 0303
+and 0340 install their contracts as rolling migrations but the separate
+activation command is still a drained, forward-only cutover. Each activation
+rejects a live application with SQLSTATE `55000` before taking `ACCESS
+EXCLUSIVE` source-table locks, and no activated boundary has a down-migration.
+For each subsequent activation:
 
 1. bind and verify the exact production subscription, cluster context,
    namespace, release, database, and image digests;
 2. prove the activation preconditions in
    [`organization-tenancy.md`](organization-tenancy.md#preconditions-for-permitting-an-activation)
-   - completed backfill counters from
+   - completed membership, resource-classification, and final session-classifier
+   receipts under fresh run keys, current counters from
    `bun run db:inventory-tenancy --organization-id <uuid>`, parity evidence,
    cross-organization/RLS evidence, and immediate-revocation evidence - and
    record that evidence in private operator storage before touching the cluster;
@@ -482,7 +485,7 @@ neither has a down-migration. For each subsequent activation:
    migration-only secret and Job identity;
 5. query `pg_stat_activity` through the migration connection and prove zero
    other sessions with `usename = 'opengeni_app'`;
-6. run the new digest's migration Job and require 0303 plus every prerequisite
+6. run the new digest's migration Job and require 0303, 0340, plus every prerequisite
    migration to appear in `schema_migrations`;
 7. with the application still drained, run:
 
@@ -495,16 +498,37 @@ neither has a down-migration. For each subsequent activation:
      --activated-by '<bounded-operator-identity>'
    ```
 
-   The command reruns the canonical inventory and parity reports, retains and
-   hashes the inventory snapshot, and requires every parity invariant plus each
+   The command reruns the canonical inventory, parity, and backfill-evidence
+   reports, retains and hashes the inventory snapshot, and requires every parity invariant plus each
    exact drainable/bounded activation lane to be zero. It deliberately does not
    gate on total ownerless sessions or all-time immutable legacy writer rows;
    migration 0298 supplies their truthful attributable and observation-window
-   refinements. It durably records the exact evidence, checks the supplied exact
-   application-role inventory twice around write-blocking locks, and is
-   idempotent only for the same evidence digests.
+   refinements. Migration 0340 also requires the newest
+   `organization_memberships`, `sessions`, `variable_sets`, `rigs`, `machines`,
+   and `connections` receipts to be completed, verifies full-population counts
+   for the resource/session/connection classifiers, requires zero unresolved
+   resource or connection rows, and binds those six exact receipt ids into every
+   new activation row. It then recomputes inventory, parity, and receipt evidence
+   under the complete source-table lock, checks the supplied exact application-
+   role inventory twice around that fence, and is idempotent only for the same
+   evidence digests. A stale or fabricated digest rejects with SQLSTATE `40001`.
    A live application session rejects activation with SQLSTATE `55000`; changed
-   evidence against an existing receipt is a conflict.
+   evidence against an existing receipt is a conflict. Immediately before the
+   final recompute and receipt write, the database also takes the owner-only
+   `session-tenancy-canonical-boundary:v1` transaction fence. This happens only
+   after all source-table locks; do not move the boundary earlier, because future
+   greenfield provisioning writes its complete graph before taking the same
+   fence and the reversed order would deadlock.
+
+   Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
+   SECURITY` and a `FOR SELECT`-only policy, so under this exact
+   non-superuser-owner posture the activation's own receipt `INSERT` was denied
+   with SQLSTATE `42501` after every gate had already passed. Migration 0340
+   re-opens that single command behind an owner-only marker policy; the runtime
+   role keeps `SELECT` and nothing else, and the table has no `UPDATE` or
+   `DELETE` writer at all. `packages/db/test/migration-0340-owner-migrated-tenancy-cutover.test.ts`
+   commits a real receipt through this posture, so the cutover is executable end
+   to end ([`force-rls-migration-backfills.md`](force-rls-migration-backfills.md)).
 8. start only that same digest's API and workers, and require the startup and
    readiness posture checks to pass before reopening admission.
 
@@ -978,11 +1002,16 @@ The exact reviewed head must still resolve directly from its canonical
 `Current-base source admission` check. Version PRs receive that named check
 from trusted `ci.yml` dispatch. The `source-admission.yml` workflow is
 hotfix-into-production only; its required-check name stays on a skip-success
-report job so promote PRs from live `main` remain mergeable. The check admits
-the immutable provider event head against the PR's provider merge-base tree; it
-does not require the event base to equal continuously moving `main`. The
-base-owned workflow/helper SHA must remain in protected `production` ancestry
-for hotfix admission, and the provider base/head/repository,
+report job so promote PRs from live `main` remain mergeable. GitHub loads a
+`pull_request_target` workflow from protected default-branch `main`, even when
+the PR base is `production`. That controller therefore validates its real
+default-branch workflow identity, reads the production base SHA from the exact
+pull-request event, fetches and hash-pins the verifier from that immutable event
+base, and invokes it with an explicit base-owned workflow context. The check
+admits the immutable provider event head against
+the PR's provider merge-base tree; it does not require the event base to equal
+continuously moving `main`. The base-owned helper SHA must remain in protected
+`production` ancestry for hotfix admission, and the provider base/head/repository,
 direct tree manifest, file projection, helper digest, read-only permissions,
 and terminal head identity remain fail-closed. The merge authority separately performs the fresh latest-main
 conflict, canonical patch-equivalence, protected-path, generated/migration,
@@ -1035,7 +1064,11 @@ Protected main CI uses the separate `canary-sha-<source>` namespace for its
 SHA-configured images and records that tag in the canary receipt. The
 release-owned `sha-<source>` namespace therefore remains available for the
 accepted product-version manifests even when the two build configurations
-produce different digests from the same source tree.
+produce different digests from the same source tree. Every protected-main
+canary and release-candidate workload image carries
+`org.opencontainers.image.revision=<exact source SHA>` and the repository's
+`org.opencontainers.image.source` label; inspect those labels together with the
+immutable digest when diagnosing a deployed image.
 Each attempt refuses pre-existing run-scoped tags and builds the complete image
 set from scratch. A retry receives a different tag, so an interrupted attempt's
 partial registry state can never be mistaken for the next attempt's output.

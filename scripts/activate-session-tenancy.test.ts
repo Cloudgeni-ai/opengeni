@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { assertSessionTenancyActivationEvidence } from "./activate-session-tenancy";
+import {
+  assertSessionTenancyActivationEvidence,
+  assertSessionTenancyBackfillEvidence,
+} from "./activate-session-tenancy";
 
 const cleanInventory = {
   schemaVersion: 2,
@@ -47,6 +50,22 @@ const cleanParity = {
     sessionsAttributableButUnattributed: 0,
     connectionUseLegacyResolutionsInWindow: 0,
   },
+};
+const cleanBackfillEvidence = {
+  schemaVersion: 1,
+  ready: true,
+  receiptIds: Array.from({ length: 6 }, () => crypto.randomUUID()),
+  blockers: [],
+  families: Object.fromEntries(
+    [
+      "organization_memberships",
+      "sessions",
+      "variable_sets",
+      "rigs",
+      "machines",
+      "connections",
+    ].map((family) => [family, { status: "completed", blocker: null }]),
+  ),
 };
 
 describe("session tenancy activation evidence", () => {
@@ -106,5 +125,28 @@ describe("session tenancy activation evidence", () => {
         gates: missingGate,
       }),
     ).toThrow(/missing-gate:membership_personal_workspace_pointer/);
+  });
+
+  test("requires all six settled backfill receipt families", () => {
+    expect(() => assertSessionTenancyBackfillEvidence(cleanBackfillEvidence)).not.toThrow();
+    expect(() =>
+      assertSessionTenancyBackfillEvidence({
+        ...cleanBackfillEvidence,
+        ready: false,
+        blockers: [{ resourceFamily: "machines", code: "missing_receipt" }],
+      }),
+    ).toThrow(/backfill evidence is not settled/);
+    expect(() =>
+      assertSessionTenancyBackfillEvidence({
+        ...cleanBackfillEvidence,
+        receiptIds: cleanBackfillEvidence.receiptIds.slice(1),
+      }),
+    ).toThrow(/backfill evidence is not settled/);
+    expect(() =>
+      assertSessionTenancyBackfillEvidence({
+        ...cleanBackfillEvidence,
+        families: { ...cleanBackfillEvidence.families, rigs: { status: "open", blocker: null } },
+      }),
+    ).toThrow(/family:rigs/);
   });
 });

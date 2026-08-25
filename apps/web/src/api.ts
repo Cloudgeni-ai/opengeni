@@ -33,6 +33,18 @@ export class ApiError extends Error {
   }
 }
 
+export class AuthApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string | null,
+    public readonly field: string | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AuthApiError";
+  }
+}
+
 export function isApiErrorStatus(error: unknown, status: number): boolean {
   return (
     (error instanceof ApiError || error instanceof OpenGeniApiError) && error.status === status
@@ -139,7 +151,26 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Auth ${response.status}: ${text}`);
+    let code: string | null = null;
+    let message = "Authentication request failed";
+    try {
+      const payload = JSON.parse(text) as { code?: unknown; message?: unknown };
+      if (typeof payload.code === "string" && payload.code.trim()) {
+        code = payload.code.trim();
+      }
+      if (typeof payload.message === "string" && payload.message.trim()) {
+        message = payload.message.trim();
+      }
+    } catch {
+      // Better Auth normally returns JSON. Keep malformed/upstream bodies out
+      // of user-facing errors while retaining the HTTP status for mapping.
+    }
+    const fieldMatch = message.match(/^\[body\.([A-Za-z][A-Za-z0-9_]*)\]\s*/u);
+    const field = fieldMatch?.[1] ?? null;
+    if (fieldMatch) {
+      message = message.slice(fieldMatch[0].length).trim() || "Invalid value";
+    }
+    throw new AuthApiError(response.status, code, field, message);
   }
   return (await response.json()) as T;
 }

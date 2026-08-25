@@ -45,6 +45,18 @@ export function localRuntimeBuildId(identityDigest: string): string {
   return `local-${process.platform}-${process.arch}-${identityDigest.slice(0, 20)}`;
 }
 
+export function localBrowserdSignatureCommands(
+  browserdPath: string,
+  platform = process.platform,
+  architecture = process.arch,
+): string[][] {
+  if (platform !== "darwin" || architecture !== "arm64") return [];
+  return [
+    ["codesign", "--force", "--sign", "-", browserdPath],
+    ["codesign", "--verify", "--strict", browserdPath],
+  ];
+}
+
 async function gitOutput(args: string[]): Promise<Uint8Array> {
   const child = Bun.spawn(["git", ...args], {
     cwd: repositoryRoot,
@@ -83,9 +95,16 @@ export async function prepareLocalAgentRuntime(): Promise<PreparedRuntime> {
   await run(["bun", "run", "build:binary"], browserdRoot, {
     OPENGENI_RUNTIME_BUILD_ID: buildId,
   });
+  const browserd = join(browserdRoot, "dist", `opengeni-browserd${executableSuffix}`);
+  // Bun 1.4.0 emits an invalid ad-hoc signature for compiled darwin-arm64
+  // executables. Repair and verify the exact helper bytes before hashing or
+  // embedding them in the local agent; signing the outer agent cannot repair a
+  // child executable after materialization.
+  for (const command of localBrowserdSignatureCommands(browserd)) {
+    await run(command, repositoryRoot);
+  }
   await run(["cargo", "build", "--release", "-p", "opengeni-computer-native"], agentRoot);
 
-  const browserd = join(browserdRoot, "dist", `opengeni-browserd${executableSuffix}`);
   const agentBrowser = join(browserdRoot, "dist", `agent-browser${executableSuffix}`);
   const computerNative = join(
     agentRoot,

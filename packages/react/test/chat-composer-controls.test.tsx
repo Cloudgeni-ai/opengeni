@@ -217,8 +217,11 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     );
 
     expect(mounted.container.querySelector("textarea")?.placeholder).toBe(
-      "Sending will resume this workstream…",
+      "Message the agent — it will wait in the queue…",
     );
+    expect(
+      mounted.container.querySelector('button[aria-label="Add message to queue"]'),
+    ).not.toBeNull();
   });
 
   test("the send button queues and explains the steer shortcut", async () => {

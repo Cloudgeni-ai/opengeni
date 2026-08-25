@@ -28,8 +28,9 @@
  * Inbox has no product dismiss API; pass `onDismissIncoming` when the host
  * wants a visible action (dev harness may use a local dummy).
  *
- * Segment switches keep the panel shell mounted and crossfade content while
- * animating measured height — no `mode="wait"` unmount flash.
+ * Segment switches keep the panel shell mounted and crossfade content. The
+ * shell uses one CSS grid-track transition for deliberate open/close actions;
+ * live queue reconciliation never feeds measurements back into layout.
  */
 import type { SessionGoal, SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
 import {
@@ -37,6 +38,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   BotIcon,
+  CheckIcon,
   InboxIcon,
   ListOrderedIcon,
   Loader2Icon,
@@ -49,17 +51,9 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import {
-  useEffect,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
-import type { ComposerState } from "../hooks/use-composer";
+import type { ComposerOptimisticMessage, ComposerState } from "../hooks/use-composer";
 import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import { cn } from "../lib/cn";
@@ -331,34 +325,29 @@ export function SessionChrome({
   const record = goal?.goal ?? null;
   const incoming = queue.pendingInputs;
   const turns = queue.queue;
-  const composerSteering = composer?.steering ?? null;
-  const { steering, queuedTurns } = useMemo(() => {
-    const pendingQueueSteer =
-      turns.find((turn) => queue.pendingByTurn[turn.id] === "steer") ?? null;
-    const durableQueueSteer =
-      !pendingQueueSteer && turns[0] && isSteeringTurn(turns[0]) ? turns[0] : null;
-    const currentSteering =
-      composerSteering?.phase === "submitting"
-        ? composerSteering
-        : pendingQueueSteer
-          ? {
-              phase: "submitting" as const,
-              text: queuedTurnPresentation(pendingQueueSteer).text,
-              turnId: pendingQueueSteer.id,
-            }
-          : durableQueueSteer
-            ? {
-                phase: "accepted" as const,
-                text: queuedTurnPresentation(durableQueueSteer).text,
-                turnId: durableQueueSteer.id,
-              }
-            : composerSteering;
-    const currentTurnId = currentSteering?.turnId ?? null;
-    return {
-      steering: currentSteering,
-      queuedTurns: currentTurnId ? turns.filter((turn) => turn.id !== currentTurnId) : turns,
-    };
-  }, [composerSteering, queue.pendingByTurn, turns]);
+  const queueMutationFor = queue.mutationFor;
+  const queuedTurns = useMemo(
+    () => turns.filter((turn) => !isSteeringTurn(turn) && queueMutationFor(turn.id) !== "steer"),
+    [queueMutationFor, turns],
+  );
+  const queuedTurnIds = useMemo(() => new Set(queuedTurns.map((turn) => turn.id)), [queuedTurns]);
+  const optimisticQueued = useMemo(
+    () =>
+      (composer?.optimisticMessages ?? []).filter(
+        (message) =>
+          message.delivery === "send" &&
+          message.destination === "queue" &&
+          (!message.turnId || !queuedTurnIds.has(message.turnId)) &&
+          !(
+            message.turnId &&
+            message.appliedQueueVersion !== null &&
+            message.appliedQueueVersion !== undefined &&
+            queue.snapshot &&
+            queue.snapshot.version >= message.appliedQueueVersion
+          ),
+      ),
+    [composer?.optimisticMessages, queue.snapshot, queuedTurnIds],
+  );
   const stoppingKind =
     composer?.stoppingAttempt ??
     (queue.stoppingPreviousAttempt
@@ -401,44 +390,43 @@ export function SessionChrome({
         icon: <InboxIcon className="size-3" />,
       });
     }
-    if (steering || stopping) {
-      rows.push({
-        id: "steering",
-        label: stopping
-          ? stoppingKind === "current"
-            ? "Stopping current work…"
-            : "Stopping previous work…"
-          : "Changing direction…",
-        ...(steering?.text ? { detail: steering.text } : {}),
-        tone: stopping ? "waiting" : "accent",
-        icon:
-          steering?.phase === "submitting" || stopping ? (
-            <Loader2Icon className="size-3 animate-og-spin" />
-          ) : (
-            <ZapIcon className="size-3" />
-          ),
-      });
-    }
-    if (queuedTurns.length > 0) {
+    const queuedCount = queuedTurns.length + optimisticQueued.length;
+    const queueProblem = queue.mutationError ?? queue.error;
+    if (queuedCount > 0 || queueProblem) {
       const presentations = queuedTurns.map(queuedTurnPresentation);
       const first = presentations[0];
-      const allVoiceRequests = presentations.every(({ kind }) => kind === "realtime_voice");
+      const allVoiceRequests =
+        optimisticQueued.length === 0 &&
+        presentations.length > 0 &&
+        presentations.every(({ kind }) => kind === "realtime_voice");
       const onlyVoiceHandoff =
-        presentations.length === 1 && first?.kind === "realtime_voice_handoff";
+        optimisticQueued.length === 0 &&
+        presentations.length === 1 &&
+        first?.kind === "realtime_voice_handoff";
       const voiceOnly = allVoiceRequests || onlyVoiceHandoff;
-      const detail = first?.text;
+      const detail = queueProblem
+        ? queue.mutationError
+          ? "Action not confirmed"
+          : "Queue unavailable"
+        : (first?.text ?? optimisticQueued[0]?.text);
       rows.push({
         id: "queue",
-        label: allVoiceRequests
-          ? queuedTurns.length === 1
-            ? "Voice request queued"
-            : `${queuedTurns.length} voice requests queued`
-          : onlyVoiceHandoff
-            ? "Voice handoff queued"
-            : `${queuedTurns.length} queued prompt${queuedTurns.length === 1 ? "" : "s"}`,
+        label: queueProblem
+          ? queuedCount > 0
+            ? `${queuedCount} queued · needs attention`
+            : "Queue needs attention"
+          : allVoiceRequests
+            ? queuedCount === 1
+              ? "Voice request queued"
+              : `${queuedCount} voice requests queued`
+            : onlyVoiceHandoff
+              ? "Voice handoff queued"
+              : `${queuedCount} queued prompt${queuedCount === 1 ? "" : "s"}`,
         ...(detail ? { detail } : {}),
-        tone: "neutral",
-        icon: voiceOnly ? (
+        tone: queueProblem ? "waiting" : "neutral",
+        icon: queueProblem ? (
+          <TriangleAlertIcon className="size-3" />
+        ) : voiceOnly ? (
           <AudioLinesIcon className="size-3" />
         ) : (
           <ListOrderedIcon className="size-3" />
@@ -490,11 +478,11 @@ export function SessionChrome({
     elapsed,
     goalState,
     incoming,
+    optimisticQueued,
+    queue.error,
+    queue.mutationError,
     queuedTurns,
     record,
-    steering,
-    stopping,
-    stoppingKind,
   ]);
 
   const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(
@@ -505,13 +493,24 @@ export function SessionChrome({
     if (activeControlled === undefined) setActiveUncontrolled(next);
     onActiveChange?.(next);
   };
+  const optimisticQueueKeys = optimisticQueued.map((message) => message.clientEventId).join(",");
+  const previousOptimisticQueueKeys = useRef(optimisticQueueKeys);
+  const [queueArrivalNonce, setQueueArrivalNonce] = useState(0);
+  useEffect(() => {
+    const previous = new Set(previousOptimisticQueueKeys.current.split(",").filter(Boolean));
+    const arrived = optimisticQueued.some((message) => !previous.has(message.clientEventId));
+    previousOptimisticQueueKeys.current = optimisticQueueKeys;
+    if (!arrived) return;
+    // Queue admission must not move the conversation or open a drawer beneath
+    // the pointer. A stable, paint-only receipt on the queue chip communicates
+    // destination without participating in layout.
+    setQueueArrivalNonce((current) => current + 1);
+  }, [optimisticQueueKeys, optimisticQueued]);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
 
   const chipRefs = useRef<Partial<Record<SessionChromeSignalId, HTMLButtonElement | null>>>({});
   const railRef = useRef<HTMLDivElement | null>(null);
-  const panelBodyRef = useRef<HTMLDivElement | null>(null);
   const [pill, setPill] = useState({ left: 0, top: 0, width: 0, height: 0, opacity: 0 });
-  const [panelHeight, setPanelHeight] = useState(0);
 
   const signalIds = signals.map((signal) => signal.id).join(",");
   useEffect(() => {
@@ -565,28 +564,7 @@ export function SessionChrome({
 
   const open = active !== null;
 
-  useLayoutEffect(() => {
-    if (!open) {
-      setPanelHeight(0);
-      return;
-    }
-    const node = panelBodyRef.current;
-    if (!node) return;
-    setPanelHeight(node.offsetHeight);
-  }, [open, active, incoming, queuedTurns, record, goalState, agentsPanel, agentsSignal, steering]);
-
-  useEffect(() => {
-    if (!open) return;
-    const node = panelBodyRef.current;
-    if (!node || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      setPanelHeight(node.offsetHeight);
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [open, active]);
-
-  if (signals.length === 0) return null;
+  if (signals.length === 0 && !stopping) return null;
 
   const shellDuration = reduceMotion ? 0 : 0.22;
   const crossfadeDuration = reduceMotion ? 0 : 0.18;
@@ -595,15 +573,16 @@ export function SessionChrome({
   const panelBody =
     active === "incoming" ? (
       <IncomingPanel inputs={incoming} onDismiss={onDismissIncoming} />
-    ) : active === "steering" && (steering || stopping) ? (
-      <SteeringPanel
-        phase={stopping ? "stopping" : (steering?.phase ?? "accepted")}
-        stoppingKind={stoppingKind}
-        text={steering?.text}
-      />
     ) : active === "queue" ? (
       <QueuePanel
         turns={queuedTurns}
+        optimistic={optimisticQueued}
+        loadError={queue.error}
+        mutationError={queue.mutationError}
+        onRefresh={queue.refresh}
+        onClearMutationError={queue.clearMutationError}
+        onRetryOptimistic={composer?.retryOptimisticMessage}
+        onRemoveOptimistic={composer?.removeOptimisticMessage}
         readOnly={!canMutateQueue}
         mutationFor={queue.mutationFor}
         replaceDraftFor={replaceDraftFor}
@@ -613,10 +592,13 @@ export function SessionChrome({
             ? () => {
                 const turnId = replaceDraftFor;
                 setReplaceDraftFor(null);
-                void queue.editTurn(turnId, {
-                  expectedDraftRevision: composer.draftRevision,
-                  replaceDraft: true,
-                });
+                void (async () => {
+                  const checkedOut = await queue.editTurn(turnId, {
+                    expectedDraftRevision: composer.draftRevision,
+                    replaceDraft: true,
+                  });
+                  if (checkedOut) composer.applyDraft(checkedOut);
+                })();
               }
             : undefined
         }
@@ -627,10 +609,13 @@ export function SessionChrome({
                   composer,
                   () => setReplaceDraftFor(turn.id),
                   () => {
-                    void queue.editTurn(turn.id, {
-                      expectedDraftRevision: composer.draftRevision,
-                      replaceDraft: false,
-                    });
+                    void (async () => {
+                      const checkedOut = await queue.editTurn(turn.id, {
+                        expectedDraftRevision: composer.draftRevision,
+                        replaceDraft: false,
+                      });
+                      if (checkedOut) composer.applyDraft(checkedOut);
+                    })();
                   },
                 );
               }
@@ -755,6 +740,17 @@ export function SessionChrome({
                       paddingInline: "var(--og-session-chrome-chip-pad-x)",
                     }}
                   >
+                    {signal.id === "queue" && queueArrivalNonce > 0 && !reduceMotion ? (
+                      <motion.span
+                        key={queueArrivalNonce}
+                        aria-hidden="true"
+                        data-testid="session-chrome-queue-arrival"
+                        className="pointer-events-none absolute inset-0 rounded-og-md bg-og-accent-soft"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: [0, 0.38, 0] }}
+                        transition={{ duration: 0.72, times: [0, 0.18, 1], ease }}
+                      />
+                    ) : null}
                     <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
                       {signal.icon}
                     </span>
@@ -781,55 +777,74 @@ export function SessionChrome({
                   </button>
                 );
               })}
+              {stopping ? (
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className="inline-flex min-h-[var(--og-session-chrome-chip-min-height)] items-center gap-1.5 px-1.5 text-og-xs text-og-fg-muted"
+                  data-testid="session-chrome-stopping"
+                >
+                  <Loader2Icon
+                    aria-hidden="true"
+                    className="size-3 animate-og-spin motion-reduce:animate-none"
+                  />
+                  {stoppingKind === "current" ? "Current work stopping" : "Previous work stopping"}
+                </span>
+              ) : null}
             </div>
           </div>
 
-          <motion.div
+          <div
             id={panelId}
             data-og-session-chrome-panel-shell=""
-            initial={false}
-            animate={{
-              height: open ? panelHeight : 0,
+            aria-hidden={!open}
+            inert={!open ? true : undefined}
+            className="grid overflow-hidden motion-reduce:transition-none"
+            style={{
+              gridTemplateRows: open ? "1fr" : "0fr",
               opacity: open ? 1 : 0,
+              pointerEvents: open ? "auto" : "none",
+              transitionProperty: "grid-template-rows, opacity",
+              transitionDuration: "var(--og-session-chrome-duration)",
+              transitionTimingFunction: "var(--_og-session-chrome-ease)",
             }}
-            transition={{ duration: shellDuration, ease }}
-            className="overflow-hidden"
           >
-            <div
-              ref={panelBodyRef}
-              className="relative overflow-y-auto overscroll-contain border-t border-og-border/50"
-              style={{
-                maxHeight: "var(--og-session-chrome-panel-max-height)",
-                paddingInline: "var(--og-session-chrome-panel-pad-x)",
-                paddingBlock: "var(--og-session-chrome-panel-pad-y)",
-              }}
-            >
-              <AnimatePresence initial={false}>
-                {active && panelBody ? (
-                  <motion.div
-                    key={active}
-                    data-og-session-chrome-panel-frame={active}
-                    initial={reduceMotion ? false : { opacity: 0 }}
-                    animate={{ opacity: 1, position: "relative" }}
-                    exit={
-                      reduceMotion
-                        ? { opacity: 1, position: "relative" }
-                        : {
-                            opacity: 0,
-                            position: "absolute",
-                            top: 0,
-                            left: 0,
-                            right: 0,
-                          }
-                    }
-                    transition={{ duration: crossfadeDuration, ease }}
-                  >
-                    {panelBody}
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
+            <div className="min-h-0 overflow-hidden">
+              <div
+                className="relative overflow-y-auto overscroll-contain border-t border-og-border/50"
+                style={{
+                  maxHeight: "var(--og-session-chrome-panel-max-height)",
+                  paddingInline: "var(--og-session-chrome-panel-pad-x)",
+                  paddingBlock: "var(--og-session-chrome-panel-pad-y)",
+                }}
+              >
+                <AnimatePresence initial={false}>
+                  {active && panelBody ? (
+                    <motion.div
+                      key={active}
+                      data-og-session-chrome-panel-frame={active}
+                      initial={reduceMotion ? false : { opacity: 0 }}
+                      animate={{ opacity: 1, position: "relative" }}
+                      exit={
+                        reduceMotion
+                          ? { opacity: 1, position: "relative" }
+                          : {
+                              opacity: 0,
+                              position: "absolute",
+                              top: 0,
+                              left: 0,
+                              right: 0,
+                            }
+                      }
+                      transition={{ duration: crossfadeDuration, ease }}
+                    >
+                      {panelBody}
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
+              </div>
             </div>
-          </motion.div>
+          </div>
         </div>
       </div>
     </TooltipProvider>
@@ -883,49 +898,15 @@ function IncomingPanel({
   );
 }
 
-function SteeringPanel({
-  phase,
-  stoppingKind,
-  text,
-}: {
-  phase: "submitting" | "accepted" | "stopping";
-  stoppingKind?: "current" | "previous" | null | undefined;
-  text?: string | undefined;
-}) {
-  return (
-    <div
-      className="flex items-start gap-2 rounded-og-sm px-1.5 py-1"
-      role="status"
-      aria-live="polite"
-      data-og-session-chrome-panel="steering"
-    >
-      <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-og-accent-soft text-og-accent">
-        {phase === "submitting" || phase === "stopping" ? (
-          <Loader2Icon className="size-3 animate-og-spin" aria-hidden="true" />
-        ) : (
-          <ZapIcon className="size-3" aria-hidden="true" />
-        )}
-      </span>
-      <div className="min-w-0">
-        {text ? (
-          <p className="truncate text-og-xs font-medium leading-4 text-og-fg">{text}</p>
-        ) : null}
-        <p className={cn(text && "mt-0.5", "text-[10px] leading-4 text-og-fg-muted")}>
-          {phase === "submitting"
-            ? "Sending your latest direction…"
-            : phase === "stopping"
-              ? stoppingKind === "previous"
-                ? "Direction saved. Waiting for the previous command to stop safely."
-                : "Waiting for the current command to stop safely."
-              : "Direction accepted. The agent will continue from it."}
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function QueuePanel({
   turns,
+  optimistic,
+  loadError,
+  mutationError,
+  onRefresh,
+  onClearMutationError,
+  onRetryOptimistic,
+  onRemoveOptimistic,
   readOnly,
   mutationFor,
   replaceDraftFor,
@@ -937,6 +918,13 @@ function QueuePanel({
   onMove,
 }: {
   turns: SessionTurn[];
+  optimistic: ComposerOptimisticMessage[];
+  loadError: Error | null;
+  mutationError: Error | null;
+  onRefresh: () => Promise<void>;
+  onClearMutationError: () => void;
+  onRetryOptimistic?: ((clientEventId: string) => void) | undefined;
+  onRemoveOptimistic?: ((clientEventId: string) => void) | undefined;
   readOnly: boolean;
   mutationFor: UseTurnQueueResult["mutationFor"];
   replaceDraftFor?: string | null | undefined;
@@ -947,6 +935,28 @@ function QueuePanel({
   onRemove?: ((turnId: string) => void) | undefined;
   onMove?: ((turnId: string, beforeTurnId: string | null) => void) | undefined;
 }) {
+  const reduceMotion = useReducedMotion();
+  const turnIdsKey = turns.map((turn) => turn.id).join(",");
+  const [interactiveTurnIds, setInteractiveTurnIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  useEffect(() => {
+    const visibleTurnIds = new Set(turnIdsKey ? turnIdsKey.split(",") : []);
+    setInteractiveTurnIds((current) => {
+      const retained = new Set([...current].filter((turnId) => visibleTurnIds.has(turnId)));
+      return retained.size === current.size ? current : retained;
+    });
+    if (visibleTurnIds.size === 0) return;
+    // An optimistic queue row and its authoritative replacement have different
+    // React identities. Do not expose an actionable control during that short
+    // handoff: a pointer can otherwise press the outgoing DOM node and release
+    // over its replacement, producing a completed-looking click with no event.
+    const timer = setTimeout(
+      () => setInteractiveTurnIds((current) => new Set([...current, ...visibleTurnIds])),
+      reduceMotion ? 0 : 240,
+    );
+    return () => clearTimeout(timer);
+  }, [reduceMotion, turnIdsKey]);
   return (
     <ol
       className="flex flex-col gap-0.5"
@@ -957,6 +967,7 @@ function QueuePanel({
         const presentation = queuedTurnPresentation(turn);
         const voice = presentation.kind !== "prompt";
         const pending = mutationFor(turn.id);
+        const settling = !interactiveTurnIds.has(turn.id);
         const beforeUp = index > 0 ? (turns[index - 1]?.id ?? null) : null;
         const beforeDown = index < turns.length - 1 ? (turns[index + 2]?.id ?? null) : null;
         const showActions = !readOnly && (onEdit || onSteer || onRemove || onMove);
@@ -988,7 +999,7 @@ function QueuePanel({
                       <IconAction
                         label={`Move queued prompt ${index + 1} up`}
                         tip="Move up"
-                        disabled={pending !== null || index === 0}
+                        disabled={settling || pending !== null || index === 0}
                         onClick={() => onMove(turn.id, beforeUp)}
                       >
                         <ArrowUpIcon className="size-3" />
@@ -996,7 +1007,7 @@ function QueuePanel({
                       <IconAction
                         label={`Move queued prompt ${index + 1} down`}
                         tip="Move down"
-                        disabled={pending !== null || index >= turns.length - 1}
+                        disabled={settling || pending !== null || index >= turns.length - 1}
                         onClick={() => onMove(turn.id, beforeDown)}
                       >
                         <ArrowDownIcon className="size-3" />
@@ -1007,7 +1018,7 @@ function QueuePanel({
                     <IconAction
                       label={`Steer queued prompt ${index + 1}`}
                       tip={QUEUE_STEER_TIP}
-                      disabled={pending !== null}
+                      disabled={settling || pending !== null}
                       onClick={() => onSteer(turn.id)}
                     >
                       {pending === "steer" ? (
@@ -1021,7 +1032,7 @@ function QueuePanel({
                     <IconAction
                       label={`Edit queued prompt ${index + 1}`}
                       tip={QUEUE_EDIT_TIP}
-                      disabled={pending !== null}
+                      disabled={settling || pending !== null}
                       onClick={() => onEdit(turn)}
                     >
                       {pending === "edit" ? (
@@ -1035,7 +1046,7 @@ function QueuePanel({
                     <IconAction
                       label={`Remove queued prompt ${index + 1}`}
                       tip={QUEUE_DELETE_TIP}
-                      disabled={pending !== null}
+                      disabled={settling || pending !== null}
                       onClick={() => onRemove(turn.id)}
                       danger
                     >
@@ -1077,6 +1088,98 @@ function QueuePanel({
           </li>
         );
       })}
+      <AnimatePresence initial={false}>
+        {optimistic.map((message, index) => (
+          <motion.li
+            key={message.clientEventId}
+            aria-live="polite"
+            data-optimistic-queue-message={message.clientEventId}
+            initial={reduceMotion ? false : { opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: reduceMotion ? 0 : 0.12, ease: [0.22, 1, 0.36, 1] }}
+            className={cn(
+              "flex min-h-6 items-center gap-1.5 rounded-og-sm px-1.5 py-1",
+              message.state === "failed" ? "bg-og-danger/8 text-og-danger" : "bg-og-accent-soft/45",
+            )}
+          >
+            <span className="shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
+              {turns.length + index + 1}
+            </span>
+            <p className="min-w-0 flex-1 truncate text-og-xs leading-4 text-og-fg">
+              {message.text}
+            </p>
+            <span className="sr-only">
+              {message.state === "failed"
+                ? "Not confirmed"
+                : message.state === "sending"
+                  ? "Placing in queue"
+                  : "Queued"}
+            </span>
+            {message.state === "failed" ? (
+              <div className="flex shrink-0 items-center gap-1 text-[10px]">
+                {onRetryOptimistic ? (
+                  <button
+                    type="button"
+                    className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    onClick={() => onRetryOptimistic(message.clientEventId)}
+                  >
+                    Retry
+                  </button>
+                ) : null}
+                {onRemoveOptimistic ? (
+                  <button
+                    type="button"
+                    aria-label="Dismiss unconfirmed queued prompt"
+                    className="rounded-og-sm p-1 text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    onClick={() => onRemoveOptimistic(message.clientEventId)}
+                  >
+                    <XIcon className="size-3" />
+                  </button>
+                ) : null}
+              </div>
+            ) : message.state === "sending" ? (
+              <Loader2Icon
+                aria-hidden="true"
+                className="size-3 shrink-0 animate-og-spin text-og-accent motion-reduce:animate-none"
+              />
+            ) : (
+              <CheckIcon aria-hidden="true" className="size-3 shrink-0 text-og-accent" />
+            )}
+          </motion.li>
+        ))}
+      </AnimatePresence>
+      {loadError ? (
+        <li
+          role="alert"
+          className="flex items-center gap-1.5 rounded-og-sm bg-og-danger/8 px-1.5 py-1 text-og-xs text-og-danger"
+        >
+          <TriangleAlertIcon className="size-3 shrink-0" />
+          <span className="min-w-0 flex-1">Queue unavailable.</span>
+          <button
+            type="button"
+            className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+            onClick={() => void onRefresh()}
+          >
+            Retry
+          </button>
+        </li>
+      ) : null}
+      {mutationError ? (
+        <li
+          role="alert"
+          className="flex items-center gap-1.5 rounded-og-sm bg-og-danger/8 px-1.5 py-1 text-og-xs text-og-danger"
+        >
+          <TriangleAlertIcon className="size-3 shrink-0" />
+          <span className="min-w-0 flex-1">Not confirmed. Check the queue before retrying.</span>
+          <button
+            type="button"
+            className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+            onClick={onClearMutationError}
+          >
+            Dismiss
+          </button>
+        </li>
+      ) : null}
     </ol>
   );
 }

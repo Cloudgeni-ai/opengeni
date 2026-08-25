@@ -8,10 +8,13 @@ const targets = [
 
 const fuzzRoot = new URL("./", import.meta.url).pathname;
 const manifest = `${fuzzRoot}Cargo.toml`;
+const rustRunner = new URL("../../../../scripts/artifact-kernel-rust.ts", import.meta.url).pathname;
 
 for (const target of targets) {
   const process = Bun.spawn(
     [
+      "bun",
+      rustRunner,
       "cargo",
       "run",
       "--quiet",

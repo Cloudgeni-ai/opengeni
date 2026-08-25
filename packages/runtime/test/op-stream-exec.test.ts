@@ -18,6 +18,7 @@ import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-c
 const WORKSPACE = "ws-1";
 const AGENT = "agent-1";
 const CONNECTION_INSTANCE = "connection-test";
+const WORKSPACE_ROOT = "/home/user/project";
 
 function buildRig(
   opts: {
@@ -58,6 +59,7 @@ function buildRig(
   const requests: ControlRequest[] = [];
   const session = new SelfhostedSession({
     workspaceId: WORKSPACE,
+    workspaceRoot: WORKSPACE_ROOT,
     ...(opts.controlWorkspaceId ? { controlWorkspaceId: opts.controlWorkspaceId } : {}),
     agentId: AGENT,
     connectionInstanceId,
@@ -330,6 +332,7 @@ describe("op-stream exec (fake runner)", () => {
     const requests: Array<{ subject: string; request: ControlRequest }> = [];
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: "stale-instance",
       controlRpc: {
@@ -346,6 +349,7 @@ describe("op-stream exec (fake runner)", () => {
       opStream: { transport: staleTransport },
       resolveOperationAdmission: async () => ({
         connectionInstanceId: "live-instance",
+        workspaceRoot: WORKSPACE_ROOT,
         operationResourcePolicy: {
           memoryMaxBytes: null,
           memoryHighBytes: null,
@@ -674,6 +678,7 @@ describe("op-stream exec (fake runner)", () => {
     const responder = new MockAgentResponder();
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: responder,
@@ -699,6 +704,7 @@ describe("op-stream exec (fake runner)", () => {
     let admissionReads = 0;
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: "stale-constructor-instance",
       controlRpc: responder,
@@ -709,6 +715,7 @@ describe("op-stream exec (fake runner)", () => {
         admissionReads += 1;
         return {
           connectionInstanceId: "admitted-instance",
+          workspaceRoot: WORKSPACE_ROOT,
           operationResourcePolicy: {
             memoryMaxBytes: 134_217_728,
             memoryHighBytes: null,
@@ -763,6 +770,7 @@ describe("op-stream exec (fake runner)", () => {
     };
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: "connection-1",
       controlRpc: rpc,
@@ -774,6 +782,7 @@ describe("op-stream exec (fake runner)", () => {
         authorized
           ? {
               connectionInstanceId: "connection-1",
+              workspaceRoot: WORKSPACE_ROOT,
               operationResourcePolicy: {
                 memoryMaxBytes: null,
                 memoryHighBytes: null,
@@ -824,6 +833,7 @@ describe("op-stream exec (fake runner)", () => {
     };
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: "connection-1",
       controlRpc: rpc,
@@ -835,6 +845,7 @@ describe("op-stream exec (fake runner)", () => {
         authorized
           ? {
               connectionInstanceId: "connection-1",
+              workspaceRoot: WORKSPACE_ROOT,
               operationResourcePolicy: {
                 memoryMaxBytes: null,
                 memoryHighBytes: null,
@@ -889,6 +900,7 @@ describe("op-stream exec (fake runner)", () => {
     };
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: "connection-1",
       controlRpc: rpc,
@@ -898,6 +910,7 @@ describe("op-stream exec (fake runner)", () => {
       retryClock: { sleep: async () => {}, jitter: () => 0.5 },
       resolveOperationAdmission: async () => ({
         connectionInstanceId: "connection-1",
+        workspaceRoot: WORKSPACE_ROOT,
         operationResourcePolicy: {
           memoryMaxBytes: null,
           memoryHighBytes: null,
@@ -931,6 +944,7 @@ describe("op-stream exec (fake runner)", () => {
     const responder = new MockAgentResponder();
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: CONNECTION_INSTANCE,
       controlRpc: responder,
@@ -975,6 +989,7 @@ describe("op-stream exec (fake runner)", () => {
     });
     const session = new SelfhostedSession({
       workspaceId: WORKSPACE,
+      workspaceRoot: WORKSPACE_ROOT,
       agentId: AGENT,
       connectionInstanceId: "connection-test",
       controlRpc: runner,

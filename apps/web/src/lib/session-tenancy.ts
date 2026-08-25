@@ -30,6 +30,8 @@ export type PendingSessionVisibilityAttempt = SessionTenancyTarget & {
 };
 
 export type PendingSessionForkAttempt = SessionTenancyTarget & {
+  visibility: SessionVisibility;
+  workspaceSharedAcknowledged: boolean;
   idempotencyKey: string;
 };
 
@@ -78,17 +80,6 @@ export function prepareSessionVisibilityAttempt(
     current.visibility === target.visibility &&
     current.expectedAuthorityEpoch === target.expectedAuthorityEpoch
   ) {
-    return current;
-  }
-  return { ...target, idempotencyKey: createIdempotencyKey() };
-}
-
-export function prepareSessionForkAttempt(
-  current: PendingSessionForkAttempt | null,
-  target: SessionTenancyTarget,
-  createIdempotencyKey: () => string,
-): PendingSessionForkAttempt {
-  if (current?.workspaceId === target.workspaceId && current.sessionId === target.sessionId) {
     return current;
   }
   return { ...target, idempotencyKey: createIdempotencyKey() };

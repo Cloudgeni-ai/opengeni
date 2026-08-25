@@ -371,13 +371,20 @@ export function MessageTimeline({
   // leaves that band (scrolls down / sentinel exits) — never from scrolling
   // further toward y=0 (that was the batch-top load loop).
   const olderLoadGateRef = useRef<"armed" | "cooling">("armed");
+  // A collapsed history tail can be shorter than the viewport. In that state
+  // there is no upward scroll range, so reader intent can never arm the top
+  // sentinel. Request one older page per loaded window until history either
+  // fills the viewport or the host reports that no older rows remain.
+  const underfillLoadWindowRef = useRef<string | null>(null);
   const resizeFollowRafRef = useRef<number | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
   // post-commit settle (two rAFs). That absorbs sync late layout while hidden
   // so load/remount does not ease into the tip — live tip-follow is unchanged
   // once revealed. A flash of the window's TOP is still structurally impossible.
-  const [revealed, setRevealed] = useState(false);
+  // The accepted-create handoff uses the reserved local id "c" so its known
+  // first message is visible immediately; loaded histories still park first.
+  const [revealed, setRevealed] = useState(resolvedItems[0]?.id === "c");
   // Mirror `pinned` into a ref, written ONLY by applyPinned, so the
   // ResizeObserver rAF (a stable closure) reads the live value and a snap can
   // never race a just-unpinned reader across a pending React commit.
@@ -445,6 +452,8 @@ export function MessageTimeline({
   const groupKeyByItemIdRef = useRef<Map<string, string>>(new Map());
   const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
   const firstItemId = resolvedItems[0]?.id ?? null;
+  const lastItemId = resolvedItems.at(-1)?.id ?? null;
+  const loadedWindowKey = JSON.stringify([firstItemId, lastItemId, resolvedItems.length]);
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk =
@@ -718,6 +727,39 @@ export function MessageTimeline({
       beginChange: beginUserMessageDisclosureChange,
     }),
     [beginUserMessageDisclosureChange],
+  );
+
+  const requestOlderIfUnderfilled = useCallback(
+    (node: HTMLElement) => {
+      if (
+        underfillLoadWindowRef.current !== null &&
+        underfillLoadWindowRef.current !== loadedWindowKey
+      ) {
+        // The requested page landed. Ordinary sentinel prefetch may own the
+        // next approach to the top once this window has a usable scroll range.
+        olderLoadGateRef.current = "armed";
+      }
+      // clientHeight=0 is pre-layout/headless, not evidence that the rendered
+      // history underfills a real viewport.
+      if (
+        node.clientHeight <= 1 ||
+        maxScrollOf(node) > 1 ||
+        !hasOlder ||
+        loadingOlder ||
+        !onLoadOlder ||
+        underfillLoadWindowRef.current === loadedWindowKey
+      ) {
+        return;
+      }
+      underfillLoadWindowRef.current = loadedWindowKey;
+      // If the reader had already armed ordinary prefetch, do not let its
+      // sentinel duplicate this request while the same short page is loading.
+      if (olderPrefetchArmedRef.current) {
+        olderLoadGateRef.current = "cooling";
+      }
+      onLoadOlder();
+    },
+    [hasOlder, loadedWindowKey, loadingOlder, onLoadOlder],
   );
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
@@ -1016,9 +1058,20 @@ export function MessageTimeline({
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
+    underfillLoadWindowRef.current = null;
     seenActivityIdsRef.current.clear();
     applyPinned(true);
   }, [allGroups.length, revealed, applyPinned]);
+
+  // Parent commits cover the initial/history-loading cases. Disclosure state
+  // changes are child-local, so the ResizeObserver below owns dynamic collapse
+  // and expansion after mount.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (node) {
+      requestOlderIfUnderfilled(node);
+    }
+  });
 
   // Clear the bulk-paint marker a frame after it renders, so rows appended
   // live (streams, new turns) animate exactly as before.
@@ -1117,6 +1170,7 @@ export function MessageTimeline({
         if (!current) {
           return;
         }
+        requestOlderIfUnderfilled(current);
         if (!autoFollow || !pinnedRef.current || hasNewerRef.current) {
           return;
         }
@@ -1139,7 +1193,7 @@ export function MessageTimeline({
         resizeFollowRafRef.current = null;
       }
     };
-  }, [autoFollow, driveFollow, snapToBottom]);
+  }, [autoFollow, driveFollow, requestOlderIfUnderfilled, snapToBottom]);
 
   // Entering a non-tip history window: drop any live pin so the page bottom
   // cannot re-stick follow across loadNewer. Leaving it (the tip window

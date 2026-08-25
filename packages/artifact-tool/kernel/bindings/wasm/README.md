@@ -112,8 +112,8 @@ the peak working set of a 32-bit Wasm process.
 For local setup, install the target explicitly:
 
 ```sh
-rustup target add wasm32-unknown-unknown
-cargo install --locked wasm-bindgen-cli --version <Cargo.lock wasm-bindgen version>
+bun scripts/artifact-kernel-rust.ts ensure --target wasm32-unknown-unknown
+bun scripts/artifact-kernel-rust.ts cargo install --locked wasm-bindgen-cli --version <Cargo.lock wasm-bindgen version>
 ```
 
 Production should pin the Rust toolchain, `Cargo.lock`, and wasm-bindgen CLI to

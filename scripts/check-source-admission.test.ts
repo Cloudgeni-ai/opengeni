@@ -487,7 +487,7 @@ describe("source admission", () => {
     ).rejects.toThrow("pull-request head repository changed");
   });
 
-  test("workflow is base-owned, read-only, action-free, and helper-hash pinned", () => {
+  test("workflow uses a trusted main controller with a base-owned pinned helper", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     const helper = readFileSync(helperPath);
     const helperSha256 = createHash("sha256").update(helper).digest("hex");
@@ -501,14 +501,23 @@ describe("source admission", () => {
     expect(workflow).not.toMatch(/^\s+uses:/m);
     expect(workflow).not.toContain("secrets.");
     expect(workflow).not.toContain("--location");
-    expect(workflow).toContain("base-owned trust anchor");
+    expect(workflow).toContain("pull_request_target loads this controller from protected main");
+    expect(workflow).toContain(
+      '[[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/source-admission.yml@refs/heads/main" ]]',
+    );
+    expect(workflow).toContain('[[ "$GITHUB_REF" == "refs/heads/main" ]]');
+    expect(workflow).toContain("ADMISSION_BASE_SHA: ${{ github.event.pull_request.base.sha }}");
     expect(workflow).toContain("name: Verify hotfix freeze-head");
     expect(workflow).toContain("name: Current-base source admission");
     expect(workflow).toContain("if: ${{ always() }}");
     expect(workflow).toContain("VERIFY_RESULT");
     expect(workflow).toContain(`ADMISSION_HELPER_SHA256: ${helperSha256}`);
-    expect(workflow).toContain("ref=$GITHUB_WORKFLOW_SHA");
-    expect(workflow).toContain('node "$helper"');
+    expect(workflow).toContain("ref=$ADMISSION_BASE_SHA");
+    expect(workflow).toContain('ADMISSION_HELPER_PATH="$helper" node --input-type=module');
+    expect(workflow).toContain("GITHUB_REF: `refs/heads/${process.env.GITHUB_BASE_REF}`");
+    expect(workflow).toContain("GITHUB_SHA: process.env.ADMISSION_BASE_SHA");
+    expect(workflow).toContain("GITHUB_WORKFLOW_SHA: process.env.ADMISSION_BASE_SHA");
+    expect(workflow).toContain("@refs/heads/${process.env.GITHUB_BASE_REF}");
   });
 
   test("repository skill requires leaf-cause triage and immutable-head delivery", () => {

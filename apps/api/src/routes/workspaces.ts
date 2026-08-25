@@ -320,7 +320,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(
       await controlHumanWorkspace(
-        { db: deps.db, bus: deps.bus, workflowClient: deps.workflowClient },
+        {
+          db: deps.db,
+          bus: deps.bus,
+          workflowClient: deps.workflowClient,
+          ...(deps.schedulePromptPostCommit
+            ? { schedulePromptPostCommit: deps.schedulePromptPostCommit }
+            : {}),
+        },
         { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
         parsed.data,
       ),

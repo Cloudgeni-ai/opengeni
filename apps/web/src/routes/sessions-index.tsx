@@ -22,7 +22,10 @@ import {
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
+  type UseRigsResult,
+  type UseVariableSetsResult,
 } from "@opengeni/react";
+import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
@@ -150,8 +153,26 @@ function SessionsIndexRouteContent({
   launch: ComposerLaunchSearch;
 }) {
   const context = useAppContext();
-  const firstPartyMcpToolPolicy = clientFirstPartyMcpToolPolicy(context.clientConfig);
-  const firstPartyToolOptions = firstPartySessionToolOptionsFor(firstPartyMcpToolPolicy.allowed);
+  const firstPartyMcpToolPolicy = useMemo(
+    () => clientFirstPartyMcpToolPolicy(context.clientConfig),
+    [context.clientConfig],
+  );
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const configuredToolDefaults = useMemo(
+    () => resolveWorkspaceSessionToolDefaults(workspace?.settings),
+    [workspace?.settings],
+  );
+  const defaultFirstPartyMcpTools = useMemo(
+    () =>
+      configuredToolDefaults?.firstPartyMcpTools.filter((tool) =>
+        firstPartyMcpToolPolicy.allowed.includes(tool),
+      ) ?? firstPartyMcpToolPolicy.default,
+    [configuredToolDefaults, firstPartyMcpToolPolicy],
+  );
+  const firstPartyToolOptions = useMemo(
+    () => firstPartySessionToolOptionsFor(firstPartyMcpToolPolicy.allowed),
+    [firstPartyMcpToolPolicy],
+  );
   const navigate = useNavigate();
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
@@ -167,10 +188,16 @@ function SessionsIndexRouteContent({
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [draft, setDraft] = useState<SessionDraft>(() =>
-    emptySessionDraft(firstPartyMcpToolPolicy.default),
+    emptySessionDraft(defaultFirstPartyMcpTools),
   );
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
+  const variableSets = useVariableSets({ enabled: fixedResourceCatalogEnabled });
+  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
+  const selectedVariableSet = variableSets.variableSets.find(
+    (candidate) => candidate.id === draft.variableSetId,
+  );
+  const selectedRig = rigs.rigs.find((candidate) => candidate.id === draft.rigId);
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -211,6 +238,22 @@ function SessionsIndexRouteContent({
         );
       });
   }, [context.client, personalWorkspace, workspaceId]);
+  const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
+  const fleet = useMachines({ pollIntervalMs: fleetPollMs });
+  const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
+  const fleetEmpty = machines.length === 0;
+  const fleetLoadFailed =
+    fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
+  useEffect(() => {
+    if (fleet.loading) return;
+    setFleetPollMs(!fleetEmpty || fleetLoadFailed ? MACHINES_COMPOSER_POLL_MS : undefined);
+  }, [fleet.loading, fleetEmpty, fleetLoadFailed]);
+  const selectedMachineSandboxId =
+    draft.compute.kind === "machine" ? draft.compute.sandboxId : null;
+  const selectedMachine = selectedMachineSandboxId
+    ? (machines.find((machine) => machine.sandboxId === selectedMachineSandboxId) ?? null)
+    : null;
+  const personalMachineSelected = selectedMachine?.scope === "user";
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -218,10 +261,16 @@ function SessionsIndexRouteContent({
     accessSubjectId: context.accessContext.subjectId,
     managedSelfContext: context.managedSelfContext,
     workspace,
-    enabled: draft.compute.kind === "sandbox",
     fixed: {
       variableSetId: draft.compute.kind === "sandbox" ? draft.variableSetId || null : null,
+      variableSetScope:
+        draft.compute.kind === "sandbox" ? (selectedVariableSet?.scope ?? null) : null,
       rigId: draft.compute.kind === "sandbox" ? draft.rigId || null : null,
+      rigScope: draft.compute.kind === "sandbox" ? (selectedRig?.scope ?? null) : null,
+      connectedMachine:
+        selectedMachine?.scope === "user" && selectedMachine.enrollmentId
+          ? { enrollmentId: selectedMachine.enrollmentId, name: selectedMachine.name }
+          : null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     createVisibility: personalWorkspace ? "private" : draft.visibility,
@@ -278,7 +327,9 @@ function SessionsIndexRouteContent({
     return () => window.removeEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
   }, []);
 
-  const computeReady = isSessionDraftComputeReady(draft);
+  const computeReady =
+    isSessionDraftComputeReady(draft) &&
+    (draft.compute.kind !== "machine" || (!fleet.loading && selectedMachine !== null));
   const persistedToolPolicy = useMemo(
     () =>
       newSessionDraftToolPolicy({
@@ -306,7 +357,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
-      options: newSessionDraftOptionsFromSessionDraft(draft, firstPartyMcpToolPolicy.default),
+      options: newSessionDraftOptionsFromSessionDraft(draft, defaultFirstPartyMcpTools),
     }),
     [
       attachments.readyResources,
@@ -315,7 +366,7 @@ function SessionsIndexRouteContent({
       context.reasoningEffort,
       context.currentResources,
       draft,
-      firstPartyMcpToolPolicy.default,
+      defaultFirstPartyMcpTools,
       message,
       persistedToolPolicy,
     ],
@@ -339,7 +390,7 @@ function SessionsIndexRouteContent({
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
-        firstPartyMcpToolPolicy.default,
+        defaultFirstPartyMcpTools,
       );
       const channelId = launch.channelId ?? history.projects[0]?.channelId ?? null;
       const rememberedCompute = rememberedProjectCompute(history, channelId);
@@ -370,7 +421,7 @@ function SessionsIndexRouteContent({
       setSelectedRepoIds,
       setSelectedRepoRefs,
       githubRepos,
-      firstPartyMcpToolPolicy.default,
+      defaultFirstPartyMcpTools,
       launch.channelId,
       workspaceDefaultToolIdsForHydration,
     ],
@@ -453,6 +504,13 @@ function SessionsIndexRouteContent({
         (createdSessionAuthority === null && personalAttachment.refreshing)
       )
         return false;
+      if (realtimeModel && personalMachineSelected) {
+        toast.error("Voice can't start on a personal Connected Machine", {
+          description:
+            "Start the session with a message first so OpenGeni can attach the machine to an accepted turn.",
+        });
+        return false;
+      }
       if (
         createdSessionAuthority === null &&
         ((!text && !realtimeModel) || attachments.hasUnresolved || !computeReady)
@@ -482,7 +540,7 @@ function SessionsIndexRouteContent({
                 });
                 return null;
               }
-              const submission = submissionFromSessionDraft(draft, firstPartyMcpToolPolicy.default);
+              const submission = submissionFromSessionDraft(draft, defaultFirstPartyMcpTools);
               const created = await context.startSession(
                 workspaceId,
                 {
@@ -524,7 +582,7 @@ function SessionsIndexRouteContent({
             }
             const submission = submissionFromSessionDraft(
               draft,
-              firstPartyMcpToolPolicy.default,
+              defaultFirstPartyMcpTools,
               personalAttachment.intent,
             );
             const created = await context.startSession(
@@ -556,7 +614,7 @@ function SessionsIndexRouteContent({
                 const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
                 if (acknowledged?.kind === "consumed") {
                   setMessage("");
-                  setDraft(emptySessionDraft(firstPartyMcpToolPolicy.default));
+                  setDraft(emptySessionDraft(defaultFirstPartyMcpTools));
                   attachments.removeReadyFiles(
                     submittedResources.flatMap((resource) =>
                       resource.kind === "file" ? [resource.fileId] : [],
@@ -771,12 +829,12 @@ function SessionsIndexRouteContent({
                   : {})}
                 voiceModel={{
                   selectedLabel: voiceSelection.selectedModel.label,
-                  disabled: busy || newSessionDraft.loading,
+                  disabled: busy || newSessionDraft.loading || personalMachineSelected,
                   panel: (
                     <RealtimeVoiceModelPanel
                       models={voiceSelection.models}
                       selectedModel={voiceSelection.selectedModel}
-                      disabled={busy || newSessionDraft.loading}
+                      disabled={busy || newSessionDraft.loading || personalMachineSelected}
                       onSelect={voiceSelection.selectModel}
                     />
                   ),
@@ -805,6 +863,7 @@ function SessionsIndexRouteContent({
                     attachments.hasUnresolved ||
                     !newSessionPolicyValid ||
                     !computeReady ||
+                    personalMachineSelected ||
                     !context.workspaceMcpCatalogReady
                   }
                   disabledReason={
@@ -816,9 +875,11 @@ function SessionsIndexRouteContent({
                           ? "Choose supported model settings before starting voice."
                           : !computeReady
                             ? "Choose where this session should run first."
-                            : !context.workspaceMcpCatalogReady
-                              ? "Wait for session tools to finish loading."
-                              : null
+                            : personalMachineSelected
+                              ? "Start with a message so personal machine access can attach to an accepted turn."
+                              : !context.workspaceMcpCatalogReady
+                                ? "Wait for session tools to finish loading."
+                                : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />
@@ -864,15 +925,17 @@ function SessionsIndexRouteContent({
             onChange={setDraft}
             disabled={busy || newSessionDraft.loading}
             personalAttachment={personalAttachment}
+            fleet={fleet}
+            machines={machines}
+            variableSets={variableSets}
+            rigs={rigs}
             selectedChannelId={selectedChannelId}
             selectionHistory={selectionHistory}
           />
-          {draft.compute.kind === "sandbox" ? (
-            <PersonalResourceAttachmentControl
-              controller={personalAttachment}
-              disabled={busy || newSessionDraft.loading}
-            />
-          ) : null}
+          <PersonalResourceAttachmentControl
+            controller={personalAttachment}
+            disabled={busy || newSessionDraft.loading}
+          />
         </div>
 
         <RecentSessions workspaceId={workspaceId} />
@@ -1255,26 +1318,21 @@ function ComputeTargetControl(props: {
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalAttachment: PersonalResourceAttachmentController;
+  fleet: ReturnType<typeof useMachines>;
+  machines: MachineView[];
+  variableSets: UseVariableSetsResult;
+  rigs: UseRigsResult;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
 }) {
   const { draft, onChange } = props;
-  // One load to learn whether any machine exists. Poll only while the compute
-  // picker is shown, or while a real load error should retry. A 404 (feature
-  // off) stays a single read. The list is a heartbeat read, not a live ping.
-  const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
-  const fleet = useMachines({ pollIntervalMs: fleetPollMs });
-  const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
+  const { fleet, machines } = props;
   const fleetEmpty = machines.length === 0;
   // A 404 is the expected "self-hosted machines are disabled here" signal, not a
   // failure — only a genuine load error (network/5xx) is surfaced, so the machine
   // option isn't silently swallowed by a transient outage (states #4).
   const fleetLoadFailed =
     fleet.error != null && !(fleet.error instanceof OpenGeniApiError && fleet.error.status === 404);
-  useEffect(() => {
-    if (fleet.loading) return;
-    setFleetPollMs(!fleetEmpty || fleetLoadFailed ? MACHINES_COMPOSER_POLL_MS : undefined);
-  }, [fleet.loading, fleetEmpty, fleetLoadFailed]);
   // The Connected Machine path is OPT-IN. With an EMPTY self-hosted fleet and no
   // explicit opt-in, the segmented control is not rendered at all — the composer
   // shows the clean sandbox-only flow (byte-identical submission to before this
@@ -1397,6 +1455,8 @@ function ComputeTargetControl(props: {
             onChange={onChange}
             disabled={props.disabled}
             personalAttachment={props.personalAttachment}
+            variableSets={props.variableSets}
+            rigs={props.rigs}
           />
           <FleetErrorNotice onRetry={() => void fleet.refresh()} />
         </section>
@@ -1408,6 +1468,8 @@ function ComputeTargetControl(props: {
         onChange={onChange}
         disabled={props.disabled}
         personalAttachment={props.personalAttachment}
+        variableSets={props.variableSets}
+        rigs={props.rigs}
       />
     );
   }
@@ -1450,6 +1512,8 @@ function ComputeTargetControl(props: {
           onChange={onChange}
           disabled={props.disabled}
           personalAttachment={props.personalAttachment}
+          variableSets={props.variableSets}
+          rigs={props.rigs}
         />
       ) : (
         <ConnectedMachineFields
@@ -1525,16 +1589,16 @@ function ManagedSandboxFields(props: {
   onChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalAttachment: PersonalResourceAttachmentController;
+  variableSets: UseVariableSetsResult;
+  rigs: UseRigsResult;
 }) {
   const { draft, onChange } = props;
-  const variableSets = useVariableSets();
-  const rigs = useRigs();
   const personalRigs = props.personalAttachment.catalog?.rigs ?? [];
   const personalVariableSets = props.personalAttachment.catalog?.variableSets ?? [];
   const personalRigIds = new Set(personalRigs.map((resource) => resource.id));
   const personalVariableSetIds = new Set(personalVariableSets.map((resource) => resource.id));
-  const workspaceRigs = rigs.rigs.filter((resource) => !personalRigIds.has(resource.id));
-  const workspaceVariableSets = variableSets.variableSets.filter(
+  const workspaceRigs = props.rigs.rigs.filter((resource) => !personalRigIds.has(resource.id));
+  const workspaceVariableSets = props.variableSets.variableSets.filter(
     (resource) => !personalVariableSetIds.has(resource.id),
   );
   const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
@@ -1760,7 +1824,7 @@ function ConnectedMachineFields(props: {
                   folder: { kind: "path", path: event.target.value },
                 })
               }
-              placeholder="e.g. ~/repos/myproject or packages/runtime"
+              placeholder="e.g. /home/me/repos/project or packages/runtime"
               aria-label="Custom working directory"
               className="ml-[1.375rem] h-9 w-[calc(100%_-_1.375rem)] text-sm"
             />

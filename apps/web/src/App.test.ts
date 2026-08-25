@@ -1157,14 +1157,14 @@ describe("session create draft", () => {
       compute: {
         kind: "machine" as const,
         sandboxId: "sbx-machine-1",
-        folder: { kind: "path" as const, path: "  ~/repos/opengeni  " },
+        folder: { kind: "path" as const, path: "  packages/runtime  " },
       },
     };
     expect(submissionFromSessionDraft(draft)).toEqual({
       extras: {},
       options: {
         targetSandboxId: "sbx-machine-1",
-        workingDir: "~/repos/opengeni",
+        workingDir: "packages/runtime",
         visibility: "workspace",
       },
       omitWorkspaceResources: true,
@@ -1354,6 +1354,70 @@ describe("projectSessionTimeline", () => {
     ]);
 
     expect(items).toEqual([]);
+  });
+
+  test("keeps an accepted create prompt in chat while its initial turn is queued", () => {
+    const clientEventId = "create-client-event";
+    const items = projectSessionTimeline(
+      session({ initialMessage: "Queued bootstrap" }),
+      [
+        {
+          ...event(1, "user.message", { text: "Queued bootstrap" }),
+          clientEventId,
+          turnId: null,
+        },
+        event(2, "turn.queued", {
+          turnId: "turn-1",
+          triggerEventId: "event-1",
+          source: "user",
+        }),
+      ],
+      clientEventId,
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
+      text: "Queued bootstrap",
+      reconciliationKey: `user-message:${clientEventId}`,
+    });
+  });
+
+  test("renders exactly one reconciled create prompt before any event arrives", () => {
+    const clientEventId = "create-before-events";
+    const items = projectSessionTimeline(
+      session({ initialMessage: "Bootstrap immediately" }),
+      [],
+      clientEventId,
+    );
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
+      text: "Bootstrap immediately",
+      reconciliationKey: `user-message:${clientEventId}`,
+    });
+  });
+
+  test("hands an accepted create prompt to its durable row without duplicating it", () => {
+    const clientEventId = "create-client-event";
+    const items = projectSessionTimeline(
+      session({ initialMessage: "Bootstrap" }),
+      [
+        {
+          ...event(1, "user.message", { text: "Bootstrap" }),
+          clientEventId,
+        },
+        event(2, "turn.started", {}),
+      ],
+      clientEventId,
+    );
+
+    expect(items.filter((item) => item.kind === "user-message")).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      id: "event-1",
+      reconciliationKey: `user-message:${clientEventId}`,
+    });
   });
 
   test("preserves archived terminal failure payloads in the main timeline projection", () => {
@@ -1597,7 +1661,7 @@ describe("buildTools", () => {
     ]);
   });
 
-  test("keeps mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
+  test("keeps only mandatory OpenGeni infrastructure out of selectable server catalogs", () => {
     const config = {
       mcpServers: [
         {
@@ -1615,6 +1679,7 @@ describe("buildTools", () => {
       ],
     } as unknown as Parameters<typeof selectableMcpServers>[0];
     expect(selectableMcpServers(config)).toEqual([
+      expect.objectContaining({ id: "files" }),
       expect.objectContaining({ id: "docs" }),
       expect.objectContaining({ id: "linear" }),
     ]);
@@ -2207,7 +2272,7 @@ describe("GitHub repository resources", () => {
 });
 
 describe("new-session draft tool policy", () => {
-  test("keeps omitted defaults distinct from the UI's Files-only and narrowed policies", () => {
+  test("keeps omitted defaults distinct from explicit and narrowed policies", () => {
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni", "docs"],
@@ -2223,7 +2288,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: true,
       }),
-    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
+    ).toEqual({ tools: [], toolsProvided: true });
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni"],
@@ -2231,7 +2296,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: false,
       }),
-    ).toEqual({ tools: [{ kind: "mcp", id: "files" }], toolsProvided: true });
+    ).toEqual({ tools: [], toolsProvided: true });
     expect(
       newSessionDraftToolPolicy({
         selectedMcpServerIds: ["opengeni"],
@@ -2255,10 +2320,7 @@ describe("new-session draft tool policy", () => {
         catalogReady: true,
         explicit: false,
       }),
-    ).toEqual({
-      tools: [{ kind: "mcp", id: "files" }],
-      toolsProvided: true,
-    });
+    ).toEqual({ tools: [], toolsProvided: true });
   });
 });
 

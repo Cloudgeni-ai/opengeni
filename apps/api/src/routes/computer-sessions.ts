@@ -847,6 +847,11 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
         throw new ComputerSessionStateError("Attached browser machine is unavailable");
       }
+      if (!enrollment.workspaceRoot) {
+        throw new ComputerSessionStateError(
+          "Attached browser machine has not reported an absolute workspace root",
+        );
+      }
       if (operation !== "computer.end") {
         assertConnectedMachineComputerAccess(enrollment, operation);
       }
@@ -859,6 +864,7 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
         workspaceId: sourceSession.workspaceId,
         agentId: device.enrollmentId,
         connectionInstanceId: enrollment.connectionInstanceId,
+        workspaceRoot: enrollment.workspaceRoot,
         relay: relayConfigFromSettings(deps.settings),
         controlRpcFactory: () => new NatsControlRpc(async () => deps.bus.getRequestConnection()),
         epoch: 0,

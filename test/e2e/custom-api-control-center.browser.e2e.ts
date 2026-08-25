@@ -307,7 +307,7 @@ describe("custom API control center browser acceptance", () => {
       await reconnect.click();
       await expectVisible(repair.getByText("Couldn't start account connection"));
       expect(repairState.oauthStarts).toHaveLength(1);
-      expect(repair.url()).toBe(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`);
+      expect(repair.url()).toBe(`${webBaseUrl}/workspaces/${workspaceId}/plugins`);
       await assertAccessibleAndBounded(repair, '[data-integration-sheet="outlook-mail"]');
       await repair.screenshot({
         path: `${evidenceDir}pass-7-add-and-reconnect.png`,

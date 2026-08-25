@@ -18,6 +18,7 @@ function enrollment(overrides: Partial<SelfhostedEnrollment> = {}): SelfhostedEn
     exposure: "whole-machine",
     allowScreenControl: true,
     hasDisplay: true,
+    workspaceRoot: "/srv/project",
     lastSeenAt: NOW.toISOString(),
     wentOfflineAt: null,
     wentOfflineReason: null,
@@ -28,6 +29,7 @@ function enrollment(overrides: Partial<SelfhostedEnrollment> = {}): SelfhostedEn
 function session(online: boolean): SelfhostedSession {
   return new SelfhostedSession({
     workspaceId: "ws",
+    workspaceRoot: "/home/user/project",
     agentId: "a",
     connectionInstanceId: "connection-capabilities",
     controlRpc: new MockAgentResponder({ online }),
@@ -169,6 +171,7 @@ describe("negotiateSelfhostedCapabilities — every cell decided correctly", () 
     expect(caps.backend).toBe("selfhosted");
     expect(caps.FileSystem.available).toBe(true);
     expect(caps.FileSystem.reason).toBeNull();
+    expect(caps.FileSystem.root).toBe("/srv/project");
     expect(caps.Git.available).toBe(true);
     expect(caps.Terminal.transport).toBe("relay-pty");
     // Selfhosted desktop is the RELAY framebuffer (PNG-per-frame), rendered by the

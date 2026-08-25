@@ -64,7 +64,7 @@ describe("Personal workspace accessibility in Chromium", () => {
     });
 
     const firstTrigger = expanded.getByRole("button", {
-      name: "Org 11111111. Switch organization",
+      name: "Org 11111111. Organization menu",
       exact: true,
     });
     expect(await firstTrigger.isVisible()).toBe(true);
@@ -87,7 +87,7 @@ describe("Personal workspace accessibility in Chromium", () => {
     await secondItem.click();
     await expanded
       .getByRole("button", {
-        name: "Org aaaaaaaa. Switch organization",
+        name: "Org aaaaaaaa. Organization menu",
         exact: true,
       })
       .waitFor();
@@ -144,8 +144,7 @@ describe("Personal workspace accessibility in Chromium", () => {
       expect(
         await menu.getByRole("menuitem", { name: "Share this session with workspace…" }).count(),
       ).toBe(1);
-      expect(await menu.getByRole("menuitem", { name: "Private copy" }).count()).toBe(0);
-      expect(await menu.getByRole("menuitem", { name: /Fork session/ }).count()).toBe(0);
+      expect(await menu.getByRole("menuitem", { name: "Fork session…" }).count()).toBe(1);
       await tenancyPage.keyboard.press("Escape");
       await menu.waitFor({ state: "hidden" });
     }
@@ -185,11 +184,17 @@ describe("Personal workspace accessibility in Chromium", () => {
     expect(await sessions.getByRole("radio", { name: /Only me/ }).isEnabled()).toBe(true);
     expect(await sessions.textContent()).toContain("Only you can open this session.");
 
+    // An organization that has not activated private sessions gets no chooser at
+    // all rather than a disabled one: Workspace is the only valid value, so there
+    // is no decision to present.
     const inactive = page.locator("#inactive-session-visibility-picker");
-    expect(await inactive.getByRole("radio", { name: /Only me/ }).isDisabled()).toBe(true);
-    expect(await inactive.textContent()).toContain(
-      "Private sessions are not enabled for this organization yet.",
-    );
+    expect(await inactive.getByRole("radio").count()).toBe(0);
+    expect((await inactive.textContent()) ?? "").toBe("");
+
+    const disabled = page.locator("#disabled-session-visibility-picker");
+    expect(await disabled.getByRole("radio", { name: /Workspace/ }).isDisabled()).toBe(true);
+    expect(await disabled.getByRole("radio", { name: /Only me/ }).isDisabled()).toBe(true);
+    expect(await disabled.textContent()).toContain("Only you can open this session.");
 
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),

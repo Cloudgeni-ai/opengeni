@@ -108,9 +108,11 @@ export async function* streamSessionEvents(
           return;
         }
         const event = parseSessionEvent(message.data);
-        if (!event || event.sequence <= cursor) {
+        if (!event) {
           continue;
         }
+        const coveredSequence = eventResumeSequence(event);
+        if (coveredSequence <= cursor) continue;
         if (event.sequence > cursor + 1) {
           for await (const missed of backfillEvents(transport, cursor, event.sequence - 1)) {
             cursor = missed.sequence;
@@ -120,7 +122,7 @@ export async function* streamSessionEvents(
             }
           }
         }
-        cursor = event.sequence;
+        cursor = coveredSequence;
         yield event;
       }
       if (!reconnect) {
@@ -279,6 +281,15 @@ function parseSessionEvent(data: string): SessionEvent | null {
     return null;
   }
   return parsed as SessionEvent;
+}
+
+/** Raw durable cursor covered by a compact SSE event. */
+function eventResumeSequence(event: SessionEvent): number {
+  if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
+    return event.sequence;
+  }
+  const covered = Number((event.payload as Record<string, unknown>).coalescedUntil);
+  return Math.max(event.sequence, Number.isFinite(covered) ? Math.floor(covered) : event.sequence);
 }
 
 async function sleep(delayMs: number, signal: AbortSignal | undefined): Promise<void> {

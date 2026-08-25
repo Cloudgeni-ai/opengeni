@@ -88,7 +88,7 @@ jobs:
         if: ${{ steps.admission.outcome == 'success' }}
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version-file: .bun-version
 
       - name: Install trusted-base dependencies
         if: ${{ steps.admission.outcome == 'success' }}
@@ -929,10 +929,7 @@ jobs:
           name: ci-impact-plan
 
       - name: Install pinned artifact-kernel build toolchain
-        working-directory: packages/artifact-tool/kernel
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup show active-toolchain
+        run: bun scripts/artifact-kernel-rust.ts ensure
 
       - name: Production native artifact contracts
         env:
@@ -1370,6 +1367,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-api:canary-sha-{0}', github.sha) || 'opengeni-api:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-api
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-api,ignore-error=true' || '' }}
           build-args: |
@@ -1417,6 +1417,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-worker:canary-sha-{0}', github.sha) || 'opengeni-worker:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-worker
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-worker,ignore-error=true' || '' }}
           build-args: |
@@ -1432,6 +1435,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-web:canary-sha-{0}', github.sha) || 'opengeni-web:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-web
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-web,ignore-error=true' || '' }}
           build-args: |
@@ -1485,6 +1491,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-materializer:canary-sha-{0}', github.sha) || 'opengeni-artifact-materializer:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-artifact-materializer
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-artifact-materializer,ignore-error=true' || '' }}
           build-args: |
@@ -1531,6 +1540,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-artifact-outbox-dispatcher:canary-sha-{0}', github.sha) || 'opengeni-artifact-outbox-dispatcher:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-artifact-outbox-dispatcher
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-artifact-outbox-dispatcher,ignore-error=true' || '' }}
           build-args: |
@@ -1576,6 +1588,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-relay:canary-sha-{0}', github.sha) || 'opengeni-relay:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-relay
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-relay,ignore-error=true' || '' }}
   sandbox-image:
@@ -1623,6 +1638,9 @@ jobs:
           build-args: OPENGENI_SOURCE_SHA=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('ghcr.io/cloudgeni-ai/opengeni-sandbox:canary-sha-{0}', github.sha) || 'opengeni-sandbox:ci' }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=opengeni-ci-sandbox
           cache-to: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=opengeni-ci-sandbox,ignore-error=true' || '' }}
 

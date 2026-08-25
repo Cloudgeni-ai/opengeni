@@ -95,11 +95,23 @@ export function applySessionPinProjection(
   return { ...current, pinned, pinnedAt, pinVersion };
 }
 
+/** Merge the list-owned project filing without replacing route/SSE content. */
+export function applySessionChannelProjection(
+  current: Session | null,
+  projected: Pick<Session, "id" | "workspaceId" | "channelId">,
+): Session | null {
+  if (!current || current.id !== projected.id || current.workspaceId !== projected.workspaceId) {
+    return current;
+  }
+  const channelId = projected.channelId ?? null;
+  return (current.channelId ?? null) === channelId ? current : { ...current, channelId };
+}
+
 /**
  * Merge a detail/SSE projection into the root context without allowing a
- * slower detail read to erase a newer list or optimistic pin projection.
- * Detail remains authoritative for every non-pin field; the current context
- * contributes only its pin fields when that projection is newer or equal.
+ * slower detail read to erase newer list-owned pin or project projections.
+ * Detail remains authoritative for route-owned fields; the current context
+ * contributes personal pin fields and the project filing.
  */
 export function mergeSessionContextProjection(
   current: Session | null,
@@ -108,7 +120,8 @@ export function mergeSessionContextProjection(
   if (!projected) {
     return null;
   }
-  return applySessionPinProjection(projected, current ?? projected) ?? projected;
+  const pinned = applySessionPinProjection(projected, current ?? projected) ?? projected;
+  return applySessionChannelProjection(pinned, current ?? projected) ?? pinned;
 }
 
 /**
@@ -117,7 +130,8 @@ export function mergeSessionContextProjection(
  * while a list poll must never regress lifecycle state or message content.
  */
 export function applySessionRailProjection(current: Session, projected: Session): Session {
-  const merged = applySessionPinProjection(current, projected) ?? current;
+  const pinned = applySessionPinProjection(current, projected) ?? current;
+  const merged = applySessionChannelProjection(pinned, projected) ?? pinned;
   if (sameTreeStats(merged.treeStats, projected.treeStats)) {
     return merged;
   }

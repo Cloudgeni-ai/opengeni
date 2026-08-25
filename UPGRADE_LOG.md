@@ -15,6 +15,25 @@ does not ship advisories hidden behind older dependency trees.
 
 ## Updates
 
+### Bun: 1.3.14 → 1.4.x
+
+- Made `.bun-version` the canonical exact runtime pin and added
+  `bun run check:bun-version` to verify package-manager, type-package, workflow,
+  container, and digest-pinned native-builder mirrors.
+- Moved the portable `ogtool` CJS bundle to Bun-native APIs. Bun launches
+  Changesets too; npm remains only as the provenance-capable registry
+  transport. TypeScript keeps its existing Node process boundary because the
+  Bun-native variants produced no repeatable benchmark benefit.
+- Audited the Bun 1.4 migration guide against OpenGeni's runtime surfaces and
+  revalidated the affected lockfile, environment, worker-termination, fetch,
+  `Bun.serve`, `Bun.spawn`, SQLite, tests, bundling, compiled executables, and
+  cross-platform artifact runtimes.
+- Retained Vite/Rolldown, Temporal's workflow webpack bundle, stable `tsc`
+  declaration emit, Playwright, and release-shaped tsup package bundles at
+  explicit compatibility boundaries. Bun 1.4.0 generated invalid ESM for the
+  public SDK and React barrels, so replacing that boundary would be a
+  correctness regression rather than a migration win.
+
 ### OpenAI Agents JS: 0.13.3 → 0.14.3
 
 - Upgraded every direct `@openai/agents`, `@openai/agents-core`, and

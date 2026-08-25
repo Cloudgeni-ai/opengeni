@@ -23,6 +23,7 @@ function workspaceResolver(input: {
     authority: AuthorizeInput,
   ) => Awaited<ReturnType<typeof resolveAcceptedConnectionUse>>;
   onHostRequest?: (request: unknown) => void;
+  activated?: boolean;
 }) {
   return connectionTokenResolverForTurn({
     db: {} as Database,
@@ -34,6 +35,7 @@ function workspaceResolver(input: {
     attemptId: "attempt-1",
     turn,
     authorizeAcceptedUse: async (_db, authority) => input.authorize(authority),
+    isSessionTenancyProductActivated: async () => input.activated ?? false,
     connectionCredentials: {
       mcpCredentials: async (request) => {
         input.onHostRequest?.(request);
@@ -160,5 +162,34 @@ describe("workspace connection lane", () => {
     expect(result.status).toBe("ok");
     expect(authorizeCalls).toBe(0);
     expect(hostCalls).toBe(1);
+  });
+
+  test("an activated organization rejects a ref with no connection id before host resolution", async () => {
+    let authorizeCalls = 0;
+    let hostCalls = 0;
+    const resolver = workspaceResolver({
+      activated: true,
+      authorize: () => {
+        authorizeCalls += 1;
+        return { status: "denied" as const, reason: "connection_missing" };
+      },
+      onHostRequest: () => {
+        hostCalls += 1;
+      },
+    });
+
+    const result = await resolver({
+      ...workspaceRequest,
+      connectionRef: {
+        provider: "linear",
+        providerDomain: "linear.app",
+        kind: "oauth2" as const,
+        subjectScope: "workspace" as const,
+      },
+    });
+
+    expect(result).toMatchObject({ status: "auth_needed", reason: "missing_connection" });
+    expect(authorizeCalls).toBe(0);
+    expect(hostCalls).toBe(0);
   });
 });

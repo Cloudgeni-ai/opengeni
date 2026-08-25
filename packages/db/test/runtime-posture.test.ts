@@ -174,6 +174,7 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_membership_operation_receipts",
     "organization_memberships",
     "organization_profile_events",
+    "organization_shared_workspace_administration_capabilities",
     "organization_user_resource_authorities",
     "organization_user_resource_grants",
     "organization_user_retention_deletion_events",
@@ -332,6 +333,22 @@ function safePosture(): RuntimeDatabasePosture {
         update: false,
         delete: false,
       },
+      {
+        name: "document_migration_capabilities",
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
+      {
+        name: "connection_tenancy_backfill_capabilities",
+        owner: "opengeni_migrator",
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      },
     ],
     targetRoutines: [
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.map((name) => ({
@@ -375,6 +392,20 @@ function safePosture(): RuntimeDatabasePosture {
       },
       {
         name: "personal_document_authority_capability_active(text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "document_migration_capability_active(text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "connection_tenancy_backfill_capability_active(uuid)",
         owner: "opengeni_migrator",
         execute: true,
         publicExecute: false,
@@ -426,26 +457,26 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 281],
+            [FORCE_RLS_TABLES, 290],
             [NON_RLS_RUNTIME_TABLES, 12],
-            [RUNTIME_FULL_DML_TABLES, 145],
-            [RUNTIME_READ_ONLY_TABLES, 19],
+            [RUNTIME_FULL_DML_TABLES, 149],
+            [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 51],
-            [RUNTIME_DML_TABLES, 242],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 55],
+            [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 196],
+            [FORCE_RLS_TABLES, 200],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 113],
+            [RUNTIME_FULL_DML_TABLES, 117],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 28],
-            [RUNTIME_DML_TABLES, 179],
+            [RUNTIME_DML_TABLES, 183],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
@@ -458,7 +489,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 293 : 207;
+      const tableCount = hasCurrentMainActivityLedger ? 302 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -617,12 +648,69 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("enforces the exact document-migration private capability boundary", () => {
+    const posture = safePosture();
+    const capabilityTable = posture.privateTables.find(
+      (table) => table.name === "document_migration_capabilities",
+    )!;
+    const capabilityRoutine = posture.privateRoutines.find(
+      (routine) => routine.name === "document_migration_capability_active(text)",
+    )!;
+    capabilityTable.update = true;
+    capabilityRoutine.owner = "another_owner";
+    capabilityRoutine.execute = false;
+    capabilityRoutine.publicExecute = true;
+    capabilityRoutine.securityDefiner = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("does not match table owner"),
+        expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining("runtime role lacks document-migration capability predicate"),
+        expect.stringContaining("PUBLIC has forbidden document-migration capability predicate"),
+        expect.stringContaining("forbidden direct privileges on private table"),
+      ]),
+    );
+  });
+
+  test("enforces the connection-tenancy backfill capability boundary", () => {
+    const posture = safePosture();
+    const capabilityTable = posture.privateTables.find(
+      (table) => table.name === "connection_tenancy_backfill_capabilities",
+    )!;
+    const capabilityRoutine = posture.privateRoutines.find(
+      (routine) => routine.name === "connection_tenancy_backfill_capability_active(uuid)",
+    )!;
+    capabilityTable.update = true;
+    capabilityRoutine.owner = "another_owner";
+    capabilityRoutine.execute = false;
+    capabilityRoutine.publicExecute = true;
+    capabilityRoutine.securityDefiner = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("does not match table owner"),
+        expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining(
+          "runtime role lacks connection-tenancy backfill capability predicate",
+        ),
+        expect.stringContaining(
+          "PUBLIC has forbidden connection-tenancy backfill capability predicate",
+        ),
+        expect.stringContaining("forbidden direct privileges on private table"),
+      ]),
+    );
+  });
+
   test("accepts public-schema authority owned by the two protected tables", () => {
     const posture = safePosture();
     posture.schemas[0]!.owner = "pg_database_owner";
     for (const routine of posture.targetRoutines) {
       if (
         routine.name.includes("personal_document") ||
+        routine.name.includes("document_authority_reclassification") ||
+        routine.name.includes("document_default_collection") ||
+        routine.name === "reclassify_document_authority(jsonb)" ||
         routine.name.includes("personal_github_repository") ||
         routine.name === "resolve_document_original_file(uuid, uuid, text, uuid)" ||
         routine.name.includes("scoped_variable_set") ||
@@ -756,6 +844,12 @@ describe("runtime database posture evaluator", () => {
     }
     expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(
       "organization_private_sessions_enabled(uuid)",
+    );
+  });
+
+  test("keeps tenancy backfill activation evidence owner-only", () => {
+    expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(
+      "check_tenancy_backfill_activation_evidence(uuid)",
     );
   });
 

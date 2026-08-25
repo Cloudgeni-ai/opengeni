@@ -21,7 +21,8 @@ cannot certify native/WASM release budgets. Pinned native runners may enforce
 the architecture budgets:
 
 ```bash
-OPENGENI_ARTIFACT_BENCH_DEEP=1 OPENGENI_ARTIFACT_BENCH_PINNED=1 cargo bench \
+OPENGENI_ARTIFACT_BENCH_DEEP=1 OPENGENI_ARTIFACT_BENCH_PINNED=1 \
+  bun scripts/artifact-kernel-rust.ts cargo bench \
   --manifest-path packages/artifact-tool/kernel/Cargo.toml --bench kernel
 ```
 

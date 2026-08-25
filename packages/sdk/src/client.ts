@@ -155,7 +155,6 @@ import type {
   UpsertIntegrationFacetRequest,
   PreviewPluginRequest,
   PluginPreview,
-  PersonalResourceAttachmentIntent,
   InstallPluginRequest,
   InstalledPlugin,
   ListInstalledPluginsResponse,
@@ -164,12 +163,19 @@ import type {
   UninstallPluginResult,
   AddDocumentRequest,
   CreateKnowledgeDropRequest,
+  DocumentAuthorityReclassification,
+  DocumentDefaultCollectionBackfill,
+  ListDocumentAuthorityReclassificationsOptions,
+  ListDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
+  ReclassifyDocumentAuthorityRequest,
+  RunDocumentDefaultCollectionBackfillRequest,
   ClientConfig,
   WorkspaceModelAccessPolicy,
   WorkspaceModelCatalogResponse,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
+  UserMessageEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
   ConnectionMetadata,
@@ -249,7 +255,11 @@ import type {
   ListOrganizationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
+  AddOrganizationWorkspaceMemberRequest,
   CreateOrganizationInvitationRequest,
+  CreateOrganizationRequest,
+  CreateOrganizationResponse,
+  CreateOrganizationWorkspaceRequest,
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
@@ -282,9 +292,6 @@ import type {
   ApproveSlackUserLinkAccessRequest,
   PackInstallation,
   PackUninstallPreview,
-  LatencyMode,
-  McpConnectionAuthoritySelection,
-  ReasoningEffort,
   RetainedScreenshotDownload,
   RetainedScreenshotDownloadOptions,
   RetainedArtifactDownload,
@@ -299,7 +306,6 @@ import type {
   VideoGenerationPolicy,
   WorkspaceVideoGenerationSettings,
   RegisterCapabilityPackRequest,
-  ResourceRef,
   PreviewPackInstallationRequest,
   PreviewSkillImportRequest,
   ScheduledTask,
@@ -338,12 +344,12 @@ import type {
   SyncSessionRealtimeLedgerRequest,
   SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
-  SessionMcpCredentialUpdateInput,
-  SubmittedTimelineAnnotation,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
   SessionQueueSnapshot,
   SessionQueueMutationResponse,
+  SessionCommandReceipt,
+  SessionPromptRouting,
   ComposerDraft,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
@@ -404,7 +410,6 @@ import type {
   PtyWriteRequest,
   PtyResizeRequest,
   PtyCloseRequest,
-  ToolRef,
   TranscribeAudioResponse,
   TranscriptionRecordingListResponse,
   TranscriptionRecordingResponse,
@@ -554,40 +559,42 @@ export type OpenGeniClientOptions = {
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
   fetch?: FetchLike;
+  /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
+  sessionCommandTimeoutMs?: number;
 };
 
 /** Per-request cancellation for operations whose caller owns an AbortSignal. */
 export type OpenGeniRequestOptions = {
   signal?: AbortSignal | undefined;
+  timeoutMs?: number | undefined;
 };
 
-export type SendMessageInput = {
-  text: string;
-  annotations?: SubmittedTimelineAnnotation[];
-  /** Model-visible application context attached to this exact user message; omitted by standard timeline rendering. */
-  modelContext?: string;
-  resources?: ResourceRef[];
-  tools?: ToolRef[];
-  model?: string;
-  reasoningEffort?: ReasoningEffort;
-  latencyMode?: LatencyMode;
+/** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
+export type SendMessageInput = UserMessageEventInput["payload"] & {
   clientEventId?: string;
-  controlEtag?: string;
-  expectedDraftRevision?: number;
-  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-  connectionAuthorities?: McpConnectionAuthoritySelection[];
-  personalResourceAttachment?: PersonalResourceAttachmentIntent;
 };
+
+function assertNoMessageTools(input: object): void {
+  if (Object.prototype.hasOwnProperty.call(input, "tools")) {
+    throw new TypeError(
+      "Message-level tools are not supported; update the session tool policy before sending.",
+    );
+  }
+}
 
 export type SteerMessageResult = {
   /** The accepted `user.message` event. */
   accepted: SessionEvent;
   /** The exact turn created for this message in the same server transaction. */
   turn: SessionTurn;
+  /** Durable proof that this exact operation committed. */
+  receipt: SessionCommandReceipt;
+  /** Server-owned destination at admission time. */
+  routing: SessionPromptRouting;
   /** Number of live attempts durably asked to stop by this atomic Steer. */
-  interruptionCount?: number;
+  interruptionCount: number;
   /** True when this response came from the command's immutable idempotency receipt. */
-  replay?: boolean;
+  replay: boolean;
 };
 
 export type TranscribeAudioInput = {
@@ -628,6 +635,7 @@ export class OpenGeniClient {
   private readonly baseUrl: string;
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
+  private readonly sessionCommandTimeoutMs: number;
   private readonly readInFlight = new Map<string, Promise<unknown>>();
   private readonly readTrailing = new Map<string, Promise<unknown>>();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
@@ -638,6 +646,11 @@ export class OpenGeniClient {
     this.options = options;
     // Bind lazily so variable sets that polyfill fetch after module load work.
     this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
+    const sessionCommandTimeoutMs = options.sessionCommandTimeoutMs ?? 15_000;
+    if (!Number.isFinite(sessionCommandTimeoutMs) || sessionCommandTimeoutMs <= 0) {
+      throw new RangeError("sessionCommandTimeoutMs must be a finite positive number");
+    }
+    this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
     this.interaction = new OpenGeniInteractionClient(this);
   }
 
@@ -932,7 +945,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create an independent same-workspace private fork of an owned, quiescent session. */
+  /** Create an independent same-workspace fork with explicit destination visibility. */
   async forkSession(
     workspaceId: string,
     sessionId: string,
@@ -1700,7 +1713,7 @@ export class OpenGeniClient {
     sessionId: string,
     event: ClientSessionEventInput,
   ): Promise<SessionEvent> {
-    return await this.requestJson<SessionEvent>(
+    return await this.requestSessionCommand<SessionEvent>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
       event,
@@ -1713,6 +1726,7 @@ export class OpenGeniClient {
     message: string | SendMessageInput,
   ): Promise<SessionEvent> {
     const input = typeof message === "string" ? { text: message } : message;
+    assertNoMessageTools(input);
     const { clientEventId, ...payload } = input;
     return await this.sendEvent(workspaceId, sessionId, {
       type: "user.message",
@@ -1858,7 +1872,7 @@ export class OpenGeniClient {
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
     return await this.singleFlightRead(path, () =>
-      this.requestJson<SessionQueueSnapshot>("GET", path),
+      this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
     );
   }
 
@@ -1868,7 +1882,7 @@ export class OpenGeniClient {
     turnId: string,
     request: MoveSessionQueueItemRequest,
   ): Promise<SessionQueueMutationResponse> {
-    return await this.requestJson<SessionQueueMutationResponse>(
+    return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/move`,
       request,
@@ -1881,7 +1895,7 @@ export class OpenGeniClient {
     turnId: string,
     request: EditSessionQueueItemRequest,
   ): Promise<SessionQueueMutationResponse> {
-    return await this.requestJson<SessionQueueMutationResponse>(
+    return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/edit`,
       request,
@@ -1894,7 +1908,7 @@ export class OpenGeniClient {
     turnId: string,
     request: SteerSessionQueueItemRequest,
   ): Promise<SessionQueueMutationResponse> {
-    return await this.requestJson<SessionQueueMutationResponse>(
+    return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/steer`,
       request,
@@ -1907,7 +1921,7 @@ export class OpenGeniClient {
     turnId: string,
     request: DeleteSessionQueueItemRequest,
   ): Promise<SessionQueueMutationResponse> {
-    return await this.requestJson<SessionQueueMutationResponse>(
+    return await this.requestSessionCommand<SessionQueueMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/delete`,
       request,
@@ -1915,7 +1929,7 @@ export class OpenGeniClient {
   }
 
   async getComposerDraft(workspaceId: string, sessionId: string): Promise<ComposerDraft> {
-    return await this.requestJson<ComposerDraft>(
+    return await this.requestSessionCommand<ComposerDraft>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
     );
@@ -1926,7 +1940,7 @@ export class OpenGeniClient {
     sessionId: string,
     request: SaveComposerDraftRequest,
   ): Promise<ComposerDraft> {
-    return await this.requestJson<ComposerDraft>(
+    return await this.requestSessionCommand<ComposerDraft>(
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
       request,
@@ -1938,7 +1952,7 @@ export class OpenGeniClient {
     sessionId: string,
     request: SubmitComposerDraftRequest,
   ): Promise<SubmitComposerDraftResponse> {
-    return await this.requestJson<SubmitComposerDraftResponse>(
+    return await this.requestSessionCommand<SubmitComposerDraftResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft/submit`,
       request,
@@ -1955,7 +1969,7 @@ export class OpenGeniClient {
       expectedControlEtag?: string;
     },
   ): Promise<SessionControlResponse> {
-    return await this.requestJson<SessionControlResponse>(
+    return await this.requestSessionCommand<SessionControlResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/control`,
       request,
@@ -2180,7 +2194,8 @@ export class OpenGeniClient {
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
     const input = typeof message === "string" ? { text: message } : message;
-    return await this.requestJson<SteerMessageResult>(
+    assertNoMessageTools(input);
+    return await this.requestSessionCommand<SteerMessageResult>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/steer`,
       input,
@@ -3739,6 +3754,13 @@ export class OpenGeniClient {
     );
   }
 
+  /** Create a new organization owned by the current managed human. */
+  async createOrganization(
+    request: CreateOrganizationRequest,
+  ): Promise<CreateOrganizationResponse> {
+    return await this.requestJson<CreateOrganizationResponse>("POST", "/v1/organizations", request);
+  }
+
   /** Pending and historical invitations addressed to the current managed human. */
   async listOrganizationInvitations(
     options: { cursor?: string; limit?: number } = {},
@@ -3828,6 +3850,86 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/organizations/${organizationId}`,
       request,
+    );
+  }
+
+  /**
+   * Organization control-plane update for a shared workspace. This does not
+   * require or create operational workspace access for the organization admin.
+   */
+  async updateOrganizationWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateWorkspaceRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
+      request,
+    );
+  }
+
+  /** Create a shared workspace without implicitly granting the actor access. */
+  async createOrganizationWorkspace(
+    organizationId: string,
+    request: CreateOrganizationWorkspaceRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "POST",
+      `/v1/organizations/${organizationId}/workspaces`,
+      request,
+    );
+  }
+
+  async updateOrganizationWorkspaceSettings(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateWorkspaceSettingsRequest,
+  ): Promise<Workspace> {
+    return await this.requestJson<Workspace>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/settings`,
+      request,
+    );
+  }
+
+  async addOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    request: AddOrganizationWorkspaceMemberRequest,
+  ): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>(
+      "POST",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members`,
+      request,
+    );
+  }
+
+  async updateOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    subjectId: string,
+    request: UpdateWorkspaceMemberRequest,
+  ): Promise<WorkspaceMember> {
+    return await this.requestJson<WorkspaceMember>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
+        subjectId,
+      )}`,
+      request,
+    );
+  }
+
+  async removeOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    subjectId: string,
+  ): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
+        subjectId,
+      )}`,
     );
   }
 
@@ -5348,6 +5450,53 @@ export class OpenGeniClient {
     );
   }
 
+  /**
+   * Atomically reclassify a Document's authority and every indexed chunk.
+   * The operation is replay-safe and rejects a stale expected authority tuple.
+   */
+  async reclassifyDocumentAuthority(
+    workspaceId: string,
+    documentId: string,
+    request: ReclassifyDocumentAuthorityRequest,
+  ): Promise<DocumentAuthorityReclassification> {
+    return await this.requestJson<DocumentAuthorityReclassification>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications`,
+      request,
+    );
+  }
+
+  /** List the current actor's durable authority-reclassification receipts. */
+  async listDocumentAuthorityReclassifications(
+    workspaceId: string,
+    documentId: string,
+    options: ListDocumentAuthorityReclassificationsOptions = {},
+  ): Promise<ListDocumentAuthorityReclassificationsResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor) params.set("cursor", options.cursor);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<ListDocumentAuthorityReclassificationsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/authority-reclassifications${query}`,
+    );
+  }
+
+  /**
+   * Advance one resumable, organization-scoped Default collection backfill.
+   * Reusing an operation ID is idempotent; keep the run ID across batches.
+   */
+  async runDocumentDefaultCollectionBackfill(
+    workspaceId: string,
+    request: RunDocumentDefaultCollectionBackfillRequest,
+  ): Promise<DocumentDefaultCollectionBackfill> {
+    return await this.requestJson<DocumentDefaultCollectionBackfill>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/document-default-collection-backfills`,
+      request,
+    );
+  }
+
   /** Retry indexing for a failed document. */
   async reindexDocument(
     workspaceId: string,
@@ -6664,6 +6813,19 @@ export class OpenGeniClient {
   }
 
   /** Contract-checked JSON transport shared by opt-in typed SDK clients. */
+  private async requestSessionCommand<T>(method: string, path: string, body?: unknown): Promise<T> {
+    return await this.requestJson<T>(
+      method,
+      path,
+      body,
+      {},
+      {
+        timeoutMs: this.sessionCommandTimeoutMs,
+      },
+    );
+  }
+
+  /** Contract-checked JSON transport shared by opt-in typed SDK clients. */
   async requestJson<T>(
     method: string,
     path: string,
@@ -6672,36 +6834,46 @@ export class OpenGeniClient {
     options: OpenGeniRequestOptions = {},
   ): Promise<T> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    const abort = requestAbortSignal(options);
     try {
-      response = await this.fetchImpl(this.url(path, query), {
-        method,
-        headers: {
-          ...this.headers(correlationId),
-          Accept: "application/json",
-          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
-    } catch (error) {
-      if (isMutationMethod(method)) {
-        throw mutationTransportError(correlationId);
+      let response: Response;
+      try {
+        response = await awaitWithAbort(
+          this.fetchImpl(this.url(path, query), {
+            method,
+            headers: {
+              ...this.headers(correlationId),
+              Accept: "application/json",
+              ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+            },
+            ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+            ...(abort.signal ? { signal: abort.signal } : {}),
+          }),
+          abort.signal,
+        );
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        if (isMutationMethod(method)) {
+          throw mutationTransportError(correlationId);
+        }
+        throw error;
       }
-      throw error;
-    }
-    assertApiContractResponse(response);
-    if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method, correlationId });
-    }
-    await assertJsonResponse(response, { method, correlationId });
-    try {
-      return (await response.json()) as T;
-    } catch (error) {
-      if (isMutationMethod(method)) {
-        throw mutationTransportError(correlationId);
+      assertApiContractResponse(response);
+      if (!response.ok) {
+        throw await apiErrorFromResponse(response, { method, correlationId });
       }
-      throw error;
+      await assertJsonResponse(response, { method, correlationId });
+      try {
+        return (await response.json()) as T;
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        if (isMutationMethod(method)) {
+          throw mutationTransportError(correlationId);
+        }
+        throw error;
+      }
+    } finally {
+      abort.dispose();
     }
   }
 
@@ -6884,6 +7056,59 @@ function filenameForAudioMimeType(mimeType: string): string {
 }
 
 const API_ERROR_MAX_BYTES = 16 * 1024;
+
+function requestAbortSignal(options: OpenGeniRequestOptions): {
+  signal: AbortSignal | undefined;
+  dispose: () => void;
+} {
+  const timeoutMs = options.timeoutMs ?? 0;
+  if (timeoutMs <= 0) {
+    return { signal: options.signal, dispose: () => undefined };
+  }
+  const controller = new AbortController();
+  const onCallerAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) {
+    onCallerAbort();
+  } else {
+    options.signal?.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  const timer = setTimeout(
+    () => controller.abort(new DOMException("Request timed out", "TimeoutError")),
+    timeoutMs,
+  );
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await promise;
+  if (signal.aborted) {
+    throw signal.reason ?? new DOMException("Request aborted", "AbortError");
+  }
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+    };
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (cause) => {
+        cleanup();
+        reject(cause);
+      },
+    );
+  });
+}
 
 type ApiErrorRequestContext = {
   method: string;

@@ -16,6 +16,7 @@ import {
   ModelContextContributionSummaries,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
   OrganizationMember,
+  WorkspaceMember as WorkspaceMemberContract,
   SessionGoalSnapshot,
   ScheduledTaskRunAcceptedExecution,
   SessionGoalRootConstraintsWrite,
@@ -425,8 +426,13 @@ export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./managed-human-provisioning";
 export * from "./organization-membership-backfill";
+export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
 export * from "./slack-user-link-access";
+export * from "./slack-routing";
+export * from "./slack-routing-personal-workspace";
+import { probeSlackInteractionTenancy } from "./slack-routing";
+import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
 export * from "./workspace-membership-permissions";
 export * from "./video-generation";
 export * from "./user-resource-authority";
@@ -526,7 +532,9 @@ export {
   type SessionRlsActorContext,
   type RlsStrategy,
   type SandboxProviderReadLockIdentity,
+  type ManagedUserProfile,
   type UserLookup,
+  type UserProfileLookup,
 } from "./database";
 export { withSessionRlsActorContext } from "./database";
 import {
@@ -2138,6 +2146,51 @@ export async function createWorkspace(
   });
 }
 
+/**
+ * Create one shared workspace through the direct managed-human organization
+ * control plane. Organization authority is rechecked inside the lifecycle
+ * function, the operation id is replay-safe, and no operational
+ * workspace_memberships row is created for the actor.
+ */
+export async function createOrganizationSharedWorkspace(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    name: string;
+    slug?: string | null;
+    agentInstructions?: string | null;
+    operationId: string;
+  },
+): Promise<Workspace> {
+  return await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Database;
+    return await withRlsContext(
+      txDb,
+      { accountId: input.organizationId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+        const [result] = await rawRows<{ result: { workspaceId?: unknown } }>(
+          scopedDb,
+          sql`select create_organization_shared_workspace(
+            ${input.organizationId}::uuid,
+            ${input.actorSubjectId},
+            ${input.name},
+            ${input.slug ?? null},
+            ${input.agentInstructions ?? null},
+            ${input.operationId}::uuid
+          ) as result`,
+        );
+        const workspaceId = result?.result?.workspaceId;
+        if (typeof workspaceId !== "string") {
+          throw new Error("Organization shared-workspace creation returned no workspace id");
+        }
+        return await requireWorkspace(scopedDb, workspaceId);
+      },
+    );
+  });
+}
+
 export async function grantWorkspaceAccess(
   db: Database,
   input: {
@@ -2168,6 +2221,115 @@ export async function grantWorkspaceAccess(
         updatedAt: new Date(),
       },
     });
+}
+
+async function withOrganizationSharedWorkspaceAdministration<T>(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+  },
+  operation: (scopedDb: Database) => Promise<T>,
+): Promise<T> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      await scopedDb.execute(sql`select assert_organization_shared_workspace_administrator(
+        ${input.organizationId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.actorSubjectId}
+      )`);
+      return await operation(scopedDb);
+    },
+  );
+}
+
+/**
+ * Organization control-plane metadata update for one shared workspace. This
+ * capability never creates a workspace membership or an operational grant for
+ * the actor; the database excludes every Personal workspace before mutation.
+ */
+export async function updateOrganizationSharedWorkspace(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    name?: string;
+    slug?: string | null;
+    agentInstructions?: string | null;
+  },
+): Promise<Workspace> {
+  return await withOrganizationSharedWorkspaceAdministration(
+    db,
+    input,
+    async (scopedDb) =>
+      await updateWorkspace(scopedDb, input.workspaceId, {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.slug !== undefined ? { slug: input.slug } : {}),
+        ...(input.agentInstructions !== undefined
+          ? { agentInstructions: input.agentInstructions }
+          : {}),
+      }),
+  );
+}
+
+/** Same authority as metadata administration, preserving the canonical
+ * workspace-settings merge and inference-control lock path. */
+export async function updateOrganizationSharedWorkspaceSettings(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    patch: Record<string, unknown>;
+  },
+): Promise<Workspace> {
+  return await withOrganizationSharedWorkspaceAdministration(
+    db,
+    input,
+    async (scopedDb) => await updateWorkspaceSettings(scopedDb, input.workspaceId, input.patch),
+  );
+}
+
+/** Assign or update one active organization member in one shared workspace. */
+export async function upsertOrganizationSharedWorkspaceMember(
+  db: Database,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetOrganizationMembershipId: string;
+    subjectLabel?: string | null;
+    role?: string;
+    permissions: Permission[];
+    requireExisting: boolean;
+  },
+): Promise<WorkspaceMember> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select upsert_organization_shared_workspace_member(
+          ${input.organizationId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.actorSubjectId},
+          ${input.targetOrganizationMembershipId}::uuid,
+          ${input.subjectLabel ?? null},
+          ${input.role ?? null},
+          ${JSON.stringify(input.permissions)}::jsonb,
+          ${input.requireExisting}
+        ) as result`,
+      );
+      return WorkspaceMemberContract.parse(row?.result);
+    },
+  );
 }
 
 export async function updateWorkspace(
@@ -2367,6 +2529,30 @@ export async function getManagedUserByEmail(db: Database, email: string): Promis
     select id from auth_users where lower(email) = lower(${email}) limit 1
   `);
   return (rows as unknown as Array<{ id?: string }>)[0]?.id ?? null;
+}
+
+/**
+ * Resolve the safe profile fields organization administrators need to manage
+ * their own roster. Embedded deployments can provide the same projection
+ * through `userProfileLookup` without exposing their identity store schema.
+ */
+export async function getManagedUserProfilesByIds(
+  db: Database,
+  userIds: readonly string[],
+): Promise<Array<{ id: string; name: string | null; email: string }>> {
+  const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+  if (uniqueUserIds.length === 0) return [];
+  const binding = dbBindingFor(db);
+  if (binding?.userProfileLookup) {
+    return await binding.userProfileLookup(db, uniqueUserIds);
+  }
+  return await rawRows<{ id: string; name: string | null; email: string }>(
+    db,
+    sql`select id, name, email from auth_users where id in (${sql.join(
+      uniqueUserIds.map((userId) => sql`${userId}`),
+      sql`, `,
+    )})`,
+  );
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
@@ -2794,6 +2980,7 @@ export async function createApiKey(
     accountId: string;
     workspaceId?: string | null;
     name: string;
+    description?: string | null;
     prefix: string;
     keyHash: string;
     permissions: Permission[];
@@ -2810,6 +2997,7 @@ export async function createApiKey(
           accountId: input.accountId,
           workspaceId: input.workspaceId ?? null,
           name: input.name,
+          description: input.description ?? null,
           prefix: input.prefix,
           keyHash: input.keyHash,
           permissions: input.permissions,
@@ -9343,6 +9531,16 @@ export type SlackInteraction = {
    * one-time onboarding hint. `null` means the decision is unresolved.
    */
   firstTaskHint: boolean | null;
+  /**
+   * The routed workspace's name, frozen when the interaction bound.
+   *
+   * Null means "do not say where this went": either routing is off, or the
+   * person had exactly one workspace to begin with, and a constant footer on
+   * every message would be noise. It is frozen rather than looked up at post
+   * time because a rename between the original post and a reconciliation would
+   * make the ledger's byte comparison raise.
+   */
+  routedWorkspaceLabel: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -9478,62 +9676,123 @@ export async function getSlackBotUserLink(
  * stored decision, and unlinking plus relinking the Slack identity cannot flip
  * an acknowledgement that was already rendered.
  *
- * The frozen decision and the per-identity claim commit in one transaction, so
- * at most one interaction per Slack identity per installation is granted the
- * hint. Failure raises instead of degrading to "no hint": a caller must never
- * bind a post operation to text that depends on an unresolved answer.
+ * The per-identity claim row is the single source of truth and is replay-stable:
+ * the frozen answer is exactly "this identity's one claim names THIS
+ * interaction". At most one interaction per Slack identity per installation is
+ * therefore granted the hint, whichever resolver wins the claim, and the freeze
+ * is a separate compare-and-set whose losers read back the stored byte rather
+ * than their own recomputed one. This is deliberately not one transaction: the
+ * claim is a home-tenancy row and the freeze is a target-tenancy row, and one
+ * transaction carries one RLS scope. Failure raises instead of degrading to "no
+ * hint": a caller must never bind a post operation to text that depends on an
+ * unresolved answer.
  */
 export async function resolveSlackInteractionFirstTaskHint(
   db: Database,
   input: {
+    /** HOME: the installation workspace that owns the identity link. */
     workspaceId: string;
     connectionId: string;
     slackUserId: string;
     interactionId: string;
+    /**
+     * TARGET: the workspace that owns the interaction row. Defaults to HOME,
+     * which is what every caller means until routing exists.
+     */
+    interactionWorkspaceId?: string;
   },
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    // Interaction row first, then the identity link: one lock order for every
-    // concurrent resolver of the same interaction.
-    const [frozen] = await scopedDb
+  const identityWorkspaceId = input.workspaceId;
+  const interactionWorkspaceId = input.interactionWorkspaceId ?? input.workspaceId;
+
+  // `slack_bot_user_links` is a HOME row and `slack_interactions` is a TARGET
+  // row. One transaction carries one RLS scope, so this cannot be a single
+  // scoped transaction once the two differ. It does not need to be: the
+  // per-identity claim is itself the source of truth, and it is replay-stable.
+  //
+  // The frozen answer is `the identity's one claim names THIS interaction`. Two
+  // resolvers of the same interaction therefore always agree, whichever wins the
+  // claim; two resolvers of different interactions elect exactly one winner; and
+  // a crash between the claim and the freeze re-derives the same answer on the
+  // next call. Failure still raises rather than degrading to "no hint": a caller
+  // must never bind a post operation to text that depends on an unresolved
+  // answer.
+  const frozen = await withWorkspaceRls(db, interactionWorkspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
       .select({ firstTaskHint: schema.slackInteractions.firstTaskHint })
       .from(schema.slackInteractions)
       .where(
         and(
-          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.workspaceId, interactionWorkspaceId),
           eq(schema.slackInteractions.id, input.interactionId),
         ),
       )
-      .limit(1)
-      .for("update");
-    if (!frozen) throw new Error("Slack first-task hint requires a durable interaction row");
-    if (frozen.firstTaskHint !== null) return frozen.firstTaskHint;
+      .limit(1);
+    if (!row) throw new Error("Slack first-task hint requires a durable interaction row");
+    return row.firstTaskHint;
+  });
+  if (frozen !== null) return frozen;
 
+  const granted = await withWorkspaceRls(db, identityWorkspaceId, async (scopedDb) => {
     const claimed = await scopedDb
       .update(schema.slackBotUserLinks)
       .set({ firstTaskHintInteractionId: input.interactionId })
       .where(
         and(
-          eq(schema.slackBotUserLinks.workspaceId, input.workspaceId),
+          eq(schema.slackBotUserLinks.workspaceId, identityWorkspaceId),
           eq(schema.slackBotUserLinks.connectionId, input.connectionId),
           eq(schema.slackBotUserLinks.slackUserId, input.slackUserId),
           isNull(schema.slackBotUserLinks.firstTaskHintInteractionId),
         ),
       )
       .returning({ id: schema.slackBotUserLinks.id });
-    const granted = claimed.length > 0;
+    if (claimed.length > 0) return true;
+    // Lost the claim, or replaying after a crash between the claim and the
+    // freeze. The claim itself says which it was.
+    const [existing] = await scopedDb
+      .select({
+        firstTaskHintInteractionId: schema.slackBotUserLinks.firstTaskHintInteractionId,
+      })
+      .from(schema.slackBotUserLinks)
+      .where(
+        and(
+          eq(schema.slackBotUserLinks.workspaceId, identityWorkspaceId),
+          eq(schema.slackBotUserLinks.connectionId, input.connectionId),
+          eq(schema.slackBotUserLinks.slackUserId, input.slackUserId),
+        ),
+      )
+      .limit(1);
+    return existing?.firstTaskHintInteractionId === input.interactionId;
+  });
 
-    await scopedDb
+  return await withWorkspaceRls(db, interactionWorkspaceId, async (scopedDb) => {
+    const [written] = await scopedDb
       .update(schema.slackInteractions)
       .set({ firstTaskHint: granted, updatedAt: sql`now()` })
       .where(
         and(
-          eq(schema.slackInteractions.workspaceId, input.workspaceId),
+          eq(schema.slackInteractions.workspaceId, interactionWorkspaceId),
           eq(schema.slackInteractions.id, input.interactionId),
           isNull(schema.slackInteractions.firstTaskHint),
         ),
-      );
-    return granted;
+      )
+      .returning({ firstTaskHint: schema.slackInteractions.firstTaskHint });
+    if (written) return written.firstTaskHint ?? granted;
+    // Another resolver of this exact interaction froze first. It computed the
+    // same predicate, but return the stored byte rather than a recomputed one so
+    // the digest-bound post ledger can never see two answers.
+    const [current] = await scopedDb
+      .select({ firstTaskHint: schema.slackInteractions.firstTaskHint })
+      .from(schema.slackInteractions)
+      .where(
+        and(
+          eq(schema.slackInteractions.workspaceId, interactionWorkspaceId),
+          eq(schema.slackInteractions.id, input.interactionId),
+        ),
+      )
+      .limit(1);
+    if (!current) throw new Error("Slack first-task hint requires a durable interaction row");
+    return current.firstTaskHint ?? granted;
   });
 }
 
@@ -9900,22 +10159,26 @@ export async function getOrCreateSlackInteraction(
     | "ackSlackMessageTs"
     // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
     | "firstTaskHint"
+    | "routedWorkspaceLabel"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
     | "updatedAt"
-  > & { initiatingSlackUserId?: string | null },
+  > & { initiatingSlackUserId?: string | null; routedWorkspaceLabel?: string | null },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
-  return await withRlsContext(db, input, async (scopedDb) => {
+  const outcome = await withRlsContext(db, input, async (scopedDb) => {
     const [created] = await scopedDb
       .insert(schema.slackInteractions)
       .values({
         ...input,
         initiatingSlackUserId: input.initiatingSlackUserId ?? null,
+        routedWorkspaceLabel: input.routedWorkspaceLabel ?? null,
       })
       .onConflictDoNothing()
       .returning();
-    if (created) return { created: true, interaction: mapSlackInteraction(created) };
+    if (created) {
+      return { created: true, interaction: mapSlackInteraction(created) } as const;
+    }
     const [existing] = await scopedDb
       .select()
       .from(schema.slackInteractions)
@@ -9926,11 +10189,66 @@ export async function getOrCreateSlackInteraction(
         ),
       )
       .limit(1);
-    if (!existing) throw new Error("Slack route idempotency conflict could not be resolved");
-    return { created: false, interaction: mapSlackInteraction(existing) };
+    return existing
+      ? ({ created: false, interaction: mapSlackInteraction(existing) } as const)
+      : ({ created: false, interaction: null } as const);
+  });
+  if (outcome.interaction) {
+    return { created: outcome.created, interaction: outcome.interaction };
+  }
+  // The route unique index is connection-global while the recovery SELECT above
+  // runs under the intended tenancy. A thread that already belongs to another
+  // workspace in this organization therefore conflicts without being visible
+  // here. Re-probe the connection-global route and adopt the existing row's
+  // tenancy: a mapped thread keeps the workspace it was created in.
+  const probed = await probeSlackInteractionTenancy(db, {
+    accountId: input.accountId,
+    connectionId: input.connectionId,
+    routeKey: input.routeKey,
+  });
+  const adopted = probed
+    ? await getSlackInteractionById(db, {
+        accountId: probed.accountId,
+        workspaceId: probed.workspaceId,
+        interactionId: probed.interactionId,
+      })
+    : null;
+  if (!adopted) throw new Error("Slack route idempotency conflict could not be resolved");
+  return { created: false, interaction: adopted };
+}
+
+/**
+ * Connection-scoped thread continuation. `slack_interactions_route_uq` is
+ * `(connection_id, route_key)`, so one Slack thread maps to exactly one
+ * interaction across every workspace this installation can address. The
+ * content-free tenancy probe resolves which workspace that is; the full row is
+ * then read under that workspace's own RLS scope, so nothing is widened.
+ *
+ * `accountId` is the organization the caller is acting for, and the probe is
+ * fenced on it: crossing workspaces within one organization is the whole point,
+ * crossing organizations never is.
+ */
+export async function getSlackInteractionByConnectionRoute(
+  db: Database,
+  input: { accountId: string; connectionId: string; routeKey: string },
+): Promise<SlackInteraction | null> {
+  const probed = await probeSlackInteractionTenancy(db, input);
+  if (!probed) return null;
+  return await getSlackInteractionById(db, {
+    accountId: probed.accountId,
+    workspaceId: probed.workspaceId,
+    interactionId: probed.interactionId,
   });
 }
 
+/**
+ * Workspace-fenced route lookup.
+ *
+ * This is NOT the thread-continuation read: `slack_interactions_route_uq` is
+ * `(connection_id, route_key)` and therefore connection-global, so a thread that
+ * belongs to another workspace this installation can address is invisible here.
+ * Use `getSlackInteractionByConnectionRoute` for continuation.
+ */
 export async function getSlackInteractionByRoute(
   db: Database,
   workspaceId: string,
@@ -10837,6 +11155,11 @@ function mapSlackInteraction(
     ),
     ackSlackMessageTs: slackRowNullableString(row, "ackSlackMessageTs", "ack_slack_message_ts"),
     firstTaskHint: slackRowNullableBoolean(row, "firstTaskHint", "first_task_hint"),
+    routedWorkspaceLabel: slackRowNullableString(
+      row,
+      "routedWorkspaceLabel",
+      "routed_workspace_label",
+    ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
@@ -18288,6 +18611,79 @@ export async function namedSubjectHasLiveWorkspaceAuthority(
 }
 
 /**
+ * The ONLY place a Slack request may reach a managed human's personal
+ * workspace. Returns the grant a routed Slack target may act under, or null.
+ *
+ * A Slack webhook has no caller subject: `subjectId` is read out of band from a
+ * durable `slack_bot_user_links` row, whose only writers sit behind a verified
+ * managed-human cookie or a `members:manage` grant. That is why this uses
+ * {@link namedSubjectHasLiveWorkspaceAuthority} rather than the in-scope
+ * variant - the subject was authenticated elsewhere, and this seam is naming
+ * it, not proving it. Callers must therefore never pass a subject taken from a
+ * Slack payload; pass only `link.subjectId`.
+ *
+ * Ordinary membership first, then a derived-and-fenced pointer path (the same
+ * shape as `requirePersonalGitHubCallbackGrant`):
+ *
+ * - `getWorkspaceGrant` is a bare `workspace_memberships` join and is NOT
+ *   widened here, because `accessGrantAuthorization` calls it for every
+ *   principal kind including API keys and delegated bearers; widening it would
+ *   hand a bearer principal personal-workspace access.
+ * - The pointer path accepts only the subject's OWN `personalWorkspaceId` from
+ *   an ACTIVE membership in exactly `targetAccountId`, then re-checks live
+ *   authority. The workspace id is never taken from a route row or a Slack
+ *   payload - it must equal the pointer.
+ * - No Slack branch is ever added to `canonicalManagedCookieContexts`: that
+ *   `WeakSet` has exactly one writer, the Better Auth cookie branch of
+ *   `resolveAccessContext`, and a Slack-signed webhook can never be in it.
+ *
+ * Slack sessions stay `workspace_shared`: this grant is passed as an ordinary
+ * grant, and `createSessionForRequest` is still called WITHOUT its
+ * `authorization` argument, so Slack privacy remains
+ * `slack_interactions.visibility`.
+ */
+export async function resolveSlackTargetAuthority(
+  db: Database,
+  input: { subjectId: string; targetAccountId: string; targetWorkspaceId: string },
+): Promise<AccessGrant | null> {
+  const grant = await getWorkspaceGrant(db, input.subjectId, input.targetWorkspaceId, {
+    principalKind: "human_session",
+  });
+  const membershipGrant = grant && grant.accountId === input.targetAccountId ? grant : null;
+
+  // Both arms answer to the same rule. `getWorkspaceGrant` is a bare membership
+  // join: it cannot see that the organization membership behind that row was
+  // suspended or offboarded, so returning it verbatim would keep serving a
+  // person the organization has already removed. `namedSubjectHasLiveWorkspaceAuthority`
+  // is the canonical implementation of "does this subject hold authority here",
+  // and it covers both a persisted membership row and the personal-workspace
+  // pointer, so it is applied before either grant shape is returned.
+  const personalWorkspaceId = membershipGrant
+    ? null
+    : await namedSubjectPersonalWorkspaceId(db, {
+        accountId: input.targetAccountId,
+        subjectId: input.subjectId,
+      });
+  if (!membershipGrant && personalWorkspaceId !== input.targetWorkspaceId) return null;
+
+  const live = await namedSubjectHasLiveWorkspaceAuthority(db, {
+    accountId: input.targetAccountId,
+    workspaceId: input.targetWorkspaceId,
+    subjectId: input.subjectId,
+  });
+  if (!live) return null;
+  if (membershipGrant) return membershipGrant;
+
+  return {
+    workspaceId: input.targetWorkspaceId,
+    accountId: input.targetAccountId,
+    subjectId: input.subjectId,
+    permissions: managedPersonalWorkspacePermissions,
+    principalKind: "human_session",
+  };
+}
+
+/**
  * Read-only organization tenancy inventory (0285): content-free counts of
  * every legacy-attribution population the backfill/parity program gates on.
  * Integers only - no identities, names, keys, or values.
@@ -18510,11 +18906,9 @@ export const TENANCY_PARITY_GATES: readonly TenancyParityGateDefinition[] = [
  */
 export const TENANCY_PARITY_LANES: readonly TenancyParityLaneDefinition[] = [
   {
-    // NOT bounded today: 0256's guard_connection_authority_write still actively
-    // mints `legacy_user` for any NEW connection whose subject has no active
-    // organization membership, and no migration upgrades an existing
-    // `legacy_user` row to `user`. It becomes drainable only once the
-    // membership backfill lands and stops the mint.
+    // Migration 0340 bounds this lane with a deterministic subject + active
+    // same-organization membership repair. Activation then fences new minting
+    // and hides any unresolved legacy row from runtime reads.
     id: "connectionsLegacyUser",
     title:
       "Connections on the legacy_user authority lane (drainable after the membership backfill)",
@@ -18610,9 +19004,8 @@ export const TENANCY_PARITY_UNVERIFIABLE: readonly TenancyParityUnverifiable[] =
       "subject-created sessions whose creator holds an active organization membership " +
       "AND stated authority over that workspace: a workspace_memberships row, or the " +
       "membership's own personal_workspace_id pointer. Only that attributable subset " +
-      "is drainable; the 'sessionsAttributableButUnattributed' lane still measures " +
-      "the narrower workspace-membership half, so it under-reports pre-0302 " +
-      "personal-workspace rows that 0297's backfill owns.",
+      "is drainable; migration 0340 measures both stated-authority forms in the " +
+      "'sessionsAttributableButUnattributed' lane.",
   },
 ];
 
@@ -21974,13 +22367,27 @@ async function withTemporarySubjectRls<T>(
     sql`select current_setting('opengeni.subject_id', true) as subject_id`,
   );
   await setSubjectRlsContext(tx, subjectId);
-  try {
-    return await fn();
-  } finally {
+  const restoreSubjectScope = async () =>
     await tx.execute(
       sql`select set_config('opengeni.subject_id', ${prior?.subject_id ?? ""}, true)`,
     );
+  let result: T;
+  try {
+    result = await fn();
+  } catch (error) {
+    // Restoring the scope inside an already-aborted transaction raises 25P02,
+    // which would replace the real error with a useless one. Callers on the
+    // claim path classify the original SQLSTATE (40P01/40001) for the
+    // idempotent-persistence retry, so that substitution is not cosmetic: it
+    // silently disables the retry. The transaction is unwinding here and the
+    // scope dies with it, so a failed restore is moot.
+    await restoreSubjectScope().catch(() => undefined);
+    throw error;
   }
+  // `fn` succeeded, so the transaction is still usable and the caller keeps
+  // running inside it: a restore failure here is real and must surface.
+  await restoreSubjectScope();
+  return result;
 }
 
 async function getXaiCapacityWaitForSessionInTransaction(
@@ -29404,6 +29811,24 @@ export async function setSessionPin(
               attentionVersion: 0,
               archiveVersion: 0,
             })
+            // A turn claim may have created this subject's row for the same
+            // session between the read above and here, to acknowledge a
+            // consumed child lifecycle notice. That writer keeps the pin domain
+            // exactly at the absent-row projection (`pinned` false, version 0),
+            // so the conflict path is the same false -> true transition; only
+            // the attention fence it owns must survive untouched.
+            .onConflictDoUpdate({
+              target: [
+                schema.sessionPins.subjectId,
+                schema.sessionPins.workspaceId,
+                schema.sessionPins.sessionId,
+              ],
+              set: {
+                pinned: true,
+                pinnedAt: new Date(),
+                version: sql`${schema.sessionPins.version} + 1`,
+              },
+            })
             .returning();
           pin = inserted ?? null;
         } else if (existing.pinned !== input.pinned) {
@@ -29537,6 +29962,17 @@ export async function setSessionAttention(
           throw new SessionAttentionVersionConflictError(current);
         }
 
+        // A turn claim acknowledging a consumed child lifecycle notice advances
+        // this same fence for this same subject without holding the personal
+        // state fence above (it must not: membership removal takes that fence
+        // BEFORE the workspace/session lock prefix a claim already owns). Marking
+        // read must therefore never regress a fence that committed after the read
+        // above. An explicit mark-unread is the one deliberate regression and
+        // keeps its exact sentinel.
+        const monotonicAcknowledgment = input.unread !== true;
+        const acknowledgedSequenceWrite = monotonicAcknowledgment
+          ? sql`greatest(${schema.sessionPins.acknowledgedSequence}, ${acknowledgedSequence})`
+          : acknowledgedSequence;
         let state = existing ?? null;
         if (!existing) {
           const [inserted] = await tx
@@ -29554,13 +29990,25 @@ export async function setSessionAttention(
               attentionVersion: 1,
               archiveVersion: 0,
             })
+            .onConflictDoUpdate({
+              target: [
+                schema.sessionPins.subjectId,
+                schema.sessionPins.workspaceId,
+                schema.sessionPins.sessionId,
+              ],
+              set: {
+                acknowledgedSequence: acknowledgedSequenceWrite,
+                activelyWorking: desiredActivelyWorking,
+                attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
+              },
+            })
             .returning();
           state = inserted ?? null;
         } else {
           const [updated] = await tx
             .update(schema.sessionPins)
             .set({
-              acknowledgedSequence,
+              acknowledgedSequence: acknowledgedSequenceWrite,
               activelyWorking: desiredActivelyWorking,
               attentionVersion: sql`${schema.sessionPins.attentionVersion} + 1`,
             })
@@ -29682,6 +30130,26 @@ export async function setSessionArchive(
               archivedAt: new Date(),
               attentionVersion: 0,
               archiveVersion: 1,
+            })
+            // A turn claim may have created this subject's row for the same
+            // session between the read above and here, to acknowledge a consumed
+            // child lifecycle notice. That row is archive-neutral and pin-neutral
+            // (the absent-row projection), so this is the same false -> true
+            // archive transition; its attention fence and version stay untouched.
+            .onConflictDoUpdate({
+              target: [
+                schema.sessionPins.subjectId,
+                schema.sessionPins.workspaceId,
+                schema.sessionPins.sessionId,
+              ],
+              set: {
+                archived: true,
+                archivedAt: new Date(),
+                archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+                pinned: false,
+                pinnedAt: null,
+                activelyWorking: false,
+              },
             })
             .returning();
           state = inserted ?? null;
@@ -46585,6 +47053,8 @@ export type EnrollmentRecord = {
   connectionDuplicateDeniedAt: string | null;
   os: EnrollmentOs;
   arch: string;
+  /** Exact absolute launch root last reported by an authoritative runner Hello. */
+  workspaceRoot: string | null;
   lastSeenAt: string | null;
   /** When the machine announced a clean GoingOffline; the liveness derivation reads
    *  an un-cleared marker as offline immediately. NULL ⇒ no goodbye pending. */
@@ -46633,6 +47103,7 @@ function mapEnrollment(row: typeof schema.enrollments.$inferSelect): EnrollmentR
     connectionDuplicateDeniedAt: row.connectionDuplicateDeniedAt?.toISOString() ?? null,
     os: row.os as EnrollmentOs,
     arch: row.arch,
+    workspaceRoot: row.workspaceRoot ?? null,
     lastSeenAt: row.lastSeenAt ? row.lastSeenAt.toISOString() : null,
     wentOfflineAt: row.wentOfflineAt ? row.wentOfflineAt.toISOString() : null,
     wentOfflineReason: row.wentOfflineReason ?? null,
@@ -48104,6 +48575,8 @@ export async function setEnrollmentAgentRuntime(
     binarySha256: string | null;
     updateChannel: "stable" | "beta" | null;
     capabilities: Record<string, boolean>;
+    /** Omitted when an older or malformed Hello did not report a usable root. */
+    workspaceRoot?: string;
     completedUpdate: {
       operationId: string;
       targetVersion: string;
@@ -48143,6 +48616,7 @@ export async function setEnrollmentAgentRuntime(
           agentBinarySha256: input.binarySha256,
           agentUpdateChannel: input.updateChannel,
           agentCapabilities: input.capabilities,
+          ...(input.workspaceRoot !== undefined ? { workspaceRoot: input.workspaceRoot } : {}),
           // Success is derived atomically from the successor's durable updater
           // receipt + exact running build. If another process replaced the
           // accepting one without that proof, fail retryably instead of leaving
@@ -48194,6 +48668,9 @@ export async function setEnrollmentAgentRuntime(
               sql`${schema.enrollments.agentBinarySha256} is distinct from ${input.binarySha256}`,
               sql`${schema.enrollments.agentUpdateChannel} is distinct from ${input.updateChannel}`,
               sql`${schema.enrollments.agentCapabilities} is distinct from ${JSON.stringify(input.capabilities)}::jsonb`,
+              ...(input.workspaceRoot !== undefined
+                ? [sql`${schema.enrollments.workspaceRoot} is distinct from ${input.workspaceRoot}`]
+                : []),
               successorProvesCompletion,
               acceptingProcessWasReplaced,
             ),
@@ -49028,8 +49505,8 @@ export async function listSandboxes(db: Database, workspaceId: string): Promise<
 export type ActiveSandboxPointer = {
   activeSandboxId: string | null;
   activeEpoch: number;
-  // The session's working directory (the path/cwd base for a selfhosted backend),
-  // surfaced alongside the pointer. NULL ⇒ the default workspace_root behavior.
+  // Effective absolute Connected Machine root. Null/relative values can exist on
+  // legacy rows and are resolved against the current persisted Hello root.
   workingDir: string | null;
 };
 
@@ -53945,6 +54422,7 @@ export async function initializeSessionStartAtomically(
                       ...(session.initialModelContext
                         ? { modelContext: session.initialModelContext }
                         : {}),
+                      routing: runnable ? "accepted_for_execution" : "queued_for_execution",
                       initiator: creator.initiator,
                     },
                     clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
@@ -54044,6 +54522,7 @@ export async function initializeSessionStartAtomically(
                   temporalWorkflowId,
                   status: "queued",
                   source: "user",
+                  promptRouting: runnable ? "accepted_for_execution" : "queued_for_execution",
                   position: queueTailPosition,
                   prompt: canonicalInitialMessage,
                   modelContext: session.initialModelContext ?? null,
@@ -54183,6 +54662,7 @@ export async function initializeSessionStartAtomically(
                     turnId: turn.id,
                     triggerEventId: userEvent.id,
                     source: turn.source,
+                    ...(turn.promptRouting ? { routing: turn.promptRouting } : {}),
                     initiator: creator.initiator,
                   },
                 },
@@ -54350,6 +54830,7 @@ export async function enqueueSessionTurn(
                 temporalWorkflowId: input.temporalWorkflowId,
                 status: "queued",
                 source: input.source,
+                promptRouting: "queued_for_execution",
                 position,
                 prompt: input.prompt,
                 modelContext: input.modelContext ?? null,
@@ -54754,6 +55235,173 @@ async function goalSnapshotForAcceptedTurnInTransaction(
 }
 
 /**
+ * Every child lifecycle payload carries the same `childSessionId`. Deriving the
+ * set from `CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS` keeps that a compiler fact: a
+ * seventh kind without the field stops compiling here instead of silently
+ * dropping out of the read-fence advance.
+ */
+type ChildLifecycleSystemUpdatePayload = Extract<
+  SessionSystemUpdatePayload,
+  { type: ChildLifecycleSystemUpdateKind }
+>;
+
+function isChildLifecycleSystemUpdatePayload(
+  payload: SessionSystemUpdatePayload,
+): payload is ChildLifecycleSystemUpdatePayload {
+  return isChildLifecycleSystemUpdateKind(payload.type);
+}
+
+/**
+ * The child sessions a delivered machine-input batch reports on, deduped in
+ * first-delivery order. Keyed on the child lifecycle kind set and never on an
+ * orchestrator/goal shape. Callers pass the payloads the delivery loop already
+ * validated, so no row is parsed twice.
+ */
+function consumedChildLifecycleSessionIds(
+  updates: ReadonlyArray<typeof schema.sessionSystemUpdates.$inferSelect>,
+  payloadsById: ReadonlyMap<string, SessionSystemUpdatePayload>,
+): string[] {
+  const childSessionIds = new Set<string>();
+  for (const update of updates) {
+    if (!isChildLifecycleSystemUpdateKind(update.kind)) continue;
+    const payload = payloadsById.get(update.id);
+    // The row's kind and its payload discriminator are written together; narrow
+    // on the discriminator so the shared field access is typed rather than cast.
+    if (!payload || !isChildLifecycleSystemUpdatePayload(payload)) continue;
+    childSessionIds.add(payload.childSessionId);
+  }
+  return [...childSessionIds];
+}
+
+/**
+ * Acknowledge every child whose lifecycle notice this claim just turned into
+ * durable model input, for the receiving turn's frozen initiating human only.
+ *
+ * A parent agent that consumed a child's result, pause, capacity wait, progress
+ * note, or human-input boundary has already carried that fact to the human who
+ * started the turn, so the child's blue unread dot is pure noise: an
+ * orchestrator with dozens of children otherwise leaves dozens of permanently
+ * unread rows until a human opens each one by hand. This advances exactly the
+ * per-viewer fence `setSessionAttention` writes, as if that human had viewed the
+ * child. A pure service turn has no initiating human and writes nothing.
+ *
+ * `failed` and `requires_action` indicators are derived from `sessions.status`
+ * and rank above unread, so an acknowledged child that still needs a human keeps
+ * saying so, and a child that emits a further event goes unread again on its own
+ * because unread is only the sequence comparison in {@link mapSessionAttention}.
+ * The fence is monotone, so it also advances past a human's earlier explicit
+ * mark-unread once the parent consumes a newer notice: consumption is the
+ * signal, and OpenGeni keeps no durable "keep this unread" intent.
+ *
+ * This deliberately does NOT touch `attention_version`. That revision exists
+ * only to order explicit human attention mutations against each other, and this
+ * writer publishes no event, NATS invalidation, or sequence advance a browser
+ * could learn from - bumping it would silently invalidate the version the rail
+ * holds and turn the human's next mark-read click into a 409.
+ *
+ * Lock discipline: the claim transaction already owns the canonical workspace →
+ * session → turn → attempt prefix for the PARENT.
+ *
+ * - It takes the `session-personal-state` fence with
+ *   `pg_try_advisory_xact_lock_shared` and SKIPS the acknowledgment when the
+ *   fence is unavailable. Membership removal (migration 0278) takes that fence
+ *   EXCLUSIVELY and BEFORE the workspace/session prefix, so blocking on it here
+ *   would invert the canonical order; a non-blocking probe cannot. Honouring the
+ *   fence is what keeps this from being the "racing pin writer recreates personal
+ *   rows after cleanup" hole 0278 exists to close, and losing the probe is a
+ *   clean no-op rather than a partial write - the child simply stays unread,
+ *   which is today's behaviour. Shared rather than exclusive because
+ *   `listSessionsForSubject` holds the shared counterpart for its whole
+ *   rail-list transaction; see the acquisition site for why exclusive would drop
+ *   acknowledgments exactly when the human is watching the rail.
+ * - It takes no child turn/attempt lock and no explicit child session lock.
+ *   `session_pins` does carry two foreign keys to `sessions`, so each inserted
+ *   row does take `FOR KEY SHARE` on the child's session row. That is safe
+ *   rather than an inversion: `FOR KEY SHARE` conflicts only with `FOR UPDATE`,
+ *   and every canonical session writer takes `FOR NO KEY UPDATE`, which is
+ *   compatible with it.
+ * - One statement inserts every child in `ORDER BY id`, matching the UUID lock
+ *   ordering the rest of this file uses and the index order migration 0278
+ *   deletes in, so the two cannot deadlock against each other.
+ *
+ * The upsert is monotone: the conflict path re-reads the committed row under its
+ * own row lock and refuses to move a fence backward.
+ *
+ * There is no membership probe. The write grants nothing and discloses nothing
+ * (a fence is visible only to its own subject), the subject comes from durable
+ * frozen turn provenance rather than a request, membership removal deletes these
+ * rows and is serialized against this writer by the fence above, and the
+ * personal-workspace-owner exception a bare membership probe would need is
+ * authorized by an API-layer canonical-managed-cookie stamp that this worker path
+ * does not have. Both RLS policies on `session_pins` still apply through the
+ * temporary subject scope, and the insert is additionally fenced on
+ * `parent_session_id`, so a payload field can never decide whose personal state
+ * is mutated on an unrelated session.
+ */
+async function acknowledgeConsumedChildLifecycleNotices(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string | null;
+    childSessionIds: readonly string[];
+  },
+): Promise<void> {
+  const subjectId = input.subjectId?.trim();
+  if (!subjectId || input.childSessionIds.length === 0) return;
+  // SHARED, not exclusive. `listSessionsForSubject` holds the shared counterpart
+  // of this fence for its whole rail-list transaction, and that list refreshes on
+  // focus, online, and visibilitychange. An exclusive probe fails against a held
+  // shared lock, so it would drop acknowledgments precisely while the human is
+  // looking at the rail, and because `child_terminal_result` is typically a
+  // child's LAST notice, a drop there leaves exactly the permanent blue dot this
+  // exists to remove. Shared still conflicts with membership removal's exclusive
+  // hold, which is the invariant the fence is here for, and acknowledgment
+  // writers need no mutual exclusion against each other: the upsert is monotone
+  // and row-locked.
+  const [fence] = await rawRows<{ acquired: boolean }>(
+    tx,
+    sql`select pg_try_advisory_xact_lock_shared(
+      hashtextextended(${sessionPersonalStateLockKey(input.workspaceId, subjectId)}, 0)
+    ) as acquired`,
+  );
+  if (!fence?.acquired) return;
+  const pins = schema.sessionPins;
+  const sessions = schema.sessions;
+  await withTemporarySubjectRls(tx, subjectId, async () => {
+    await tx.execute(sql`
+      insert into ${pins} (
+        account_id, workspace_id, subject_id, session_id,
+        pinned, pinned_at, version,
+        acknowledged_sequence, actively_working, attention_version,
+        archived, archived_at, archive_version
+      )
+      select
+        ${sessions.accountId}, ${sessions.workspaceId}, ${subjectId}, ${sessions.id},
+        -- An acknowledgment is not a pin and not an archive. Both domains stay
+        -- at the absent-row projection so a concurrent pin/archive writer
+        -- holding that projection stays valid.
+        false, null, 0,
+        ${sessions.lastSequence}, false, 0,
+        false, null, 0
+      from ${sessions}
+      where ${and(
+        eq(sessions.workspaceId, input.workspaceId),
+        eq(sessions.parentSessionId, input.sessionId),
+        inArray(sessions.id, [...input.childSessionIds]),
+        // Nothing to acknowledge on a child with no durable events: the
+        // absent-row projection already reports it read.
+        gt(sessions.lastSequence, 0),
+      )}
+      order by ${sessions.id}
+      on conflict (subject_id, workspace_id, session_id) do update
+        set acknowledged_sequence = excluded.acknowledged_sequence
+        where ${pins.acknowledgedSequence} < excluded.acknowledged_sequence
+    `);
+  });
+}
+
+/**
  * Claim and register one inference attempt after a turn worker has accepted the
  * Temporal activity. This is the only transition into `running`: queue choice,
  * execution generation, active attempt identity, dispatch identity, and the
@@ -54794,6 +55442,8 @@ export async function claimSessionWorkForAttempt(
           historyItemId: string | null;
           historyItem: Record<string, unknown> | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
+          /** Deduped children the delivered batch reports on, in delivery order. */
+          childSessionIds: string[];
           events: SessionEventInsertWithPayload[];
           event: SessionEventInsertWithPayload | null;
         }> => {
@@ -54885,6 +55535,7 @@ export async function claimSessionWorkForAttempt(
               historyItemId: null,
               historyItem: null,
               updates: [],
+              childSessionIds: [],
               events: [],
               event: null,
             };
@@ -54893,16 +55544,22 @@ export async function claimSessionWorkForAttempt(
           const cancelledUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
           const unrecognizedUpdateIds: string[] = [];
+          // Retained so later consumers of the delivered batch (the child
+          // read-fence advance) reuse this exact validation instead of parsing
+          // the same payloads a second time.
+          const parsedPayloadsById = new Map<string, SessionSystemUpdatePayload>();
           for (const update of updates) {
             // A kind or payload this image cannot parse is a bounded, visible
             // condition, never an endless re-peek: mark that one row failed
             // and record `unrecognized_kind` on the timeline; the rest of the
             // batch is claimed normally.
+            const parsedPayload = SessionSystemUpdatePayload.safeParse(
+              fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
+            );
+            if (parsedPayload.success) parsedPayloadsById.set(update.id, parsedPayload.data);
             if (
               !SessionSystemUpdateKindSchema.safeParse(update.kind).success ||
-              !SessionSystemUpdatePayload.safeParse(
-                fromPostgresLosslessJson(update.payload, update.payloadCodecVersion),
-              ).success
+              !parsedPayload.success
             ) {
               await tx
                 .update(schema.sessionSystemUpdates)
@@ -55085,6 +55742,7 @@ export async function claimSessionWorkForAttempt(
               historyItemId: null,
               historyItem: null,
               updates: [],
+              childSessionIds: [],
               events: cancellationEvents,
               event: null,
             };
@@ -55243,6 +55901,7 @@ export async function claimSessionWorkForAttempt(
             historyItemId,
             historyItem,
             updates: deliverable,
+            childSessionIds: consumedChildLifecycleSessionIds(deliverable, parsedPayloadsById),
             events,
             event,
           };
@@ -56560,6 +57219,15 @@ export async function claimSessionWorkForAttempt(
             frozenGoalSnapshot,
             goalContinuationHistoryItem,
           );
+          // The batch is now durable model memory. Every child it reports on has
+          // been carried to this turn's initiating human, so their read fence on
+          // those children advances with the same commit.
+          await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            subjectId: initiatingHumanSubjectId,
+            childSessionIds: delivered.childSessionIds,
+          });
           await registerAttempt(internalTurn);
           if (!delivered.event) throw new Error("Delivered update batch has no durable event");
           await tx
@@ -56718,6 +57386,16 @@ export async function claimSessionWorkForAttempt(
               { supersedeGoalContinuations: true },
             );
         await persistDeliveredUpdateBatch(delivered, session.accountId, row.id);
+        // Same fence advance for a queued human/API turn that coalesced child
+        // lifecycle notices into its own inference.
+        await acknowledgeConsumedChildLifecycleNotices(tx as unknown as Database, {
+          workspaceId,
+          sessionId,
+          subjectId:
+            row.initiatingHumanSubjectId ??
+            (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
+          childSessionIds: delivered.childSessionIds,
+        });
         if (delivered.events.length > 0) {
           await tx
             .insert(schema.sessionEvents)
@@ -61995,13 +62673,20 @@ export async function getSessionQueueSnapshot(
         asc(schema.sessionSystemUpdates.createdAt),
         asc(schema.sessionSystemUpdates.id),
       );
-    const items = rows.map(mapSessionTurn);
+    // `status=queued` is the physical worker-claim queue. Only an explicit
+    // queued_for_execution admission belongs in the operator-visible queue.
+    // Null remains visible during rolling deploys and for legacy rows so a
+    // prompt written by an older process can never disappear from the UI.
+    const physicalItems = rows.map(mapSessionTurn);
+    const items = rows
+      .filter((row) => row.promptRouting === null || row.promptRouting === "queued_for_execution")
+      .map(mapSessionTurn);
     const latestInterruption = await latestSessionAttemptInterruption(
       scopedDb,
       workspaceId,
       sessionId,
     );
-    const queuedSteerPredecessorIds = items
+    const queuedSteerPredecessorIds = physicalItems
       .map((turn) => queuedSteerReplacementAttemptId(turn.metadata))
       .filter((attemptId): attemptId is string => attemptId !== null);
     const stoppingPreviousAttempt =
@@ -62019,8 +62704,8 @@ export async function getSessionQueueSnapshot(
       (update) => update.kind === "agent_steer_instruction",
     );
     const attachmentTurn = hasPendingAgentSteer
-      ? items.find((turn) => turn.metadata.delivery === "steer")
-      : items[0];
+      ? physicalItems.find((turn) => turn.metadata.delivery === "steer")
+      : physicalItems[0];
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
@@ -63643,6 +64328,76 @@ function childLifecycleSupersessionReason(
   if (kind === "child_progress") return "superseded_by_newer_progress";
   if (kind === "child_terminal_result") return "superseded_by_terminal";
   return "superseded_by_resolution";
+}
+
+/**
+ * One durable machine input by id, under the ordinary workspace RLS scope.
+ * The row outlives delivery, so a late bounded projection of an already
+ * announced `system.update.pending` event (Slack notification delivery)
+ * resolves the exact typed notice instead of re-deriving it from the
+ * lossy event preview. Read-only: it never mutates or consumes the update.
+ */
+export async function getSessionSystemUpdateById(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  updateId: string,
+): Promise<SessionSystemUpdate | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.id, updateId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionSystemUpdate(row) : null;
+  });
+}
+
+/**
+ * Whether the parent already holds a `child_requires_action_resolved` notice
+ * for one exact blocked boundary. Read-only, under the ordinary workspace RLS
+ * scope, and answered entirely from the PARENT's own rows: the child session is
+ * never read.
+ *
+ * A resolution supersedes a still-pending `child_requires_action` in the same
+ * commit, but a notice already claimed into a parent turn is `delivered` and
+ * keeps that state forever. A late reader (Slack delivery running behind a
+ * widened retry window) therefore cannot decide staleness from `state` alone.
+ * One accepted response advances that exact (child, turn, generation) boundary
+ * - a re-freeze is a new generation and a new notice - so the presence of the
+ * resolution row in any state is the durable "no longer blocked" fact.
+ */
+export async function childRequiresActionResolutionExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  boundary: { childSessionId: string; childTurnId: string; childTurnGeneration: number },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ id: schema.sessionSystemUpdates.id })
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.kind, "child_requires_action_resolved"),
+          eq(schema.sessionSystemUpdates.sourceId, boundary.childSessionId),
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnId' = ${boundary.childTurnId}`,
+          sql`${schema.sessionSystemUpdates.payload} ->> 'childTurnGeneration' = ${String(
+            boundary.childTurnGeneration,
+          )}`,
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
+  });
 }
 
 export async function listOutstandingSessionSystemUpdates(
@@ -65920,6 +66675,7 @@ function mapApiKey(row: typeof schema.apiKeys.$inferSelect): ApiKey {
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     name: row.name,
+    description: row.description,
     prefix: row.prefix,
     permissions: row.permissions as Permission[],
     expiresAt: row.expiresAt ? row.expiresAt.toISOString() : null,

@@ -56,5 +56,8 @@ describe("staging / production split workflows", () => {
     expect(source).toContain("name: Verify hotfix freeze-head");
     expect(source).toContain("name: Current-base source admission");
     expect(source).toContain("if: ${{ always() }}");
+    expect(source).toContain("ref=$ADMISSION_BASE_SHA");
+    expect(source).toContain("ADMISSION_BASE_SHA: ${{ github.event.pull_request.base.sha }}");
+    expect(source).toContain("pull_request_target loads this controller from protected main");
   });
 });

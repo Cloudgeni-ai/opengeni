@@ -50,9 +50,8 @@ export type ManagedSandboxTarget = {
   backend: SandboxBackend | "";
 };
 
-/** The working folder on a connected machine. PR-1 ships `root` (the agent's
- *  launch dir → no `workingDir` sent) and `path` (a free-form host path → sent as
- *  Stage A's `workingDir`). A named Project (D4) is a future third variant. */
+/** The working folder on a connected machine. `root` selects the reported
+ * launch root; `path` is absolute or relative to it. */
 export type MachineFolder = { kind: "root" } | { kind: "path"; path: string };
 
 /** A user-owned enrolled machine the platform attaches to (no clone, no teardown,
@@ -193,6 +192,7 @@ export type PendingCreateAttempt = {
   workspaceId: string;
   signature: string;
   idempotencyKey: string;
+  eventId: string;
 };
 
 export function classifyCreateSessionFailure(error: unknown): {
@@ -294,9 +294,10 @@ export function buildCreateSessionRequest(
 }
 
 /**
- * Bind a create idempotency key to the exact logical session request. Retry-only
- * fields do not define session identity: the event id is fresh per call, and a
- * draft may acquire a new OCC revision while retaining the same create value.
+ * Bind create and first-message identities to the exact logical request. A
+ * transport retry must retain both: otherwise a committed first event cannot
+ * reconcile with the optimistic handoff returned by the replay. A draft may
+ * acquire a new OCC revision while retaining the same create value.
  * A changed value, workspace, or authenticated client starts a new logical
  * create instead of reviving a partially initialized session with stale input.
  */
@@ -320,14 +321,19 @@ export function prepareCreateSessionAttempt(input: {
     input.pending.signature === signature
       ? input.pending.idempotencyKey
       : input.freshIdempotencyKey;
+  const clientEventId =
+    idempotencyKey === input.pending?.idempotencyKey
+      ? input.pending.eventId
+      : (input.request.clientEventId ?? idempotencyKey);
   return {
     pending: {
       client: input.client,
       workspaceId: input.workspaceId,
       signature,
       idempotencyKey,
+      eventId: clientEventId,
     },
-    request: { ...input.request, idempotencyKey },
+    request: { ...input.request, idempotencyKey, clientEventId },
   };
 }
 
@@ -349,6 +355,7 @@ export function submissionFromSessionDraft(
       // No sandboxBackend (forced `selfhosted` server-side) and no variable set
       // injection — the machine's own env & git auth apply (D2).
       extras: {
+        ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
         ...(goal ? { goal } : {}),
         ...mcp,
         ...visibleTools,
@@ -469,9 +476,8 @@ export function sessionDraftFromNewSessionDraftOptions(
   };
 }
 
-/** The machine's per-session working directory, or `null` for its default
- *  workspace_root (the agent's launch dir). A blank custom path normalizes to
- *  `null` (omitted ⇒ byte-identical to today). */
+/** The requested machine directory, or null for the reported launch root. The
+ * server resolves relative values to one effective absolute path. */
 function workingDirFromFolder(folder: MachineFolder): string | null {
   return folder.kind === "path" ? folder.path.trim() || null : null;
 }

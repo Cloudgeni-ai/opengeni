@@ -8,6 +8,17 @@ const root = resolve(import.meta.dir, "..");
 const exactCiSource =
   "${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}";
 
+type WorkflowStep = {
+  name?: string;
+  uses?: string;
+  if?: string;
+  with?: Record<string, unknown>;
+};
+
+type ParsedWorkflow = {
+  jobs: Record<string, { steps?: WorkflowStep[] }>;
+};
+
 async function workflow(name: string): Promise<string> {
   return readFile(resolve(root, ".github/workflows", name), "utf8");
 }
@@ -106,7 +117,212 @@ function ghApiCommands(source: string): string[] {
   return commands;
 }
 
+function setupBunSteps(parsed: ParsedWorkflow, jobName: string): WorkflowStep[] {
+  return (parsed.jobs[jobName]?.steps ?? []).filter((step) =>
+    step.uses?.startsWith("oven-sh/setup-bun@"),
+  );
+}
+
+function stepIndex(parsed: ParsedWorkflow, jobName: string, name: string): number {
+  const index = (parsed.jobs[jobName]?.steps ?? []).findIndex((step) => step.name === name);
+  if (index < 0) throw new Error(`${jobName} is missing required step ${name}`);
+  return index;
+}
+
 describe("release image workflow contract", () => {
+  test("runs controller and source phases with their owner-specific Bun pins", async () => {
+    const [candidate, acceptance, release, embedded] = await Promise.all([
+      workflow("release-candidate.yml"),
+      workflow("release-acceptance.yml"),
+      workflow("release.yml"),
+      workflow("release-embedded.yml"),
+    ]);
+    const parsed = {
+      candidate: Bun.YAML.parse(candidate) as ParsedWorkflow,
+      acceptance: Bun.YAML.parse(acceptance) as ParsedWorkflow,
+      release: Bun.YAML.parse(release) as ParsedWorkflow,
+      embedded: Bun.YAML.parse(embedded) as ParsedWorkflow,
+    };
+    const source = ".bun-version";
+    const controller = ".release/controller/.bun-version";
+    const summaries = (steps: WorkflowStep[]) =>
+      steps.map((step) => ({
+        name: step.name,
+        if: step.if,
+        versionFile: step.with?.["bun-version-file"],
+      }));
+
+    expect(summaries(setupBunSteps(parsed.candidate, "candidate"))).toEqual([
+      { name: "Set up controller Bun", if: undefined, versionFile: controller },
+      { name: "Set up source Bun", if: undefined, versionFile: source },
+      { name: "Set up restored controller Bun", if: undefined, versionFile: controller },
+    ]);
+    expect(summaries(setupBunSteps(parsed.acceptance, "acceptance"))).toEqual([
+      { name: "Set up controller Bun", if: undefined, versionFile: controller },
+    ]);
+    expect(summaries(setupBunSteps(parsed.release, "publish"))).toEqual([
+      {
+        name: "Set up controller Bun for provenance verification",
+        if: undefined,
+        versionFile: controller,
+      },
+      {
+        name: "Set up source Bun for package verification",
+        if: undefined,
+        versionFile: source,
+      },
+      {
+        name: "Set up restored controller Bun after source verification",
+        if: undefined,
+        versionFile: controller,
+      },
+      {
+        name: "Set up source Bun for package publication",
+        if: "steps.package-plan.outputs.needs_publish == 'true'",
+        versionFile: source,
+      },
+      {
+        name: "Set up restored controller Bun after source publication",
+        if: undefined,
+        versionFile: controller,
+      },
+    ]);
+    expect(summaries(setupBunSteps(parsed.release, "images"))).toEqual([
+      {
+        name: "Set up controller Bun for release evidence",
+        if: undefined,
+        versionFile: controller,
+      },
+    ]);
+    expect(summaries(setupBunSteps(parsed.embedded, "source-verification"))).toEqual([
+      { name: "Set up controller Bun", if: undefined, versionFile: controller },
+      { name: "Set up source Bun", if: undefined, versionFile: source },
+      { name: "Set up restored controller Bun", if: undefined, versionFile: controller },
+    ]);
+    expect(summaries(setupBunSteps(parsed.embedded, "release"))).toEqual([
+      { name: "Set up controller Bun", if: undefined, versionFile: controller },
+      {
+        name: "Set up source Bun for package preparation",
+        if: undefined,
+        versionFile: source,
+      },
+      {
+        name: "Set up restored controller Bun after package preparation",
+        if: undefined,
+        versionFile: controller,
+      },
+      {
+        name: "Set up source Bun for package publication",
+        if: "steps.package-plan.outputs.needs_publish == 'true'",
+        versionFile: source,
+      },
+      {
+        name: "Set up restored controller Bun after source publication",
+        if: undefined,
+        versionFile: controller,
+      },
+    ]);
+
+    expect(stepIndex(parsed.candidate, "candidate", "Set up source Bun")).toBeLessThan(
+      stepIndex(parsed.candidate, "candidate", "Install the Rust toolchain"),
+    );
+    expect(
+      stepIndex(parsed.candidate, "candidate", "Refuse occupied run-scoped candidate tags"),
+    ).toBeLessThan(stepIndex(parsed.candidate, "candidate", "Set up source Bun"));
+    expect(
+      stepIndex(
+        parsed.candidate,
+        "candidate",
+        "Restore the exact controller after source execution",
+      ),
+    ).toBeLessThan(stepIndex(parsed.candidate, "candidate", "Set up restored controller Bun"));
+    expect(
+      stepIndex(parsed.release, "publish", "Set up source Bun for package verification"),
+    ).toBeLessThan(stepIndex(parsed.release, "publish", "Install admitted source dependencies"));
+    expect(
+      stepIndex(parsed.release, "publish", "Download and validate the complete acceptance bundle"),
+    ).toBeLessThan(
+      stepIndex(parsed.release, "publish", "Set up source Bun for package verification"),
+    );
+    expect(
+      stepIndex(parsed.release, "publish", "Restore the controller after source verification"),
+    ).toBeLessThan(
+      stepIndex(
+        parsed.release,
+        "publish",
+        "Set up restored controller Bun after source verification",
+      ),
+    );
+    expect(
+      stepIndex(parsed.release, "publish", "Set up source Bun for package publication"),
+    ).toBeLessThan(stepIndex(parsed.release, "publish", "Publish evidence-bound packages"));
+    expect(stepIndex(parsed.release, "publish", "Plan exact package publication")).toBeLessThan(
+      stepIndex(parsed.release, "publish", "Set up source Bun for package publication"),
+    );
+    expect(
+      stepIndex(parsed.release, "publish", "Restore the controller after source publication"),
+    ).toBeLessThan(
+      stepIndex(
+        parsed.release,
+        "publish",
+        "Set up restored controller Bun after source publication",
+      ),
+    );
+    expect(stepIndex(parsed.embedded, "source-verification", "Set up source Bun")).toBeLessThan(
+      stepIndex(parsed.embedded, "source-verification", "Install admitted source dependencies"),
+    );
+    expect(
+      stepIndex(
+        parsed.embedded,
+        "source-verification",
+        "Download and validate the admitted candidate receipt",
+      ),
+    ).toBeLessThan(stepIndex(parsed.embedded, "source-verification", "Set up source Bun"));
+    expect(
+      stepIndex(
+        parsed.embedded,
+        "source-verification",
+        "Restore the controller after source verification",
+      ),
+    ).toBeLessThan(
+      stepIndex(parsed.embedded, "source-verification", "Set up restored controller Bun"),
+    );
+    expect(
+      stepIndex(parsed.embedded, "release", "Set up source Bun for package preparation"),
+    ).toBeLessThan(
+      stepIndex(parsed.embedded, "release", "Prepare admitted package bytes for publication"),
+    );
+    expect(
+      stepIndex(parsed.embedded, "release", "Download and validate immutable candidate"),
+    ).toBeLessThan(
+      stepIndex(parsed.embedded, "release", "Set up source Bun for package preparation"),
+    );
+    expect(
+      stepIndex(parsed.embedded, "release", "Restore the controller after package preparation"),
+    ).toBeLessThan(
+      stepIndex(
+        parsed.embedded,
+        "release",
+        "Set up restored controller Bun after package preparation",
+      ),
+    );
+    expect(
+      stepIndex(parsed.embedded, "release", "Set up source Bun for package publication"),
+    ).toBeLessThan(stepIndex(parsed.embedded, "release", "Publish source-bound packages"));
+    expect(stepIndex(parsed.embedded, "release", "Plan exact package publication")).toBeLessThan(
+      stepIndex(parsed.embedded, "release", "Set up source Bun for package publication"),
+    );
+    expect(
+      stepIndex(parsed.embedded, "release", "Restore the controller after source publication"),
+    ).toBeLessThan(
+      stepIndex(
+        parsed.embedded,
+        "release",
+        "Set up restored controller Bun after source publication",
+      ),
+    );
+  });
+
   test("stages Bun dependency patches before the workload image frozen install", async () => {
     const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
     const patchCopy = dockerfile.indexOf("COPY patches patches");
@@ -393,6 +609,14 @@ describe("release image workflow contract", () => {
     }
     expect(candidate).toContain("docker/setup-qemu-action@");
     expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(7);
+    expect(
+      candidate.match(/org\.opencontainers\.image\.revision=\$\{\{ inputs\.source_sha \}\}/g),
+    ).toHaveLength(7);
+    expect(
+      candidate.match(
+        /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
+      ),
+    ).toHaveLength(7);
     expect(candidate).toContain(
       "candidate-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}",
     );
@@ -624,6 +848,12 @@ describe("release image workflow contract", () => {
     ).toHaveLength(7);
     expect(images.match(/:canary-sha-\{0\}', github\.sha\)/g)).toHaveLength(7);
     expect(images).not.toMatch(/format\('ghcr\.io\/cloudgeni-ai\/opengeni-[^']+:sha-\{0\}'/);
+    expect(images.split(`org.opencontainers.image.revision=${exactCiSource}`).length - 1).toBe(7);
+    expect(
+      images.match(
+        /org\.opencontainers\.image\.source=https:\/\/github\.com\/\$\{\{ github\.repository \}\}/g,
+      ),
+    ).toHaveLength(7);
     expect(images.split(`OPENGENI_SERVER_VERSION=sha-${exactCiSource}`).length - 1).toBe(5);
     expect(images).toContain(`OPENGENI_DEPLOYMENT_REVISION=${exactCiSource}`);
     expect(images).toContain("Write exact-main-SHA canary receipt");
@@ -998,6 +1228,24 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain(
       'rcodesign notary-submit --api-key-path /tmp/asc.json --wait "${{ matrix.asset }}"',
     );
+    const macHelperBuild = agentRelease.slice(
+      agentRelease.indexOf("Build interaction helpers (macOS universal)"),
+      agentRelease.indexOf("Intel cargo test (macOS coverage)"),
+    );
+    const armCompile = macHelperBuild.indexOf("bun build --compile --target=bun-darwin-arm64");
+    const armSign = macHelperBuild.indexOf("codesign --force --sign - opengeni-browserd-arm64");
+    const armVerify = macHelperBuild.indexOf("codesign --verify --strict opengeni-browserd-arm64");
+    const universalBrowserd = macHelperBuild.indexOf(
+      "lipo -create opengeni-browserd-x64 opengeni-browserd-arm64",
+    );
+    const armEmbed = macHelperBuild.indexOf(
+      'OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-arm64"',
+    );
+    expect(armCompile).toBeGreaterThan(-1);
+    expect(armSign).toBeGreaterThan(armCompile);
+    expect(armVerify).toBeGreaterThan(armSign);
+    expect(universalBrowserd).toBeGreaterThan(armVerify);
+    expect(armEmbed).toBeGreaterThan(armVerify);
     const finalBundleArchive = agentRelease.lastIndexOf(
       'ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"',
     );
@@ -1130,37 +1378,37 @@ ${parser}`,
       {
         jobName: "api-image",
         name: "Build API image",
-        fingerprint: "ff721f475726ef45a1773b40b1132ee3789ad3a67a6bdd58064c86f9de93d86f",
+        fingerprint: "fd47898c1119624dbafa8e62926cbbfbb950f541e41167765257f9ba01247cd6",
       },
       {
         jobName: "worker-web-images",
         name: "Build worker image",
-        fingerprint: "202cdfa7dcdb4824d205b25f6e4fcf28c35f41af9c9d1888eb30af761526483d",
+        fingerprint: "30caf29d97ddcbc7262219ff597c0febd8d99771e8a5d76c656fc3ba3189f9ba",
       },
       {
         jobName: "worker-web-images",
         name: "Build web image",
-        fingerprint: "9125d43f534c6574db87755be185c22bd923910c5d25c6f015e0e6f5c521c9b9",
+        fingerprint: "80eb5b15cc4d529a9b3b8cb3582f19465b34a288791f4233d734ebb7f1010e05",
       },
       {
         jobName: "artifact-materializer-image",
         name: "Build artifact materializer image",
-        fingerprint: "8ce52cc968f445d0c83b3ee89cc47cfa1c290646599c137a47fe868e2d784728",
+        fingerprint: "41973667fdf57ab9af89ba5d7aa497dd74378f559e26de644131f5a18e1ce849",
       },
       {
         jobName: "artifact-outbox-dispatcher-image",
         name: "Build artifact outbox dispatcher image",
-        fingerprint: "6e4fa54094e7d208f8f1f9e58ae7c3f1d3601765493cb9f8a86128a861b86693",
+        fingerprint: "d9653c9b324d2bf40c226c54784492d740d6000465f0aeb8571218d226d7f394",
       },
       {
         jobName: "relay-image",
         name: "Build relay image",
-        fingerprint: "f1728ec3218f2d0d2c3ac1697277eaf7f231c30ed11fdfb9d0513db194d319ad",
+        fingerprint: "146554993b13ba0e9cbb9776ffdeb4006c7ba98f81ca05f46d8f3abbf5fa67b1",
       },
       {
         jobName: "sandbox-image",
         name: "Build headless sandbox image",
-        fingerprint: "05a2dc33ab504335251581afec4aca6282ca11e11c72612722a5a48e256e314d",
+        fingerprint: "de1ae66fe410cd78f9965fe23e5d80d5506d1132c68cfec7a4c5c93e103fcd7d",
       },
     ]);
 

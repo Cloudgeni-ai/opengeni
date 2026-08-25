@@ -162,9 +162,83 @@ describe("release schema contract", () => {
       "0325_child_lifecycle_notices.sql",
       "0327_slack_first_task_hint.sql",
       "0328_session_background_commands.sql",
+      "0329_slack_orchestration_delivery_events.sql",
+      "0330_api_key_descriptions.sql",
+      "0331_managed_organization_creation.sql",
+      "0332_organization_shared_workspace_control_plane.sql",
+      "0333_session_turn_prompt_routing.sql",
+      "0334_connected_machine_workspace_root.sql",
+      "0335_slack_workspace_routing.sql",
+      "0336_atomic_session_fork_visibility.sql",
+      "0337_slack_routed_action_handles.sql",
+      "0338_atomic_connected_machine_attachments.sql",
+      "0339_document_authority_reclassification.sql",
+      "0340_tenancy_backfill_activation_evidence.sql",
+      "0341_slack_routing_probe_organization_fence.sql",
+      "0342_slack_route_prompt_single_pending.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
+    // Each appended migration moves both of these, and two candidates can be in
+    // flight at once, so derive them from what is actually on disk rather than
+    // re-pinning a literal that the next merge invalidates.
+    const routedSlackHandles = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0337_slack_routed_action_handles.sql",
+    );
+    const atomicConnectedMachineAttachments = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0338_atomic_connected_machine_attachments.sql",
+    );
+    const documentAuthorityReclassification = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0339_document_authority_reclassification.sql",
+    );
+    const tenancyBackfillActivationEvidence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0340_tenancy_backfill_activation_evidence.sql",
+    );
+
+    const slackRoutingProbeFence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0341_slack_routing_probe_organization_fence.sql",
+    );
+
+    const slackRoutePromptSinglePending = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0342_slack_route_prompt_single_pending.sql",
+    );
+    expect(completeSourceContract).toMatchObject({
+      fileCount:
+        (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
+        (documentAuthorityReclassification ? 1 : 0) +
+        (tenancyBackfillActivationEvidence ? 1 : 0) +
+        (slackRoutingProbeFence ? 1 : 0) +
+        (slackRoutePromptSinglePending ? 1 : 0),
+      latestMigration: slackRoutePromptSinglePending
+        ? "0342_slack_route_prompt_single_pending.sql"
+        : slackRoutingProbeFence
+          ? "0341_slack_routing_probe_organization_fence.sql"
+          : tenancyBackfillActivationEvidence
+            ? "0340_tenancy_backfill_activation_evidence.sql"
+            : documentAuthorityReclassification
+              ? "0339_document_authority_reclassification.sql"
+              : atomicConnectedMachineAttachments
+                ? "0338_atomic_connected_machine_attachments.sql"
+                : routedSlackHandles
+                  ? "0337_slack_routed_action_handles.sql"
+                  : "0336_atomic_session_fork_visibility.sql",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0330_api_key_descriptions.sql",
+      ),
+    ).toMatchObject({
+      sha256: "7167987a841c839601069749768f37032c2890136e42128116954c4d92baad22",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0336_atomic_session_fork_visibility.sql",
+      ),
+    ).toMatchObject({
+      sha256: "75604a1d9cce1bf698184e87d4f0405493e200e06378938b2f10adbfaa565f2d",
+      deploymentMode: "rolling",
+    });
     const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
     const sourceContract =
       forwardMigrationPaths.length > 0
@@ -181,6 +255,46 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0314_unregistered_organization_invitations.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0331_managed_organization_creation.sql",
+      ),
+    ).toMatchObject({
+      sha256: "62912af210c1db18c7b58de8ad2c233f2fc6759a6ef4509c8e6352d75dd0641f",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0332_organization_shared_workspace_control_plane.sql",
+      ),
+    ).toMatchObject({
+      sha256: "6de1a4fc6f0dc0e67852cef996b6d0e01326d180c67d188cb7fcb9c704bc5cdd",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0333_session_turn_prompt_routing.sql",
+      ),
+    ).toMatchObject({
+      sha256: "3eab54938c65c4db7af9ae3421045e6f44af01a27b06129093a58f1ae22ea05c",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0334_connected_machine_workspace_root.sql",
+      ),
+    ).toMatchObject({
+      sha256: "6cf8700390b42b354ba66414a94a7d2d48ce4756110037e9b4f104bdd8d92a9c",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0338_atomic_connected_machine_attachments.sql",
+      ),
+    ).toMatchObject({
+      sha256: "0bd5490d1e7f2b9b9195c89d602478ffd023b6c035f7151dd2fc89e898daf053",
+      deploymentMode: "maintenance",
+    });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0238_supergrok_realtime_model.sql",

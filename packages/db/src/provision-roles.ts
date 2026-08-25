@@ -490,6 +490,12 @@ async function grantAppRoleIfSchemaExists(
     "list_organization_members(uuid,text)",
     "list_organization_invitations(uuid,text,uuid,integer)",
     "get_organization_administration_overview(uuid,text)",
+    "create_managed_organization(text,text,text,uuid)",
+    "assert_organization_shared_workspace_administrator(uuid,uuid,text)",
+    "open_organization_shared_workspace_administration_capability(uuid,uuid,text)",
+    "close_organization_shared_workspace_administration_capability(uuid)",
+    "create_organization_shared_workspace(uuid,text,text,text,text,uuid)",
+    "upsert_organization_shared_workspace_member(uuid,uuid,text,uuid,text,text,jsonb,boolean)",
     "update_organization_name(uuid,text,text,timestamptz,uuid)",
     "create_organization_invitation_v2(jsonb)",
     "bind_pending_organization_invitations_for_verified_email(text,text)",
@@ -664,6 +670,25 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    -- Migration 0340's bounded connection convergence and repaired parity
+    -- seams also live in the data schema. Converge their exact grants for the
+    -- supported migrate-then-provision order.
+    FOREACH routine_signature IN ARRAY ARRAY[
+      'classify_organization_connection_authority(uuid,text)',
+      'backfill_organization_connection_authority(uuid,integer,boolean)',
+      'check_organization_tenancy_parity(uuid,integer,integer)'
+    ] LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature))
+        IS NOT NULL
+      THEN
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)},
+          routine_signature,
+          ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to
@@ -1229,6 +1254,38 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format(
+        '%I.fork_session_content(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.replay_applied_session_fork(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format('%I.session_tenancy_product_activated(uuid,integer)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format(
@@ -1524,6 +1581,22 @@ BEGIN
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_admissions FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.session_attempt_personal_document_snapshots FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.personal_document_once_consumption_receipts FROM %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(
+      format('%I.reclassify_document_authority(jsonb)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.reclassify_document_authority(jsonb) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.reclassify_document_authority(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamptz, uuid) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamptz, uuid) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.run_document_default_collection_backfill(jsonb) FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.run_document_default_collection_backfill(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL ON FUNCTION opengeni_private.document_migration_capability_active(text) FROM PUBLIC');
+      EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.document_migration_capability_active(text) TO %I', ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE opengeni_private.document_migration_capabilities FROM %I', ${literal(role)});
+      EXECUTE format('GRANT SELECT ON TABLE %I.document_authority_reclassifications TO %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON TABLE %I.document_authority_reclassifications FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.document_default_collection_backfill_runs, %I.document_default_collection_backfill_operations, %I.document_default_collection_backfill_receipts FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
     END IF;
     IF to_regprocedure(
       format('%I.create_scoped_variable_set(uuid,uuid,text,text,text,jsonb,boolean)', ${literal(schema)})

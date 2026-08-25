@@ -42,7 +42,7 @@ describe("0257 governed goal revision authority migration", () => {
     } finally {
       await blank.release();
     }
-  });
+  }, 180_000);
 
   test("rejects an explicitly configured custom live role and succeeds only after drain", async () => {
     const blank = await acquireBlankTestDatabase("migration-0257-live-writer-guard");

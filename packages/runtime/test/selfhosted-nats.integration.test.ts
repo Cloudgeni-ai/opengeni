@@ -28,6 +28,7 @@ function buildClient(responder: MockAgentResponder): SelfhostedSandboxClient {
   });
   return new SelfhostedSandboxClient({
     workspaceId: WS,
+    workspaceRoot: "/home/user/project",
     relay: RELAY,
     controlRpcFactory: () => stream.controlRpc,
     agentId: AGENT,
@@ -69,13 +70,11 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
     // We drive readFile directly through the service to prove the duck-typing holds
     // (no selfhosted branching in Channel-A).
     //
-    // The mock models the MACHINE's filesystem — there is no literal "/workspace"
-    // on a real machine; the agent stores files relative to its real
-    // workspace_root. Channel-A here is rooted at the SDK's virtual "/workspace"
-    // root, and the SelfhostedSession is the SOLE adapter that strips that prefix
-    // to the machine frame ("/workspace/app.txt" → "app.txt"). So we seed the mock
-    // at the machine-relative path and assert the full virtual→machine round-trip.
-    const mock = new MockAgentResponder({ files: { "app.txt": "from-the-machine" } });
+    // Channel A speaks relative paths; the selfhosted session resolves them from
+    // the exact persisted host root.
+    const mock = new MockAgentResponder({
+      files: { "/home/user/project/app.txt": "from-the-machine" },
+    });
     const session = await buildClient(mock).resume({ agentId: AGENT });
 
     const service = new SandboxChannelAService({
@@ -83,7 +82,7 @@ describe("selfhosted mocked-NATS integration — exec + fs round-trip through a 
         exec: (args) => session.exec(args),
         readFile: (args) => session.readFile(args),
       },
-      workspaceRoot: "/workspace",
+      workspaceRoot: ".",
     });
 
     const read = await service.fsRead({ path: "app.txt", maxBytes: 4096, encoding: "utf8" });

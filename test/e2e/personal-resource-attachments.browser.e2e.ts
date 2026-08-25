@@ -143,7 +143,7 @@ describe("personal resource attachments in Chromium", () => {
     const unavailableControl = page.locator("[data-personal-resource-attachment]").first();
     expect(await unavailableControl.count()).toBe(1);
     expect(await unavailableControl.getByRole("alert").textContent()).toContain(
-      "couldn’t check access to the selected Variable Set or Rig",
+      "couldn’t check access to the selected personal resource",
     );
     expect(await unavailableControl.getByRole("button", { name: "Retry" }).count()).toBe(1);
     expect(await unavailableControl.getByRole("status").textContent()).toContain(

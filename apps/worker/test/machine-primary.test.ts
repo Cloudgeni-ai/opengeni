@@ -125,6 +125,7 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
         sessionId: SESSION_ID,
         agentId: "enr_1",
         connectionInstanceId: CONNECTION_INSTANCE_ID,
+        workspaceRoot: "/home/user/repo",
         opStream: false,
         operationResourcePolicy: EMPTY_OPERATION_POLICY,
         operationResourcePolicySupported: false,
@@ -156,7 +157,7 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
     // per-turn provided-session env delta is empty (no "cannot change manifest
     // environment variables" throw on the machine-primary turn).
     expect(state.environment).toEqual(env);
-    expect(state.manifest.root).toBe("/workspace");
+    expect(state.manifest.root).toBe("/home/user/repo");
     expect(await state.manifest.resolveEnvironment()).toEqual(env);
   });
 
@@ -169,6 +170,7 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
         sessionId: SESSION_ID,
         agentId: "enr_xyz",
         connectionInstanceId: CONNECTION_INSTANCE_ID,
+        workspaceRoot: "/home/user/repo",
         opStream: false,
         operationResourcePolicy: EMPTY_OPERATION_POLICY,
         operationResourcePolicySupported: false,

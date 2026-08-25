@@ -247,7 +247,7 @@ import {
   getActorNewSessionDraft,
   getManagedHumanSessionCreateCapabilities,
   getHumanComposerDraft,
-  forkManagedHumanSessionPrivate,
+  forkManagedHumanSession,
   moveHumanQueuePrompt,
   readSessionLineage,
   saveHumanComposerDraft,
@@ -459,10 +459,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw sessionAuthorizationHttpError(new SessionAuthorizationUnavailableError());
     }
     if (operation === "session.visibility.write" || operation === "session.fork.create") {
-      // These two owner-only product mutations perform their target-free
-      // managed-cookie, permission, and activation gates inside core before
-      // resolving the target exactly once. Running the generic middleware here
-      // would both create a pre-gate existence oracle and double-call the host.
+      // These product mutations perform their target-free managed-cookie,
+      // permission, and activation gates inside core before resolving the
+      // target exactly once. Visibility changes remain owner-only; a shared
+      // source may be forked by any currently authorized workspace member.
+      // Running the generic middleware here would both create a pre-gate
+      // existence oracle and double-call the host.
       await next();
       return;
     }
@@ -858,7 +860,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     try {
-      const response = await forkManagedHumanSessionPrivate(
+      const response = await forkManagedHumanSession(
         deps,
         authorization,
         workspaceId,
@@ -2773,6 +2775,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         accepted: result.accepted,
         turn: result.turn,
         draft: result.draft,
+        receipt: result.receipt,
+        routing: result.routing,
         interruptionCount: result.interruptionCount,
         replay: result.replay,
       },
@@ -3062,6 +3066,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId: activeSandbox.workspaceId,
           agentId: liveConnection.id,
           connectionInstanceId: liveConnection.connectionInstanceId,
+          // Capability negotiation only pings, so a pre-root agent may still
+          // report upgrade guidance without exposing a false filesystem root.
+          workspaceRoot: liveConnection.workspaceRoot ?? "/",
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
           relay: relayConfigFromSettings(settings),
           epoch: session.activeEpoch,

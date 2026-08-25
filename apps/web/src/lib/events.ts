@@ -13,8 +13,37 @@ export function isTerminalSessionStatus(value: SessionStatus): boolean {
  * The console's timeline projection over exact session events. Falls back to
  * the session's initial message while the event log is still empty.
  */
-export function projectSessionTimeline(session: Session, events: SessionEvent[]): TimelineItem[] {
+export function projectSessionTimeline(
+  session: Session,
+  events: SessionEvent[],
+  creationClientEventId?: string,
+): TimelineItem[] {
   const items = buildTimeline(events);
+  if (creationClientEventId) {
+    const reconciliationKey = `user-message:${creationClientEventId}`;
+    if (
+      items.some(
+        (item) => item.kind === "user-message" && item.reconciliationKey === reconciliationKey,
+      )
+    ) {
+      return items;
+    }
+    if (!session.initialMessage && session.resources.length === 0) {
+      return items;
+    }
+    return [
+      {
+        kind: "user-message",
+        id: "c",
+        reconciliationKey,
+        text: session.initialMessage,
+        resources: session.resources,
+        tools: session.tools,
+        occurredAt: session.createdAt,
+      },
+      ...items,
+    ];
+  }
   if (events.length === 0 && items.length === 0 && session.initialMessage) {
     return [
       {

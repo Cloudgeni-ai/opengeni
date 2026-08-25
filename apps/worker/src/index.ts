@@ -1089,5 +1089,19 @@ export async function startWorker() {
 }
 
 if (import.meta.main) {
-  await startWorker();
+  // `bun --watch` keeps its supervisor alive after the application consumes
+  // SIGINT. Once the worker, NATS, DB, and Temporal resources have all closed,
+  // explicitly terminate that supervisor too; otherwise a later file edit can
+  // resurrect this stopped process as a duplicate worker with stale env/code.
+  let interrupted = false;
+  const markInterrupted = () => {
+    interrupted = true;
+  };
+  process.once("SIGINT", markInterrupted);
+  try {
+    await startWorker();
+  } finally {
+    process.off("SIGINT", markInterrupted);
+    if (interrupted) process.exit(0);
+  }
 }
