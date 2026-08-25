@@ -417,28 +417,7 @@ function isCanonicalArrayIndex(property: string, length: number): boolean {
 
 /** Count raw UTF-8 bytes using the standard three-byte lone-surrogate replacement. */
 export function utf8ByteLength(value: string): number {
-  let length = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x7f) {
-      length += 1;
-    } else if (code <= 0x7ff) {
-      length += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        length += 4;
-        index += 1;
-      } else {
-        length += 3;
-      }
-    } else if (code >= 0xdc00 && code <= 0xdfff) {
-      length += 3;
-    } else {
-      length += 3;
-    }
-  }
-  return length;
+  return Buffer.byteLength(value, "utf8");
 }
 
 function jsonStringUtf8ByteLength(value: string): number {

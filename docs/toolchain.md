@@ -4,24 +4,37 @@ The fast path for contributors: what runs typecheck, lint, and format, and why.
 
 ## Package manager & runtime
 
-**Bun** end to end — install, run, test, and script execution. There is no `npm`/`pnpm`/`yarn`
-lockfile in this repo; use `bun install`, `bun run <script>`, `bun test`. Libraries build
-JavaScript with `tsup` (esbuild) and declarations with stable TypeScript 7 `tsc`; `apps/web`
-builds with Vite.
+**Bun 1.4** end to end — install, run, test, and script execution. `.bun-version` is the
+canonical exact pin; `bun run check:bun-version` verifies every package, workflow, container,
+and native-builder mirror. There is no `npm`/`pnpm`/`yarn` lockfile in this repo; use
+`bun install`, `bun run <script>`, and `bun test`.
 
-The one intentional exception is the publish step: `bun run release:publish`
-(`scripts/release-publish.sh`) shells out to `npx changeset publish`, which falls back to
+Specialized build boundaries remain explicit:
+
+- publishable libraries use `tsup` (esbuild) for release-shaped ESM and stable TypeScript 7
+  `tsc` for declarations. Bun 1.4.0's bundler emitted invalid ESM for the re-export-heavy SDK
+  and React barrels during migration validation, so this stays until that correctness defect is
+  fixed and the full external-consumer matrix proves parity;
+- `apps/web` uses Vite/Rolldown because TanStack Router and Tailwind provide supported Vite
+  plugins and OpenGeni's payload budgets depend on custom Rolldown chunk groups;
+- Temporal owns the deterministic workflow webpack bundle consumed by its Worker API;
+- `packages/ogtool` uses Bun's bundler for its portable all-in-one CommonJS executable.
+
+The one intentional package-manager exception is the registry transport inside
+`bun run release:publish`. Bun launches the local Changesets CLI, while Changesets invokes
 `npm publish` for the actual registry push. That's deliberate — `bun publish` cannot emit npm
 provenance attestations, so the release workflow (`.github/workflows/release.yml`) sets up Node
-and the npm registry for that one step only. Don't "fix" this to use bun; provenance is the reason
-it exists.
+and npm for that one boundary only. Do not replace the provenance-capable publish transport
+until Bun can emit equivalent registry attestations.
 
 ## Typecheck: stable TypeScript 7
 
 Typecheck runs on the exact pinned stable **TypeScript 7** `tsc`. `bun run typecheck` invokes
-`bun scripts/typecheck.ts`, which runs `tsc --noEmit` over every project's `tsconfig.json` with a
-bounded worker pool. Per-package `typecheck` scripts invoke the same compiler. Preview compiler
-packages and executables are not part of the toolchain.
+`bun scripts/typecheck.ts`, which launches the Node-hosted compiler over every project's
+`tsconfig.json` with a bounded worker pool. The scheduler retains its established Node
+child-process boundary because Bun-native variants produced no repeatable performance benefit in
+the isolated migration benchmark. Per-package `typecheck` scripts invoke the same compiler.
+Preview compiler packages and executables are not part of the toolchain.
 
 Publishable packages use `scripts/build-typescript-package.ts`: `tsup` still creates JavaScript
 and source maps, then stable TypeScript 7 `tsc` emits declarations. This split is intentional;

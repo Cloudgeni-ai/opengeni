@@ -12,8 +12,9 @@
  * result is e.g. `@opengeni/react` shipping `"@opengeni/sdk": "workspace:*"`,
  * which npm clients cannot resolve → the package is uninstallable.
  *
- * We keep using npm (not bun) for publish because bun cannot emit npm
- * provenance. So we have to do the rewrite ourselves: replace each
+ * Bun launches Changesets, but Changesets keeps npm as the registry transport
+ * because Bun cannot emit npm provenance. So we have to do the rewrite
+ * ourselves: replace each
  * `workspace:*` / `workspace:^x` / `workspace:~x` / `workspace:1.2.3` in the
  * publishable packages' published dependency maps (dependencies,
  * peerDependencies, optionalDependencies) with a concrete range resolved from

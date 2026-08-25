@@ -90,6 +90,23 @@ describe("browser state artifact upload", () => {
     });
   });
 
+  test("does not follow storage redirects with the signed upload grant", async () => {
+    await withDirectory(async (directory) => {
+      const artifact = join(directory, "profile.ogbs");
+      await writeFile(artifact, "encrypted");
+      await withRedirectUploadServer(async (url, redirectedRequests) => {
+        try {
+          await uploadBrowserStateArtifact(artifact, authority(url), { now: () => now });
+          throw new Error("expected redirect rejection");
+        } catch (error) {
+          expect(error).toBeInstanceOf(BrowserStateUploadError);
+          expect((error as Error).message).toContain("HTTP 307");
+        }
+        expect(redirectedRequests()).toBe(0);
+      });
+    });
+  });
+
   test("does not touch a successful storage response body", async () => {
     await withDirectory(async (directory) => {
       const artifact = join(directory, "profile.ogbs");
@@ -167,6 +184,40 @@ async function unavailableUrl(): Promise<string> {
   server.close();
   await once(server, "close");
   return `http://127.0.0.1:${address.port}/closed`;
+}
+
+async function withRedirectUploadServer<T>(
+  run: (url: string, redirectedRequests: () => number) => Promise<T>,
+): Promise<T> {
+  let redirectedRequests = 0;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) {
+      // Consume the request before returning the storage redirect.
+    }
+    if (request.url === "/redirect-target") {
+      redirectedRequests += 1;
+      response.writeHead(201).end();
+      return;
+    }
+    const address = server.address() as AddressInfo;
+    response.writeHead(307, {
+      location: `http://127.0.0.1:${address.port}/redirect-target`,
+    });
+    response.end();
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as AddressInfo;
+  try {
+    return await run(
+      `http://127.0.0.1:${address.port}/object?signature=private`,
+      () => redirectedRequests,
+    );
+  } finally {
+    server.closeAllConnections();
+    server.close();
+    await once(server, "close");
+  }
 }
 
 async function withDirectory(run: (directory: string) => Promise<void>): Promise<void> {

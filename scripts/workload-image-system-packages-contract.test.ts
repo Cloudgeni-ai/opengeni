@@ -28,7 +28,7 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
   const materializer = stage(source, "artifact-materializer");
 
   return (
-    sourceBase.startsWith("FROM oven/bun:1.3.14 AS source-base") &&
+    sourceBase.startsWith("FROM oven/bun:${BUN_VERSION} AS source-base") &&
     sourceBase.includes("RUN bun install --frozen-lockfile") &&
     aptTransactions(sourceBase) === 0 &&
     base.startsWith("FROM source-base AS base") &&

@@ -10,19 +10,19 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "35441ce078a5d5b5710ff2746a5d2d3e6ee0989f6547d3d1bf772c248e3f51ad"
+      "sha256": "50a3d99bcc370d90fe7fd0763c278cc5487f96be128157abd7837e0329d0a8dc"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
-      "sha256": "5d33c5a6f442c7b1afb65e8743acb6f5399f12c65b8aaef6a034fe9fe39d6df4"
+      "sha256": "f7fbdb50dea10fe1f31b2f48cb5e38b343689807a16dd063d3b85f6999c52b0e"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "1abf46ad7fb50e94574e910337c4b65d3fb04ee2412184a0371b8b81260b7a14"
+      "sha256": "74d60ecd5d77411e1f8c29263ab9ba165bbc67102fcd2ff4a5771af37d85b248"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
-      "sha256": "9aae9ecd5dff90589d8fbadb98b4afcfefe433a6c359fac03556f6fc2ba89a45"
+      "sha256": "a739913b5470819b147f4d94633cdbbb7edbe89decfa98888aefa7d24ef3a9e7"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -42,23 +42,23 @@
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "ed111afddcb1980a4c7f7a8b8c0d821a98bc0826b5db2058d2d90e19d5fd5660"
+      "sha256": "35ea669e9119244185608d6b3ba36bd1594b1cf51dc8e7e800fcee91c7b0a495"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
-      "sha256": "b2f3fd253fa2e8fb833e4f7af4d09616ca9feb9233e7528e4d75674bd57e1589"
+      "sha256": "70b22095d09e553c573388f66686d4ad8d39488f4a823a3a885fe5386bde82f7"
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "1e4c4cda968eb95bfcf53afc30832af3e10552ae56809b27ac2222ed19977676"
+      "sha256": "9b00914d30645c9b5b2045f25b27ccd6f8642a55c329977eaa790c3c8b46857a"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "197b48efce02b7ba6c1fc36f02a626c9fe597e1600f3b5e1b6cf5c7317e286ce"
+      "sha256": "1e7e7d55154fbc19f38a24698087969e38c700ff3b635858a4d60390cd1fd151"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
-      "sha256": "1e34b409940a9c11d44bf25de320bfc7d8bcbe35d19cf88a27a0f99ad95688bc"
+      "sha256": "3491fd64b0482ec10f70fa36d7530b07bae9fe3dd5783ae8baba8d4728655148"
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
@@ -66,7 +66,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "30a86a0b8f1af49c9c448a19917f56b42ba0d4628631214bbfd35d91c7b1a2df"
+      "sha256": "7204e80493fea6239fe36ff39cff06c18f75715ac2c69df2a07e3831522c9e9f"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
@@ -379,7 +379,7 @@
       "workflow": ".github/workflows/artifact-runtime.yml",
       "job": "musl",
       "step": "Build and smoke in exact musl userspace",
-      "sha256": "3de2421cc8eec63f2ecdf28f59e7c9f775631f0e572f8927fd780179720c10e1"
+      "sha256": "c0fc1f31278709f68baa72395b4fc4ff980072199ae49944341473b7e01a23ee"
     },
     {
       "workflow": ".github/workflows/artifact-runtime.yml",

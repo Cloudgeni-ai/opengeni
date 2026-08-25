@@ -1,6 +1,3 @@
-import { createReadStream } from "node:fs";
-import { request as httpRequest } from "node:http";
-import { request as httpsRequest } from "node:https";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { BROWSER_STATE_ARTIFACT_CONTENT_TYPE } from "@opengeni/contracts";
@@ -56,50 +53,23 @@ export async function uploadBrowserStateArtifact(
   }
 }
 
-/**
- * Stream the artifact without Bun fetch. Bun 1.3.14 on Linux can segfault after
- * a successful streamed PUT, including when the empty response body is never
- * read. Node's request stream is stable on the same runtime and gives us the
- * only response field this presigned-object contract needs: the status code.
- */
-function putArtifact(
+async function putArtifact(
   authority: BrowserStateUploadAuthority,
   artifactPath: string,
   sizeBytes: number,
   timeoutMs: number,
 ): Promise<number> {
-  const url = new URL(authority.url);
-  const request = url.protocol === "https:" ? httpsRequest : httpRequest;
-  return new Promise((resolvePromise, rejectPromise) => {
-    let settled = false;
-    const settle = (result: { status?: number; error?: Error }) => {
-      if (settled) return;
-      settled = true;
-      if (result.error) rejectPromise(result.error);
-      else resolvePromise(result.status!);
-    };
-    const outgoing = request(url, {
-      method: "PUT",
-      headers: {
-        ...authority.requiredHeaders,
-        "content-length": String(sizeBytes),
-      },
-    });
-    outgoing.setTimeout(timeoutMs, () => {
-      outgoing.destroy(new Error("browser state upload timed out"));
-    });
-    outgoing.once("response", (response) => {
-      const status = response.statusCode;
-      response.destroy();
-      if (status === undefined) settle({ error: new Error("storage response has no status") });
-      else settle({ status });
-    });
-    outgoing.once("error", (error) => settle({ error }));
-
-    const artifact = createReadStream(artifactPath);
-    artifact.once("error", (error) => outgoing.destroy(error));
-    artifact.pipe(outgoing);
+  const response = await fetch(authority.url, {
+    method: "PUT",
+    headers: {
+      ...authority.requiredHeaders,
+      "content-length": String(sizeBytes),
+    },
+    body: Bun.file(artifactPath),
+    redirect: "manual",
+    signal: AbortSignal.timeout(timeoutMs),
   });
+  return response.status;
 }
 
 export function validateUploadAuthority(

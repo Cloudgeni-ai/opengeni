@@ -1,3 +1,4 @@
+ARG BUN_VERSION=1.4.0
 FROM python:3.12-slim AS checkov-runtime
 
 ARG CHECKOV_VERSION=3.2.526
@@ -45,9 +46,9 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     install -m 0755 "target/${rust_target}/release/opengeni-computer-native" /out/opengeni-computer-native; \
     xx-verify /out/opengeni-computer-native
 
-FROM oven/bun:1.3.14 AS bun-runtime
+FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS anydoc-runtime-builder
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
 
 ARG TARGETARCH
 WORKDIR /src
@@ -67,7 +68,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-bun-anydoc,target=/root/.bun/install/
       "$runtime/anydoc-linux-${node_arch}-gnu"; \
     test "$(bun -e 'const value=await Bun.file("node_modules/@firecrawl/anydoc/package.json").json();process.stdout.write(value.version)')" = 0.1.8
 
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS browserd-source-build
 
 WORKDIR /src
 # Stage only the lock-resolving manifests first so the frozen install layer is
@@ -138,7 +139,7 @@ RUN set -eux; \
 
 RUN cd packages/ogtool && bun run build
 
-FROM oven/bun:1.3.14 AS browserd-build
+FROM oven/bun:${BUN_VERSION} AS browserd-build
 
 WORKDIR /src
 COPY --from=browserd-source-build /src /src
@@ -182,7 +183,7 @@ RUN printf '%s  %s\n' \
 
 FROM node:22.22.0-bookworm-slim AS node-runtime
 
-FROM oven/bun:1.3.14 AS artifact-runtime-builder
+FROM oven/bun:${BUN_VERSION} AS artifact-runtime-builder
 
 ARG TARGETARCH
 ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime

@@ -1,4 +1,5 @@
-FROM oven/bun:1.3.14 AS source-base
+ARG BUN_VERSION=1.4.0
+FROM oven/bun:${BUN_VERSION} AS source-base
 
 WORKDIR /app
 

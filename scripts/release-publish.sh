@@ -6,7 +6,7 @@
 # release failure: ordinary pushes and Version-PR automation never invoke this
 # script, and release images must not be minted after a skipped publication.
 #
-# Publishing goes through `changeset publish`, which runs `npm publish` per
+# Bun launches the local `changeset publish` CLI, which runs `npm publish` per
 # package and honors each package.json `publishConfig` ({ access: "public",
 # provenance: true }). We use npm (not bun) because bun cannot emit npm
 # provenance. NPM_CONFIG_PROVENANCE=true is set by the workflow env.
@@ -49,5 +49,6 @@ bun scripts/rewrite-workspace-deps.ts --strip-dev-dependencies
 bun scripts/rewrite-entry-points.ts
 
 # changeset publish reads publishConfig (access: public, provenance: true) from
-# each package and runs `npm publish` with provenance under the hood.
-npx changeset publish
+# each package and runs `npm publish` with provenance under the hood. Keep npm
+# only as the provenance-capable registry transport; Bun owns CLI execution.
+bun node_modules/@changesets/cli/bin.js publish

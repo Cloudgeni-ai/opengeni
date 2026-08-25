@@ -8,7 +8,7 @@ const startupScriptPath = "docker/desktop/opengeni-browserd-up.sh";
 
 function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
   const sourceStage = dockerfile.indexOf(
-    "FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build",
+    "FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS browserd-source-build",
   );
   // Manifests are staged first so the frozen install layer survives source
   // edits; the full tree lands after it and before any source-dependent step.
@@ -16,7 +16,7 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
   const sourceCopy = dockerfile.indexOf("COPY . .", install);
   const codemode = dockerfile.indexOf("runtime=/out/codemode-runtime", sourceCopy);
   const ogtool = dockerfile.indexOf("RUN cd packages/ogtool && bun run build", codemode);
-  const targetStage = dockerfile.indexOf("FROM oven/bun:1.3.14 AS browserd-build", ogtool);
+  const targetStage = dockerfile.indexOf("FROM oven/bun:${BUN_VERSION} AS browserd-build", ogtool);
   const targetSource = dockerfile.indexOf(
     "COPY --from=browserd-source-build /src /src",
     targetStage,
@@ -32,7 +32,7 @@ function buildsBrowserControllerOnTargetPlatform(dockerfile: string): boolean {
     nativeCompile,
   );
   const nextStage = dockerfile.indexOf("\nFROM ", targetController);
-  const bunRuntime = dockerfile.indexOf("FROM oven/bun:1.3.14 AS bun-runtime");
+  const bunRuntime = dockerfile.indexOf("FROM oven/bun:${BUN_VERSION} AS bun-runtime");
   const targetBunCopy = dockerfile.indexOf(
     "COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun",
     nextStage,
@@ -67,8 +67,8 @@ describe("browser controller image build contract", () => {
       expect(buildsBrowserControllerOnTargetPlatform(dockerfile)).toBe(true);
 
       const crossCompiled = dockerfile.replace(
-        "FROM oven/bun:1.3.14 AS browserd-build",
-        "FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-build",
+        "FROM oven/bun:${BUN_VERSION} AS browserd-build",
+        "FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS browserd-build",
       );
       const missingPreparedSource = dockerfile.replace(
         "COPY --from=browserd-source-build /src /src",
