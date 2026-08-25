@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { HumanInputQuestion, SessionEvent } from "@opengeni/sdk";
+import type {
+  HumanInputQuestion,
+  SessionEvent,
+  SubmitHumanInputResponseRequest,
+} from "@opengeni/sdk";
 import { act, createElement } from "react";
 import {
   answersFromDrafts,
@@ -38,6 +42,18 @@ function event(
     occurredAt: new Date(sequence * 1_000).toISOString(),
     turnId,
   };
+}
+
+function typeIntoInput(input: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  setter?.call(input, value);
+  const reactPropsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"));
+  if (!reactPropsKey) throw new Error("React input props were not attached");
+  const onChange = (
+    input as unknown as Record<string, { onChange?: (event: { target: HTMLInputElement }) => void }>
+  )[reactPropsKey]?.onChange;
+  if (!onChange) throw new Error("React input change handler was not attached");
+  onChange({ target: input });
 }
 
 const questions: HumanInputQuestion[] = [
@@ -310,11 +326,141 @@ describe("HumanInputForm async host boundary", () => {
     );
     const otherInput = group?.querySelector<HTMLInputElement>('input[type="text"]');
     expect(otherInput).not.toBeNull();
-    expect(otherInput?.disabled).toBe(true);
+    expect(otherInput?.disabled).toBe(false);
     expect(otherInput?.labels).toHaveLength(1);
     expect(otherInput?.labels?.[0]?.textContent).toContain(
       "Other answer for Where should this run?",
     );
+  });
+
+  test("clicking or typing Other selects it and submits its exact text", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-other-focus",
+          questions: [
+            {
+              id: "environment",
+              kind: "single_select" as const,
+              prompt: "Where should this run?",
+              options: [{ id: "staging", label: "Staging" }],
+              required: true,
+              allowOther: true,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+
+    const staging = mounted.container.querySelector<HTMLInputElement>(
+      'input[type="radio"]:not([aria-labelledby])',
+    );
+    const otherChoice = mounted.container.querySelector<HTMLInputElement>(
+      'input[type="radio"][aria-labelledby]',
+    );
+    const otherInput = mounted.container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(staging).not.toBeNull();
+    expect(otherChoice).not.toBeNull();
+    expect(otherInput).not.toBeNull();
+
+    await act(async () => {
+      staging!.click();
+    });
+    expect(staging?.checked).toBe(true);
+    expect(otherChoice?.checked).toBe(false);
+
+    await act(async () => {
+      otherInput!.click();
+    });
+    expect(staging?.checked).toBe(false);
+    expect(otherChoice?.checked).toBe(true);
+
+    await act(async () => {
+      staging!.click();
+    });
+    expect(staging?.checked).toBe(true);
+    expect(otherChoice?.checked).toBe(false);
+
+    await act(async () => {
+      typeIntoInput(otherInput!, "  Customer sandbox eu-42  ");
+    });
+    expect(otherInput?.value).toBe("  Customer sandbox eu-42  ");
+    expect(staging?.checked).toBe(false);
+    expect(otherChoice?.checked).toBe(true);
+
+    await act(async () => {
+      mounted!.container
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([
+      {
+        outcome: "answered",
+        answers: [
+          {
+            questionId: "environment",
+            values: [],
+            other: "  Customer sandbox eu-42  ",
+          },
+        ],
+      },
+    ]);
+  });
+
+  test("focusing Other preserves multi-select choices and normal choices still toggle", async () => {
+    const submissions: SubmitHumanInputResponseRequest[] = [];
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-other-multi",
+          questions: [questions[1]!],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: (response) => {
+          submissions.push(response);
+        },
+        autoFocus: false,
+      }),
+    );
+
+    const staging = mounted.container.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    const otherChoice =
+      mounted.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[2];
+    const otherInput = mounted.container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(staging).not.toBeNull();
+    expect(otherChoice).not.toBeNull();
+    expect(otherInput).not.toBeNull();
+
+    await act(async () => {
+      staging!.click();
+      otherInput!.focus();
+      typeIntoInput(otherInput!, "canary");
+    });
+    expect(document.activeElement).toBe(otherInput);
+    expect(staging?.checked).toBe(true);
+    expect(otherChoice?.checked).toBe(true);
+
+    await act(async () => {
+      mounted!.container
+        .querySelector("form")!
+        .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+    expect(submissions).toEqual([
+      {
+        outcome: "answered",
+        answers: [{ questionId: "targets", values: ["staging"], other: "canary" }],
+      },
+    ]);
   });
 
   test("supports complete host copy and autofocus", async () => {

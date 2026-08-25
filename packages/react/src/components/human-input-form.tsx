@@ -508,6 +508,11 @@ function QuestionControls({
     ]
       .filter(Boolean)
       .join(" ") || undefined;
+  const selectOtherDraft = (current: HumanInputAnswerDraft): HumanInputAnswerDraft => ({
+    ...current,
+    otherSelected: true,
+    ...(question.kind === "single_select" ? { values: [] } : {}),
+  });
   return (
     <>
       {showPromptChrome ? (
@@ -679,14 +684,17 @@ function QuestionControls({
                 id={otherTextId}
                 type="text"
                 value={draft.other}
-                disabled={!draft.otherSelected || busy}
+                disabled={busy}
                 placeholder="Type a value…"
-                onChange={(event) =>
+                onClick={() => onUpdate(selectOtherDraft)}
+                onFocus={() => onUpdate(selectOtherDraft)}
+                onChange={(event) => {
+                  const other = event.target.value;
                   onUpdate((current) => ({
-                    ...current,
-                    other: event.target.value,
-                  }))
-                }
+                    ...selectOtherDraft(current),
+                    other,
+                  }));
+                }}
                 className="mt-1.5 w-full rounded-og-sm border border-og-border bg-og-surface-1 px-2 py-1.5 text-og-sm text-og-fg outline-hidden focus:border-og-accent disabled:opacity-50"
               />
             </span>
