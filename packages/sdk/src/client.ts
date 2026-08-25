@@ -261,7 +261,6 @@ import type {
   ListOrganizationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
-  AddOrganizationWorkspaceMemberRequest,
   CreateOrganizationInvitationRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
@@ -269,11 +268,17 @@ import type {
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
+  OrganizationWorkspaceAccess,
+  OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationInvitationRequest,
+  RevokeOrganizationWorkspaceMemberRequest,
+  RevokeOrganizationWorkspaceMemberResponse,
+  PutOrganizationWorkspaceMemberRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  UpdateOrganizationWorkspaceRequest,
   UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
@@ -3847,42 +3852,27 @@ export class OpenGeniClient {
     );
   }
 
-  /** Rename the organization under an exact optimistic-concurrency fence. */
-  async updateOrganizationName(
-    organizationId: string,
-    request: UpdateOrganizationNameRequest,
-  ): Promise<OrganizationSummary> {
-    return await this.requestJson<OrganizationSummary>(
-      "PATCH",
-      `/v1/organizations/${organizationId}`,
-      request,
-    );
-  }
-
-  /**
-   * Organization control-plane update for a shared workspace. This does not
-   * require or create operational workspace access for the organization admin.
-   */
-  async updateOrganizationWorkspace(
-    organizationId: string,
-    workspaceId: string,
-    request: UpdateWorkspaceRequest,
-  ): Promise<Workspace> {
-    return await this.requestJson<Workspace>(
-      "PATCH",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
-      request,
-    );
-  }
-
   /** Create a shared workspace without implicitly granting the actor access. */
   async createOrganizationWorkspace(
     organizationId: string,
     request: CreateOrganizationWorkspaceRequest,
-  ): Promise<Workspace> {
-    return await this.requestJson<Workspace>(
+  ): Promise<OrganizationWorkspaceAccess> {
+    return await this.requestJson<OrganizationWorkspaceAccess>(
       "POST",
       `/v1/organizations/${organizationId}/workspaces`,
+      request,
+    );
+  }
+
+  /** Rename one shared workspace under an exact optimistic-concurrency fence. */
+  async updateOrganizationWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateOrganizationWorkspaceRequest,
+  ): Promise<OrganizationWorkspaceAccess> {
+    return await this.requestJson<OrganizationWorkspaceAccess>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
       request,
     );
   }
@@ -3899,43 +3889,41 @@ export class OpenGeniClient {
     );
   }
 
-  async addOrganizationWorkspaceMember(
+  async putOrganizationWorkspaceMember(
     organizationId: string,
     workspaceId: string,
-    request: AddOrganizationWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
-    return await this.requestJson<WorkspaceMember>(
+    membershipId: string,
+    request: PutOrganizationWorkspaceMemberRequest,
+  ): Promise<OrganizationWorkspaceAccessMember> {
+    return await this.requestJson<OrganizationWorkspaceAccessMember>(
+      "PUT",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${membershipId}`,
+      request,
+    );
+  }
+
+  async revokeOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    request: RevokeOrganizationWorkspaceMemberRequest,
+  ): Promise<RevokeOrganizationWorkspaceMemberResponse> {
+    return await this.requestJson<RevokeOrganizationWorkspaceMemberResponse>(
       "POST",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members`,
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${membershipId}/revoke`,
       request,
     );
   }
 
-  async updateOrganizationWorkspaceMember(
+  /** Rename the organization under an exact optimistic-concurrency fence. */
+  async updateOrganizationName(
     organizationId: string,
-    workspaceId: string,
-    subjectId: string,
-    request: UpdateWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
-    return await this.requestJson<WorkspaceMember>(
+    request: UpdateOrganizationNameRequest,
+  ): Promise<OrganizationSummary> {
+    return await this.requestJson<OrganizationSummary>(
       "PATCH",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
-        subjectId,
-      )}`,
+      `/v1/organizations/${organizationId}`,
       request,
-    );
-  }
-
-  async removeOrganizationWorkspaceMember(
-    organizationId: string,
-    workspaceId: string,
-    subjectId: string,
-  ): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
-        subjectId,
-      )}`,
     );
   }
 

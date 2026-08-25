@@ -1,6 +1,6 @@
 import type { AccessContext, Workspace } from "@/types";
 
-import { personalWorkspaceMembership, type ManagedSelfContext } from "./managed-self-context";
+import type { ManagedSelfContext } from "./managed-self-context";
 import { orgLabel } from "./org";
 
 export type WorkspaceScopeContext = {
@@ -70,6 +70,7 @@ export function resolveWorkspaceScopeContext(input: {
         (candidate) =>
           candidate.id === organizationMembership.personalWorkspaceId &&
           candidate.accountId === workspace.accountId &&
+          candidate.kind === "personal" &&
           accessContext.workspaceGrants.some(
             (grant) =>
               grant.workspaceId === candidate.id &&
@@ -84,10 +85,7 @@ export function resolveWorkspaceScopeContext(input: {
     organizationLabel: orgLabel(workspace.accountId, accessContext.accountGrants),
     workspaceId: workspace.id,
     workspaceLabel: workspace.name,
-    workspaceKind:
-      personalWorkspaceMembership(workspace, currentManagedContext) !== null
-        ? "personal"
-        : "shared",
+    workspaceKind: workspace.kind,
     personalWorkspaceId: exactPersonalWorkspace?.id ?? null,
   };
 }
