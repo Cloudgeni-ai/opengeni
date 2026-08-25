@@ -14,6 +14,7 @@ import {
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimeTablePosture,
@@ -355,7 +356,9 @@ function safePosture(): RuntimeDatabasePosture {
         name,
         owner: "opengeni_migrator",
         execute: true,
-        publicExecute: false,
+        publicExecute: (
+          RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
+        ).includes(name),
         securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
           name,
         ),
@@ -1174,6 +1177,27 @@ describe("runtime database posture evaluator", () => {
         "runtime role lacks target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
         "PUBLIC has forbidden target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
       ]),
+    );
+  });
+
+  test("allows PUBLIC execution only for the exact shared-table policy predicate", () => {
+    const missing = safePosture();
+    missing.targetRoutines.find(
+      (routine) =>
+        routine.name === "connection_authority_convergence_audit_capability_active(uuid)",
+    )!.publicExecute = false;
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "PUBLIC lacks required shared-policy predicate connection_authority_convergence_audit_capability_active(uuid)",
+    );
+
+    const excess = safePosture();
+    excess.targetRoutines.find(
+      (routine) =>
+        routine.name ===
+        "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
+    )!.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(excess, options)).toContain(
+      "PUBLIC has forbidden target-schema capability inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
     );
   });
 

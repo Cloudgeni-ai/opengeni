@@ -676,7 +676,6 @@ BEGIN
     FOREACH routine_signature IN ARRAY ARRAY[
       'classify_organization_connection_authority(uuid,text)',
       'backfill_organization_connection_authority(uuid,integer,boolean)',
-      'connection_authority_convergence_audit_capability_active(uuid)',
       'inspect_organization_connection_authority_convergence(uuid,integer,uuid)',
       'check_organization_tenancy_parity(uuid,integer,integer)'
     ] LOOP

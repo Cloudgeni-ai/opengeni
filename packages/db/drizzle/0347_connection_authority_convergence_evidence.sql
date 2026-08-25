@@ -38,6 +38,12 @@ AS $capability$
 $capability$;
 REVOKE ALL ON FUNCTION
   connection_authority_convergence_audit_capability_active(uuid) FROM PUBLIC;
+-- These policies protect shared tables whose owners and SECURITY DEFINER
+-- callers are not all known when this migration runs. The predicate exposes
+-- only a boolean and cannot create or inspect the backend/xid/token-bound
+-- capability, so every policy-evaluating role may execute it safely.
+GRANT EXECUTE ON FUNCTION
+  connection_authority_convergence_audit_capability_active(uuid) TO PUBLIC;
 
 DO $connection_authority_convergence_audit_policies$
 DECLARE
@@ -372,10 +378,6 @@ BEGIN
   );
 
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
-    EXECUTE pg_catalog.format(
-      'GRANT EXECUTE ON FUNCTION %I.connection_authority_convergence_audit_capability_active(uuid) TO opengeni_app',
-      data_schema
-    );
     EXECUTE pg_catalog.format(
       'GRANT EXECUTE ON FUNCTION %I.inspect_organization_connection_authority_convergence(uuid,integer,uuid) TO opengeni_app',
       data_schema

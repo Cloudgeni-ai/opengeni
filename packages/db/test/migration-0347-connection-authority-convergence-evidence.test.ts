@@ -313,6 +313,90 @@ describe("migration 0347 connection authority convergence evidence", () => {
     expect(restoredToken).toEqual([{ token: previousToken }]);
   }, 900_000);
 
+  test("permits shared-table policy evaluation without exposing the audit capability", async () => {
+    if (!owned) return;
+
+    const policyRole = `connection_audit_policy_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`;
+    const accountId = crypto.randomUUID();
+    const fakeToken = crypto.randomUUID();
+    await owned.admin.unsafe(`
+      CREATE ROLE "${policyRole}"
+        NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT;
+      GRANT USAGE ON SCHEMA public TO "${policyRole}";
+    `);
+
+    try {
+      const [posture] = await owned.admin.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE "${policyRole}"`);
+        await tx`select pg_current_xact_id(), set_config(
+          'opengeni.connection_authority_convergence_audit_token',
+          ${fakeToken},
+          true
+        )`;
+        return await tx<
+          Array<{
+            predicateExecute: boolean;
+            inspectorExecute: boolean;
+            capabilitySelect: boolean;
+            capabilityInsert: boolean;
+            active: boolean;
+          }>
+        >`select
+            has_function_privilege(
+              current_user,
+              'connection_authority_convergence_audit_capability_active(uuid)',
+              'EXECUTE'
+            ) as "predicateExecute",
+            has_function_privilege(
+              current_user,
+              'inspect_organization_connection_authority_convergence(uuid,integer,uuid)',
+              'EXECUTE'
+            ) as "inspectorExecute",
+            has_table_privilege(
+              current_user,
+              'connection_authority_convergence_audit_capabilities',
+              'SELECT'
+            ) as "capabilitySelect",
+            has_table_privilege(
+              current_user,
+              'connection_authority_convergence_audit_capabilities',
+              'INSERT'
+            ) as "capabilityInsert",
+            connection_authority_convergence_audit_capability_active(
+              ${accountId}::uuid
+            ) as active`;
+      });
+      expect(posture).toEqual({
+        predicateExecute: true,
+        inspectorExecute: false,
+        capabilitySelect: false,
+        capabilityInsert: false,
+        active: false,
+      });
+
+      const directCapabilityError = await owned.admin
+        .begin(async (tx) => {
+          await tx.unsafe(`SET LOCAL ROLE "${policyRole}"`);
+          await tx`insert into connection_authority_convergence_audit_capabilities (
+            capability_id, backend_pid, transaction_id, account_id
+          ) values (
+            ${fakeToken}::uuid, pg_backend_pid(), pg_current_xact_id(),
+            ${accountId}::uuid
+          )`;
+        })
+        .then(
+          () => null,
+          (error: unknown) => error,
+        );
+      expect(nestedErrorMessages(directCapabilityError)).toMatch(/permission denied/iu);
+    } finally {
+      await owned.admin.unsafe(`
+        DROP OWNED BY "${policyRole}";
+        DROP ROLE "${policyRole}";
+      `);
+    }
+  }, 900_000);
+
   test("classifies failed membership prerequisites and never reactivates terminal membership", async () => {
     if (!owned || !appClient) return;
 

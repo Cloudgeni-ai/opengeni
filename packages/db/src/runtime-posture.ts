@@ -482,6 +482,19 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
 
+/**
+ * Boolean-only predicates that shared-table RLS policies must be able to
+ * evaluate under table owners and SECURITY DEFINER roles unknown at migration
+ * time. The capability ledger and the routine that mints its opaque token stay
+ * private; only these exact policy predicates may be PUBLIC-executable.
+ */
+export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
+  CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
+] as const;
+const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+);
+
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
@@ -2275,7 +2288,12 @@ export function evaluateRuntimeDatabasePosture(
     if (!routine.execute) {
       violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
-    if (routine.publicExecute) {
+    const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
+      routine.name,
+    );
+    if (publicPolicyPredicate && !routine.publicExecute) {
+      violations.push(`PUBLIC lacks required shared-policy predicate ${routine.name}`);
+    } else if (!publicPolicyPredicate && routine.publicExecute) {
       violations.push(`PUBLIC has forbidden target-schema capability ${routine.name}`);
     }
   }
