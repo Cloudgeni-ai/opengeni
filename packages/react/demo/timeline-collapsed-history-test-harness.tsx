@@ -11,6 +11,7 @@ type TimelineCollapsedHistoryHarness = {
   appendLivePageMarkNoOlderAndSettleOlder: () => Promise<void>;
   armOlder: () => void;
   clickRetainedRetryAfterRemovingLoader: () => boolean;
+  finishNewer: () => void;
   loadCalls: () => number;
   prependFilteredOlderPage: () => void;
   prependUnderfilledPage: () => void;
@@ -135,6 +136,7 @@ const search = new URLSearchParams(window.location.search);
 
 function Harness() {
   const dynamicCollapse = search.has("dynamic-collapse");
+  const declineDuringNewer = search.has("decline-during-newer");
   const manualLoad = search.has("manual-load");
   const overlapLoads = search.has("overlap-loads");
   const emptyWindow = search.has("empty-window");
@@ -152,6 +154,7 @@ function Harness() {
   );
   const [hasOlder, setHasOlder] = useState(!dynamicCollapse);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(declineDuringNewer);
   const [loaderAvailable, setLoaderAvailable] = useState(true);
   const [loadCalls, setLoadCalls] = useState(0);
   const loadCallsRef = useRef(0);
@@ -190,7 +193,7 @@ function Harness() {
       pending.reject(new Error("transient collapsed-history load failure"));
       return;
     }
-    pending.resolve(false);
+    pending.resolve(true);
   }, []);
 
   const prependOlderPage = useCallback(() => {
@@ -278,12 +281,17 @@ function Harness() {
           setHasOlder(false);
         });
       }
-      pending.resolve(false);
+      pending.resolve(true);
     },
     [],
   );
 
   const loadOlder = useCallback((): Promise<boolean> | void => {
+    if (declineDuringNewer && loadingNewer) {
+      const call = ++loadCallsRef.current;
+      setLoadCalls(call);
+      return Promise.resolve(false);
+    }
     if (syncCachedPrefetch || syncCachedUnderfill) {
       const call = ++loadCallsRef.current;
       flushSync(() => {
@@ -326,7 +334,15 @@ function Harness() {
       window.setTimeout(() => settleOlder("success"), 250);
     }
     return load;
-  }, [manualLoad, overlapLoads, settleOlder, syncCachedPrefetch, syncCachedUnderfill]);
+  }, [
+    declineDuringNewer,
+    loadingNewer,
+    manualLoad,
+    overlapLoads,
+    settleOlder,
+    syncCachedPrefetch,
+    syncCachedUnderfill,
+  ]);
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
@@ -335,6 +351,7 @@ function Harness() {
       appendLivePageMarkNoOlderAndSettleOlder,
       armOlder: () => setHasOlder(true),
       clickRetainedRetryAfterRemovingLoader,
+      finishNewer: () => setLoadingNewer(false),
       loadCalls: () => loadCallsRef.current,
       prependFilteredOlderPage,
       prependUnderfilledPage,
@@ -384,6 +401,7 @@ function Harness() {
           items={items}
           hasOlder={hasOlder}
           loadingOlder={overlapLoads || omitLoadingOlder ? false : loadingOlder}
+          loadingNewer={loadingNewer}
           onLoadOlder={loaderAvailable ? loadOlder : undefined}
           shouldRenderAuthNeeded={suppressAuthNeeded ? () => false : undefined}
           renderMessageText={(text, item) => <div data-conversation-message={item.id}>{text}</div>}

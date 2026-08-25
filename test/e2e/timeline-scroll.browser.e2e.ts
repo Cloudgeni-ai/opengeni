@@ -830,6 +830,57 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(3);
   }, 30_000);
 
+  test("retries older pagination after newer navigation declines a collapse backfill", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse&decline-during-newer&manual-load`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+
+    const step = page.getByRole("button", { name: /steps/ }).first();
+    await step.click();
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 0,
+      undefined,
+      { timeout: 5_000 },
+    );
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.armOlder());
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(0);
+    expect(await page.locator("[data-og-loading-newer]").count()).toBe(1);
+
+    // Collapsing the window makes it underfilled while newer pagination owns
+    // the first-party navigation lock. loadOlder declines with exact `false`.
+    await step.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+
+    // Resize callbacks cannot amplify the declined request while Retry owns
+    // this exact oldest boundary.
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.finishNewer());
+    await page.waitForFunction(() => document.querySelector("[data-og-loading-newer]") === null);
+    expect(await retry.count()).toBe(1);
+
+    await retry.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("backfills history when collapsing dynamic step content removes the scroll range", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?dynamic-collapse`);

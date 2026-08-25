@@ -1264,7 +1264,7 @@ describe("MessageTimeline pagination affordances", () => {
 
       await r.unmount();
       r = null;
-      await actRun(() => pending.resolve(false));
+      await actRun(() => pending.resolve(true));
       await flush();
       expect(calls).toBe(1);
     } finally {
@@ -1335,7 +1335,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(distanceFromBottom(scroller)).toBeLessThan(2);
     expect(layout.tipBottomGap()).toBeLessThan(2);
 
-    await actRun(() => load.resolve(false));
+    await actRun(() => load.resolve(true));
     await flush();
     expect(calls).toBe(1);
     layout.restore();
@@ -1400,7 +1400,7 @@ describe("MessageTimeline pagination affordances", () => {
 
     // Promise settlement still does not prove that the fetched rows committed.
     // Keep this exact owner through the settlement-only render as well.
-    await actRun(() => load.resolve(false));
+    await actRun(() => load.resolve(true));
     await flush();
     expect(calls).toBe(1);
     expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
@@ -1511,10 +1511,110 @@ describe("MessageTimeline pagination affordances", () => {
     expect(scroller.scrollTop).toBe(0);
     expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
 
-    await actRun(() => load.resolve(false));
+    await actRun(() => load.resolve(true));
     await drainFrames(frames);
     expect(calls).toBe(1);
     layout.restore();
+    await r.unmount();
+  });
+
+  test("a declined older load during newer navigation exposes one bounded retry", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const acceptedRetry = deferred<boolean>();
+    let calls = 0;
+    const onLoadOlder = () => {
+      calls += 1;
+      // Mirrors useSessionEvents.loadOlder() declining while loadNewer owns
+      // the navigation lock. The later explicit retry is accepted.
+      return calls === 1 ? Promise.resolve(false) : acceptedRetry.promise;
+    };
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const r = await renderComponent(
+      <MessageTimeline items={items} hasOlder loadingNewer onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 800 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        status="idle"
+        hasOlder
+        loadingNewer
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(0);
+
+    // A collapse removes the scroll range while newer pagination is active.
+    // The first-party loader declines this older request with exact `false`.
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    expect(calls).toBe(1);
+
+    // Observer churn cannot auto-repeat the declined request.
+    await actRun(() => {
+      resizeCallback([], resizeObserver!);
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // Once the newer navigation settles, exactly one explicit retry may take
+    // ownership. The exiting button and resize callbacks cannot overlap it.
+    await r.rerender(
+      <MessageTimeline items={items} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    await r.rerender(
+      <MessageTimeline
+        items={[reasoningItem("older-step", "older step"), ...items]}
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await actRun(() => acceptedRetry.resolve(true));
+    await flush();
+    // AnimatePresence may retain the exiting button, but current ownership has
+    // been revoked by boundary progress/final-page availability.
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
     await r.unmount();
   });
 
@@ -1577,7 +1677,7 @@ describe("MessageTimeline pagination affordances", () => {
 
     // Window B owns the active marker now. A's later settlement must not clear
     // it or let the post-settlement commit/observer issue another B request.
-    await actRun(() => first.resolve(false));
+    await actRun(() => first.resolve(true));
     await flush();
     await drainFrames(frames);
     expect(calls).toBe(2);
@@ -1607,7 +1707,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.rerender(
       <MessageTimeline items={nextItems} hasOlder={false} onLoadOlder={onLoadOlder} />,
     );
-    await actRun(() => retryLoad.resolve(false));
+    await actRun(() => retryLoad.resolve(true));
     await flush();
     expect(calls).toBe(3);
     await r.unmount();
@@ -1659,7 +1759,7 @@ describe("MessageTimeline pagination affordances", () => {
     // Fulfillment can precede the parent commit that prepends a successful
     // non-final page. It is not a no-progress signal and must not expose a
     // same-boundary Retry, even when loadingOlder is omitted.
-    await actRun(() => first.resolve(false));
+    await actRun(() => first.resolve(true));
     await flush();
     await actRun(() => {
       r.container
@@ -1700,7 +1800,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.rerender(
       <MessageTimeline items={nextItems} hasOlder={false} onLoadOlder={onLoadOlder} />,
     );
-    await actRun(() => retryLoad.resolve(false));
+    await actRun(() => retryLoad.resolve(true));
     await flush();
     await r.unmount();
   });
@@ -1747,7 +1847,7 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     expect(calls).toBe(1);
 
-    await actRun(() => first.resolve(false));
+    await actRun(() => first.resolve(true));
     await flush();
     expect(calls).toBe(1);
     expect(r.container.querySelector("[data-og-retry]")).toBeNull();
@@ -1777,7 +1877,7 @@ describe("MessageTimeline pagination affordances", () => {
         shouldRenderAuthNeeded={shouldRenderAuthNeeded}
       />,
     );
-    await actRun(() => second.resolve(false));
+    await actRun(() => second.resolve(true));
     await flush();
     expect(r.container.textContent).toContain("visible older step");
     expect(calls).toBe(2);
@@ -1885,7 +1985,7 @@ describe("MessageTimeline pagination affordances", () => {
         onLoadOlder={onLoadOlder}
       />,
     );
-    await actRun(() => second.resolve(false));
+    await actRun(() => second.resolve(true));
     await flush();
     await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(calls).toBe(2);
@@ -1950,7 +2050,7 @@ describe("MessageTimeline pagination affordances", () => {
     await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(calls).toBe(2);
 
-    await actRun(() => retryLoad.resolve(false));
+    await actRun(() => retryLoad.resolve(true));
     await flush();
     await r.unmount();
   });
@@ -2023,7 +2123,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(calls).toBe(2);
 
     await r.rerender(<MessageTimeline items={items} hasOlder={false} onLoadOlder={onLoadOlder} />);
-    await actRun(() => retryLoad.resolve(false));
+    await actRun(() => retryLoad.resolve(true));
     await flush();
     expect(calls).toBe(2);
     await r.unmount();
@@ -2251,7 +2351,7 @@ describe("MessageTimeline pagination affordances", () => {
     });
     expect(calls).toBe(2);
 
-    await actRun(() => retryLoad.resolve(false));
+    await actRun(() => retryLoad.resolve(true));
     await flush();
     await r.unmount();
   });

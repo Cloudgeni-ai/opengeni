@@ -183,7 +183,7 @@ export type MessageTimelineProps = {
   /**
    * Called when older history should backfill. Return the load promise when
    * available so an underfilled timeline can expose a bounded retry after a
-   * rejection or synchronous throw.
+   * rejection, synchronous throw, or an exact `false` no-progress receipt.
    */
   onLoadOlder?: (() => unknown) | undefined;
   /** Jump to the durable session start (bounded oldest window, no middle). */
@@ -243,15 +243,23 @@ const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 // The tuple identity is the exact ownership fence.
 type OlderLoadAttempt = [boundary: string | undefined, state: number];
 
-function invokeOlderLoad(load: () => unknown, reject: () => void): 1 | undefined {
+function invokeOlderLoad(load: () => unknown, noProgress: () => void): 1 | undefined {
   try {
     const result = load();
+    if (result === false) {
+      noProgress();
+      return 1;
+    }
     if (typeof (result as PromiseLike<unknown> | undefined)?.then == "function") {
-      void (result as PromiseLike<unknown>).then(null, reject);
+      void (result as PromiseLike<unknown>).then((value) => {
+        if (value === false) {
+          noProgress();
+        }
+      }, noProgress);
       return 1;
     }
   } catch {
-    reject();
+    noProgress();
     return 1;
   }
 }
@@ -805,16 +813,17 @@ export function MessageTimeline({
       setUnderfillSettledAttempt(null);
       // Every underfill request owns the ordinary sentinel too, even if reader
       // intent had not armed it yet when this short-window request began.
-      const reject = () => {
+      const noProgress = () => {
         if (scrollRef.current && olderLoadAttemptRef.current === attempt) {
           setUnderfillSettledAttempt(attempt);
         }
       };
       // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
-      // that return the real promise opt into safe rejection/no-progress retry.
-      // Fulfillment retains this exact owner until its prepend boundary
-      // commits; promise settlement alone cannot prove progress or no-progress.
-      invokeOlderLoad(onLoadOlder, reject);
+      // that return the real promise opt into safe rejection/no-progress retry;
+      // exact `false` is the first-party request-not-accepted receipt.
+      // All other fulfillment retains this exact owner until its prepend
+      // boundary commits; promise settlement alone cannot prove progress.
+      invokeOlderLoad(onLoadOlder, noProgress);
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder, underfillSettledAttempt],
   );
@@ -1243,7 +1252,7 @@ export function MessageTimeline({
         }
         const attempt: OlderLoadAttempt = [olderBoundaryKey, 1];
         olderLoadAttemptRef.current = attempt;
-        const reject = () => {
+        const noProgress = () => {
           if (!scrollRef.current || olderLoadAttemptRef.current !== attempt) {
             return;
           }
@@ -1257,9 +1266,10 @@ export function MessageTimeline({
         };
         // Preserve legacy fire-and-forget top-band retries: the callback has
         // synchronously returned, but this visit remains cooling until exit.
-        // Fulfilled promises retain their pending owner until boundary commit;
+        // Only rejection/throw/exact `false` is a no-progress receipt. Other
+        // fulfillment retains the pending owner until boundary commit;
         // otherwise a delayed prepend could overlap a same-boundary request.
-        if (!invokeOlderLoad(onLoadOlder, reject) && olderLoadAttemptRef.current === attempt) {
+        if (!invokeOlderLoad(onLoadOlder, noProgress) && olderLoadAttemptRef.current === attempt) {
           attempt[1] = 2;
           requestOlderIfUnderfilled(root);
         }
