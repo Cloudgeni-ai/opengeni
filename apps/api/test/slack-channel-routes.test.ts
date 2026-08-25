@@ -183,6 +183,34 @@ describe("Slack channel routing administration", () => {
     ).json()) as { routes: Array<{ slackChannelId: string }> };
     expect(afterRefusal.routes.map((route) => route.slackChannelId)).toEqual(["C_ADMIN"]);
 
+    // A channel may not be pointed at the admin's own personal workspace, even
+    // though they can obviously start work in it. Routing a shared channel
+    // there would put every message in it somewhere nobody else in the channel
+    // can see, so this is a 422 rather than the 403 above: the objection is to
+    // the destination, not to their access.
+    const [personal] = await shared!.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${install.accountId}, 'Personal') returning id`;
+    await shared!.admin`
+      insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${install.accountId}, ${adminSubject}, 'member', 'active', ${personal!.id})
+      on conflict (account_id, subject_id) do update
+        set status = 'active', personal_workspace_id = excluded.personal_workspace_id`;
+    const personalRefusal = await app().request(base, {
+      method: "PUT",
+      headers: admin,
+      body: JSON.stringify({
+        connectionId: install.connectionId,
+        routes: [{ slackChannelId: "C_PERSONAL", targetWorkspaceId: personal!.id }],
+      }),
+    });
+    expect(personalRefusal.status).toBe(422);
+    expect(await personalRefusal.text()).toContain("personal workspace");
+    const afterPersonal = (await (
+      await app().request(`${base}?connectionId=${install.connectionId}`, { headers: admin })
+    ).json()) as { routes: Array<{ slackChannelId: string }> };
+    expect(afterPersonal.routes.map((route) => route.slackChannelId)).toEqual(["C_ADMIN"]);
+
     // A null target clears the route, putting the channel back to asking.
     expect(
       (
