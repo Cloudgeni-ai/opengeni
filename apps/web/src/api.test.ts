@@ -11,6 +11,7 @@ import {
   sendVerificationEmail,
   setStoredAccessKey,
   clearStoredAccessKey,
+  completeSelfServiceOrganizationSetup,
   shouldReloadForDeploymentRevision,
   shouldReloadForApiContractRevision,
 } from "./api";
@@ -123,6 +124,36 @@ describe("web API auth helpers", () => {
     expect(JSON.parse(String(request!.init?.body))).toEqual({
       email: "user@example.com",
     });
+    expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
+      OPENGENI_API_CONTRACT_REVISION,
+    );
+  });
+
+  test("sends the exact API contract revision on product-owned auth mutations", async () => {
+    const originalFetch = globalThis.fetch;
+    const requests: Array<{ input: Parameters<typeof fetch>[0]; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requests.push({ input, init });
+      return Response.json({
+        status: "complete",
+        organizationId: crypto.randomUUID(),
+        personalWorkspaceId: crypto.randomUUID(),
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      await completeSelfServiceOrganizationSetup({
+        organizationName: "Northwind Research",
+        operationId: crypto.randomUUID(),
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(String(requests[0]!.input)).toBe("/v1/auth/organization-onboarding");
+    expect(new Headers(requests[0]!.init?.headers).get("x-opengeni-api-contract")).toBe(
+      OPENGENI_API_CONTRACT_REVISION,
+    );
   });
 
   test("parses Better Auth failures into structured errors without raw JSON prefixes", async () => {

@@ -40,6 +40,7 @@ import {
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getManagedUserProfilesByIds,
+  ensureOrganizationUserSetupIntent,
   getOrganizationAdministrationOverview,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
@@ -61,6 +62,12 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+
+import { sendManagedAuthEmail } from "../auth/managed-auth";
+import {
+  assertOrganizationUserSetupDeliveryConfigured,
+  deriveOrganizationUserSetupToken,
+} from "../auth/organization-user-setup";
 
 const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
@@ -159,6 +166,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         email: session.user.email,
         name: session.user.name,
         emailVerified: session.user.emailVerified,
+        provisionFallbackOrganization: false,
       });
       return context.json(
         ListManagedOrganizationMembershipsResponse.parse({
@@ -166,6 +174,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         }),
       );
     } catch (error) {
+      // Not dead after 0348: a terminal-only membership is now a bounded EMPTY
+      // projection rather than a 42501, but the verified-email binder still
+      // raises 42501 when the session claims `emailVerified` and the durable
+      // `auth_users` row disagrees (an email change clears it), so this stays
+      // the correct deny for a stale-verification session.
       if (nestedPostgresSqlState(error) === "42501") {
         throw new HTTPException(403, {
           message: "organization membership is not active",
@@ -514,23 +527,48 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
+    // Fail before the invitation commits, never after: a 500 raised once the
+    // row exists is an outcome-unknown state for the administrator.
     try {
-      return context.json(
-        OrganizationInvitation.parse(
-          await createOrganizationInvitation(deps.db, {
-            organizationId,
-            actorSubjectId: subjectId,
-            operationId: payload.operationId,
-            targetSubjectId: null,
-            targetEmail: payload.email.trim().toLowerCase(),
-            ...(payload.name === undefined ? {} : { targetName: payload.name }),
-            initialWorkspaceIds: payload.initialWorkspaceIds,
-            role: payload.role,
-            expiresAt: payload.expiresAt,
-          }),
-        ),
-        201,
+      assertOrganizationUserSetupDeliveryConfigured(deps.settings);
+    } catch {
+      throw new HTTPException(503, {
+        message: "invited-user account setup delivery is not configured on this deployment",
+      });
+    }
+    try {
+      const invitation = OrganizationInvitation.parse(
+        await createOrganizationInvitation(deps.db, {
+          organizationId,
+          actorSubjectId: subjectId,
+          operationId: payload.operationId,
+          targetSubjectId: null,
+          targetEmail: payload.email.trim().toLowerCase(),
+          ...(payload.name === undefined ? {} : { targetName: payload.name }),
+          initialWorkspaceIds: payload.initialWorkspaceIds,
+          role: payload.role,
+          expiresAt: payload.expiresAt,
+        }),
       );
+      const setup = await deriveOrganizationUserSetupToken(deps.settings, {
+        invitationId: invitation.id,
+        operationId: payload.operationId,
+      });
+      await ensureOrganizationUserSetupIntent(deps.db, {
+        organizationId,
+        actorSubjectId: subjectId,
+        invitationId: invitation.id,
+        tokenDigest: setup.digest,
+        expiresAt: invitation.expiresAt,
+      });
+      await sendManagedAuthEmail(deps.settings, {
+        to: invitation.targetEmail,
+        subject: "Join your OpenGeni organization",
+        text: `You have been invited to an OpenGeni organization. If you need a new account, set it up here: ${setup.url}\n\nIf you already have an account, sign in at ${deps.settings.publicBaseUrl ?? "OpenGeni"} and accept the invitation.`,
+        html: `<p>You have been invited to an OpenGeni organization.</p><p><a href="${escapeHtml(setup.url)}">Set up your account</a></p><p>If you already have an account, sign in to OpenGeni and accept the invitation.</p>`,
+        idempotencyKey: `opengeni-organization-setup-${payload.operationId}`,
+      });
+      return context.json(invitation, 201);
     } catch (error) {
       if (error instanceof HTTPException) throw error;
       rethrowMembershipError(error);
@@ -739,4 +777,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       rethrowMembershipError(error);
     }
   });
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }

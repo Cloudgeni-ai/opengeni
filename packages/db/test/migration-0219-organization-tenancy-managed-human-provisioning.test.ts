@@ -10,6 +10,7 @@ import {
   createDb,
   ensureManagedAccessForUser,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  getSelfServiceOrganizationOnboardingState,
   listWorkspacesForSubject,
   managedPersonalWorkspacePermissions,
   nestedPostgresSqlState,
@@ -386,21 +387,101 @@ describe("migration 0219 managed-human organization provisioning", () => {
       "42501",
     );
 
+    // The current onboarding state resolver verifies the managed-auth identity
+    // before binding invitations. This historical provisioning fixture predates
+    // `auth_users`, so materialize the verified identity whose cookie the
+    // terminal projection represents.
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (
+        ${firstUserId}, 'Adversarial managed human',
+        ${`${firstUserId}@example.test`}, true
+      )
+      on conflict (id) do nothing`;
+    const terminalInput = {
+      userId: firstUserId,
+      email: `${firstUserId}@example.test`,
+      name: "Adversarial managed human",
+      emailVerified: true,
+      provisionFallbackOrganization: false,
+    } as const;
+    const durableShape = async () => {
+      const [shape] = await shared!.admin<
+        Array<{
+          accounts: number;
+          workspaces: number;
+          workspaceMemberships: number;
+          organizationMemberships: number;
+          authorities: number;
+          grants: number;
+        }>
+      >`
+        select
+          (select count(*)::int from managed_accounts
+            where id = ${firstAccountId}) as accounts,
+          (select count(*)::int from workspaces
+            where account_id = ${firstAccountId}) as workspaces,
+          (select count(*)::int from workspace_memberships
+            where account_id = ${firstAccountId}
+              and subject_id = ${firstSubjectId}) as "workspaceMemberships",
+          (select count(*)::int from organization_memberships
+            where account_id = ${firstAccountId}
+              and subject_id = ${firstSubjectId}) as "organizationMemberships",
+          (select count(*)::int from organization_user_resource_authorities
+            where account_id = ${firstAccountId}) as authorities,
+          (select count(*)::int from organization_user_resource_grants
+            where account_id = ${firstAccountId}) as grants`;
+      return shape;
+    };
+    const expectedDurableShape = {
+      accounts: 1,
+      workspaces: 2,
+      workspaceMemberships: 1,
+      organizationMemberships: 1,
+      authorities: 0,
+      grants: 0,
+    };
+    expect(await durableShape()).toEqual(expectedDurableShape);
+
+    const expectBoundedUnavailableProjection = async () => {
+      // Migration 0348 removed implicit fallback provisioning from the
+      // managed-cookie resolver. A non-active membership is authenticated but
+      // has no projected authority: it returns a bounded empty context and the
+      // onboarding surface reports `unavailable` instead of retrying the 0219
+      // provisioning seam or presenting the human with a create flow.
+      expect(
+        await ensureManagedAccessForUserWithOrganizationMemberships(client!.db, terminalInput),
+      ).toEqual({
+        accessContext: {
+          mode: "managed",
+          subjectId: firstSubjectId,
+          subjectLabel: terminalInput.email,
+          accountGrants: [],
+          workspaceGrants: [],
+          defaultAccountId: null,
+          defaultWorkspaceId: null,
+        },
+        organizationMemberships: [],
+      });
+      expect(
+        await getSelfServiceOrganizationOnboardingState(client!.db, {
+          authUserId: firstUserId,
+          email: terminalInput.email,
+          emailVerified: true,
+        }),
+      ).toBe("unavailable");
+      // Projection and onboarding reads cannot mint a replacement account,
+      // workspace, membership, authority, or grant for the terminal subject.
+      expect(await durableShape()).toEqual(expectedDurableShape);
+    };
+
     await shared.admin`
       update organization_memberships
       set status = 'suspended', revoked_at = null
       where account_id = ${firstAccountId}
         and subject_id = ${firstSubjectId}
     `;
-    await expectSqlState(
-      () =>
-        ensureManagedAccessForUser(client!.db, {
-          userId: firstUserId,
-          email: `${firstUserId}@example.test`,
-          name: "Adversarial managed human",
-        }),
-      "42501",
-    );
+    await expectBoundedUnavailableProjection();
 
     await shared.admin`
       update organization_memberships
@@ -408,15 +489,7 @@ describe("migration 0219 managed-human organization provisioning", () => {
       where account_id = ${firstAccountId}
         and subject_id = ${firstSubjectId}
     `;
-    await expectSqlState(
-      () =>
-        ensureManagedAccessForUser(client!.db, {
-          userId: firstUserId,
-          email: `${firstUserId}@example.test`,
-          name: "Adversarial managed human",
-        }),
-      "42501",
-    );
+    await expectBoundedUnavailableProjection();
 
     await shared.admin`
       update organization_memberships
@@ -426,15 +499,7 @@ describe("migration 0219 managed-human organization provisioning", () => {
       where account_id = ${firstAccountId}
         and subject_id = ${firstSubjectId}
     `;
-    await expectSqlState(
-      () =>
-        ensureManagedAccessForUser(client!.db, {
-          userId: firstUserId,
-          email: `${firstUserId}@example.test`,
-          name: "Adversarial managed human",
-        }),
-      "23505",
-    );
+    await expectBoundedUnavailableProjection();
 
     await shared.admin`
       update organization_memberships

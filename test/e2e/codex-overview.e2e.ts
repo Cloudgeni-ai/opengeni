@@ -355,6 +355,7 @@ beforeAll(async () => {
       id: OWNER_USER_ID,
       name: "Codex quota Owner",
       email: `codex-quota-owner-${RUN_ID}@example.com`,
+      emailVerified: true,
     },
   });
   await client.db.execute(sql`
@@ -418,6 +419,35 @@ beforeAll(async () => {
     codexFetch: provider.fetch.bind(provider) as typeof fetch,
   });
 
+  const onboarding = await api.request("/v1/auth/organization-onboarding", {
+    method: "POST",
+    headers: { cookie: OWNER_COOKIE, "content-type": "application/json" },
+    body: JSON.stringify({
+      organizationName: "Codex quota organization",
+      operationId: crypto.randomUUID(),
+    }),
+  });
+  expect(onboarding.status).toBe(200);
+  const access = await api.request("/v1/access/me", {
+    headers: { cookie: OWNER_COOKIE },
+  });
+  expect(access.status).toBe(200);
+  const context = (await access.json()) as AccessContext;
+  const accountId = context.defaultAccountId!;
+  defaultAccountId = accountId;
+  // Self-service setup creates only the owner-only Personal workspace. This
+  // administrative scenario therefore creates the shared workspace it needs.
+  const workspace = await api.request("/v1/workspaces", {
+    method: "POST",
+    headers: { cookie: OWNER_COOKIE, "content-type": "application/json" },
+    body: JSON.stringify({
+      accountId,
+      name: "Codex quota workspace",
+    }),
+  });
+  expect(workspace.status).toBe(201);
+  workspaceId = ((await workspace.json()) as { id: string }).id;
+
   const extensionBuild = Bun.spawn(["bun", "run", "build"], {
     cwd: `${repoRoot}/apps/browser-extension`,
     env: {
@@ -466,13 +496,6 @@ beforeAll(async () => {
     },
   });
 
-  const access = await api.request("/v1/access/me", {
-    headers: { cookie: OWNER_COOKIE },
-  });
-  const context = (await access.json()) as AccessContext;
-  workspaceId = context.defaultWorkspaceId!;
-  const accountId = context.defaultAccountId!;
-  defaultAccountId = accountId;
   const key = Buffer.from(settings.environmentsEncryptionKey!, "base64");
   for (const [externalId, label] of [
     ["detailed", "Detailed account"],

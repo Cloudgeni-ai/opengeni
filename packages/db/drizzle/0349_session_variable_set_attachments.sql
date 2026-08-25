@@ -1,7 +1,7 @@
 -- deployment-mode: maintenance
 -- Activate ordered, FK-backed session Variable Set attachments. Runtime
 -- injection now consumes the complete ordered selection, so every API/control/
--- turn worker must be stopped before this cutover and no pre-0348 image may
+-- turn worker must be stopped before this cutover and no pre-0349 image may
 -- restart afterwards.
 
 SET LOCAL lock_timeout = '5s';
@@ -16,14 +16,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0348 session Variable Set attachments require an explicit application database role list'
+      '0349 session Variable Set attachments require an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0348 session Variable Set attachments received a malformed application database role list'
+      '0349 session Variable Set attachments received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -42,7 +42,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0348 session Variable Set attachments received an invalid application database role list'
+      '0349 session Variable Set attachments received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -54,7 +54,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0348 session Variable Set attachments require all configured OpenGeni application database sessions to be stopped'
+      '0349 session Variable Set attachments require all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -99,7 +99,7 @@ ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 -- restrictive policy prevents an old API/control/turn worker from rejoining
 -- afterwards. Current standalone connections use the PgBouncer-supported
 -- application_name startup receipt; injected/embedded handles stamp the
--- transaction-local GUC in setRlsContext. Pre-0348 binaries carry neither.
+-- transaction-local GUC in setRlsContext. Pre-0349 binaries carry neither.
 CREATE FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active()
 RETURNS boolean
 LANGUAGE plpgsql
@@ -114,7 +114,7 @@ BEGIN
     RETURN true;
   END IF;
   RAISE EXCEPTION
-    'session Variable Set attachments require an OpenGeni 0348-or-newer runtime'
+    'session Variable Set attachments require an OpenGeni 0349-or-newer runtime'
     USING ERRCODE = '55000';
 END
 $function$;
@@ -146,7 +146,7 @@ $session_variable_set_protocol_grants$;
 SELECT set_config('opengeni.session_variable_set_attachments_v1', '1', true);
 
 -- Migration 0176 admitted the then-current createDb application_name as a
--- lossless-content writer. The 0348 startup receipt rotates that name, so keep
+-- lossless-content writer. The 0349 startup receipt rotates that name, so keep
 -- both generations lossless-aware while the sessions protocol gate separately
 -- rejects the old generation.
 CREATE OR REPLACE FUNCTION opengeni_private.fence_legacy_lossless_content_update()
@@ -1060,7 +1060,7 @@ BEGIN
   FOR SHARE OF variable_set;$new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0348 could not extend the personal-resource attachment lock set'
+    RAISE EXCEPTION '0349 could not extend the personal-resource attachment lock set'
       USING ERRCODE = '55000';
   END IF;
 
@@ -1080,7 +1080,7 @@ BEGIN
       AND attachment.session_id = p_session_id$new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0348 could not extend the personal-resource attachment closure'
+    RAISE EXCEPTION '0349 could not extend the personal-resource attachment closure'
       USING ERRCODE = '55000';
   END IF;
   function_source := replace(
@@ -1093,7 +1093,7 @@ BEGIN
   IF function_source NOT LIKE '%IF selected_count > 52 THEN%'
     OR function_source LIKE '%IF selected_count > 28 THEN%'
   THEN
-    RAISE EXCEPTION '0348 could not update the personal-resource attachment bound'
+    RAISE EXCEPTION '0349 could not update the personal-resource attachment bound'
       USING ERRCODE = '55000';
   END IF;
 
@@ -1150,7 +1150,7 @@ BEGIN
     'session_value.variable_set_ids, session_value.variable_set_id, session_value.rig_id,'
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0348 could not extend the scheduled session selection snapshot'
+    RAISE EXCEPTION '0349 could not extend the scheduled session selection snapshot'
       USING ERRCODE = '55000';
   END IF;
 
@@ -1173,7 +1173,7 @@ BEGIN
       AND run_snapshot -> 'targetSessionExecution' ->> 'variableSetId' = p_variable_set_id::text$new$
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0348 could not extend the scheduled accepted generation lookup'
+    RAISE EXCEPTION '0349 could not extend the scheduled accepted generation lookup'
       USING ERRCODE = '55000';
   END IF;
 
@@ -1184,7 +1184,7 @@ BEGIN
     'IF NOT coalesce(session_row.variable_set_ids, ''[]''::jsonb) ? p_variable_set_id::text'
   );
   IF function_source = prior_source THEN
-    RAISE EXCEPTION '0348 could not extend the scheduled exact-session selection check'
+    RAISE EXCEPTION '0349 could not extend the scheduled exact-session selection check'
       USING ERRCODE = '55000';
   END IF;
 

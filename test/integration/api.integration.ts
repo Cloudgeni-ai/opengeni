@@ -1110,7 +1110,7 @@ describe("API component integration", () => {
     });
   });
 
-  test("managed email/password auth bootstraps account access and workspace API keys", async () => {
+  test("managed email/password auth completes onboarding before using workspace API keys", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -1148,6 +1148,21 @@ describe("API component integration", () => {
     const cookie = signin.headers.get("set-cookie");
     expect(cookie).toBeTruthy();
 
+    const onboardingStatus = await app.request("/v1/auth/organization-onboarding", {
+      headers: { cookie: cookie! },
+    });
+    expect(onboardingStatus.status).toBe(200);
+    expect(await onboardingStatus.json()).toEqual({ state: "required" });
+    const onboarding = await app.request("/v1/auth/organization-onboarding", {
+      method: "POST",
+      headers: { cookie: cookie!, "content-type": "application/json" },
+      body: JSON.stringify({
+        organizationName: "Managed integration organization",
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(onboarding.status).toBe(200);
+
     const access = await app.request("/v1/access/me", {
       headers: { cookie: cookie! },
     });
@@ -1155,7 +1170,18 @@ describe("API component integration", () => {
     const context = (await access.json()) as AccessContext;
     expect(context.mode).toBe("managed");
     expect(context.accountGrants[0]?.permissions).toContain("billing:manage");
-    const workspaceId = context.defaultWorkspaceId!;
+    // Personal workspaces deliberately cannot mint API keys. Provision the
+    // shared workspace this API-key scenario is intended to administer.
+    const createdWorkspace = await app.request("/v1/workspaces", {
+      method: "POST",
+      headers: { cookie: cookie!, "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: context.defaultAccountId,
+        name: "Managed integration workspace",
+      }),
+    });
+    expect(createdWorkspace.status).toBe(201);
+    const workspaceId = ((await createdWorkspace.json()) as { id: string }).id;
     const createdKey = await app.request(workspacePath(workspaceId, "/api-keys"), {
       method: "POST",
       headers: { "content-type": "application/json", cookie: cookie! },
@@ -1525,7 +1551,10 @@ describe("API component integration", () => {
     const context = (await access.json()) as AccessContext;
     expect(context.mode).toBe("managed");
     expect(context.subjectId).toBe(`user:${userId}`);
-    expect(context.defaultWorkspaceId).toBeTruthy();
+    expect(context.defaultAccountId).toBeNull();
+    expect(context.defaultWorkspaceId).toBeNull();
+    expect(context.accountGrants).toEqual([]);
+    expect(context.workspaceGrants).toEqual([]);
   });
 
   test("managed credit gate blocks costly writes and exposes recorded usage", async () => {

@@ -132,6 +132,7 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
@@ -486,6 +487,9 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  // These product-owned auth routes must be registered before Better Auth's
+  // wildcard handler or the provider returns its own 404 first.
+  registerManagedOnboardingRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", (c) => managedAuth.handler(c.req.raw));
   }
@@ -1956,6 +1960,12 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   }
   if (!pathname.startsWith("/v1/")) {
     return false;
+  }
+  if (
+    pathname === "/v1/auth/organization-onboarding" ||
+    pathname === "/v1/auth/organization-setup"
+  ) {
+    return true;
   }
   if (
     pathname.startsWith("/v1/auth/") ||

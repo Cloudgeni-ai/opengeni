@@ -186,7 +186,19 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       where resource_kind = 'document' and resource_id = ${beforeDocument}`;
     expect(legacyAuthorities).toHaveLength(0);
 
+    const applicationSessionCount = async () => {
+      const [row] = await admin<Array<{ count: number }>>`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname = current_database()
+          and usename = 'opengeni_app'`;
+      return row!.count;
+    };
+    expect(await applicationSessionCount()).toBe(1);
+    // This historical 0343 replay now crosses maintenance migration 0348. Model
+    // the required application-writer drain instead of weakening its fail-closed guard.
     await app.end({ timeout: 5 });
+    expect(await applicationSessionCount()).toBe(0);
     await admin`alter table sessions drop column variable_set_ids`;
     await migrate(ownerUrl);
     app = openApp();

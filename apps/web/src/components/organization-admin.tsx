@@ -310,7 +310,6 @@ export function OrganizationOverviewSection(props: {
   accessibleWorkspaceIds: ReadonlySet<string>;
   onOrganizationChanged: () => void | Promise<void>;
   onCreateWorkspace: (name: string, operationId: string) => Promise<void>;
-  onCreateOrganization: (name: string, operationId: string) => Promise<void>;
 }) {
   const identityKey = organizationAdminIdentityKey(props.identity);
   const identityRef = useRef<OrganizationAdminIdentity | null>(props.identity);
@@ -318,10 +317,6 @@ export function OrganizationOverviewSection(props: {
   const sequenceRef = useRef(new Map<OrganizationAdminOperationSlot, number>());
   const activeRef = useRef(new Map<OrganizationAdminOperationSlot, OrganizationAdminOperation>());
   const pendingRenameRef = useRef<PendingOrganizationRename | null>(null);
-  const pendingCreateOrganizationRef = useRef<{
-    name: string;
-    operationId: string;
-  } | null>(null);
   const pendingCreateWorkspaceRef = useRef<{
     name: string;
     operationId: string;
@@ -344,8 +339,6 @@ export function OrganizationOverviewSection(props: {
   const [accessBusyWorkspaceId, setAccessBusyWorkspaceId] = useState<string | null>(null);
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
-  const [newOrganizationName, setNewOrganizationName] = useState("");
-  const [creatingOrganization, setCreatingOrganization] = useState(false);
   const canAdminister = props.actorRole === "owner" || props.actorRole === "admin";
 
   const claim = useCallback(
@@ -587,38 +580,6 @@ export function OrganizationOverviewSection(props: {
     }
   }
 
-  async function createOrganization() {
-    const requestedName = newOrganizationName.trim();
-    if (!requestedName) return;
-    const currentAttempt = pendingCreateOrganizationRef.current;
-    const attempt =
-      currentAttempt?.name === requestedName
-        ? currentAttempt
-        : { name: requestedName, operationId: crypto.randomUUID() };
-    pendingCreateOrganizationRef.current = attempt;
-    setCreatingOrganization(true);
-    try {
-      await props.onCreateOrganization(attempt.name, attempt.operationId);
-      pendingCreateOrganizationRef.current = null;
-      setNewOrganizationName("");
-    } catch (error) {
-      const outcomeUnknown =
-        typeof error === "object" &&
-        error !== null &&
-        (error as { outcomeUnknown?: unknown }).outcomeUnknown === true;
-      if (!outcomeUnknown) pendingCreateOrganizationRef.current = null;
-      toast.error("Couldn't create organization", {
-        description: outcomeUnknown
-          ? "The result is not known yet. Retry to safely reconcile the same request."
-          : error instanceof Error
-            ? error.message
-            : String(error),
-      });
-    } finally {
-      setCreatingOrganization(false);
-    }
-  }
-
   async function saveName() {
     const requestedName = name.trim();
     if (!overview || !requestedName || requestedName === overview.organization.name) {
@@ -689,39 +650,6 @@ export function OrganizationOverviewSection(props: {
     }
   }
 
-  const createOrganizationSection = (
-    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4 sm:grid-cols-[minmax(0,1fr)_minmax(20rem,auto)] sm:items-end">
-      <div>
-        <h2 className="text-sm font-medium">Create another organization</h2>
-        <p className="mt-1 text-xs text-fg-muted">
-          Start a separate company or team with its own people, workspaces, and settings.
-        </p>
-      </div>
-      <form
-        className="flex gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void createOrganization();
-        }}
-      >
-        <Input
-          aria-label="New organization name"
-          placeholder="Organization name"
-          value={newOrganizationName}
-          onChange={(event) => setNewOrganizationName(event.target.value)}
-        />
-        <Button
-          type="submit"
-          size="sm"
-          disabled={!newOrganizationName.trim() || creatingOrganization}
-        >
-          {creatingOrganization ? <Loader2Icon className="size-3.5 animate-spin" /> : null}
-          Create
-        </Button>
-      </form>
-    </section>
-  );
-
   if (!props.managedSession) {
     return (
       <Notice tone="muted" title="Organization overview unavailable">
@@ -731,12 +659,9 @@ export function OrganizationOverviewSection(props: {
   }
   if (!canAdminister) {
     return (
-      <div className="grid gap-4">
-        {createOrganizationSection}
-        <Notice tone="muted" title="Organization administration unavailable">
-          Your current organization role does not allow you to change this organization.
-        </Notice>
-      </div>
+      <Notice tone="muted" title="Organization administration unavailable">
+        Your current organization role does not allow you to change this organization.
+      </Notice>
     );
   }
   if (visible.error) {
@@ -823,8 +748,6 @@ export function OrganizationOverviewSection(props: {
           />
         </div>
       </section>
-
-      {createOrganizationSection}
 
       <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
         <div className="flex flex-wrap items-end justify-between gap-3">
@@ -1416,9 +1339,7 @@ export function OrganizationPeopleSection(props: {
         error: null,
       }));
       setInviteEmail("");
-      setLiveOutcome(
-        `Invitation created for ${invitation.targetEmail}. It is available in OpenGeni.`,
-      );
+      setLiveOutcome(`Invitation emailed to ${invitation.targetEmail}.`);
       toast.success("Organization invitation created");
     } catch (error) {
       if (!owns(operation)) return;
@@ -1856,9 +1777,8 @@ export function OrganizationPeopleSection(props: {
               People &amp; invitations
             </h2>
             <p className="mt-1 text-xs text-fg-muted">
-              Invite someone by email. OpenGeni records the invitation here; invitation-email
-              delivery is not connected yet. If they do not have an account, ask them to sign up
-              with the same address.
+              New users receive a one-time account setup link. Existing users can sign in and accept
+              the invitation. Invitations expire after seven days.
             </p>
           </div>
           <fieldset

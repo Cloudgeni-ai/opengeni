@@ -12,6 +12,7 @@ import {
   createDb,
   createOrganizationInvitation,
   createSession,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   listSessionsForSubject,
   managedPersonalWorkspacePermissions,
   namedSubjectHasLiveWorkspaceAuthority,
@@ -126,7 +127,7 @@ type AuthHuman = { userId: string; subjectId: string; email: string; cookie: str
  * first request, so they end up as a genuine same-organization co-member rather
  * than the owner of a freshly bootstrapped account of their own.
  */
-async function createAuthHuman(): Promise<AuthHuman> {
+async function createAuthHuman(bootstrapOwnOrganization = true): Promise<AuthHuman> {
   if (!client || !shared) throw new Error("test database unavailable");
   const userId = `pw-session-${crypto.randomUUID()}`;
   const email = `${userId}@example.test`;
@@ -139,6 +140,19 @@ async function createAuthHuman(): Promise<AuthHuman> {
   await shared.admin`
     insert into auth_identities (id, user_id, provider_id, account_id)
     values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
+  // Before 0348 the managed-cookie access resolver materialised an
+  // organization implicitly on the first `/v1/access/me`. The post-sign-in
+  // onboarding gate replaces that, so an owner fixture now states the premise
+  // explicitly. A co-member must NOT bootstrap one: they join the inviting
+  // organization through the real 0263 lifecycle instead.
+  if (bootstrapOwnOrganization) {
+    await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId,
+      email,
+      name: "Managed human",
+      emailVerified: true,
+    });
+  }
   const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
   await shared.admin`
     insert into auth_sessions (
@@ -235,7 +249,7 @@ async function inviteIntoOrganization(
   role: "member" | "admin",
 ): Promise<ManagedHuman> {
   if (!client) throw new Error("test database unavailable");
-  const auth = await createAuthHuman();
+  const auth = await createAuthHuman(false);
   const invitation = await createOrganizationInvitation(client.db, {
     organizationId: owner.accountId,
     actorSubjectId: owner.subjectId,
@@ -1178,19 +1192,22 @@ describe("the personal-workspace exception stays owner-only", () => {
 
     // Outlives the authority: the owner loses access, the key does not.
     //
-    // The owner's cookie surfaces suspension as a 500, not a clean 403 — the
-    // lifecycle seam raises `assert_active_managed_human_organization_membership`
-    // and nothing converts it. Verified pre-existing on pristine `origin/main`
-    // (6f61d6ee) with the same probe, so it is recorded here rather than fixed;
-    // it fails closed either way. The point of this assertion is the contrast:
-    // whatever the owner gets, the key still gets 200.
+    // This used to surface as a 500: managed-access refresh projected the
+    // terminal membership through the fallback organization, which raised
+    // `assert_active_managed_human_organization_membership` with nothing to
+    // convert it (recorded here as pre-existing on `origin/main` 6f61d6ee).
+    // Migration 0348 removed that fallback projection, so a terminal-only
+    // membership is now a bounded empty access context and the route denies
+    // cleanly with 403 — the same bounded state the onboarding contract reports
+    // as `unavailable`. The point of this assertion is unchanged: whatever the
+    // owner gets, it is never 200, and the key still gets 200.
     await shared.admin`
       update organization_memberships set status = 'suspended'
       where account_id = ${owner.accountId} and subject_id = ${owner.subjectId}`;
     const ownerAfterSuspension = await owner.app.request(listUrl, {
       headers: { cookie: owner.cookie },
     });
-    expect(ownerAfterSuspension.status).toBe(500);
+    expect(ownerAfterSuspension.status).toBe(403);
     expect(ownerAfterSuspension.status).not.toBe(200);
     expect((await owner.app.request(listUrl, { headers })).status).toBe(200);
   }, 180_000);

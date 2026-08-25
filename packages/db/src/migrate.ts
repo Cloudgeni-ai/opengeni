@@ -11,8 +11,9 @@ const GOAL_REVISION_CUTOVER_MIGRATION = "0257_goal_revision_decisions_and_root_c
 const ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION = "0306_atomic_personal_resource_attachments.sql";
 const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organization_invitations.sql";
 const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql";
+const NAMED_SIGNUP_CUTOVER_MIGRATION = "0348_named_signup_and_user_setup.sql";
 const SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION =
-  "0348_session_variable_set_attachments.sql";
+  "0349_session_variable_set_attachments.sql";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
@@ -381,6 +382,7 @@ export async function migrate(
       !applied.has(ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION) ||
       !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION) ||
       !applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION) ||
+      !applied.has(NAMED_SIGNUP_CUTOVER_MIGRATION) ||
       !applied.has(SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION)
     ) {
       const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);

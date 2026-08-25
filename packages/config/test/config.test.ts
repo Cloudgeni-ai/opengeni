@@ -126,6 +126,18 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("Slack workspace routing defaults on and parses the rollout flag", () => {
+    expect(getSettings().slackWorkspaceRoutingEnabled).toBe(true);
+    expect(
+      withEnv({ OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "false" }, () => getSettings())
+        .slackWorkspaceRoutingEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "true" }, () => getSettings())
+        .slackWorkspaceRoutingEnabled,
+    ).toBe(true);
+  });
+
   test("parses public provider identifiers without treating them as credentials", () => {
     const settings = withEnv(
       {

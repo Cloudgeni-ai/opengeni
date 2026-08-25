@@ -169,7 +169,8 @@ const budgets = {
   // envelopes; initial, per-file, lazy-chunk, and CSS caps remain unchanged.
   // Managed organization bootstrap adds the authenticated principal routing
   // needed to accept an invitation or create an organization before a user has
-  // any workspace. The sign-in and onboarding surfaces remain lazy; the merged
+  // any workspace. The sign-in surface remains lazy while the authenticated
+  // no-workspace gate stays in the shell; the merged
   // macOS/arm64 graph measures 2,165,667 raw / 604,766 gzip bytes. Advance only
   // the raw aggregate to the next whole KiB above one KiB of headroom.
   // Restoring the rail creator monogram on root rows adds the shared chip
@@ -209,16 +210,13 @@ const budgets = {
   // guard's one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance by
   // advancing each to its next compliant whole-KiB envelope. Every file-count,
   // initial, per-file, lazy-chunk, and CSS cap stays fixed.
-  // The organization-admin document migration audit adds three typed SDK
-  // methods, while ordered session Variable Sets add the plural contract and
-  // SDK mutation surface plus the direct-session personal-authority scope
-  // resolver. The exact merged Linux/x64 production graph measures 2,187,616
-  // raw / 610,518 gzip bytes. Advance only raw to the next whole-KiB envelope
-  // that preserves at least one KiB of headroom; gzip retains more than the
-  // 1.5-KiB platform-skew allowance. Initial, per-file, file-count, lazy-chunk,
-  // and CSS limits remain unchanged. The separately tracked structural fix is
-  // to make the client tree-shakeable instead of continuing to grow this
-  // shared class.
+  // The merged organization setup, organization-admin document migration audit,
+  // and ordered session Variable Set surfaces all retain methods on the shared
+  // OpenGeni client graph. The exact Bun 1.4 Linux/x64 production graph measures
+  // 2,184,325 raw / 608,446 gzip bytes, leaving 4,987 raw and 3,906 gzip bytes of
+  // headroom. Initial, per-file, file-count, lazy-chunk, and CSS limits remain
+  // unchanged. The separately tracked structural fix is to make the client
+  // tree-shakeable instead of continuing to grow this shared class.
   directSessionRaw: 2138 * kib,
   directSessionGzip: 598 * kib,
   directSessionFiles: 24,

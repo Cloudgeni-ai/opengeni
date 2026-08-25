@@ -183,6 +183,8 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_user_retention_object_deletion_receipts",
     "organization_user_retention_object_obligations",
     "organization_user_retention_policies",
+    "organization_user_setup_intents",
+    "self_service_organization_setup_receipts",
   ].map((name) => ({
     name,
     owner: "opengeni_migrator",
@@ -420,12 +422,12 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
-  test("requires the 0348 session Variable Set runtime receipt", () => {
+  test("requires the 0349 session Variable Set runtime receipt", () => {
     const posture = safePosture();
     posture.sessionVariableSetAttachmentsCutoverPresent = false;
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the 0348 session Variable Set attachment runtime receipt",
+      "database is missing the 0349 session Variable Set attachment runtime receipt",
     );
   });
 
@@ -470,14 +472,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 291],
+            [FORCE_RLS_TABLES, 293],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 56],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 58],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
@@ -502,7 +504,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 303 : 212;
+      const tableCount = hasCurrentMainActivityLedger ? 305 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );

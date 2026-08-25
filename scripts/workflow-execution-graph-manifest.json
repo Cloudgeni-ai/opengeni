@@ -34,7 +34,7 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "98e63b20977ab223f7ccf737a5d8b2aabeb0df02783eb6395646170681382a83"
+      "sha256": "15ae3450651d33fd5751c8ea0ca060522dd8681f4d6c30e5cbdde3e2f81dcdc1"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
@@ -781,7 +781,7 @@
       "workflow": ".github/workflows/publish-canary.yml",
       "job": "publish",
       "step": "Publish canary versions",
-      "sha256": "dc8ac6d56268cd6bdf86da4b418c393a303f90851923c24b9d5a995bb4bd0244"
+      "sha256": "7c1b768bb42a75e60e78fcad73d4655b249190a6268f232eae2d32f55af0a3b9"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",

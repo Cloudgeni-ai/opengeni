@@ -478,9 +478,10 @@ The managed-human API surface is:
   uses a deterministic `(created_at,id)` keyset represented by the last
   returned invitation UUID; ordinary members and cross-organization callers
   cannot enumerate invitation metadata;
-- `POST /v1/organizations` creates a separate organization, its first shared
-  workspace, the owning human's organization membership, and that human's
-  Personal workspace through one idempotent lifecycle transaction;
+- `POST /v1/organizations` is the compatibility entry point for the one-time
+  organization-name-only setup. It creates exactly the owning human's active
+  organization membership and canonical Personal workspace/control row—no
+  shared workspace and no Personal `workspace_memberships` row;
 - `POST /v1/organizations/:organizationId/workspaces` idempotently creates a
   shared workspace without implicitly granting the organization administrator
   operational access;
@@ -493,8 +494,7 @@ The managed-human API surface is:
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
 These routes require a direct managed-human cookie session; API keys and
-delegated bearer requests are rejected. Provider email delivery remains a
-separate integration.
+delegated bearer requests are rejected.
 
 ### Pre-registration invitations and signup convergence (0314)
 
@@ -537,8 +537,109 @@ The Better Auth create hook no longer provisions access before required email
 verification. Email verification and later canonical managed-cookie access
 both run the verified binding/convergence seam. Managed bootstrap also stops
 renaming an existing initial workspace back to `Default workspace`, so a later
-administrator rename is durable. Invitation delivery itself is still outside
-this migration and no provider message is sent by the lifecycle.
+administrator rename is durable. Migration 0314 itself sends no provider
+message; the later 0348 API delivery path below does.
+
+### Post-sign-in organization setup and one-time invited-user setup (0348)
+
+Migration `0348_named_signup_and_user_setup.sql` makes both onboarding paths
+explicit without widening Better Auth or organization authority. Public
+self-service email signup remains an ordinary Better Auth account create and
+accepts no organization or workspace intent. After the first verified
+managed-cookie sign-in, a user with no organization membership or bound
+invitation may call `POST /v1/auth/organization-onboarding`
+with only a bounded organization name and operation id. One PUBLIC-revoked
+SECURITY DEFINER lifecycle serializes the exact auth user, binds any
+already-committed verified-email invitation first, and then creates exactly one
+active owner membership plus its canonical Personal workspace and control row.
+It creates no shared workspace and no `workspace_memberships` row. A FORCE-RLS
+completion receipt makes exact retries converge and changed retries fail, while
+ordinary managed-access refreshes use the non-provisioning path and cannot
+bypass the setup gate. The `/v1/organizations` compatibility entry point
+uses the same canonical fingerprint bytes, so an exact operation can move
+between either supported route without forking its receipt identity. A user
+whose memberships are all suspended or revoked receives the explicit bounded
+`unavailable` state; a bound pending invitation still takes precedence and
+opens only the invitation chooser. `GET /v1/organization-memberships` reports
+that same terminal state as a bounded empty list rather than a 403: the route
+projects only the caller's own memberships, so an empty list leaks nothing and
+does not make an un-onboarded human look unauthenticated. Its 403 remains for a
+session that claims a verified email the durable `auth_users` row contradicts.
+
+Because managed-access convergence no longer provisions a fallback
+organization, it also no longer self-heals one. A human left holding a legacy
+`better-auth:user` account whose organization membership was never anchored -
+migration 0290 anchored only subjects that already held workspace access -
+would otherwise be permanently stuck: the state resolver reports `required` and
+every completion attempt refuses. The lifecycle therefore **adopts** that exact
+account instead of refusing it. It reuses the account id, so the human keeps
+their existing account identity and any legacy workspace grants inside it,
+takes the canonical organization advisory lock before any workspace state, and
+defers the one-shot signup rename until after every workspace row is acquired -
+an organization-row write held across workspace acquisition is exactly the
+deadlock migration 0299 fences. Adoption requires the account to carry **no**
+organization membership at all; one that already has memberships is refused,
+because granting owner there would be a privilege event rather than a repair.
+No migration-time backfill over a FORCE-RLS table is needed.
+
+Pre-registration invitation creation creates a matching
+`organization_user_setup_intents` row, then asks the shared managed-auth email
+transport to send the recipient a setup link. Only the SHA-256 digest of the
+deterministic server-signed bearer is stored; the email carries it in a URL
+fragment that the browser consumes and scrubs before any API request. The table
+is FORCE RLS with no application-role DML, and its creation capability requires
+the exact invitation creator's live owner/administrator membership.
+
+When `OPENGENI_RESEND_API_KEY` is configured, the transport attempts provider
+delivery with an idempotency key derived from the invitation operation id. An
+exact API replay derives the same bearer and provider key without minting
+another authority. In local or test mode without that provider key, the
+transport logs that delivery was skipped and returns successfully; it does not
+provide a capturable setup link. In a non-local deployment, a missing provider
+key or a provider error fails the request after the invitation and setup intent
+may already have committed, so the administrator receives an outcome-unknown
+result. This phase has no durable delivery outcome, retry, or reconciliation
+state.
+
+Because the bearer is derived from the invitation id, the URL and signing
+configuration (`OPENGENI_PUBLIC_BASE_URL` and
+`OPENGENI_BETTER_AUTH_SECRET`) is proven as a precondition *before* the
+invitation commits and reported as `503`; a deployment missing either would
+otherwise fail after the row exists without even being able to construct the
+setup link. This precondition does not prove provider availability or record a
+delivery outcome.
+
+`POST /v1/auth/organization-setup` accepts the unguessable bearer without a
+session. A bounded fail-closed global/per-client application limiter runs
+before request work. The route then performs a cheap, non-consuming,
+PUBLIC-revoked SECURITY DEFINER token-authority preflight before invoking
+Better Auth's password hasher. Invalid, expired, unavailable, and completed
+bearers cannot amplify password hashing; an exact completed retry goes directly
+to the final idempotency check. The route fingerprints the request without
+storing the password and calls one PUBLIC-revoked SECURITY DEFINER completion
+capability. Under the
+normalized-email fence and canonical organization lock order, the function
+rejects expired or revoked invitations and every pre-existing Better Auth email,
+creates one verified credential, binds and accepts the exact invitation through
+the revision-fenced 0263 lifecycle, and consumes the bearer in the same
+transaction. Exact retries return the committed result; changed replays fail.
+After the email fence, every organization referenced by a matching pending
+invitation is locked in UUID order before the selected invitation is touched.
+No session is created until normal sign-in, no temporary or plaintext password
+exists, and the user has only the inviting organization, their canonical
+Personal workspace, and the invitation's selected shared-workspace grants.
+
+0348 is a drained maintenance protocol cutover, not a rolling migration. Stop
+every old API, control worker, and turn worker; provide the exact old/new
+application database role list through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
+`applicationDatabaseRoles` for programmatic/dedicated-schema migration); apply
+0348; and never restart a pre-0348 image. The migration checks
+`pg_stat_activity` before and after its exclusive writer fence and aborts with
+SQLSTATE `55000` if a configured application login remains. The Personal-only
+product mutations are also API-contract fenced, and the web sends the exact
+release contract revision, so a stale client cannot cross the cutover after
+service resumes.
 
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
@@ -548,7 +649,9 @@ excludes all Personal workspaces before JSON projection. Owners and
 administrators can rename the organization through a revision- and
 operation-fenced lifecycle function, and managed-access bootstrap never
 overwrites that deliberate name from the user's profile. It lists the
-organization roster and invitation state,
+organization roster and invitation state; incoming invitation pages include the
+authorized current organization name so a multi-invitation choice never relies
+on opaque UUID fragments.
 supports the role and lifecycle transitions authorized above, accepts incoming
 invitations, and gives owners a version-fenced 30–90 day retention editor while
 administrators receive the read-only policy. The browser binds every read and
@@ -570,15 +673,19 @@ private sessions, credentials, Connections, or personal resources. Workspace
 access is administered from the organization console: invite the person to the
 organization first, then assign an active organization member to each shared
 workspace. Workspace settings links back to that control plane instead of
-creating an independent invitation path. Provider email delivery remains a
-non-goal.
+creating an independent invitation path. The setup path attempts provider email
+delivery as described above; durable outcome and retry administration remain a
+later delivery phase.
 
-Migration `0331_managed_organization_creation.sql` adds the managed-cookie-only
-self-service organization factory. One idempotent lifecycle transaction creates
-the organization, its initial shared workspace, the owner membership and grant,
-and the owner's Personal workspace pointer. Exact operation ids serialize
-before replay lookup, and the SECURITY DEFINER function dynamically pins its
-runtime search path to `pg_catalog`, the selected data schema, then `pg_temp`.
+Migration `0331_managed_organization_creation.sql` introduced the
+managed-cookie-only `POST /v1/organizations` factory with a provisional initial
+shared-workspace graph. Migration 0348 replaces the same database function in
+place and forwards compatibility callers through the final setup lifecycle described
+above. Exact operation ids still serialize before replay lookup, but successful
+creation now yields only the owner membership and canonical Personal
+workspace/control row; it does not create an owner grant or forced shared
+workspace. The SECURITY DEFINER function dynamically pins its runtime search
+path to `pg_catalog`, the selected data schema, then `pg_temp`.
 
 Migration `0332_organization_shared_workspace_control_plane.sql` makes the
 organization control plane authoritative rather than depending on an
@@ -1135,15 +1242,16 @@ activity-write fence described in the Legacy behavior section, and migration
 reads. The later bounded API/core/SDK activation described above does not widen
 the personal-workspace exception or add another durable membership row.
 
-### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 current)
+### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 + 0348 current)
 
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
 described above are active. The bounded managed web administration surface
 described above is also active. Verified-email invitation binding,
-self-service managed organization creation, and organization-scoped shared
-workspace administration are active. Provider email delivery and automatic
-scheduling of the operator command remain deferred.
+self-service managed organization creation, organization-scoped shared
+workspace administration, and the invited-user setup email attempt are active.
+Durable email delivery outcome/retry reconciliation and automatic scheduling of
+the operator command remain deferred.
 
 ### D. Backfill
 
@@ -2086,7 +2194,7 @@ itself auto-activate new organizations.
 
 ## Remaining non-goals
 
-- provider invitation email delivery;
+- durable invitation-email delivery outcome, retry, and reconciliation state;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;

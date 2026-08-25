@@ -14,6 +14,8 @@ import {
   ClientModel,
   WorkspaceModelCatalogResponse,
   ClientSessionEvent,
+  CompleteOrganizationUserSetupRequest,
+  CompleteSelfServiceOrganizationSetupRequest,
   CreateCapabilityCatalogItemRequest,
   CreateKnowledgeMemoryRequest,
   CreateSocialConnectionRequest,
@@ -46,6 +48,7 @@ import {
   ModelCredentialSourceV1,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
+  OrganizationInvitation,
   RequestHumanInputToolInput,
   RepositoryResourceRef,
   TURN_EXECUTION_POLICY_METADATA_KEY,
@@ -72,6 +75,7 @@ import {
   sessionSystemUpdateBatchHistoryItem,
   numberTimelineAnnotations,
   UpdateSessionMcpApprovalPolicyRequest,
+  SelfServiceOrganizationOnboardingStatus,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
@@ -116,6 +120,57 @@ describe("API key descriptions", () => {
 });
 
 describe("contracts", () => {
+  test("bounds the two managed onboarding paths without accepting organization intent at signup", () => {
+    expect(
+      CompleteSelfServiceOrganizationSetupRequest.parse({
+        organizationName: "Northwind Research",
+        operationId: "10000000-0000-4000-8000-000000000001",
+      }),
+    ).toEqual({
+      organizationName: "Northwind Research",
+      operationId: "10000000-0000-4000-8000-000000000001",
+    });
+    expect(
+      CompleteOrganizationUserSetupRequest.safeParse({
+        token: "a".repeat(32),
+        name: "Invited teammate",
+        password: "password1234",
+        operationId: "10000000-0000-4000-8000-000000000002",
+      }).success,
+    ).toBe(true);
+    expect(
+      CompleteOrganizationUserSetupRequest.safeParse({
+        token: "too-short",
+        name: "Invited teammate",
+        password: "password1234",
+        operationId: "10000000-0000-4000-8000-000000000002",
+      }).success,
+    ).toBe(false);
+    expect(SelfServiceOrganizationOnboardingStatus.parse({ state: "invitation_pending" })).toEqual({
+      state: "invitation_pending",
+    });
+    expect(SelfServiceOrganizationOnboardingStatus.parse({ state: "unavailable" })).toEqual({
+      state: "unavailable",
+    });
+    expect(
+      OrganizationInvitation.parse({
+        id: "10000000-0000-4000-8000-000000000003",
+        organizationId: "10000000-0000-4000-8000-000000000004",
+        organizationName: "Northwind Research",
+        targetEmail: "invitee@example.test",
+        targetName: null,
+        initialWorkspaceIds: [],
+        role: "member",
+        status: "pending",
+        revision: 1,
+        expiresAt: "2026-08-25T00:00:00.000Z",
+        acceptedMembershipId: null,
+        createdAt: "2026-08-24T00:00:00.000Z",
+        updatedAt: "2026-08-24T00:00:00.000Z",
+      }).organizationName,
+    ).toBe("Northwind Research");
+  });
+
   test("validates Stripe billing portal sessions", () => {
     const accountId = "00000000-0000-4000-8000-000000000001";
     expect(CreateBillingPortalRequest.parse({ accountId })).toEqual({
