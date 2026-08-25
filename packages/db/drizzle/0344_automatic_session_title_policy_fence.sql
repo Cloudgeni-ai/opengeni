@@ -32,8 +32,8 @@ BEGIN
 END;
 $$;
 
-DROP TRIGGER IF EXISTS sessions_automatic_title_policy_v1_fence ON public.sessions;
+DROP TRIGGER IF EXISTS sessions_automatic_title_policy_v1_fence ON sessions;
 CREATE TRIGGER sessions_automatic_title_policy_v1_fence
-BEFORE UPDATE OF title, title_source ON public.sessions
+BEFORE UPDATE OF title, title_source ON sessions
 FOR EACH ROW
 EXECUTE FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1();

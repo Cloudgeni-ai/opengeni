@@ -37,6 +37,8 @@ describe("migration 0344 automatic session title policy fence", () => {
     expect(source).toContain("IS DISTINCT FROM NEW.title");
     expect(source).toContain("NEW.title IS DISTINCT FROM 'New conversation'");
     expect(source).toContain("BEFORE UPDATE OF title, title_source");
+    expect(source).toContain("ON sessions");
+    expect(source).not.toContain("public.sessions");
     expect(source).not.toContain("BEFORE INSERT");
   });
 
