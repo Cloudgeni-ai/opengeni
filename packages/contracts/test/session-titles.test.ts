@@ -139,6 +139,19 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("Open [2001:db8::7]:8443/admin")).toBeNull();
   });
 
+  test("preserves Windows drive paths without weakening URI-scheme rejection", () => {
+    expect(normalizeAutomaticSessionTitle(String.raw`Review C:\tmp\report.txt generation`)).toBe(
+      String.raw`Review C:\tmp\report.txt generation`,
+    );
+    expect(normalizeAutomaticSessionTitle("Inspect D:/build/output.log")).toBe(
+      "Inspect D:/build/output.log",
+    );
+    expect(normalizeAutomaticSessionTitle("Inspect x:opaque identifier")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Connect x://service.internal/path")).toBeNull();
+    expect(normalizeAutomaticSessionTitle(String.raw`Inspect C:\tmp\https://secret`)).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Connect custom+tls://service.internal/path")).toBeNull();
+  });
+
   test("preserves benign localhost, IP-version, IPv6, and protocol discussion", () => {
     expect(normalizeAutomaticSessionTitle("Review localhost development setup")).toBe(
       "Review localhost development setup",

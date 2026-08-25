@@ -275,6 +275,7 @@ export async function sseSessionStream(
   let newestBuffered: SessionEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<SessionEvent> | null = null;
+  let stopReconnectObservation = () => {};
   let stopReauthorization = () => {};
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
@@ -282,6 +283,8 @@ export async function sseSessionStream(
   const stopUpstream = () => {
     closeMetrics();
     detachAbortListener();
+    stopReconnectObservation();
+    stopReconnectObservation = () => {};
     stopReauthorization();
     if (heartbeatTimer) {
       clearTimeout(heartbeatTimer);
@@ -359,6 +362,42 @@ export async function sseSessionStream(
     durableDeliveryTail = deliveryRun.catch(() => {});
     return deliveryRun;
   };
+  let newestReconnectGeneration = 0;
+  let reconnectReconcilePending = false;
+  let reconnectReconcileRunning = false;
+  const drainReconnectReconciliation = () => {
+    if (
+      bootstrapping ||
+      reconnectReconcileRunning ||
+      !reconnectReconcilePending ||
+      channel.stopped()
+    ) {
+      return;
+    }
+    reconnectReconcileRunning = true;
+    void (async () => {
+      while (reconnectReconcilePending && !channel.stopped()) {
+        // Multiple reconnects during one durable read collapse into one newest
+        // catch-up. Postgres is authoritative, so that later read covers every
+        // disconnect window without one query per heartbeat or buffered event.
+        reconnectReconcilePending = false;
+        await reconcileDurableThrough();
+      }
+    })()
+      .catch((error) => {
+        if (!(error instanceof SseStreamStoppedError)) fail(error);
+      })
+      .finally(() => {
+        reconnectReconcileRunning = false;
+        drainReconnectReconciliation();
+      });
+  };
+  const scheduleReconnectReconciliation = (generation: number) => {
+    if (generation <= newestReconnectGeneration || channel.stopped()) return;
+    newestReconnectGeneration = generation;
+    reconnectReconcilePending = true;
+    drainReconnectReconciliation();
+  };
   const send = async (event: SessionEvent) => {
     const targetSequence = sessionEventResumeSequence(event);
     if (targetSequence <= lastSent) return;
@@ -376,6 +415,8 @@ export async function sseSessionStream(
     }, heartbeatIntervalMs);
   };
   delivery = createLatestWinsDelivery(send, fail);
+  stopReconnectObservation =
+    bus.subscribeReconnect?.(scheduleReconnectReconciliation) ?? (() => {});
 
   void (async () => {
     const release = await bus.subscribe(workspaceId, sessionId, (events) => {
@@ -399,6 +440,7 @@ export async function sseSessionStream(
     await writeFrame(": connected\n\n");
     scheduleHeartbeat();
     bootstrapping = false;
+    drainReconnectReconciliation();
     const buffered = newestBuffered;
     newestBuffered = null;
     if (buffered) delivery.publish([buffered]);

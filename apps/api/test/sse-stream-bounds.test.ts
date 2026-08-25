@@ -357,6 +357,56 @@ test("an open session stream reconciles a quarantine title event from durable fa
   await reader.cancel();
 });
 
+test("an open session stream durably catches up once after a subscriber reconnect", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  let reconnect: ((generation: number) => void) | null = null;
+  let reconnectReleased = 0;
+  const response = await sseSessionStream(
+    fakeDb as never,
+    {
+      subscribe: async () => () => {},
+      subscribeReconnect: (listener: (generation: number) => void) => {
+        reconnect = listener;
+        return () => {
+          reconnectReleased += 1;
+        };
+      },
+    } as unknown as EventBus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+
+  // Core NATS drops publications while this subscriber is disconnected. The
+  // durable row exists, but no session-event notification reaches the stream.
+  durableEvents = [titleEvent(1, "New conversation")];
+  reconnect?.(1);
+  const [quarantineEvent] = await readSessionEvents(reader, 1);
+  expect(quarantineEvent).toMatchObject({
+    sequence: 1,
+    type: "session.title_set",
+    payload: { title: "New conversation", source: "agent" },
+  });
+  expect(durableReads).toEqual([
+    { after: 0, limit: 100 },
+    { after: 0, limit: 100 },
+  ]);
+
+  // A duplicate notification for the same transport generation and the normal
+  // heartbeat both remain read-free.
+  reconnect?.(1);
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
+  expect(durableReads).toHaveLength(2);
+
+  await reader.cancel();
+  expect(reconnectReleased).toBe(1);
+});
+
 test("idle session stream count does not multiply durable reads on heartbeat", async () => {
   durableEvents = [];
   durableReads.length = 0;

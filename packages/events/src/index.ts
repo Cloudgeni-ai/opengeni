@@ -268,6 +268,13 @@ export type EventBus = {
     sessionId: string,
     onEvents: (events: SessionEvent[]) => void | Promise<void>,
   ) => Promise<() => void>;
+  /**
+   * Observe successful transport reconnects. Core NATS resumes subscriptions but
+   * cannot replay messages published while this client was disconnected, so
+   * durable consumers use the monotonic generation as a bounded catch-up trigger.
+   * Optional for embedding-host and in-memory buses that do not reconnect.
+   */
+  subscribeReconnect?: (onReconnect: (generation: number) => void) => () => void;
   /** Best-effort live invalidation; the event is already durable in Postgres. */
   publishWorkspaceControl: (workspaceId: string, event: WorkspaceControlEvent) => Promise<void>;
   /** One workspace subscription fans a control change to every open descendant view. */
@@ -344,6 +351,8 @@ export async function createNatsEventBus(
   }
   const nc = await (options.connect ?? connect)(withReconnectDefaults(connectOptions));
   let connected = true;
+  let reconnectGeneration = 0;
+  const reconnectSubscribers = new Set<(generation: number) => void>();
   logConnectionStatus(nc, "event-bus", options.logger, (type) => {
     if (
       type === "disconnect" ||
@@ -354,6 +363,20 @@ export async function createNatsEventBus(
       connected = false;
     } else if (type === "connect" || type === "reconnect") {
       connected = true;
+    }
+    if (type === "reconnect") {
+      reconnectGeneration += 1;
+      for (const subscriber of reconnectSubscribers) {
+        try {
+          subscriber(reconnectGeneration);
+        } catch (error) {
+          (options.logger?.warn ?? silentLogger.warn)("NATS reconnect observer failed", {
+            label: "event-bus",
+            reconnectGeneration,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
     }
   });
   const requestConnection: RequestConnection = {
@@ -428,6 +451,10 @@ export async function createNatsEventBus(
     },
     subscribe: async (workspaceId, sessionId, onEvents) =>
       subscribeSession(nc, workspaceId, sessionId, onEvents),
+    subscribeReconnect: (onReconnect) => {
+      reconnectSubscribers.add(onReconnect);
+      return () => reconnectSubscribers.delete(onReconnect);
+    },
     publishWorkspaceControl: async (workspaceId, event) => {
       try {
         const encoded = workspaceControlEventNatsPayload(event);
@@ -465,6 +492,7 @@ export async function createNatsEventBus(
     getOpStreamConnection: () => opStreamConnection,
     isConnected: () => connected && !nc.isClosed() && !nc.isDraining(),
     close: async () => {
+      reconnectSubscribers.clear();
       await nc.drain();
     },
   };

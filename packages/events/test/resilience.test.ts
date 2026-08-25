@@ -44,6 +44,46 @@ function fakeNatsConnection(): unknown {
   };
 }
 
+function controllableStatusFeed(): {
+  iterable: AsyncIterable<{ type: string; data: string }>;
+  push: (type: string) => void;
+  close: () => void;
+} {
+  const queued: Array<{ type: string; data: string }> = [];
+  const waiters: Array<
+    (result: IteratorResult<{ type: string; data: string }, undefined>) => void
+  > = [];
+  let closed = false;
+  return {
+    iterable: {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            const queuedStatus = queued.shift();
+            if (queuedStatus) return { done: false, value: queuedStatus } as const;
+            if (closed) return { done: true, value: undefined } as const;
+            return await new Promise<IteratorResult<{ type: string; data: string }, undefined>>(
+              (resolve) => waiters.push(resolve),
+            );
+          },
+        };
+      },
+    },
+    push: (type) => {
+      const status = { type, data: type };
+      const waiter = waiters.shift();
+      if (waiter) waiter({ done: false, value: status });
+      else queued.push(status);
+    },
+    close: () => {
+      closed = true;
+      for (const waiter of waiters.splice(0)) {
+        waiter({ done: true, value: undefined });
+      }
+    },
+  };
+}
+
 const fakeConnect = async (opts: Record<string, unknown>) => {
   captured.push(opts);
   return fakeNatsConnection() as never;
@@ -115,7 +155,46 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
     expect(opts.name).toBe("opengeni-auth-callout");
     expectInfiniteReconnect(opts);
   });
+
+  test("event-bus subscribers observe each successful transport reconnect once", async () => {
+    const statuses = controllableStatusFeed();
+    const bus = await createNatsEventBus("nats://reconnect-observer.test:4222", undefined, {
+      connect: async () =>
+        ({
+          ...fakeNatsConnection(),
+          status: () => statuses.iterable,
+          async drain() {
+            statuses.close();
+          },
+        }) as never,
+    });
+    const observed: number[] = [];
+    const unsubscribe = bus.subscribeReconnect!((generation) => observed.push(generation));
+
+    statuses.push("disconnect");
+    await Bun.sleep(0);
+    expect(observed).toEqual([]);
+
+    statuses.push("reconnect");
+    statuses.push("reconnect");
+    await waitFor(() => observed.length === 2);
+    expect(observed).toEqual([1, 2]);
+
+    unsubscribe();
+    statuses.push("reconnect");
+    await Bun.sleep(0);
+    expect(observed).toEqual([1, 2]);
+    await bus.close();
+  });
 });
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for NATS status observation");
+    await Bun.sleep(1);
+  }
+}
 
 describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
   test("does not throw the turn to death when bus.publish rejects", async () => {

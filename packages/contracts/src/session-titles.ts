@@ -24,9 +24,11 @@ const KNOWN_SENSITIVE_VALUE_PATTERNS = [
   /\bAKIA[0-9A-Z]{16}\b/u,
   /\bAIza[0-9A-Za-z_-]{20,}\b/u,
   /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u,
-  /\b[a-z][a-z0-9+.-]*:\S+/iu,
   /[?&](?:access_token|api_key|apikey|password|secret|token)=[^\s&#]+/iu,
 ] as const;
+
+const URI_SCHEME_CANDIDATE_PATTERN = /\b[a-z][a-z0-9+.-]*:\S+/giu;
+const WINDOWS_DRIVE_PATH_PATTERN = /^[a-z]:[\\/](?![\\/])[^:]*$/iu;
 
 const SCHEMELESS_HOST_CANDIDATE_PATTERN =
   /\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?(?::\d{1,5})?(?:[/?#][^\s]*)?/giu;
@@ -133,6 +135,16 @@ function containsSensitiveAssignment(value: string): boolean {
   return false;
 }
 
+function containsUriScheme(value: string): boolean {
+  for (const match of value.matchAll(URI_SCHEME_CANDIDATE_PATTERN)) {
+    // A Windows drive path is the one scheme-shaped token accepted here. Keep
+    // the exception exact: one separator after the drive letter and no later
+    // colon, so x://host and a nested scheme remain rejected.
+    if (!WINDOWS_DRIVE_PATH_PATTERN.test(match[0])) return true;
+  }
+  return false;
+}
+
 function isDottedTechnologyPath(candidate: string): boolean {
   if (/[?:#]/u.test(candidate)) return false;
   const [authority, ...pathSegments] = candidate.split("/");
@@ -204,6 +216,7 @@ function containsSensitiveAutomaticTitleValue(value: string): boolean {
   const detectionValue = automaticTitleDetectionValue(value);
 
   if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(detectionValue))) return true;
+  if (containsUriScheme(detectionValue)) return true;
   if (containsSchemelessUrl(detectionValue)) return true;
   if (SECRET_LABEL_ASSIGNMENT_PATTERN.test(detectionValue)) return true;
   if (containsSensitiveAssignment(detectionValue)) return true;
