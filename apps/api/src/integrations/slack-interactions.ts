@@ -959,11 +959,20 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     // somewhere nobody else in the channel can see.
     //
     // Only the caller's OWN personal workspace has to be excluded, and that is
-    // the whole rule rather than a partial one. `resolveSlackTargetAuthority`
-    // admits exactly two shapes - a `workspace_memberships` row, or this
-    // subject's own personal-workspace pointer - and migration 0219 forbids a
-    // membership row on any personal workspace. So no other person's personal
-    // workspace can survive the authorization above in the first place.
+    // the whole rule rather than a partial one, because no other person's can
+    // reach this loop. `resolveSlackTargetAuthority` admits exactly two shapes:
+    // a `workspace_memberships` row this subject holds, or this subject's own
+    // personal-workspace pointer. There is no account-admin union, so an
+    // administrator does not thereby reach anyone else's personal workspace.
+    //
+    // Deliberately NOT justified by "the schema forbids a membership row on a
+    // personal workspace". It does not. Migration 0219's `42501` is a
+    // precondition inside the provisioning function, checked at provisioning
+    // time only, and `personal_workspace_has_no_membership_row` is recorded as
+    // `basis: "runtime"` - the parity report's own term for a property nothing
+    // in the schema prevents. It holds because every membership writer either
+    // requires `members:manage` on the target (which a personal-workspace grant
+    // deliberately omits) or excludes personal workspaces outright.
     const callerPersonalWorkspaceId = await namedSubjectPersonalWorkspaceId(deps.db, {
       accountId: grant.accountId,
       subjectId: grant.subjectId,
