@@ -1389,15 +1389,19 @@ async function postSlackRouteRefusal(
       : refusal.reason === "no_access_to_route"
         ? `OpenGeni starts work from this conversation in ${
             refusal.requested ?? "another workspace"
-          }, and you do not have access to it. Request access: ${linkUrl(deps, {
-            // Minted for the workspace they actually need, not the
-            // installation's. The token only decides which workspace an access
-            // request may be raised for; approval is unchanged.
-            workspaceId: refusal.workspaceId ?? entry.workspaceId,
-            connectionId: entry.connectionId,
-            slackTeamId: entry.slackTeamId,
-            slackUserId: entry.slackUserId,
-          })}. No session was created.`
+          }, and you do not have access to it. Request access: ${linkUrl(
+            deps,
+            {
+              // Minted for the workspace they actually need, not the
+              // installation's. The token only decides which workspace an
+              // access request may be raised for; approval is unchanged.
+              workspaceId: refusal.workspaceId ?? entry.workspaceId,
+              connectionId: entry.connectionId,
+              slackTeamId: entry.slackTeamId,
+              slackUserId: entry.slackUserId,
+            },
+            entry.createdAt.getTime(),
+          )}. No session was created.`
         : "OpenGeni has no workspace it can start this task in for you. Ask an OpenGeni administrator to give you access to one. No session was created.";
   await client.postMessage({
     operationId: deterministicUuid(`slack-route-denied:${entry.id}:${refusal.reason}`),
@@ -1803,7 +1807,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
     await client.postMessage({
       operationId: deterministicUuid(`slack-link:${entry.id}`),
       userId: entry.slackUserId,
-      text: `Link your Slack identity to OpenGeni before starting work: ${linkUrl(deps, entry)}. No session was created.`,
+      text: `Link your Slack identity to OpenGeni before starting work: ${linkUrl(deps, entry, entry.createdAt.getTime())}. No session was created.`,
     });
     return;
   }
@@ -4802,6 +4806,16 @@ function linkUrl(
     SlackInteractionInboxEntry,
     "workspaceId" | "connectionId" | "slackTeamId" | "slackUserId"
   >,
+  /**
+   * When this URL goes into a message posted under a deterministic operation
+   * id, the token has to be deterministic too. The post ledger binds that id to
+   * a digest over the text, so a retry that mints a fresh token renders
+   * different bytes and is refused as a conflicting request, permanently. Pass
+   * the originating inbox row's creation time: the token is then stable for that
+   * row and still expires fifteen minutes after the message could first have
+   * been read.
+   */
+  mintedAtMs?: number,
 ) {
   const base = deps.settings.webBaseUrl ?? deps.settings.publicBaseUrl;
   const signingSecret = deps.settings.slackSigningSecret;
@@ -4810,7 +4824,7 @@ function linkUrl(
   // Fragments stay out of HTTP request lines, reverse-proxy logs, Referer
   // headers, and managed-auth callback URLs. Query-form bearers are rejected.
   url.hash = new URLSearchParams({
-    slack_link: createSlackUserLinkToken(signingSecret, entry),
+    slack_link: createSlackUserLinkToken(signingSecret, entry, mintedAtMs),
   }).toString();
   return url.toString();
 }
