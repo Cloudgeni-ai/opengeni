@@ -43,6 +43,7 @@ import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { registerSessionRoutes } from "../src/routes/sessions";
 
 const SECRET = "session-authorization-route-test-secret";
+const ENVIRONMENTS_ENCRYPTION_KEY = Buffer.alloc(32, 73).toString("base64");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let available = true;
@@ -75,6 +76,7 @@ function appWith(port?: SessionAuthorizationPort): Hono {
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret: SECRET,
+      environmentsEncryptionKey: ENVIRONMENTS_ENCRYPTION_KEY,
       sandboxBackend: "modal",
       sandboxDesktopEnabled: true,
       streamTokenSecret: "session-authorization-stream-secret",
@@ -103,7 +105,11 @@ function appWith(port?: SessionAuthorizationPort): Hono {
 
 function fullAppWith(port: SessionAuthorizationPort): Hono {
   return createApp({
-    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SECRET,
+      environmentsEncryptionKey: ENVIRONMENTS_ENCRYPTION_KEY,
+    }),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {} as SessionWorkflowClient,
