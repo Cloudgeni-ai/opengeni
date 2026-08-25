@@ -130,7 +130,7 @@ describe("connected machine removal browser e2e", () => {
           .catch(() => "<unavailable>"),
       ]);
       throw new Error(
-        `Machine card ${sandboxId} did not become visible. URL: ${page.url()}; title: ${title}; body: ${body.slice(0, 2_000)}; diagnostics: ${(pageDiagnostics.get(page) ?? []).join(" | ")}`,
+        `Machine card ${sandboxId} did not become visible. URL: ${page.url()}; diagnostics: ${failureDiagnostics(page)}; title: ${title}; body: ${body.slice(0, 2_000)}`,
         { cause: error },
       );
     }
@@ -319,4 +319,16 @@ function trackPageDiagnostics(page: Page): void {
       );
     }
   });
+}
+
+function failureDiagnostics(page: Page): string {
+  const diagnostics = pageDiagnostics.get(page) ?? [];
+  const failures = diagnostics.filter(
+    (diagnostic) =>
+      diagnostic.startsWith("pageerror:") ||
+      diagnostic.startsWith("requestfailed:") ||
+      diagnostic.startsWith("response:") ||
+      diagnostic.startsWith("console.error:"),
+  );
+  return (failures.length > 0 ? failures : diagnostics).slice(-10).join(" | ");
 }

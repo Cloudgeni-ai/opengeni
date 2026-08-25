@@ -1,8 +1,9 @@
 import {
   SessionStatus as SessionStatusBadge,
   type SessionEventsConnectionState,
+  useRigs,
+  useVariableSets,
 } from "@opengeni/react";
-import { useRigs, useVariableSets } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
 import { useNavigate } from "@tanstack/react-router";
 import {

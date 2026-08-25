@@ -260,6 +260,18 @@ function trackPageDiagnostics(page: Page): void {
   });
 }
 
+function failureDiagnostics(page: Page): string {
+  const diagnostics = pageDiagnostics.get(page) ?? [];
+  const failures = diagnostics.filter(
+    (diagnostic) =>
+      diagnostic.startsWith("pageerror:") ||
+      diagnostic.startsWith("requestfailed:") ||
+      diagnostic.startsWith("response:") ||
+      diagnostic.startsWith("console.error:"),
+  );
+  return (failures.length > 0 ? failures : diagnostics).slice(-10).join(" | ");
+}
+
 async function waitForSubscriptionsHeading(page: Page): Promise<void> {
   try {
     await page.locator("#codex-subscriptions-heading").waitFor({ timeout: 20_000 });
@@ -272,7 +284,7 @@ async function waitForSubscriptionsHeading(page: Page): Promise<void> {
         .catch(() => "<unavailable>"),
     ]);
     throw new Error(
-      `Codex subscriptions heading did not become visible. URL: ${page.url()}; title: ${title}; body: ${body.slice(0, 2_000)}; diagnostics: ${(pageDiagnostics.get(page) ?? []).join(" | ")}`,
+      `Codex subscriptions heading did not become visible. URL: ${page.url()}; diagnostics: ${failureDiagnostics(page)}; title: ${title}; body: ${body.slice(0, 2_000)}`,
       { cause: error },
     );
   }
