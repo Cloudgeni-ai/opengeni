@@ -12,6 +12,7 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "public-hygiene": ["bun", "run", "check:public-hygiene"],
   "migration-ordinals": ["bun", "scripts/check-migration-ordinals.ts"],
   "migration-rls-backfills": ["bun", "scripts/check-migration-rls-backfills.ts"],
+  "migration-schema-contract": ["bun", "scripts/check-migration-schema-contract.ts"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],
 };
 
