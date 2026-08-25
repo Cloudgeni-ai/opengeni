@@ -84,6 +84,14 @@ import {
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
 import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
 import {
+  applySessionChannelMove,
+  beginSessionChannelMove,
+  commitSessionChannelMove,
+  reconcileSessionChannelMoves,
+  rollbackSessionChannelMove,
+  type SessionChannelMoveOverrides,
+} from "@/lib/session-channel-move";
+import {
   MAX_VISUAL_TREE_DEPTH,
   defaultExpandedAncestors,
   sessionAncestorPath,
@@ -362,6 +370,9 @@ export function SessionList() {
   const [pinOverrides, setPinOverrides] = useState<ReadonlyMap<string, PinOverride>>(
     () => new Map(),
   );
+  const [channelMoveOverrides, setChannelMoveOverrides] = useState<SessionChannelMoveOverrides>(
+    () => new Map(),
+  );
   const [archiveTransitions, setArchiveTransitions] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -379,6 +390,8 @@ export function SessionList() {
     return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
   }, [rail.workspaceId]);
   const archiving = useRef(new Set<string>());
+  const movingSessions = useRef(new Map<string, number>());
+  const channelMoveOperation = useRef(0);
   const pinOperation = useRef(0);
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
@@ -438,8 +451,31 @@ export function SessionList() {
       const current = source.get(id);
       if (current) source.set(id, applySessionAttentionProjection(current, override));
     }
+    for (const [id, override] of channelMoveOverrides) {
+      const current = source.get(id);
+      if (current) source.set(id, applySessionChannelMove(current, override));
+    }
     return [...source.values()];
-  }, [attentionOverrides, pinOverrides, serverSessions]);
+  }, [attentionOverrides, channelMoveOverrides, pinOverrides, serverSessions]);
+
+  // Successful writes stay layered over stale list requests until one of the
+  // server-owned pages confirms the destination. Pagination may omit a row, so
+  // absence alone is never treated as reconciliation.
+  useEffect(() => {
+    setChannelMoveOverrides((current) =>
+      reconcileSessionChannelMoves(current, [
+        ...extraSessions,
+        ...sessions,
+        ...loadedChildren,
+        ...pinned,
+      ]),
+    );
+  }, [extraSessions, loadedChildren, pinned, sessions]);
+
+  useEffect(() => {
+    movingSessions.current.clear();
+    setChannelMoveOverrides(new Map());
+  }, [rail.workspaceId]);
   const branchParentsById = useRef<ReadonlyMap<string, Session>>(new Map());
   branchParentsById.current = new Map(allSessions.map((session) => [session.id, session]));
 
@@ -707,14 +743,47 @@ export function SessionList() {
   }, [channelNameDraft, requestCreateChannel]);
   const onMoveToChannel = useCallback(
     async (session: Session, channelId: string | null) => {
-      const moved = await requestMoveSession(session.id, channelId);
-      if (moved) {
+      if (movingSessions.current.has(session.id) || session.channelId === channelId) return;
+      const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+      if (!acceptedTransition) return;
+      const operation = ++channelMoveOperation.current;
+      movingSessions.current.set(session.id, operation);
+      setCollapsedChannelSections((current) => {
+        const destinationKey = channelId ?? "default";
+        if (!current.has(destinationKey)) return current;
+        const next = new Set(current);
+        next.delete(destinationKey);
+        return next;
+      });
+      setChannelMoveOverrides((current) =>
+        beginSessionChannelMove(current, session.id, channelId, operation),
+      );
+      try {
+        const moved = await requestMoveSession(session.id, channelId);
+        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+        if (moved) {
+          setChannelMoveOverrides((current) =>
+            commitSessionChannelMove(current, session.id, moved.channelId ?? null, operation),
+          );
+          context.setSession((current) =>
+            current?.id === moved.id && current.workspaceId === moved.workspaceId
+              ? { ...current, channelId: moved.channelId ?? null }
+              : current,
+          );
+        } else {
+          setChannelMoveOverrides((current) =>
+            rollbackSessionChannelMove(current, session.id, operation),
+          );
+          toast.error("Couldn't move the workstream. Its previous project was restored.");
+        }
         await refreshSessionPages();
-      } else {
-        toast.error("Couldn't move the workstream.");
+      } finally {
+        if (movingSessions.current.get(session.id) === operation) {
+          movingSessions.current.delete(session.id);
+        }
       }
     },
-    [requestMoveSession, refreshSessionPages],
+    [context, requestMoveSession, refreshSessionPages],
   );
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {
