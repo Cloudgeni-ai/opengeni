@@ -2556,7 +2556,13 @@ export async function getManagedUserProfilesByIds(
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
-  await db.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
+  await db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Database;
+    await tx.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+    );
+    await tx.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
+  });
 }
 
 export type TemporalScheduleCleanupClaim = {

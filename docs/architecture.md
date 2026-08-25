@@ -518,6 +518,13 @@ before mutable source-session authorization by only the same authenticated
 actor with current authority in the same workspace, and is bound to the source,
 operation key, destination intent, and canonical request hash. Changed intent
 conflicts, while a fresh key still requires current source and host authority;
+all workspace-scoped runtime transactions enter the shared
+`session-tenancy:<workspace id>` advisory prefix before callback row locks.
+Migration 0345 is the maintenance-only protocol cutover that replaces the old
+17-table schema-wide lock with an exclusive form of that prefix in transition
+and fork. Database triggers on those 17 hot tables reject an unfenced writer,
+so every pre-0345 API and worker must be stopped before migration and may never
+restart afterward.
 the receipt seam cannot enumerate arbitrary sources or destinations. Late
 results remain inert after a principal, workspace, or session transition. The canonical caller
 is only `apps/web`; there is no cross-workspace fork, attachment,

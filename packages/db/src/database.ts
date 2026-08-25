@@ -453,12 +453,18 @@ export async function withRlsContext<T>(
   context: RlsContext,
   fn: (db: Database) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
+  sessionTenancyFence: "shared" | "none" = "shared",
 ): Promise<T> {
   const restoreParentScope = isTransactionHandle(db);
   return await db.transaction(async (tx) => {
     const scoped = tx as unknown as Database;
     const parentScope = restoreParentScope ? await readRlsContextSettings(scoped) : null;
     await setRlsContext(scoped, context);
+    if (context.workspaceId && sessionTenancyFence === "shared") {
+      await scoped.execute(
+        sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${context.workspaceId}`}, 0))`,
+      );
+    }
     // Defense-in-depth: read the LOCAL GUC back on THIS backend BEFORE running
     // the scoped query. The set_config and this read share one db.transaction,
     // which a transaction pooler pins to a single backend — so a mismatch here
@@ -706,6 +712,7 @@ export async function withSessionActivityRlsContext<T>(
   context: RlsContext & { workspaceId: string },
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
+  fenceMode: "shared" | "none" = "shared",
 ): Promise<T> {
   await assertSessionActivityGateEntry(db);
   return await withRlsContext(
@@ -724,6 +731,7 @@ export async function withSessionActivityRlsContext<T>(
       return value;
     },
     transactionConfig,
+    fenceMode,
   );
 }
 
@@ -838,6 +846,7 @@ export async function withWorkspaceSubjectRls<T>(
   subjectId: string,
   fn: (db: Database) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
+  sessionTenancyFence: "shared" | "none" = "shared",
 ): Promise<T> {
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectRls: a non-empty subjectId is required");
@@ -851,6 +860,7 @@ export async function withWorkspaceSubjectRls<T>(
       return await fn(scopedDb);
     },
     transactionConfig,
+    sessionTenancyFence,
   );
 }
 
@@ -860,6 +870,7 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
   subjectId: string,
   fn: (db: SessionActivityDatabase) => Promise<T>,
   transactionConfig?: PgTransactionConfig,
+  fenceMode: "shared" | "none" = "shared",
 ): Promise<T> {
   if (!subjectId.trim()) {
     throw new Error("withWorkspaceSubjectSessionActivityRls: a non-empty subjectId is required");
@@ -873,6 +884,7 @@ export async function withWorkspaceSubjectSessionActivityRls<T>(
       return await fn(scopedDb);
     },
     transactionConfig,
+    fenceMode,
   );
 }
 
