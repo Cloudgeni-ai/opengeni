@@ -9,7 +9,7 @@ let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0328-session-background-commands");
-});
+}, 180_000);
 
 afterAll(async () => {
   await shared?.release();

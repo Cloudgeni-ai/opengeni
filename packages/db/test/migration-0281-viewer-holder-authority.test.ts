@@ -23,7 +23,7 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
-});
+}, 180_000);
 
 afterAll(async () => {
   await shared?.release();

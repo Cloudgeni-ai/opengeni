@@ -64,7 +64,7 @@ beforeAll(async () => {
   sql = await shared.admin.reserve();
   await sql`set lock_timeout = '5s'`;
   await sql`set statement_timeout = '15s'`;
-});
+}, 180_000);
 
 afterAll(async () => {
   sql?.release();

@@ -8,7 +8,7 @@ let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0285-task-note-expiry");
-});
+}, 180_000);
 
 afterAll(async () => {
   await shared?.release();

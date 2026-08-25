@@ -66,6 +66,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("public-hygiene");
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-schema-contract");
+    expect(plan.guards).toContain("migration-test-budgets");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
   });
 
