@@ -201,7 +201,9 @@ import type {
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
+  SlackChannelRouteListResponse,
   SlackReactionChannelListResponse,
+  UpdateSlackChannelRoutesRequest,
   FikenInstallRequest,
   FikenOAuthStartRequest,
   FikenOAuthStartResponse,
@@ -6273,6 +6275,28 @@ export class OpenGeniClient {
     return await this.requestJson<SlackReactionChannelListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/slack/reaction-channels?${query}`,
+    );
+  }
+
+  async listOpenGeniSlackChannelRoutes(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<SlackChannelRouteListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    return await this.requestJson<SlackChannelRouteListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/channel-routes?${query}`,
+    );
+  }
+
+  async updateOpenGeniSlackChannelRoutes(
+    workspaceId: string,
+    request: UpdateSlackChannelRoutesRequest,
+  ): Promise<void> {
+    await this.requestJson<{ ok: boolean }>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/slack/channel-routes`,
+      request,
     );
   }
 
