@@ -521,6 +521,10 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}`)).toBe("/v1/workspaces/:workspaceId");
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/turns`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/turns",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/lineage`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/lineage",
     );

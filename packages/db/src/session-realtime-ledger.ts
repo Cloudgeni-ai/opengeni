@@ -1185,10 +1185,8 @@ async function admitRealtimeDelegationInTransaction(
     subjectId: input.ownerSubjectId,
     subjectLabel: "Realtime",
     actor: {
-      type: "service",
+      type: "human",
       subjectId: input.ownerSubjectId,
-      subjectLabel: "Realtime",
-      context: provenance,
     },
     operationKey: incoming.operationId,
     delivery: "steer",
@@ -1199,6 +1197,7 @@ async function admitRealtimeDelegationInTransaction(
       text: inputTranscript,
       context: incoming.text!,
     },
+    mirrorToRealtime: false,
     resources: [],
     model: latestStarted?.model ?? session.model,
     reasoningEffort: latestReasoning.success ? latestReasoning.data : sessionReasoning,
@@ -1511,6 +1510,10 @@ export async function syncSessionRealtimeLedgerInTransaction(
           entry.id,
           modelContext,
         );
+        // Human prompt admission can mirror a provider-out context row into this
+        // ledger. Continue after that canonical append instead of reusing its
+        // sequence for the next provider-in entry in this batch.
+        nextSequence = await nextLedgerSequence(db, input.realtimeId);
         const [linked] = await db
           .update(schema.sessionRealtimeEntries)
           .set({ turnId: admission.turnId, updatedAt: now })

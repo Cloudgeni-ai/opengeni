@@ -13,13 +13,20 @@ import {
   createDb,
   createSession,
   endSessionRealtimeInTransaction,
+  ensureManagedAccessForUser,
   getActiveSessionHistoryItems,
+  getOrCreateCompanyProfileSnapshot,
+  getOrCreatePreferenceRegistrySnapshot,
+  getOrCreateWorkspaceInstructionPolicySnapshot,
   getSessionRealtimeContinuityEntries,
   renderSessionRealtimeTail,
+  resolveCompanyBrainContextSelection,
   SESSION_REALTIME_CONTEXT_MAX_BYTES,
   SESSION_REALTIME_TAIL_INSTRUCTION,
   SESSION_REALTIME_TAIL_SOURCE,
   syncSessionRealtimeLedgerInTransaction,
+  transitionSessionVisibility,
+  withSessionRlsActorContext,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   type SessionActivityDatabase,
   type SessionRealtimeContextSourceEntry,
@@ -82,6 +89,47 @@ async function fixture() {
     subjectId: grant.subjectId,
     session,
   };
+}
+
+async function privateFixture() {
+  const suffix = crypto.randomUUID();
+  const userId = `realtime-context-owner-${suffix}`;
+  const subjectId = `user:${userId}`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Realtime context owner",
+  });
+  const grant = access.workspaceGrants[0]!;
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
+  const session = await withSessionRlsActorContext({ subjectId }, () =>
+    createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "ordinary history before voice",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      createdByContext: {},
+    }),
+  );
+  await transitionSessionVisibility(client.db, {
+    workspaceId: grant.workspaceId!,
+    sessionId: session.id,
+    actorSubjectId: subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: `realtime-context-private-${suffix}`,
+  });
+  return { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId, session };
 }
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -255,7 +303,7 @@ describe("session realtime transcript tail and continuity", () => {
   });
 
   test("ending with transcript tail attaches the latest user message context to one canonical Steer", async () => {
-    const value = await fixture();
+    const value = await privateFixture();
     const userModelContext = "Current application context: organization profile revision 42.";
     const mode = await runMode(value, [
       transcript("user", "Please remember the final constraint", {}, userModelContext),
@@ -308,6 +356,9 @@ describe("session realtime transcript tail and continuity", () => {
     expect(facts.turns[0]).toMatchObject({
       id: facts.projections[0]?.turnId,
       status: "queued",
+      initiatorKind: "subject",
+      initiatorSubjectId: value.subjectId,
+      initiatingHumanSubjectId: value.subjectId,
       modelContext: userModelContext,
       metadata: {
         delivery: "steer",
@@ -322,15 +373,39 @@ describe("session realtime transcript tail and continuity", () => {
         context: facts.projections[0]?.context,
       },
     });
+    const attemptId = crypto.randomUUID();
     const claim = await claimSessionWorkForAttempt(client.db, value.workspaceId, {
       sessionId: value.session.id,
       workflowId: `session-${value.session.id}`,
       workflowRunId: crypto.randomUUID(),
-      attemptId: crypto.randomUUID(),
+      attemptId,
       dispatchId: crypto.randomUUID(),
       trigger: { kind: "next" },
     });
     expect(claim).toMatchObject({ action: "claimed", turn: { id: facts.turns[0]?.id } });
+    if (claim.action !== "claimed")
+      throw new Error(`Voice tail was not claimable: ${claim.reason}`);
+    const claims = {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      sessionId: value.session.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    };
+    const selected = await withSessionRlsActorContext(
+      { subjectId: "worker:realtime-context", initiatingHumanSubjectId: value.subjectId },
+      async () => {
+        await getOrCreateCompanyProfileSnapshot(client.db, claims);
+        await getOrCreateWorkspaceInstructionPolicySnapshot(client.db, claims);
+        await getOrCreatePreferenceRegistrySnapshot(client.db, claims);
+        return await resolveCompanyBrainContextSelection(client.db, claims);
+      },
+    );
+    expect(selected.receipt).toMatchObject({
+      rootSessionId: value.session.id,
+      turnContextSnapshotSource: "accepted_turn",
+    });
     const history = await getActiveSessionHistoryItems(
       client.db,
       value.workspaceId,
