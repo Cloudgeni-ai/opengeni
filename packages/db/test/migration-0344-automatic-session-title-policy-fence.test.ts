@@ -11,7 +11,7 @@ import {
 } from "../src/index";
 
 const migrationUrl = new URL(
-  "../drizzle/0343_automatic_session_title_policy_fence.sql",
+  "../drizzle/0344_automatic_session_title_policy_fence.sql",
   import.meta.url,
 );
 
@@ -29,7 +29,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("migration 0343 automatic session title policy fence", () => {
+describe("migration 0344 automatic session title policy fence", () => {
   test("is a rolling exact-candidate fence rather than a generic bypass", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
