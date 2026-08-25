@@ -69,7 +69,9 @@ async function quarantineStatement(batchSize = 500): Promise<string> {
     .trim();
   return batchSize === 500
     ? statement
-    : statement.replace("500::integer AS batch_size", `${batchSize}::integer AS batch_size`);
+    : statement
+        .replace("500::integer AS batch_size", `${batchSize}::integer AS batch_size`)
+        .replace("LIMIT 500", `LIMIT ${batchSize}`);
 }
 
 async function runQuarantineBatch(
@@ -307,7 +309,7 @@ describe("migrations 0347-0349 automatic session title policy fence", () => {
       ),
     ).toBe(true);
     expect(quarantine).toContain("500::integer AS batch_size");
-    expect(quarantine).toContain("LIMIT (SELECT batch_size FROM settings)");
+    expect(quarantine).toContain("LIMIT 500");
     expect(quarantine).toContain("session.workspace_id = ANY(scope.workspace_ids)");
     expect(quarantine).toContain("FOR UPDATE OF session");
     expect(quarantine.indexOf("acquire_automatic_session_title_quarantine_fences_v1")).toBeLessThan(

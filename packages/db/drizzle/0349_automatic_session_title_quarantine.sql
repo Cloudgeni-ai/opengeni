@@ -36,7 +36,7 @@ candidates AS MATERIALIZED (
       OR session.title_source IS DISTINCT FROM 'agent'
     )
   ORDER BY session.id
-  LIMIT (SELECT batch_size FROM settings)
+  LIMIT 500
   FOR UPDATE OF session
 ),
 quarantined AS (
