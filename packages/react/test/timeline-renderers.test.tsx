@@ -46,6 +46,19 @@ function timelineEvent(
   };
 }
 
+async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElement> {
+  const deadline = performance.now() + 5_000;
+  while (performance.now() < deadline) {
+    const disclosure = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"][aria-expanded]'),
+    ).find((candidate) => candidate.textContent?.includes("Fleet policy shadow"));
+    if (disclosure) return disclosure;
+    await flush(10);
+  }
+
+  throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
+}
+
 describe("context compaction rendering", () => {
   test("labels before and after values as estimated history tokens", async () => {
     const r = await renderComponent(
@@ -667,19 +680,18 @@ describe("FleetDecisionRow", () => {
         events={[timelineEvent("codex.fleet.decision", fleetDecisionEventPayload())]}
       />,
     );
-    await flush();
 
-    const disclosure = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    expect(disclosure?.getAttribute("aria-expanded")).toBe("false");
+    const disclosure = await fleetDecisionDisclosure(r.container);
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
     expect(r.container.textContent ?? "").toContain("Fleet policy shadow");
     expect(r.container.textContent ?? "").toContain("Shadow preferred another candidate");
 
     await act(async () => {
-      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      disclosure.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
 
-    expect(disclosure?.getAttribute("aria-expanded")).toBe("true");
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
     expect(
       r.container.querySelector('section[aria-label="Fleet policy shadow details"]'),
     ).toBeTruthy();
@@ -725,10 +737,9 @@ describe("FleetDecisionRow", () => {
     const r = await renderComponent(
       <MessageTimeline events={[timelineEvent("codex.fleet.decision", payload)]} />,
     );
-    await flush();
-    const disclosure = r.container.querySelector('[role="button"]') as HTMLElement | null;
+    const disclosure = await fleetDecisionDisclosure(r.container);
     await act(async () => {
-      disclosure?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      disclosure.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flush();
 

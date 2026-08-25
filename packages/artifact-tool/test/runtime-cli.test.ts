@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import packageJson from "../package.json" with { type: "json" };
@@ -22,6 +22,7 @@ import {
 
 const roots: string[] = [];
 const packageVersion = packageJson.version;
+const bunVersion = (await readFile(join(import.meta.dir, "../../../.bun-version"), "utf8")).trim();
 const integrity = `sha512-${"a".repeat(86)}==` as const;
 const buildIdentity = `opengeni-artifact-kernel/${packageVersion};abi=1;source=runtime-cli-test`;
 
@@ -173,11 +174,11 @@ describe("Linux libc runtime evidence", () => {
     expect(
       resolveLinuxLibcFromRuntimeEvidence({
         arch,
-        versions: { bun: "1.3.14" },
+        versions: { bun: bunVersion },
         report: {
           header: {
             release: {
-              sourceUrl: `https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-${archive}.zip`,
+              sourceUrl: `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-${archive}.zip`,
             },
           },
           sharedObjects: [],
@@ -208,15 +209,15 @@ describe("Linux libc runtime evidence", () => {
 
   test.each([
     undefined,
-    "https://example.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-musl.zip",
+    `https://example.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-x64-musl.zip`,
     "https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64-musl.zip",
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64-musl.zip",
-    "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-musl-unknown.zip",
+    `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-aarch64-musl.zip`,
+    `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-x64-musl-unknown.zip`,
   ])("rejects absent, lookalike, stale, wrong-arch, or unknown Bun evidence", (sourceUrl) => {
     expect(() =>
       resolveLinuxLibcFromRuntimeEvidence({
         arch: "x64",
-        versions: { bun: "1.3.14" },
+        versions: { bun: bunVersion },
         report: { header: { release: { sourceUrl } } },
       }),
     ).toThrow("Could not prove");
@@ -226,13 +227,12 @@ describe("Linux libc runtime evidence", () => {
     expect(() =>
       resolveLinuxLibcFromRuntimeEvidence({
         arch: "x64",
-        versions: { bun: "1.3.14" },
+        versions: { bun: bunVersion },
         report: {
           header: {
             glibcVersionRuntime: "2.39",
             release: {
-              sourceUrl:
-                "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64-musl.zip",
+              sourceUrl: `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-x64-musl.zip`,
             },
           },
         },

@@ -545,8 +545,8 @@ describe("workflow fail-closed contracts", () => {
     const ci = readFileSync(".github/workflows/ci.yml", "utf8");
     const admission = ci.slice(ci.indexOf("  automation-admission:"), ci.indexOf("  plan:"));
     expect(admission).toContain("ref: ${{ github.sha }}");
-    expect(admission).toContain("bun-version: 1.3.14");
-    expect(admission).not.toContain("bun-version-file: .bun-version");
+    expect(admission).toContain("bun-version-file: .bun-version");
+    expect(admission).not.toMatch(/\bbun-version:\s*\d/u);
     expect(ci).toContain("  plan:\n    name: Explain change impact");
     expect(ci).toContain(
       "ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.event.pull_request.head.sha || github.sha }}",

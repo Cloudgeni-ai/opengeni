@@ -15,7 +15,9 @@
 # MANDATORY (the 07-credentialed finding): DEBIAN_FRONTEND=noninteractive + TZ=Etc/UTC
 # on EVERY apt layer — the full xfce4 tree pulls tzdata, whose interactive debconf
 # blocks the builder forever otherwise.
-#
+
+ARG BUN_VERSION=1.4.0
+
 # Official release BOM is the headless opengeni-sandbox image. This desktop
 # box is a sibling: `.github/workflows/publish-desktop-image.yml` on main, and
 # Helm `desktop.imageRef` is the digest pin written to OPENGENI_MODAL_IMAGE_REF.
@@ -46,9 +48,9 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native
 
-FROM oven/bun:1.3.14 AS bun-runtime
+FROM oven/bun:${BUN_VERSION} AS bun-runtime
 
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS anydoc-runtime-builder
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS anydoc-runtime-builder
 
 ARG TARGETARCH
 WORKDIR /src
@@ -68,7 +70,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-bun-anydoc,target=/root/.bun/install/
       "$runtime/anydoc-linux-${node_arch}-gnu"; \
     test "$(bun -e 'const value=await Bun.file("node_modules/@firecrawl/anydoc/package.json").json();process.stdout.write(value.version)')" = 0.1.8
 
-FROM --platform=$BUILDPLATFORM oven/bun:1.3.14 AS browserd-source-build
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS browserd-source-build
 
 WORKDIR /src
 # Stage only the lock-resolving manifests first so the frozen install layer is
@@ -139,7 +141,7 @@ RUN set -eux; \
 
 RUN cd packages/ogtool && bun run build
 
-FROM oven/bun:1.3.14 AS browserd-build
+FROM oven/bun:${BUN_VERSION} AS browserd-build
 
 WORKDIR /src
 COPY --from=browserd-source-build /src /src

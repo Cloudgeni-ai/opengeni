@@ -2,11 +2,13 @@
 
 import { resolve } from "node:path";
 
+import { canonicalBunVersion } from "./bun-version";
+
 const repoRoot = resolve(import.meta.dir, "..");
 const canonicalRoot = "/tmp/opengeni-artifact-wasm-source-v1";
 const canonicalTarget = "/tmp/opengeni-artifact-wasm-target-v1";
 const builderRoot = resolve(repoRoot, "packages/artifact-tool/kernel/bindings/wasm");
-const builderImage = "opengeni-artifact-wasm-builder:1.97.0-0.2.127-1.3.14";
+const builderImage = `opengeni-artifact-wasm-builder:1.97.0-0.2.127-${await canonicalBunVersion()}`;
 // An anonymous target volume guarantees every proof recompiles from clean Rust outputs. Docker
 // removes it with the container, so an earlier build can never make a later byte check pass.
 const targetMount = `type=volume,target=${canonicalTarget}`;

@@ -196,9 +196,8 @@ describe("non-materializing plain JSON length", () => {
       "lone-low-\udfff",
     ];
     for (const value of rawStrings) {
-      // TextEncoder follows the UTF-8 replacement contract for lone UTF-16
-      // surrogates. Bun 1.3.14's Buffer.byteLength SIMD path undercounts these
-      // by one byte on some CPUs, while Node and TextEncoder report three.
+      // TextEncoder and Bun 1.4's corrected Buffer.byteLength implementation
+      // follow the same replacement contract for lone UTF-16 surrogates.
       const encodedLength = new TextEncoder().encode(value).length;
       expect(utf8ByteLength(value)).toBe(encodedLength);
       expect(estimateSerializedValueTokens(value)).toBe(estimateTextTokens(value));

@@ -29,7 +29,7 @@ const budgets = {
   // embed a configured VITE_API_BASE_URL; the supported loopback form adds up
   // to 18 raw bytes relative to the same-origin build. Keep a narrow full-KiB
   // envelope above that configured graph instead of a platform/config-specific
-  // one-byte margin. Canonical Bun 1.3.14 Linux/x64 measured the combined
+  // one-byte margin. The pre-migration Bun 1.3.14 Linux/x64 baseline measured the combined
   // Company Brain base at 2,039,311/2,039,328/2,039,329 raw bytes for
   // default/4-digit/5-digit API URLs; that integration already exceeded the old
   // cap. The lazy residual inspector adds 769 raw bytes in every case. The
@@ -125,7 +125,7 @@ const budgets = {
   // Advance only those two aggregate envelopes to their next whole KiB; every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stays fixed.
   // Generic event automations add the shared SDK contracts that let ordinary
-  // session surfaces carry Pack-owned trigger metadata. The exact Bun 1.3.14
+  // session surfaces carry Pack-owned trigger metadata. The pre-migration Bun 1.3.14
   // production graph measures 2,121,826 raw / 588,620 gzip bytes. Advance only
   // the raw aggregate to its next whole-KiB envelope; gzip, file-count, initial,
   // per-file, lazy-chunk, and CSS caps remain unchanged.
