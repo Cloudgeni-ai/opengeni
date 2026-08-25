@@ -1,10 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import { MessageTimeline, type TimelineItem, type UserMessageItem } from "../src";
+import {
+  MessageTimeline,
+  type MessageTimelineProps,
+  type TimelineItem,
+  type UserMessageItem,
+} from "../src";
 import { setScrollEndSupportForTests } from "../src/components/tip-follow";
 import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 
 registerDom();
+
+const nonBooleanPromiseLoadOlder: NonNullable<MessageTimelineProps["onLoadOlder"]> = async () => [
+  "older-event",
+];
+void nonBooleanPromiseLoadOlder;
 
 function event(sequence: number): SessionEvent {
   return {
@@ -1434,6 +1444,80 @@ describe("MessageTimeline pagination affordances", () => {
     await actRun(() => second.resolve(false));
     await flush();
     await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await r.unmount();
+  });
+
+  test("an explicit underfill retry remains actionable after resize creates a scroll range", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const retryLoad = deferred<boolean>();
+    let calls = 0;
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const onLoadOlder = () => {
+      calls += 1;
+      return calls === 1 ? first.promise : retryLoad.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={items} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline items={items} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => first.reject(new Error("transient listEvents failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+
+    // Geometry can become scrollable while this exact rejected window still
+    // owns the retry. Resize must not auto-load, and the explicit retry must
+    // remain usable instead of becoming a visible no-op.
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 800 });
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(scroller.scrollHeight - scroller.clientHeight).toBeGreaterThan(1);
+    expect(calls).toBe(1);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    await r.rerender(<MessageTimeline items={items} hasOlder={false} onLoadOlder={onLoadOlder} />);
+    await actRun(() => retryLoad.resolve(false));
+    await flush();
     expect(calls).toBe(2);
     await r.unmount();
   });

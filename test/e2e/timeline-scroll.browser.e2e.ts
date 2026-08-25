@@ -412,17 +412,24 @@ describe("timeline scroll ownership browser regression", () => {
     const retry = page.getByRole("button", { name: "Retry earlier activity" });
     await retry.waitFor({ timeout: 5_000 });
 
-    // Repeated layout observations against the unchanged short window do not
-    // turn one rejection into a polling loop.
-    await page.setViewportSize({ width: 1280, height: 899 });
-    await page.setViewportSize({ width: 1280, height: 900 });
+    // A timeline/chrome resize can make the rejected window scrollable.
+    // Observing that geometry must not auto-load, and the explicit retry must
+    // remain usable.
+    await page.locator(".timeline-collapsed-history-shell").evaluate((node) => {
+      (node as HTMLElement).style.height = "140px";
+    });
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 1,
+    );
     await page.waitForTimeout(250);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
 
     await retry.click();
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
-    await page.setViewportSize({ width: 1280, height: 899 });
-    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.locator(".timeline-collapsed-history-shell").evaluate((node) => {
+      (node as HTMLElement).style.height = "139px";
+      (node as HTMLElement).style.height = "140px";
+    });
     await page.waitForTimeout(250);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
 

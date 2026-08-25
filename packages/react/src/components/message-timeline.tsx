@@ -185,7 +185,7 @@ export type MessageTimelineProps = {
    * available so an underfilled timeline can expose a bounded retry after
    * rejection or settlement without progress.
    */
-  onLoadOlder?: (() => boolean | void | PromiseLike<boolean | void>) | undefined;
+  onLoadOlder?: (() => unknown) | undefined;
   /** Jump to the durable session start (bounded oldest window, no middle). */
   onJumpToStart?: (() => void | Promise<void>) | undefined;
   /** True while the oldest window is loading. */
@@ -758,7 +758,7 @@ export function MessageTimeline({
       // history underfills a real viewport.
       if (
         node.clientHeight <= 1 ||
-        maxScrollOf(node) > 1 ||
+        (!retry && maxScrollOf(node) > 1) ||
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
@@ -780,14 +780,14 @@ export function MessageTimeline({
           setUnderfillSettledAttempt(attempt);
         }
       };
-      let result: boolean | void | PromiseLike<boolean | void>;
+      let result: unknown;
       try {
         result = onLoadOlder();
       } catch {
         settle();
         return;
       }
-      if (!result || typeof (result as PromiseLike<boolean | void>).then !== "function") {
+      if (!result || typeof (result as PromiseLike<unknown>).then !== "function") {
         // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
         // that return the real promise opt into safe rejection/no-progress retry.
         return;
