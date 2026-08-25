@@ -349,11 +349,21 @@ export async function removeWorkspaceMember(
         },
       );
     }
-    // The personal-state fence first, exactly as the pre-0278 delete path took
-    // it: session listing takes the shared counterpart and pin mutation the
-    // same exclusive one. The removal command re-acquires it (reentrant within
-    // this transaction), but taking it here keeps the wait observable and the
-    // fence ordered before every other lock this transaction takes.
+    // Enter the canonical organization -> session-tenancy prefix before the
+    // SECURITY-DEFINER command can lock or mutate session rows. Both locks are
+    // reentrant with the command's narrower lifecycle work. The shared tenancy
+    // fence lets ordinary writers continue while excluding a concurrent
+    // visibility transition/fork for this exact workspace.
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${input.accountId}`}, 0))`,
+    );
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(
+        ${`session-tenancy:${input.workspaceId}`}, 0))`,
+    );
+    // The personal-state fence follows that common prefix. Session listing
+    // takes its shared counterpart and pin mutation the same exclusive one.
     await txDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(
         ${`session-personal-state:${input.workspaceId}:${input.targetSubjectId}`}, 0))`,

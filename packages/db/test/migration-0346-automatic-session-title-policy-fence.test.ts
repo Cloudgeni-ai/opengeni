@@ -26,11 +26,11 @@ import {
 } from "../src/index";
 
 const fenceMigrationUrl = new URL(
-  "../drizzle/0345_automatic_session_title_policy_fence.sql",
+  "../drizzle/0346_automatic_session_title_policy_fence.sql",
   import.meta.url,
 );
 const quarantineMigrationUrl = new URL(
-  "../drizzle/0346_automatic_session_title_quarantine.sql",
+  "../drizzle/0347_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
 
@@ -228,7 +228,7 @@ async function addAcceptedScheduledOccurrence(input: {
   );
 }
 
-describe("migrations 0345-0346 automatic session title policy fence", () => {
+describe("migrations 0346-0347 automatic session title policy fence", () => {
   test("use a short rolling fence followed by a bounded resumable quarantine", async () => {
     const fence = await readFile(fenceMigrationUrl, "utf8");
     const quarantine = await readFile(quarantineMigrationUrl, "utf8");
