@@ -290,7 +290,8 @@ describe("Slack access-link browser acceptance", () => {
       await page.reload({ waitUntil: "networkidle" });
       // A managed principal with no workspace access lands on organization
       // onboarding; the bare "No workspace access" panel is the unmanaged path.
-      await expectText(page.locator("main"), "Set up your OpenGeni workspace");
+      await expectText(page.locator("main"), "Create your organization");
+      await expectVisible(page.getByLabel("Organization name"));
       await expectSingleMainWithoutRail(page);
       expect(state.prepareBodies).toHaveLength(1);
       expect(await page.getByRole("button", { name: "Cancel" }).count()).toBe(0);
@@ -447,6 +448,9 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
       }
       state.signedIn = true;
       return json({ user: { id: "browser-user" } });
+    }
+    if (url.pathname === "/v1/auth/organization-onboarding" && request.method() === "GET") {
+      return json({ state: "required" });
     }
     if (url.pathname === "/v1/access/me") {
       state.accessReads += 1;
