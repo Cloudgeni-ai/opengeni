@@ -1,10 +1,30 @@
 import { CalendarClockIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
+import { useId } from "react";
 
 import { CreatorMonogram } from "@/components/creator-monogram";
 import { type CreatorRef, creatorAnnouncement, creatorInitials } from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { RailAggregateStatus } from "@/lib/sessions-group";
+
+function ActiveWorkMark() {
+  const maskId = `active-work-${useId().replaceAll(":", "")}`;
+  return (
+    <svg aria-hidden="true" viewBox="0 0 108 108" className="size-2.5 shrink-0 text-brand">
+      <defs>
+        <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="108">
+          <circle cx="54" cy="54" r="48" fill="white" />
+          <g fill="none" stroke="black" strokeWidth="21" strokeLinecap="round">
+            <path d="M-8 43 C35 40 71 29 116 16" />
+            <path d="M-8 86 C35 83 71 72 116 59" />
+          </g>
+        </mask>
+      </defs>
+      <circle cx="54" cy="54" r="48" fill="currentColor" mask={`url(#${maskId})`} />
+      <circle cx="54" cy="54" r="48" fill="none" stroke="currentColor" strokeWidth="2.5" />
+    </svg>
+  );
+}
 
 /** The one descendant-aware status marker shared by rows and section headers. */
 function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
@@ -18,16 +38,7 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
     );
   }
   if (summary.kind === "active_work") {
-    return (
-      <span
-        aria-hidden="true"
-        className="inline-flex size-2.5 shrink-0 rounded-full border border-brand"
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(-12deg, var(--og-color-accent) 0 2px, transparent 2px 3.5px)",
-        }}
-      />
-    );
+    return <ActiveWorkMark />;
   }
   if (summary.kind === "send_failed") {
     return (

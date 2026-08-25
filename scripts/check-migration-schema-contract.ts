@@ -87,8 +87,9 @@ async function main(): Promise<void> {
   const head = listLedger(root);
   const violations = unregisteredMigrations(head, base, registration);
 
-  // Independent of what this head adds: a ladder rung naming a forward-listed
-  // migration can never fire, and reads as a live pin that it is not.
+  // Independent of what this head adds: any reference to a forward-listed
+  // migration in a filtered-set membership test can never match, and a dead hash
+  // rung reads as a live pin that it is not.
   const unreachable = unreachableContractReferences(source, head, registration.forward);
   if (unreachable.length > 0) {
     const plural = unreachable.length === 1 ? "migration is" : "migrations are";

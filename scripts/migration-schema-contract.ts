@@ -190,7 +190,12 @@ export function parseFilteredMembershipTests(source: string): string[] {
     if (!found.includes(match[1]!)) found.push(match[1]!);
   }
   for (const match of clean.matchAll(
-    /\[([^\]]*?)\]\s*\.find\(\([A-Za-z_$][\w$]*\)\s*=>\s*migrations\.has\(/g,
+    // `.find` and `.filter` both resolve their entries through the same
+    // membership test. The callback shape is matched loosely - annotated
+    // parameter, extra arguments - for the same reason `PRESENCE_PROBE` is:
+    // rejecting a construct the contract itself accepts would make the audit
+    // wrong about a correct tree.
+    /\[([^\]]*?)\]\s*\.(?:find|filter)\(\(\s*[A-Za-z_$][\w$]*[^)]*\)\s*=>\s*migrations\.has\(/g,
   )) {
     for (const entry of match[1]!.matchAll(MIGRATION_LITERAL)) {
       if (!found.includes(entry[1]!)) found.push(entry[1]!);
@@ -259,6 +264,12 @@ export function parseContractRegistration(source: string): ContractRegistration 
  *
  * A reference to a migration that is not on this tree is left alone. Those are
  * the ordinary compatibility branches that fire where fewer migrations exist.
+ *
+ * Known limit: a NEGATED test (`if (!migrations.has(X))`) is live exactly when X
+ * is forward-listed, so flagging it would be wrong. No such test names a
+ * forward-listed migration today, and the contract has exactly one negated test
+ * at all, so this is left as a documented limit rather than special-cased on a
+ * shape that does not yet exist.
  */
 export function unreachableContractReferences(
   source: string,

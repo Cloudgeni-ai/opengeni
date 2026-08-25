@@ -1605,6 +1605,81 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
     );
   });
 
+  test("says where routed work went, and stays quiet when there was no choice", async () => {
+    if (!available) return;
+    const value = await fixture({
+      slackWorkspaceRouting: true,
+      routedWorkspaceName: "Platform",
+    });
+    const routed = value.routed!;
+    const channelId = "C_WORKSPACE_LINE";
+    await upsertSlackChannelRoute(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        connectionId: value.connectionId,
+        slackTeamId: value.teamId,
+        slackChannelId: channelId,
+        targetAccountId: routed.accountId,
+        targetWorkspaceId: routed.workspaceId,
+        decidedBySubjectId: value.owner.subjectId,
+        decidedBySlackUserId: value.ownerSlackUserId,
+        source: "admin",
+      },
+    );
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_LINE_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: value.ownerSlackUserId,
+            channel: channelId,
+            ts: "1700001100.0001",
+            text: "do the routed thing",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+
+    const routedAck = value.slack.posts.at(-1)!;
+    expect(routedAck.text).toContain("-> Platform");
+    expect(JSON.stringify(routedAck.blocks)).toContain("-> Platform");
+    const [label] = await shared!.admin<{ routed_workspace_label: string | null }[]>`
+      select routed_workspace_label from slack_interactions
+      where workspace_id = ${routed.workspaceId}`;
+    expect(label?.routed_workspace_label).toBe("Platform");
+
+    // An install where the person has exactly one workspace made no choice, so
+    // a constant footer on every message would be noise rather than
+    // information. Same flag, same code path, no line.
+    const single = await fixture({ slackWorkspaceRouting: true });
+    expect(
+      (
+        await postEvent(single.app, {
+          teamId: single.teamId,
+          eventId: `E_QUIET_${crypto.randomUUID()}`,
+          event: {
+            type: "app_mention",
+            user: single.ownerSlackUserId,
+            channel: "C_QUIET",
+            ts: "1700001100.0002",
+            text: "and the quiet one",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(single.deps);
+    expect(single.slack.posts.length).toBeGreaterThan(0);
+    expect(single.slack.posts.every((post) => !post.text.includes("->"))).toBe(true);
+    const [quietLabel] = await shared!.admin<{ routed_workspace_label: string | null }[]>`
+      select routed_workspace_label from slack_interactions
+      where workspace_id = ${single.owner.workspaceId}`;
+    expect(quietLabel?.routed_workspace_label).toBeNull();
+  });
+
   test("a routed workspace the person cannot reach never falls back to another one", async () => {
     if (!available) return;
     // The headline rule: OpenGeni does not quietly serve this from a workspace

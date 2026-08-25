@@ -81,7 +81,7 @@ function miniContract(sites: {
     "    });",
     '    const laterPin = "0004_later.sql";',
     "    const releaseSchemaContractHash = (includesActivation: boolean): string | null => {",
-    // The real contract always carries a ladder, and `parseLadderRungs` is
+    // The real contract always carries a ladder, and `parseFilteredMembershipTests` is
     // strict about that so a refactor cannot silently disable the audit. Give
     // every fixture a baseline rung, the same way it gets a baseline probe.
     '      if (migrations.has("0001_first.sql")) {',
@@ -312,6 +312,15 @@ describe("unreachable contract references", () => {
    * `.find((path) => migrations.has(path))`, so its names are membership tests
    * too and a dead entry there is the same debris as a dead rung.
    */
+  test.each([
+    ["annotated find callback", ".find((path: string) => migrations.has(path))"],
+    ["filter callback", ".filter((file) => migrations.has(file))"],
+    ["extra-argument callback", ".find((path, index) => migrations.has(path) && index >= 0)"],
+  ])("reads names resolved through an array %s", (_label, tail) => {
+    const withArray = contract([], []) + `\nconst picked = ["0003_new.sql"]${tail};\n`;
+    expect(parseFilteredMembershipTests(withArray)).toContain("0003_new.sql");
+  });
+
   test("reads names resolved through a .find over migrations.has", () => {
     const withFind =
       contract([], []) +

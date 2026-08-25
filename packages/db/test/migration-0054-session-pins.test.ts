@@ -49,6 +49,34 @@ afterAll(async () => {
 }, 180_000);
 
 describe("0054 session pin migration (real PostgreSQL)", () => {
+  // The harness budget is a safety net, not the contract. What this test actually
+  // bounds is the blocked migration's own `elapsedMs` (>= 4 s, < 15 s), asserted
+  // below against the `SET lock_timeout = '5s'` inside `0054_session_pins.sql`
+  // itself. That pair is untouched here and measures 5.02 s with about 20 ms of
+  // client overhead, so it has roughly ten seconds of slack and remains what
+  // would catch a real lock-contention regression.
+  //
+  // The budget additionally has to cover the retry `migrate()` to head. Its
+  // result is asserted below; its DURATION is bounded by nothing, and it grows
+  // with every unrelated migration that lands. When `30_000` was chosen
+  // (e4d3569c, 2026-07-12) the ledger held 61 migrations and none sorted after
+  // `0054`, so that phase replayed only `0054` itself and 30 s was simply twice
+  // the 15 s internal bound. Today it replays 290. Measured here: ~5.02 s
+  // blocked plus ~2.84 s migrating, ~7.86 s of the 30 s.
+  //
+  // The one observed failure (PR #1792, job 97473277348) is the proof that the
+  // eroded margin, not the contract, is what broke: it reports `5 expect() calls`
+  // of the six, so everything through `< 15_000` PASSED and the timeout landed
+  // inside the retry `migrate()`. That runner was in CI's heavy tail, roughly 9x
+  // slower at migration replay than this machine; CI is not systematically slower
+  // (this file runs isolated, and sampled runs sit at 7.3 s to 13.1 s), but the
+  // lost margin is what made one slow runner fatal.
+  //
+  // Raising the net to match this file's own `beforeAll`/`afterAll` restores the
+  // runway without weakening an assertion. It costs a longer wall-clock failure
+  // if the blocked phase ever hangs outright, which is why the internal bounds
+  // stay: a regression pushing `lock_timeout` past 15 s fails on that assertion
+  // with a real message rather than as a bare timeout.
   test("bounds production lock contention and cleanly retries", async () => {
     if (!available || !blank) return;
     const blocker = postgres(blank.databaseUrl, { max: 1 });
@@ -113,5 +141,5 @@ describe("0054 session pin migration (real PostgreSQL)", () => {
       snapshotRowSecurity: true,
       snapshotForceRowSecurity: true,
     });
-  }, 30_000);
+  }, 180_000);
 });

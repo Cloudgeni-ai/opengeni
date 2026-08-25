@@ -4,6 +4,7 @@
 // failed override that falls through as if it were a suggestion, and any path
 // that quietly serves a request from a workspace the person did not name.
 import { describe, expect, test } from "bun:test";
+import { slackPostSeed, withWorkspaceLine } from "../src/integrations/slack-interactions";
 import {
   isSlackDirectMessageConversation,
   splitSlackLeadingMention,
@@ -367,5 +368,50 @@ describe("a direct message with no workspace of one's own", () => {
         }),
       ),
     ).toMatchObject({ kind: "denied", reason: "no_candidates" });
+  });
+});
+
+describe("the post-ledger seed", () => {
+  test("moves only for an interaction that renders the line", () => {
+    // A labelled interaction renders different bytes, so it must claim a fresh
+    // ledger row. An unlabelled one renders exactly what it always did, so
+    // moving its id would orphan its row and turn a repair into a duplicate
+    // post. The label is written once at insert and never updated, which is
+    // what makes it a safe discriminator.
+    expect(slackPostSeed({ routedWorkspaceLabel: null }, "slack-ack:abc")).toBe("slack-ack:abc");
+    expect(slackPostSeed({ routedWorkspaceLabel: "Platform" }, "slack-ack:abc")).toBe(
+      "slack-ack:abc:v2",
+    );
+  });
+});
+
+describe("the workspace line", () => {
+  test("says nothing at all without a label", () => {
+    expect(withWorkspaceLine(null, "done")).toEqual({ text: "done" });
+    const blocks = [{ type: "section" as const, text: { type: "mrkdwn" as const, text: "done" } }];
+    expect(withWorkspaceLine(null, "done", blocks)).toEqual({ text: "done", blocks });
+  });
+
+  test("appends to the notification text and the blocks independently", () => {
+    const blocks = [{ type: "section" as const, text: { type: "mrkdwn" as const, text: "done" } }];
+    const rendered = withWorkspaceLine("Platform", "done", blocks);
+    expect(rendered.text).toBe("done\n-> Platform");
+    expect(rendered.blocks).toHaveLength(2);
+    expect(rendered.blocks?.[1]).toEqual({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: "-> Platform" }],
+    });
+  });
+
+  test("reserves room for the line rather than overflowing, and is stable on replay", () => {
+    // A body already at the cap must still leave room for the line, and two
+    // renders of the same input must produce identical bytes or the ledger's
+    // digest check rejects the second.
+    const huge = "x".repeat(10_000);
+    const first = withWorkspaceLine("Platform", huge);
+    const second = withWorkspaceLine("Platform", huge);
+    expect(first.text).toBe(second.text);
+    expect(first.text.endsWith("\n-> Platform")).toBe(true);
+    expect(first.text.length).toBeLessThanOrEqual(3_500);
   });
 });

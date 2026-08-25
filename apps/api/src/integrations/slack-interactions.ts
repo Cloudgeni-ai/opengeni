@@ -1392,6 +1392,92 @@ function boundedSlackRouteLabel(label: string): string {
   return `${bounded}...`;
 }
 
+/**
+ * Say where the work went, quietly.
+ *
+ * The line exists to stop work landing somewhere surprising, so it appears only
+ * when the routing decision was a genuine choice: a null label means routing is
+ * off, or the person had exactly one workspace anyway, and a constant footer on
+ * every message would be noise rather than information.
+ *
+ * The label is frozen on the interaction rather than looked up here, because a
+ * workspace rename between the original post and a reconciliation would make the
+ * post ledger's byte comparison raise.
+ */
+export function withWorkspaceLine(
+  label: string | null,
+  text: string,
+  blocks?: SlackMessageBlock[],
+): { text: string; blocks?: SlackMessageBlock[] } {
+  if (!label) return blocks ? { text, blocks } : { text };
+  const suffix = `\n-> ${label}`;
+  // Reserve the suffix rather than truncating after the fact, so the bounded
+  // body plus the line still fits.
+  const body = boundedOutput(text, MAX_SLACK_TEXT_CHARS - suffix.length);
+  const line: SlackMessageBlock = {
+    type: "context",
+    elements: [{ type: "mrkdwn", text: `-> ${label}` }],
+  };
+  return {
+    text: `${body}${suffix}`,
+    ...(blocks ? { blocks: [...blocks, line] } : {}),
+  };
+}
+
+/**
+ * The post-ledger seed for one interaction's messages.
+ *
+ * The ledger binds one operation id to a digest over the rendered bytes, so
+ * adding the workspace line under an unchanged id would wedge every interaction
+ * with a claimed-but-unposted row. But bumping the id for interactions whose
+ * bytes did NOT change is not free either: their ledger rows become unreachable,
+ * so a repair or a cross-deploy retry posts a duplicate instead of finding the
+ * completed original, and an action handle still points at the old operation.
+ *
+ * Only a labelled interaction renders different bytes, and the label is written
+ * once at insert and never updated, so it is a stable discriminator. Version the
+ * id on the label rather than on the release: a labelled interaction can only
+ * have been created by an image that already renders the line, and every
+ * pre-existing and unlabelled interaction keeps its exact ledger identity.
+ */
+export function slackPostSeed(
+  interaction: Pick<SlackInteraction, "routedWorkspaceLabel">,
+  seed: string,
+): string {
+  return interaction.routedWorkspaceLabel ? `${seed}:v2` : seed;
+}
+
+/** Sources that mean somebody, or something, actually chose this workspace. */
+const SLACK_ROUTE_SOURCES_WORTH_NAMING: ReadonlySet<string> = new Set([
+  // Not "thread": a mapped thread reuses the interaction that already exists,
+  // so it inherits the label frozen when that interaction was created and never
+  // reaches the writer below.
+  "prefix",
+  "channel",
+  "dm_route",
+  "dm_personal",
+]);
+
+/**
+ * The label to freeze on a new interaction, or null to say nothing.
+ *
+ * `installation` and `sole_candidate` both mean there was only ever one place
+ * this could go, so naming it on every message would be noise.
+ *
+ * Bounded with the picker's own button cap so the frozen label and the button
+ * that produced it agree; the column allows 128 bytes, which is headroom.
+ */
+async function routedWorkspaceLabelFor(
+  deps: ApiRouteDeps,
+  resolution: Extract<SlackRouteResolution, { kind: "resolved" }>,
+): Promise<string | null> {
+  if (!SLACK_ROUTE_SOURCES_WORTH_NAMING.has(resolution.source)) return null;
+  const label = resolution.label ?? (await getWorkspace(deps.db, resolution.workspaceId))?.name;
+  if (!label) return null;
+  const bounded = boundedSlackRouteLabel(label);
+  return bounded.length > 0 ? bounded : null;
+}
+
 /** How long a first-use picker stays answerable. */
 const SLACK_ROUTE_PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -1819,6 +1905,11 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   }
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
     ...target,
+    // Frozen here, after authorization, so a workspace name is never shown to
+    // someone who could not reach it. Null when the routing decision was not a
+    // genuine choice, which is what keeps the line off every message in an
+    // install that only ever had one workspace.
+    routedWorkspaceLabel: await routedWorkspaceLabelFor(deps, resolution),
     connectionId: entry.connectionId,
     slackTeamId: entry.slackTeamId,
     slackChannelId: entry.slackChannelId,
@@ -2134,7 +2225,7 @@ async function acknowledgeSlackSession(
   const privateHandoff =
     !directMessageShortcut && interaction.visibility === "private" && entry.triggerKind !== "dm";
   const privateBotDm = directMessageShortcut || privateHandoff;
-  const operationId = deterministicUuid(`slack-ack:${interaction.id}`);
+  const operationId = deterministicUuid(slackPostSeed(interaction, `slack-ack:${interaction.id}`));
   // The acknowledgement carries exactly one session link plus the Status/Stop
   // buttons. The how-to prose it used to repeat forever now rides along once,
   // on this Slack identity's first accepted task in this installation.
@@ -2162,6 +2253,15 @@ async function acknowledgeSlackSession(
     sessionEventSequence: 0,
     state: "active",
   });
+  // The approval and control cards let `text` and `blocks[0]` diverge, so the
+  // line is appended to each independently rather than assuming they match.
+  const acknowledgement = withWorkspaceLine(
+    interaction.routedWorkspaceLabel,
+    text,
+    controls.length > 0
+      ? ([{ type: "section", text: { type: "mrkdwn", text } }, ...controls] as SlackMessageBlock[])
+      : undefined,
+  );
   const ack = await client.postMessage({
     operationId,
     ...(privateBotDm
@@ -2172,15 +2272,8 @@ async function acknowledgeSlackSession(
             ? {}
             : { threadTimestamp: entry.slackThreadTs ?? entry.slackMessageTs }),
         }),
-    text,
-    ...(controls.length > 0
-      ? {
-          blocks: [
-            { type: "section", text: { type: "mrkdwn", text } },
-            ...controls,
-          ] as SlackMessageBlock[],
-        }
-      : {}),
+    text: acknowledgement.text,
+    ...(acknowledgement.blocks ? { blocks: acknowledgement.blocks } : {}),
   });
   if (entry.triggerKind === "slash_command" || privateBotDm) {
     const rekeyed = await rekeySlackInteractionRoute(deps.db, {
@@ -2395,6 +2488,10 @@ async function processSlackReactionInboxEntry(
   }
   const { interaction } = await getOrCreateSlackInteraction(deps.db, {
     ...target,
+    // A reaction routes exactly like a mention, so it names its workspace the
+    // same way. Resolved after `authorizeTarget`, so a name never reaches
+    // somebody who could not reach the workspace.
+    routedWorkspaceLabel: await routedWorkspaceLabelFor(deps, routeResolution),
     connectionId: entry.connectionId,
     slackTeamId: entry.slackTeamId,
     slackChannelId: entry.slackChannelId,
@@ -2488,11 +2585,15 @@ async function acknowledgeSlackReactionSession(
   if (!interaction.sessionId) {
     throw new Error("Slack reaction acknowledgement requires a bound session");
   }
+  const started = `OpenGeni started from the :${emoji}: reaction. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} If the intended action is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`;
+  const rendered = withWorkspaceLine(interaction.routedWorkspaceLabel, started);
   await client.postMessage({
-    operationId: deterministicUuid(`slack-reaction-ack:${interaction.id}`),
+    operationId: deterministicUuid(
+      slackPostSeed(interaction, `slack-reaction-ack:${interaction.id}`),
+    ),
     channelId: interaction.slackChannelId,
     threadTimestamp: interaction.slackThreadTs,
-    text: `OpenGeni started from the :${emoji}: reaction. ${openSessionText(deps, interaction.workspaceId, interaction.sessionId)} If the intended action is unclear, OpenGeni will ask in this thread. Reply here to continue, or reply \`stop\` to stop.`,
+    text: rendered.text,
   });
 }
 
@@ -3050,17 +3151,26 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   // ever shown. The handle's message operation identifies the acknowledgement
   // exactly, independent of route rekeying. Later control cards have their own
   // operation ids, so the hint still appears on exactly one message.
-  const acknowledgementOperationId = deterministicUuid(`slack-ack:${interaction.id}`);
+  const acknowledgementOperationId = deterministicUuid(
+    slackPostSeed(interaction, `slack-ack:${interaction.id}`),
+  );
   const updateText =
     interaction.firstTaskHint === true && handle.messageOperationId === acknowledgementOperationId
       ? `${outcome.text}${slackFirstTaskHintText(deps)}`
       : outcome.text;
+  // A control click replaces a message that already carried the line, so the
+  // replacement carries it too rather than quietly stripping it.
+  const rendered = withWorkspaceLine(interaction.routedWorkspaceLabel, updateText, [
+    { type: "section", text: { type: "mrkdwn", text: updateText } },
+  ]);
   await client.updateMessage({
-    operationId: deterministicUuid(`slack-action-update:${handle.id}:${outcome.result}`),
+    operationId: deterministicUuid(
+      slackPostSeed(interaction, `slack-action-update:${handle.id}:${outcome.result}`),
+    ),
     channelId: entry.slackChannelId,
     timestamp: entry.slackMessageTs,
-    text: updateText,
-    blocks: [{ type: "section", text: { type: "mrkdwn", text: updateText } }],
+    text: rendered.text,
+    ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
   });
   await settleSlackInteractionActionHandles(deps.db, {
     ...target,
@@ -3508,7 +3618,7 @@ async function slackApprovalCard(
   requesterAuthorized: boolean,
 ): Promise<{ text: string; blocks?: SlackMessageBlock[]; operationId: string }> {
   const operationId = deterministicUuid(
-    `slack-delivery:${interaction.id}:${event.sequence}:approval`,
+    slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:approval`),
   );
   const approvals = slackApprovalSummaries(event.payload);
   const fallback = approvals.length
@@ -3661,7 +3771,7 @@ async function slackHumanInputCard(
   );
   if (!request || request.status !== "pending") return null;
   const operationId = deterministicUuid(
-    `slack-delivery:${interaction.id}:${event.sequence}:human-input`,
+    slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:human-input`),
   );
   const text = `${mention}OpenGeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
   if (!requesterAuthorized || !interaction.initiatingSlackUserId) return { text, operationId };
@@ -4137,32 +4247,38 @@ async function deliverSlackSessionEvents(
           // The result is the result. Continuation prose and the recurring
           // action live on the control/Status card and `<command> info`.
           const text = boundedOutput(`${requester.mention}${existingProgress.text}`);
+          // This rewrites a message that already carried the line, so it has to
+          // carry it too, or the update would quietly strip it.
+          const rendered = withWorkspaceLine(
+            interaction.routedWorkspaceLabel,
+            text,
+            publicationBlocks.length > 0
+              ? ([
+                  { type: "section", text: { type: "mrkdwn", text } },
+                  ...publicationBlocks,
+                ] as SlackMessageBlock[])
+              : undefined,
+          );
           await client.updateMessage({
             operationId: deterministicUuid(
-              `slack-terminal-update:${interaction.id}:${event.sequence}`,
+              slackPostSeed(
+                interaction,
+                `slack-terminal-update:${interaction.id}:${event.sequence}`,
+              ),
             ),
             channelId: posted.slackChannelId,
             timestamp: posted.slackMessageTimestamp,
-            text,
-            ...(publicationBlocks.length > 0
+            text: rendered.text,
+            ...(rendered.blocks
               ? {
-                  blocks: [
-                    {
-                      type: "section",
-                      text: {
-                        type: "mrkdwn",
-                        text,
-                      },
-                    },
-                    ...publicationBlocks,
-                  ],
+                  blocks: rendered.blocks,
                 }
               : {}),
           });
         }
       } else {
         const operationId = deterministicUuid(
-          `slack-delivery:${interaction.id}:${event.sequence}:final`,
+          slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:final`),
         );
         const text = boundedOutput(
           `${requester.mention}${output || "OpenGeni finished this task."}`,
@@ -4263,15 +4379,18 @@ async function postDelivery(
   event: SessionEvent,
   text: string,
   kind: string,
-  operationId = deterministicUuid(`slack-delivery:${interaction.id}:${event.sequence}:${kind}`),
+  operationId = deterministicUuid(
+    slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:${kind}`),
+  ),
   blocks?: SlackMessageBlock[],
 ) {
+  const rendered = withWorkspaceLine(interaction.routedWorkspaceLabel, boundedOutput(text), blocks);
   await client.postMessage({
     operationId,
     channelId: interaction.slackChannelId,
     threadTimestamp: interaction.slackThreadTs,
-    text: boundedOutput(text),
-    ...(blocks ? { blocks } : {}),
+    text: rendered.text,
+    ...(rendered.blocks ? { blocks: rendered.blocks } : {}),
   });
 }
 
@@ -4832,10 +4951,8 @@ function boundedSlackChildDetail(value: string) {
     : `${collapsed.slice(0, MAX_SLACK_CHILD_DETAIL_CHARS - 1)}…`;
 }
 
-function boundedOutput(value: string) {
-  return value.length <= MAX_SLACK_TEXT_CHARS
-    ? value
-    : `${value.slice(0, MAX_SLACK_TEXT_CHARS - 20)}\n… output truncated`;
+function boundedOutput(value: string, limit = MAX_SLACK_TEXT_CHARS) {
+  return value.length <= limit ? value : `${value.slice(0, limit - 20)}\n… output truncated`;
 }
 
 function safePayloadText(payload: unknown, field: string) {
