@@ -4034,9 +4034,7 @@ export const sessionVariableSetAttachments = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").notNull(),
     sessionId: uuid("session_id").notNull(),
     variableSetId: uuid("variable_set_id")
       .notNull()
@@ -4045,10 +4043,15 @@ export const sessionVariableSetAttachments = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_variable_set_attachments_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
     session: foreignKey({
       name: "session_variable_set_attachments_session_fk",
-      columns: [table.accountId, table.workspaceId, table.sessionId],
-      foreignColumns: [sessions.accountId, sessions.workspaceId, sessions.id],
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
     }).onDelete("cascade"),
     sessionPosition: uniqueIndex("session_variable_set_attachments_session_position_uq").on(
       table.workspaceId,

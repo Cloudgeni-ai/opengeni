@@ -85,14 +85,17 @@ ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 CREATE TABLE session_variable_set_attachments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id uuid NOT NULL REFERENCES managed_accounts(id) ON DELETE CASCADE,
-  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id uuid NOT NULL,
   session_id uuid NOT NULL,
   variable_set_id uuid NOT NULL REFERENCES workspace_variable_sets(id) ON DELETE CASCADE,
   position integer NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT session_variable_set_attachments_workspace_account_fk
+    FOREIGN KEY (workspace_id, account_id)
+    REFERENCES workspaces(id, account_id) ON DELETE CASCADE,
   CONSTRAINT session_variable_set_attachments_session_fk
-    FOREIGN KEY (account_id, workspace_id, session_id)
-    REFERENCES sessions(account_id, workspace_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, session_id)
+    REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT session_variable_set_attachments_position_check
     CHECK (position >= 0 AND position < 25),
   CONSTRAINT session_variable_set_attachments_session_position_uq
