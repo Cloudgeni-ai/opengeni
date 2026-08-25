@@ -149,6 +149,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
     try {
       const observed = await app.begin(async (sql) => {
         // Organization B's exact request context.
+        await sql`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
         await sql`select set_config('opengeni.account_id', ${b.accountId}, true)`;
         await sql`select set_config('opengeni.workspace_id', ${b.workspaceId}, true)`;
         await sql`select set_config('opengeni.subject_id', ${`user:non-rls-b-${suffix}`}, true)`;
