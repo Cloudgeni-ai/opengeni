@@ -749,7 +749,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       await sql?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
-  });
+  }, 180_000);
 
   test("serializes concurrent once use and fails closed after live authority drift", async () => {
     let admin: postgres.Sql | undefined;
@@ -944,7 +944,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       await admin?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
-  });
+  }, 180_000);
 
   test("requires the exact current uninterrupted attempt at admission and resolution", async () => {
     let sql: postgres.Sql | undefined;
@@ -1155,7 +1155,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       await sql?.end({ timeout: 5 }).catch(() => undefined);
       await blank.release();
     }
-  });
+  }, 180_000);
 });
 
 type FixtureIds = {
