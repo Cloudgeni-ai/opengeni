@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import { VariableSetCard } from "./variable-sets";
+import { ManagedAuthPanel } from "@/components/managed-auth-panel";
 import type { WorkspaceVariableSet } from "@/types";
 
 beforeAll(() => {
@@ -276,14 +277,57 @@ describe("Variable Sets credential-autofill boundaries", () => {
     }
   });
 
+  // The Variable Set forms above must look like nothing a password manager
+  // should save; the managed sign-in form is the exact opposite boundary and
+  // must keep the credential tokens that let one save and refill the account.
+  // Assert the rendered attributes rather than the component source: this form
+  // has already moved once (out of `context.tsx` into `ManagedAuthPanel`), and
+  // a source-text assertion silently stops protecting anything when that
+  // happens.
   test("keeps the managed sign-in fields on their credential autocomplete tokens", async () => {
-    const authSource = await Bun.file(
-      `${import.meta.dir}/../components/managed-auth-panel.tsx`,
-    ).text();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
 
-    expect(authSource).toContain('autoComplete="email"');
-    expect(authSource).toContain(
-      'autoComplete={mode === "signin" ? "current-password" : "new-password"}',
-    );
+    try {
+      await act(async () => {
+        root.render(
+          <ManagedAuthPanel emailVerificationRequired={false} onSubmit={async () => undefined} />,
+        );
+      });
+
+      const email = container.querySelector<HTMLInputElement>("#managed-auth-email");
+      expect(email).not.toBeNull();
+      expect({ type: email!.type, autocomplete: email!.autocomplete }).toEqual({
+        type: "email",
+        autocomplete: "email",
+      });
+
+      const signInPassword = container.querySelector<HTMLInputElement>("#managed-auth-password");
+      expect(signInPassword).not.toBeNull();
+      expect({ type: signInPassword!.type, autocomplete: signInPassword!.autocomplete }).toEqual({
+        type: "password",
+        autocomplete: "current-password",
+      });
+
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.trim() === "Sign up")!
+          .click();
+      });
+
+      const signUpPassword = container.querySelector<HTMLInputElement>("#managed-auth-password");
+      expect(signUpPassword).not.toBeNull();
+      expect({ type: signUpPassword!.type, autocomplete: signUpPassword!.autocomplete }).toEqual({
+        type: "password",
+        autocomplete: "new-password",
+      });
+      expect(container.querySelector<HTMLInputElement>("#managed-auth-name")?.autocomplete).toBe(
+        "name",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 });
