@@ -20,6 +20,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   failOrganizationRetentionDeletion,
   finalizeOrganizationRetentionDeletion,
+  getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getBillingBalance,
   listOrganizationMembers,
@@ -34,6 +35,7 @@ import {
   settleSessionAttemptInterruptions,
   transitionSessionVisibility,
   updateOrganizationMember,
+  updateOrganizationPrivateSessionSettings,
   updateOrganizationRetentionPolicy,
   runMigrations,
   type DbClient,
@@ -1016,6 +1018,17 @@ describe("migration 0263 organization membership lifecycle", () => {
     await shared.admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id, role)
       values (${owner!.organizationId}, ${sharedWorkspaceId}, ${targetSubject}, 'member')`;
+    const privateSessionSettings = await getOrganizationPrivateSessionSettings(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+    });
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+      enabled: true,
+      expectedVersion: privateSessionSettings.version,
+      operationId: crypto.randomUUID(),
+    });
     const privateSession = await createSession(client.db, {
       accountId: owner!.organizationId,
       workspaceId: sharedWorkspaceId,

@@ -177,6 +177,7 @@ describe("release schema contract", () => {
       "0341_slack_routing_probe_organization_fence.sql",
       "0342_slack_route_prompt_single_pending.sql",
       "0343_personal_document_force_rls_lock_repair.sql",
+      "0344_private_session_visibility_transition_gate.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -206,6 +207,9 @@ describe("release schema contract", () => {
     const personalDocumentForceRlsRepair = completeSourceContract.migrations.some(
       (migration) => migration.path === "0343_personal_document_force_rls_lock_repair.sql",
     );
+    const privateSessionVisibilityTransitionGate = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0344_private_session_visibility_transition_gate.sql",
+    );
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
@@ -213,22 +217,25 @@ describe("release schema contract", () => {
         (tenancyBackfillActivationEvidence ? 1 : 0) +
         (slackRoutingProbeFence ? 1 : 0) +
         (slackRoutePromptSinglePending ? 1 : 0) +
-        (personalDocumentForceRlsRepair ? 1 : 0),
-      latestMigration: personalDocumentForceRlsRepair
-        ? "0343_personal_document_force_rls_lock_repair.sql"
-        : slackRoutePromptSinglePending
-          ? "0342_slack_route_prompt_single_pending.sql"
-          : slackRoutingProbeFence
-            ? "0341_slack_routing_probe_organization_fence.sql"
-            : tenancyBackfillActivationEvidence
-              ? "0340_tenancy_backfill_activation_evidence.sql"
-              : documentAuthorityReclassification
-                ? "0339_document_authority_reclassification.sql"
-                : atomicConnectedMachineAttachments
-                  ? "0338_atomic_connected_machine_attachments.sql"
-                  : routedSlackHandles
-                    ? "0337_slack_routed_action_handles.sql"
-                    : "0336_atomic_session_fork_visibility.sql",
+        (personalDocumentForceRlsRepair ? 1 : 0) +
+        (privateSessionVisibilityTransitionGate ? 1 : 0),
+      latestMigration: privateSessionVisibilityTransitionGate
+        ? "0344_private_session_visibility_transition_gate.sql"
+        : personalDocumentForceRlsRepair
+          ? "0343_personal_document_force_rls_lock_repair.sql"
+          : slackRoutePromptSinglePending
+            ? "0342_slack_route_prompt_single_pending.sql"
+            : slackRoutingProbeFence
+              ? "0341_slack_routing_probe_organization_fence.sql"
+              : tenancyBackfillActivationEvidence
+                ? "0340_tenancy_backfill_activation_evidence.sql"
+                : documentAuthorityReclassification
+                  ? "0339_document_authority_reclassification.sql"
+                  : atomicConnectedMachineAttachments
+                    ? "0338_atomic_connected_machine_attachments.sql"
+                    : routedSlackHandles
+                      ? "0337_slack_routed_action_handles.sql"
+                      : "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(

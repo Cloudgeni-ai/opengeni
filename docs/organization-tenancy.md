@@ -1020,6 +1020,12 @@ The activated database contract is intentionally narrow:
   behavior is not ported. The nested quiescence helper is owner-internal and
   ungranted; only the fully authorized lifecycle functions may invoke it.
 - Transition-to-private additionally requires a singleton sandbox group. A
+  fresh transition to private in a shared workspace also requires the 0323
+  organization setting. Migration 0344 fences the actual visibility update,
+  after the lifecycle function's applied-receipt replay return, so a committed
+  transition still replays after disable. Personal workspaces are exempt and
+  transition-to-shared never consults the setting.
+  A
   proven transition advances the epoch, revokes old-epoch personal grants,
   clears staged personal delegations, preserves 0301 cache/pin behavior, and
   appends one event without a workflow wake.
