@@ -124,10 +124,12 @@ DECLARE
   configured_role text;
 BEGIN
   FOR configured_role IN
-    SELECT value
+    SELECT role_value.rolname
     FROM jsonb_array_elements_text(
       current_setting('opengeni.migration_application_roles')::jsonb
-    ) roles(value)
+    ) configured(value)
+    JOIN pg_catalog.pg_roles role_value
+      ON role_value.rolname = configured.value
   LOOP
     EXECUTE format(
       'GRANT EXECUTE ON FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active() TO %I',

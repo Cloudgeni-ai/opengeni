@@ -39,6 +39,9 @@ describe("migration 0348 ordered session Variable Set attachments", () => {
     expect(source).toContain("CREATE POLICY sessions_variable_set_attachments_protocol_v1");
     expect(source).toContain("AS RESTRICTIVE");
     expect(source).toContain("0348-or-newer runtime");
+    expect(source).toMatch(
+      /DO \$session_variable_set_protocol_grants\$[\s\S]*?JOIN pg_catalog\.pg_roles role_value[\s\S]*?role_value\.rolname = configured\.value/u,
+    );
     expect(source).toContain("ADD COLUMN variable_set_ids jsonb NOT NULL DEFAULT '[]'::jsonb");
     const backfillFence = source.indexOf(
       "PERFORM acquire_session_tenancy_fence(workspace_id_value);",
