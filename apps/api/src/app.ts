@@ -1462,6 +1462,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/events",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/turns",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/queue\/[^/]+\/(move|edit|steer|delete)$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/queue/:turnId/:action",
   },
@@ -1924,6 +1928,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/github\/oauth\/callback$/,
     label: "/v1/github/oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId",
   },
 ];
 

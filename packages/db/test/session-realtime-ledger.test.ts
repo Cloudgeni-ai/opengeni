@@ -18,20 +18,27 @@ import {
   createDb,
   createSession,
   endSessionRealtimeInTransaction,
+  ensureManagedAccessForUser,
   evaluateSessionControl,
   failSessionRealtimeConnectionInTransaction,
   getActiveSessionHistoryItems,
+  getOrCreateCompanyProfileSnapshot,
+  getOrCreatePreferenceRegistrySnapshot,
+  getOrCreateWorkspaceInstructionPolicySnapshot,
   getSessionHumanInputRequest,
   listOutstandingSessionSystemUpdates,
   mutateSessionControlInTransaction,
   peekSessionWork,
   recoverSessionDispatch,
+  resolveCompanyBrainContextSelection,
   SessionControlInvariantError,
   SessionRealtimeConflictError,
   settleCodexCredentialLeaseLoss,
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
   syncSessionRealtimeLedgerInTransaction,
+  transitionSessionVisibility,
+  withSessionRlsActorContext,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   type SessionActivityDatabase,
 } from "../src/index";
@@ -83,6 +90,60 @@ async function fixture() {
     sessionId: session.id,
     operationId: crypto.randomUUID(),
     ownerSubjectId: grant.subjectId,
+    browserInstanceId: `browser-${crypto.randomUUID()}`,
+    ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+    model: "gpt-live-1-boulder-alpha" as const,
+  };
+  const started = await transaction(owner.workspaceId, (tx) =>
+    beginSessionRealtimeInTransaction(tx, owner),
+  );
+  return { grant, session, owner, started };
+}
+
+async function privateFixture() {
+  const suffix = crypto.randomUUID();
+  const userId = `realtime-ledger-owner-${suffix}`;
+  const subjectId = `user:${userId}`;
+  const access = await ensureManagedAccessForUser(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Realtime ledger owner",
+  });
+  const grant = access.workspaceGrants[0]!;
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
+    on conflict (account_id) do nothing`;
+  const session = await withSessionRlsActorContext({ subjectId }, () =>
+    createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "ordinary history before voice",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      createdBy: { kind: "subject", subjectId },
+      createdByContext: {},
+    }),
+  );
+  await transitionSessionVisibility(client.db, {
+    workspaceId: grant.workspaceId!,
+    sessionId: session.id,
+    actorSubjectId: subjectId,
+    targetVisibility: "user_private",
+    expectedAuthorityEpoch: 1,
+    operationKey: `realtime-ledger-private-${suffix}`,
+  });
+  const owner = {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    sessionId: session.id,
+    operationId: crypto.randomUUID(),
+    ownerSubjectId: subjectId,
     browserInstanceId: `browser-${crypto.randomUUID()}`,
     ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
     model: "gpt-live-1-boulder-alpha" as const,
@@ -1304,9 +1365,10 @@ describe("session realtime ledger", () => {
       latencyMode: "fast",
       sandboxBackend: "none",
       sandboxOs: null,
-      initiatorKind: "service",
+      initiatorKind: "subject",
       initiatorSubjectId: value.owner.ownerSubjectId,
-      lineage: { actor: "service" },
+      initiatingHumanSubjectId: value.owner.ownerSubjectId,
+      lineage: { actor: "human" },
       metadata: {
         delivery: "steer",
         realtimeDelegation: {
@@ -1340,6 +1402,42 @@ describe("session realtime ledger", () => {
     expect(persisted.count).toBe(before.count);
     expect(persisted.children).toBe(0);
     expect(persisted.session).toEqual(before.session);
+  });
+
+  test("private-session voice delegation retains human authority through Company Brain selection", async () => {
+    const value = await privateFixture();
+    const connection = await claimInitial(value);
+    await complete(value, connection.claimed.connection);
+    await proveProviderStarted(value, connection.claimed.connection);
+    const delegated = await admitAndClaimDelegation(value, connection.claimed.connection);
+    expect(delegated.turn).toMatchObject({
+      initiator: { kind: "subject", subjectId: value.owner.ownerSubjectId },
+      initiatingHumanSubjectId: value.owner.ownerSubjectId,
+    });
+    const claims = {
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      sessionId: value.session.id,
+      turnId: delegated.turn.id,
+      attemptId: delegated.attemptId,
+      executionGeneration: delegated.turn.executionGeneration,
+    };
+    const selected = await withSessionRlsActorContext(
+      {
+        subjectId: "worker:realtime-ledger",
+        initiatingHumanSubjectId: value.owner.ownerSubjectId,
+      },
+      async () => {
+        await getOrCreateCompanyProfileSnapshot(client.db, claims);
+        await getOrCreateWorkspaceInstructionPolicySnapshot(client.db, claims);
+        await getOrCreatePreferenceRegistrySnapshot(client.db, claims);
+        return await resolveCompanyBrainContextSelection(client.db, claims);
+      },
+    );
+    expect(selected.receipt).toMatchObject({
+      rootSessionId: value.session.id,
+      turnContextSnapshotSource: "accepted_turn",
+    });
   });
 
   test("delegation uses canonical Steer against an already-running ordinary turn", async () => {
