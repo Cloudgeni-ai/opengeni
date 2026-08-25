@@ -880,7 +880,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
     const runtimeUrl = new URL(owned.adminUrl);
     runtimeUrl.username = "opengeni_app";
     runtimeUrl.password = owned.appPassword;
-    const runtime = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => undefined });
+    const runtime = postgres(runtimeUrl.toString(), {
+      max: 1,
+      onnotice: () => undefined,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
     try {
       await runtime.begin(async (transaction) => {
         await transaction`
