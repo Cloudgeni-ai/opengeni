@@ -3600,6 +3600,8 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       await tx`select set_config('opengeni.account_id', ${ids.accountId}, true)`;
       await tx`select set_config('opengeni.workspace_id', ${ids.workspaceId}, true)`;
       await tx`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`;
+      await tx`select pg_advisory_xact_lock_shared(hashtextextended(
+        ${`session-tenancy:${ids.workspaceId}`}, 0))`;
       const [lease] = await tx<{ id: string }[]>`
         select id from sandbox_leases
         where workspace_id = ${ids.workspaceId}

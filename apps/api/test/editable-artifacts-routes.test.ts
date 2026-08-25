@@ -194,6 +194,9 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
         ) {
           return [];
         }
+        if (text.includes("pg_advisory_xact_lock_shared")) {
+          return [];
+        }
         if (
           text.includes("current_setting('opengeni.account_id'") &&
           text.includes("current_setting('opengeni.workspace_id'")
