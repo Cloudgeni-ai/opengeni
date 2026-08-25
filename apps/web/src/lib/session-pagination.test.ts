@@ -105,7 +105,9 @@ describe("session continuation pagination", () => {
       ]),
     };
 
-    expect(rebaseSessionContinuation(retained, 7, 7, "fresh-next", 8)).toEqual({
+    expect(
+      rebaseSessionContinuation(retained, 7, 7, { sessions: [], nextCursor: "fresh-next" }, 8),
+    ).toEqual({
       generation: 7,
       sessions: retained.sessions,
       nextCursor: "fresh-next",
@@ -116,6 +118,31 @@ describe("session continuation pagination", () => {
       authoritativeSessionIds: new Set(),
       channelReadGenerations: new Map(),
     });
+  });
+
+  test("adopts fresh page-one channel evidence when an expired cursor rebases", () => {
+    const stale = { ...row("shared"), channelId: "channel-a" } as Session;
+    const fresh = { ...stale, channelId: "channel-b" } as Session;
+    let state = mergeSessionContinuation(
+      emptySessionContinuation(11),
+      11,
+      11,
+      { sessions: [stale, row("retained")], nextCursor: "expired" },
+      30,
+      40,
+    );
+    const freshFirstPage = { sessions: [fresh], nextCursor: null };
+
+    // This mirrors the production cursor-expiry path: page one returned B,
+    // but the old rebase API retained only its cursor and silently discarded
+    // the row itself.
+    state = rebaseSessionContinuation(state, 11, 11, freshFirstPage, 31, 41, "rebase");
+
+    expect(state.sessions.find((session) => session.id === fresh.id)?.channelId).toBe("channel-b");
+    expect(authoritativeSessionContinuationChannels(state, 11, 31, 41)).toEqual([
+      { session: fresh, readGeneration: 41 },
+    ]);
+    expect(state.sessions.map((session) => session.id)).toEqual(["shared", "retained"]);
   });
 
   test("retains thousands of rows across repeated pages, overlaps, and cursor rebases", () => {
@@ -136,7 +163,13 @@ describe("session continuation pagination", () => {
         20,
       );
       if (page > 0 && page % 10 === 0) {
-        state = rebaseSessionContinuation(state, 12, 12, `rebased-${page}`, 20);
+        state = rebaseSessionContinuation(
+          state,
+          12,
+          12,
+          { sessions: [], nextCursor: `rebased-${page}` },
+          20,
+        );
       }
     }
 
@@ -159,7 +192,9 @@ describe("session continuation pagination", () => {
       channelReadGenerations: new Map([["current", 19]]),
     };
 
-    expect(rebaseSessionContinuation(current, 9, 8, "stale-next", 10)).toBe(current);
+    expect(
+      rebaseSessionContinuation(current, 9, 8, { sessions: [], nextCursor: "stale-next" }, 10),
+    ).toBe(current);
   });
 
   test("keeps retained rows visible while expiring and reloading their list authority", () => {
@@ -190,7 +225,7 @@ describe("session continuation pagination", () => {
     });
     expect(state.sessions[0]?.channelId).toBe("channel-new");
 
-    state = rebaseSessionContinuation(state, 4, 4, "fresh-next", 8);
+    state = rebaseSessionContinuation(state, 4, 4, { sessions: [], nextCursor: "fresh-next" }, 8);
     expect(authoritativeSessionContinuation(state, 4, 8)).toEqual([]);
     state = mergeSessionContinuation(
       state,
@@ -228,7 +263,7 @@ describe("session continuation pagination", () => {
       emptySessionContinuation(5),
       5,
       5,
-      "rebased-next",
+      { sessions: [], nextCursor: "rebased-next" },
       91,
       rebaseGeneration,
       "rebase",
@@ -256,7 +291,7 @@ describe("session continuation pagination", () => {
       emptySessionContinuation(6),
       6,
       6,
-      "stale-next",
+      { sessions: [], nextCursor: "stale-next" },
       92,
       staleRebaseGeneration,
       "rebase",
@@ -343,7 +378,15 @@ describe("session continuation pagination", () => {
     );
 
     const rebaseGeneration = authority.beginRead();
-    state = rebaseSessionContinuation(state, 8, 8, "rebased-next", 103, rebaseGeneration, "rebase");
+    state = rebaseSessionContinuation(
+      state,
+      8,
+      8,
+      { sessions: [], nextCursor: "rebased-next" },
+      103,
+      rebaseGeneration,
+      "rebase",
+    );
     const postRebaseContinuationGeneration = authority.beginRead();
     state = mergeSessionContinuation(
       state,

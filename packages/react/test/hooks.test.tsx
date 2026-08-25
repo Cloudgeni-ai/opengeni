@@ -1051,6 +1051,55 @@ describe("useTurnQueue", () => {
 });
 
 describe("useSessionLineage", () => {
+  test("captures a shared causal generation when each lineage request starts", async () => {
+    let releaseInitial: (() => void) | null = null;
+    let nextGeneration = 70;
+    const started: number[] = [];
+    const beginRead = () => {
+      const generation = ++nextGeneration;
+      started.push(generation);
+      return generation;
+    };
+    const client = fakeClient({
+      getSessionLineage: async () => {
+        if (started.length === 1) {
+          await new Promise<void>((resolve) => {
+            releaseInitial = resolve;
+          });
+        }
+        return {
+          ancestors: [{ id: `ancestor-${started.length}` }],
+          children: [],
+          truncated: false,
+        } as never;
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(started).toEqual([71]);
+    expect(hook.result.current.readGeneration).toBe(0);
+    await reactAct(async () => releaseInitial!());
+    await flush();
+    expect(hook.result.current.readGeneration).toBe(71);
+
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(started).toEqual([71, 72]);
+    expect(hook.result.current.readGeneration).toBe(72);
+    await hook.unmount();
+  });
+
   test("loads lineage and refreshes on session lineage events", async () => {
     let reads = 0;
     const client = fakeClient({

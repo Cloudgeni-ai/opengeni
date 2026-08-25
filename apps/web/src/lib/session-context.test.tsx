@@ -259,7 +259,13 @@ describe("session context equality", () => {
 
     // Re-paging from a fresh snapshot restores exact list authority without
     // duplicating the display row.
-    continuation = rebaseSessionContinuation(continuation, 3, 3, "fresh-next", 11);
+    continuation = rebaseSessionContinuation(
+      continuation,
+      3,
+      3,
+      { sessions: [], nextCursor: "fresh-next" },
+      11,
+    );
     continuation = mergeSessionContinuation(
       continuation,
       3,

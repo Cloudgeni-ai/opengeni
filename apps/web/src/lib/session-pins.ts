@@ -22,6 +22,11 @@ type SessionChannelRead = {
   present: boolean;
   readGeneration: number;
 };
+type SessionChannelCommittedMove = {
+  channelId: string | null;
+  operation: number;
+  readGeneration: number;
+};
 type SessionChannelAcceptedRead = SessionChannelProjection & {
   readGeneration: number;
 };
@@ -41,8 +46,8 @@ function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspace
 }
 
 /**
- * Tracks exact list/point-read ownership of channel projections without
- * putting browser-only provenance onto the public Session contract.
+ * Tracks list, exact-read, and settled-move ownership of channel projections
+ * without putting browser-only provenance onto the public Session contract.
  */
 export class SessionChannelProjectionAuthority {
   private readonly projectionsByOwner = new Map<
@@ -50,6 +55,7 @@ export class SessionChannelProjectionAuthority {
     ReadonlyMap<string, SessionChannelEvidence>
   >();
   private readonly acceptedReads = new Map<string, SessionChannelRead>();
+  private readonly committedMoves = new Map<string, SessionChannelCommittedMove>();
   private readonly acceptedReadListeners = new Set<
     (accepted?: SessionChannelAcceptedRead) => void
   >();
@@ -60,7 +66,7 @@ export class SessionChannelProjectionAuthority {
 
   readonly beginRead = (): number => ++this.nextReadGeneration;
 
-  /** Reconcile component-owned optimistic state when a newer exact read wins. */
+  /** React to persistent exact read/write authority advancing. */
   readonly subscribeToAcceptedReads = (
     listener: (accepted?: SessionChannelAcceptedRead) => void,
   ): (() => void) => {
@@ -68,7 +74,7 @@ export class SessionChannelProjectionAuthority {
     return () => this.acceptedReadListeners.delete(listener);
   };
 
-  /** Reactive snapshot for consumers whose projected rows depend on accepted reads. */
+  /** Reactive snapshot for consumers whose projected rows depend on persistent authority. */
   readonly getAcceptedReadRevision = (): number => this.acceptedReadRevision;
 
   /**
@@ -119,13 +125,18 @@ export class SessionChannelProjectionAuthority {
     const key = sessionChannelProjectionKey(projection);
     // Completed evidence newer than the mutation start may already be a
     // post-commit value, so only a fresh point read can choose between it and
-    // this response. Otherwise settle the response at a new generation: every
-    // overlapping read already has an older generation even if it has not yet
-    // completed, and therefore cannot reassert a pre-commit snapshot later.
-    if (this.highestReadGeneration(key) > request.readGeneration) {
-      return "verification-required";
-    }
-    return this.recordRead(projection, this.beginRead()) ? "accepted" : "verification-required";
+    // this response. In either case retain exact B at a new settlement
+    // generation: every overlapping read already has an older generation even
+    // if it has not completed, and a rail unmount cannot discard this fence.
+    const verificationRequired = this.highestReadGeneration(key) > request.readGeneration;
+    const readGeneration = this.beginRead();
+    this.committedMoves.set(key, {
+      channelId: projection.channelId ?? null,
+      operation: request.operation,
+      readGeneration,
+    });
+    this.publishAuthorityChange({ ...projection, readGeneration });
+    return verificationRequired ? "verification-required" : "accepted";
   }
 
   finishMoveRequest(owner: object, request: SessionChannelMoveRequest): void {
@@ -193,6 +204,9 @@ export class SessionChannelProjectionAuthority {
     for (const key of this.pendingMoveRequests.keys()) {
       if (key.startsWith(prefix)) this.pendingMoveRequests.delete(key);
     }
+    for (const key of this.committedMoves.keys()) {
+      if (key.startsWith(prefix)) this.committedMoves.delete(key);
+    }
   }
 
   /** Retain an accepted exact/detail read so older list requests cannot revive stale filing. */
@@ -217,6 +231,12 @@ export class SessionChannelProjectionAuthority {
     if (readGeneration <= 0) return false;
     const key = sessionChannelProjectionKey(projection);
     if (this.highestReadGeneration(key) > readGeneration) return false;
+    const committedMove = this.committedMoves.get(key);
+    // Only an accepted exact read that started after settlement can choose B,
+    // a genuinely newer C, or deletion and retire the persistent move fence.
+    if (committedMove && readGeneration > committedMove.readGeneration) {
+      this.committedMoves.delete(key);
+    }
     // Refresh iteration order when exact evidence for one session advances so
     // compaction considers genuinely older observations first.
     for (const projections of this.projectionsByOwner.values()) {
@@ -230,7 +250,6 @@ export class SessionChannelProjectionAuthority {
       readGeneration,
     });
     this.compactAcceptedReads();
-    this.acceptedReadRevision += 1;
     const accepted = present
       ? {
           id: projection.id,
@@ -239,8 +258,13 @@ export class SessionChannelProjectionAuthority {
           readGeneration,
         }
       : undefined;
-    for (const listener of this.acceptedReadListeners) listener(accepted);
+    this.publishAuthorityChange(accepted);
     return true;
+  }
+
+  private publishAuthorityChange(accepted?: SessionChannelAcceptedRead): void {
+    this.acceptedReadRevision += 1;
+    for (const listener of this.acceptedReadListeners) listener(accepted);
   }
 
   /**
@@ -297,6 +321,10 @@ export class SessionChannelProjectionAuthority {
 
   private highestReadGeneration(key: string): number {
     let generation = this.acceptedReads.get(key)?.readGeneration ?? Number.NEGATIVE_INFINITY;
+    generation = Math.max(
+      generation,
+      this.committedMoves.get(key)?.readGeneration ?? Number.NEGATIVE_INFINITY,
+    );
     for (const projections of this.projectionsByOwner.values()) {
       const candidate = projections.get(key);
       if (candidate) generation = Math.max(generation, candidate.readGeneration);
@@ -305,7 +333,12 @@ export class SessionChannelProjectionAuthority {
   }
 
   project<T extends SessionChannelProjection>(projection: T, readGeneration: number): T {
-    const accepted = this.acceptedReads.get(sessionChannelProjectionKey(projection));
+    const key = sessionChannelProjectionKey(projection);
+    const committedMove = this.committedMoves.get(key);
+    if (committedMove && committedMove.channelId !== (projection.channelId ?? null)) {
+      return { ...projection, channelId: committedMove.channelId };
+    }
+    const accepted = this.acceptedReads.get(key);
     if (
       !accepted ||
       !accepted.present ||
@@ -321,6 +354,8 @@ export class SessionChannelProjectionAuthority {
     if (!projection) return false;
     const key = sessionChannelProjectionKey(projection);
     const channelId = projection.channelId ?? null;
+    const committedMove = this.committedMoves.get(key);
+    if (committedMove) return committedMove.channelId === channelId;
     const accepted = this.acceptedReads.get(key);
     let highestPriority = accepted ? 0 : Number.NEGATIVE_INFINITY;
     let highestGeneration = accepted?.readGeneration ?? Number.NEGATIVE_INFINITY;

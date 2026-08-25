@@ -115,13 +115,22 @@ describe("session control surface architecture", () => {
     expect(list).toContain("rootReadGeneration");
     expect(list).toContain("globalPinsReadGeneration");
     expect(list).toContain("pinsChannelProjectionOwner");
+    expect(list).toContain("lineageChannelProjectionOwner");
+    expect(list).toContain("beginRead: context.sessionChannelProjectionAuthority.beginRead");
+    expect(list).toContain("activeLineage.readGeneration");
+    expect(list).toContain(
+      "const lineageProjected = context.sessionChannelProjectionAuthority.project(",
+    );
     expect(list).toContain("currentListChannelEvidence");
     expect(list).toContain("sessionChannelProjectionAuthority.project(");
     expect(list).toContain("authoritativeSessionContinuationChannels(");
     expect(list).toContain("pageReadGeneration");
     expect(list).not.toContain("replace(owner, channelAuthoritySessions)");
     expect(list).not.toContain("replace(owner, listedSessions)");
-    expect(list).toContain("applySessionRailProjection(session, projected, { channelOwned })");
+    expect(list).toContain(
+      "applySessionRailProjection(lineageProjected, projected, { channelOwned })",
+    );
+    expect(list).toContain("sessionChannelProjectionAuthority.owns(authoritative)");
     expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
     expect(list).toContain("sessionChannelProjectionAuthority.beginMoveRequest(");
     expect(list).toContain("sessionChannelProjectionAuthority.ownsMoveRequest(");

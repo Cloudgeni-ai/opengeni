@@ -201,28 +201,39 @@ export function reconcileRetainedSessionContinuationChannel(
 
 /**
  * Rebase retained rows onto a fresh first-page snapshot after the server says
- * the previous cursor expired. Delayed rebases are fenced like ordinary page
- * merges so an A → B → A query transition cannot revive an obsolete cursor.
+ * the previous cursor expired. Fresh rows replace retained duplicates and own
+ * the new snapshot while older off-page rows remain display-only. Delayed
+ * rebases are fenced like ordinary page merges so an A → B → A query
+ * transition cannot revive an obsolete cursor.
  */
 export function rebaseSessionContinuation(
   state: SessionContinuationState,
   activeGeneration: number,
   requestGeneration: number,
-  nextCursor: string | null,
+  page: { sessions: Session[]; nextCursor: string | null },
   snapshotReadRevision: number,
   snapshotReadGeneration = 0,
   snapshotSource: "root" | "rebase" = "root",
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) return state;
   const active = activeSessionContinuation(state, activeGeneration);
+  const rows = new Map(active.sessions.map((session) => [session.id, session]));
+  const authoritativeSessionIds = new Set<string>();
+  const channelReadGenerations = new Map<string, number>();
+  for (const session of page.sessions) {
+    rows.set(session.id, session);
+    authoritativeSessionIds.add(session.id);
+    channelReadGenerations.set(session.id, snapshotReadGeneration);
+  }
   return {
     ...active,
-    nextCursor,
+    sessions: [...rows.values()],
+    nextCursor: page.nextCursor,
     failed: false,
     snapshotReadRevision,
     snapshotReadGeneration,
     snapshotSource,
-    authoritativeSessionIds: new Set(),
-    channelReadGenerations: new Map(),
+    authoritativeSessionIds,
+    channelReadGenerations,
   };
 }

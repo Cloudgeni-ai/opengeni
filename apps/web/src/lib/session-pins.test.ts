@@ -389,6 +389,38 @@ describe("session pin reconciliation", () => {
     expect(authority.project(beforeMove, overlappingReadGeneration).channelId).toBe("channel-b");
   });
 
+  test("persists an ambiguous successful move across rail remounts until exact verification", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const firstRailOwner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const movedAgain = { ...session, channelId: "channel-c" } as Session;
+    const { beginMoveRequest, finishMoveRequest, recordMoveResponse } =
+      portableMoveAuthority(authority);
+    const request = beginMoveRequest(firstRailOwner, beforeMove)!;
+    const overlappingReadGeneration = authority.beginRead();
+
+    // A completed overlapping read makes the write response ambiguous, but
+    // its A snapshot cannot remain persistent authority after the successful
+    // response returned exact B. The component-local optimistic owner may be
+    // gone before the point probe and page refresh both fail.
+    expect(authority.recordRead(beforeMove, overlappingReadGeneration)).toBe(true);
+    expect(recordMoveResponse(firstRailOwner, request, moved)).toBe("verification-required");
+    finishMoveRequest(firstRailOwner, request);
+
+    expect(authority.project(beforeMove, overlappingReadGeneration).channelId).toBe("channel-b");
+    expect(authority.owns(moved)).toBe(true);
+    expect(authority.owns(beforeMove)).toBe(false);
+
+    // Only an exact read started after settlement may retire the retained B
+    // and choose a genuinely newer cross-client destination C.
+    const verificationGeneration = authority.beginRead();
+    expect(authority.recordRead(movedAgain, verificationGeneration)).toBe(true);
+    expect(authority.project(beforeMove, overlappingReadGeneration).channelId).toBe("channel-c");
+    expect(authority.owns(movedAgain)).toBe(true);
+    expect(authority.owns(moved)).toBe(false);
+  });
+
   test("fences an overlapping stale read that settles after a successful move response", () => {
     const authority = new SessionChannelProjectionAuthority();
     const owner = {};

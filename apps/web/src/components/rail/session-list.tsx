@@ -475,10 +475,16 @@ export function SessionList() {
   const continuationChannelProjectionOwner = useRef({});
   const branchChannelProjectionOwner = useRef({});
   const pinsChannelProjectionOwner = useRef({});
+  const lineageChannelProjectionOwner = useRef({});
   const moveChannelProjectionOwner = useRef({});
   const activeLineage = useSessionLineage(context.session?.id ?? null, {
     pollIntervalMs: 30_000,
+    beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
+  const lineageChannelAuthoritySessions = useMemo(
+    () => activeLineage.lineage?.ancestors ?? [],
+    [activeLineage.lineage?.ancestors],
+  );
   const loadedChildren = useMemo(
     () => [...childPages.values()].flatMap((page) => page.sessions),
     [childPages],
@@ -611,6 +617,21 @@ export function SessionList() {
     hierarchyMode,
   ]);
   useLayoutEffect(() => {
+    const owner = lineageChannelProjectionOwner.current;
+    context.sessionChannelProjectionAuthority.replace(
+      owner,
+      hierarchyMode ? lineageChannelAuthoritySessions : [],
+      0,
+      activeLineage.readGeneration,
+    );
+    return () => context.sessionChannelProjectionAuthority.clear(owner);
+  }, [
+    activeLineage.readGeneration,
+    context.sessionChannelProjectionAuthority,
+    hierarchyMode,
+    lineageChannelAuthoritySessions,
+  ]);
+  useLayoutEffect(() => {
     const owner = moveChannelProjectionOwner.current;
     context.sessionChannelProjectionAuthority.replace(
       owner,
@@ -632,27 +653,37 @@ export function SessionList() {
     // List/page projections own personal pin revisions and server treeStats.
     // Insert those first, with the current pinned section last so an older
     // ordinary continuation cannot overwrite a newer pin projection.
-    // Route/lineage projections own lifecycle and content. Merge list-owned
-    // fields into them rather than replacing either domain wholesale; in
-    // particular, a stale route object must not resurrect a cross-device pin.
+    // Route/lineage projections own lifecycle and content. Project their
+    // channel through persistent authority first, then merge list-owned fields
+    // rather than replacing either domain wholesale; in particular, a stale
+    // route object must not resurrect a cross-device pin or project move.
     const lineageSessions = hierarchyMode
       ? [...(activeLineage.lineage?.ancestors ?? []), ...(context.session ? [context.session] : [])]
       : [];
     for (const session of lineageSessions) {
+      const lineageProjected = context.sessionChannelProjectionAuthority.project(
+        session,
+        activeLineage.readGeneration,
+      );
       const projected = source.get(session.id);
       const authoritative = channelAuthorityById.get(session.id);
       const channelOwned =
         authoritative !== undefined &&
+        context.sessionChannelProjectionAuthority.owns(authoritative) &&
         (authoritative.channelId ?? null) === (projected?.channelId ?? null);
       source.set(
         session.id,
-        projected ? applySessionRailProjection(session, projected, { channelOwned }) : session,
+        projected
+          ? applySessionRailProjection(lineageProjected, projected, { channelOwned })
+          : lineageProjected,
       );
     }
     return [...source.values()];
   }, [
     activeLineage.lineage?.ancestors,
+    activeLineage.readGeneration,
     channelAuthorityById,
+    context.sessionChannelProjectionAuthority,
     context.session,
     hierarchyMode,
     listedSessions,
@@ -1735,7 +1766,7 @@ export function SessionList() {
             current,
             pageGeneration,
             requestGeneration,
-            freshFirstPage.nextCursor,
+            freshFirstPage,
             requestSnapshotReadRevision,
             requestSnapshotReadGeneration,
             requestSnapshotSource,
