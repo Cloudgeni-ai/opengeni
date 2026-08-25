@@ -561,6 +561,52 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("shares a queued successor with a predecessor settlement reaction", async () => {
+    let requests = 0;
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        throw new Error("single-flight regression uses the selected read directly");
+      },
+    });
+    const singleFlightRead = (
+      client as unknown as {
+        singleFlightRead<T>(
+          key: string,
+          read: () => Promise<T>,
+          options?: { fresh?: boolean },
+        ): Promise<T>;
+      }
+    ).singleFlightRead.bind(client);
+    const read = async () => {
+      requests += 1;
+      const request = requests;
+      if (request === 1) await activeGate;
+      return { id: SESSION_ID, workspaceId: WORKSPACE_ID, request } as Session & {
+        request: number;
+      };
+    };
+
+    const active = singleFlightRead("session", read);
+    // Register this reaction before the fresh successor is queued. When the
+    // predecessor settles it must join that queued successor, not launch a
+    // competing request during the active-entry cleanup gap.
+    const reactionRead = active.then(() => singleFlightRead("session", read));
+    const queuedFresh = singleFlightRead("session", read, { fresh: true });
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+
+    releaseActive();
+    expect((await active).request).toBe(1);
+    const [reactionResult, queuedResult] = await Promise.all([reactionRead, queuedFresh]);
+    expect(requests).toBe(2);
+    expect([reactionResult, queuedResult].map((result) => result.request)).toEqual([2, 2]);
+  });
+
   test("queues a new fresh generation behind an active trailing read", async () => {
     let requests = 0;
     let releaseInitial!: () => void;

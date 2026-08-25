@@ -1246,6 +1246,15 @@ export class OpenGeniClient {
       void entry.promise.then(clear, clear);
       return entry.promise as Promise<T>;
     }
+    // The active entry clears in its finally before reactions on its public
+    // promise run. During that settlement gap a successor may already be
+    // queued but not yet launched; every caller must join that exact successor
+    // instead of bypassing it with a competing GET for the same generation.
+    const queued = this.readTrailing.get(key);
+    if (queued) {
+      if (options.onRequestStart) queued.startListeners.add(options.onRequestStart);
+      return queued.promise as Promise<T>;
+    }
     const generation = (this.readGeneration.get(key) ?? 0) + 1;
     const entry: SingleFlightReadEntry = {
       generation,

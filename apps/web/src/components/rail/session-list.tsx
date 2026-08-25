@@ -37,6 +37,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type MouseEvent,
   type DragEvent,
   type ReactNode,
@@ -307,7 +308,6 @@ export function SessionList() {
     update: updateProject,
     remove: removeProject,
     reorder: reorderProjects,
-    moveSession: requestMoveSession,
   } = channelsQuery;
   const [channelDialogOpen, setChannelDialogOpen] = useState(false);
   const [channelNameDraft, setChannelNameDraft] = useState("");
@@ -415,9 +415,15 @@ export function SessionList() {
   const [channelMoveOverrides, setChannelMoveOverrides] = useState<SessionChannelMoveOverrides>(
     () => new Map(),
   );
+  const acceptedChannelReadRevision = useSyncExternalStore(
+    context.sessionChannelProjectionAuthority.subscribeToAcceptedReads,
+    context.sessionChannelProjectionAuthority.getAcceptedReadRevision,
+    context.sessionChannelProjectionAuthority.getAcceptedReadRevision,
+  );
   useEffect(
     () =>
       context.sessionChannelProjectionAuthority.subscribeToAcceptedReads((accepted) => {
+        if (!accepted) return;
         if (accepted.workspaceId !== rail.workspaceId) return;
         setChannelMoveOverrides((current) => {
           const override = current.get(accepted.id);
@@ -480,6 +486,7 @@ export function SessionList() {
   );
   const pinnedChannelReadGeneration = hierarchyMode ? globalPinsReadGeneration : rootReadGeneration;
   const currentListChannelEvidence = useMemo(() => {
+    void acceptedChannelReadRevision;
     const evidence = new Map<string, { session: Session; readGeneration: number }>();
     const add = (candidates: readonly Session[], readGeneration: number) => {
       for (const session of candidates) {
@@ -499,6 +506,7 @@ export function SessionList() {
     }
     return evidence;
   }, [
+    acceptedChannelReadRevision,
     authoritativeExtraSessionEvidence,
     loadedChildChannelEvidence,
     pinned,
@@ -532,13 +540,11 @@ export function SessionList() {
     sessions,
   ]);
   const rootChannelAuthoritySessions = useMemo(() => sessions, [sessions]);
-  const channelAuthoritySessions = useMemo(
-    () =>
-      [...currentListChannelEvidence.values()].map(({ session, readGeneration }) =>
-        context.sessionChannelProjectionAuthority.project(session, readGeneration),
-      ),
-    [context.sessionChannelProjectionAuthority, currentListChannelEvidence],
-  );
+  const channelAuthoritySessions = useMemo(() => {
+    return [...currentListChannelEvidence.values()].map(({ session, readGeneration }) =>
+      context.sessionChannelProjectionAuthority.project(session, readGeneration),
+    );
+  }, [context.sessionChannelProjectionAuthority, currentListChannelEvidence]);
   const channelAuthorityById = useMemo(
     () => new Map(channelAuthoritySessions.map((session) => [session.id, session])),
     [channelAuthoritySessions],
@@ -1065,7 +1071,15 @@ export function SessionList() {
         beginSessionChannelMove(current, session.id, channelId, operation),
       );
       try {
-        const moved = await requestMoveSession(session.id, channelId);
+        let moved: Session | null = null;
+        try {
+          moved = await context.client.updateSessionChannel(session.workspaceId, session.id, {
+            channelId,
+          });
+        } catch {
+          // Preserve the existing optimistic rollback UX, while keeping the
+          // raw successful response available after this component unmounts.
+        }
         if (
           !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition) ||
           !context.sessionChannelProjectionAuthority.ownsMoveRequest(
@@ -1076,12 +1090,18 @@ export function SessionList() {
           return;
         }
         if (moved) {
-          // The successful write response is exact post-write evidence. Retain
-          // it in the workspace-level authority before committing component
-          // state so collapsing or switching away from the rail cannot drop
-          // the only fence against an already-started stale detail response.
-          const moveEvidenceGeneration = context.sessionChannelProjectionAuthority.beginRead();
-          context.sessionChannelProjectionAuthority.recordRead(moved, moveEvidenceGeneration);
+          // The successful write response is exact evidence from this
+          // request's start. A later server read can therefore reject a
+          // delayed mutation response, while rail unmount cannot discard it.
+          if (
+            !context.sessionChannelProjectionAuthority.recordMoveResponse(
+              moveRequestOwner.current,
+              moveRequest,
+              moved,
+            )
+          ) {
+            return;
+          }
           setChannelMoveOverrides((current) =>
             commitSessionChannelMove(current, session.id, moved.channelId ?? null, operation),
           );
@@ -1109,7 +1129,7 @@ export function SessionList() {
         }
       }
     },
-    [context, requestMoveSession, refreshSessionPages],
+    [context, refreshSessionPages],
   );
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {

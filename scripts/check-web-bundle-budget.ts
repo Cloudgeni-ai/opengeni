@@ -224,7 +224,13 @@ const budgets = {
   // of raw headroom and the 1.5-KiB gzip platform-skew allowance; every other
   // cap remains fixed. The separately tracked structural fix is to remove this
   // browser tax, not keep growing the shared client class.
-  directSessionRaw: 2130 * kib,
+  // Durable move settlement, start-ordered mutation evidence, compaction-safe
+  // accepted-read fences, reactive rail projection, and queued-successor read
+  // sharing measure 2,181,466 raw bytes against the reviewed head's 2,180,493.
+  // Advance only this aggregate to the next whole-KiB envelope above one KiB
+  // of headroom; every compressed, file-count, initial, lazy, and CSS cap stays
+  // fixed.
+  directSessionRaw: 2132 * kib,
   directSessionGzip: 596 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,

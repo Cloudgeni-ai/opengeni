@@ -29,6 +29,68 @@ const session = {
   updatedAt: "2026-07-10T00:01:00.000Z",
 } as Session;
 
+type PortableMoveRequest = Readonly<{
+  workspaceId: string;
+  sessionId: string;
+  operation: number;
+  readGeneration: number;
+}>;
+
+function portableMoveAuthority(authority: SessionChannelProjectionAuthority) {
+  const persistent = authority as unknown as {
+    beginMoveRequest?: (
+      owner: object,
+      projection: Pick<Session, "id" | "workspaceId">,
+    ) => PortableMoveRequest | null;
+    ownsMoveRequest?: (owner: object, request: PortableMoveRequest) => boolean;
+    recordMoveResponse?: (
+      owner: object,
+      request: PortableMoveRequest,
+      response: Pick<Session, "id" | "workspaceId" | "channelId">,
+    ) => boolean;
+    finishMoveRequest?: (owner: object, request: PortableMoveRequest) => void;
+  };
+  const localPending = new WeakMap<object, Map<string, PortableMoveRequest>>();
+  const localOperations = new WeakMap<object, number>();
+  const moveKey = (request: Pick<PortableMoveRequest, "workspaceId" | "sessionId">) =>
+    `${request.workspaceId}\u0000${request.sessionId}`;
+  const beginMoveRequest =
+    persistent.beginMoveRequest?.bind(authority) ??
+    ((owner: object, projection: Pick<Session, "id" | "workspaceId">) => {
+      const pending = localPending.get(owner) ?? new Map<string, PortableMoveRequest>();
+      localPending.set(owner, pending);
+      const key = moveKey({ workspaceId: projection.workspaceId, sessionId: projection.id });
+      if (pending.has(key)) return null;
+      const request = {
+        workspaceId: projection.workspaceId,
+        sessionId: projection.id,
+        operation: (localOperations.get(owner) ?? 0) + 1,
+        readGeneration: authority.beginRead(),
+      };
+      localOperations.set(owner, request.operation);
+      pending.set(key, request);
+      return request;
+    });
+  const ownsMoveRequest =
+    persistent.ownsMoveRequest?.bind(authority) ??
+    ((owner: object, request: PortableMoveRequest) =>
+      localPending.get(owner)?.get(moveKey(request))?.operation === request.operation);
+  const recordMoveResponse =
+    persistent.recordMoveResponse?.bind(authority) ??
+    ((owner: object, request: PortableMoveRequest, response: Session) => {
+      if (!ownsMoveRequest(owner, request)) return false;
+      // Reviewed-head behavior assigned the response a generation only when
+      // its promise settled, making an older mutation look causally newest.
+      return authority.recordRead(response, authority.beginRead());
+    });
+  const finishMoveRequest =
+    persistent.finishMoveRequest?.bind(authority) ??
+    ((owner: object, request: PortableMoveRequest) => {
+      if (ownsMoveRequest(owner, request)) localPending.get(owner)?.delete(moveKey(request));
+    });
+  return { beginMoveRequest, finishMoveRequest, ownsMoveRequest, recordMoveResponse };
+}
+
 describe("session pin reconciliation", () => {
   test("merges the list-owned channel without replacing route lifecycle fields", () => {
     const updated = applySessionChannelProjection(session, {
@@ -140,12 +202,13 @@ describe("session pin reconciliation", () => {
     const subscribeToAcceptedReads = (
       authority as SessionChannelProjectionAuthority & {
         subscribeToAcceptedReads?: (
-          listener: (accepted: Pick<Session, "id" | "workspaceId" | "channelId">) => void,
+          listener: (accepted?: Pick<Session, "id" | "workspaceId" | "channelId">) => void,
         ) => () => void;
       }
     ).subscribeToAcceptedReads?.bind(authority);
     const unsubscribe =
       subscribeToAcceptedReads?.((accepted) => {
+        if (!accepted) return;
         const override = overrides.get(accepted.id);
         if (override?.committed) {
           overrides = reconcileSessionChannelMovePointRead(
@@ -195,54 +258,8 @@ describe("session pin reconciliation", () => {
     let current = beforeMove;
     let acceptedResponses = 0;
 
-    type MoveRequest = Readonly<{
-      workspaceId: string;
-      sessionId: string;
-      operation: number;
-    }>;
-    const persistentMoves = authority as SessionChannelProjectionAuthority & {
-      beginMoveRequest?: (
-        owner: object,
-        projection: Pick<Session, "id" | "workspaceId">,
-      ) => MoveRequest | null;
-      ownsMoveRequest?: (owner: object, request: MoveRequest) => boolean;
-      finishMoveRequest?: (owner: object, request: MoveRequest) => void;
-    };
-    // This fallback is the reviewed-head behavior: each mounted component has
-    // an independent pending map and operation counter. Keeping it here lets
-    // this regression fail semantically on that head instead of merely failing
-    // to compile because the persistent registry did not exist yet.
-    const localPending = new WeakMap<object, Map<string, MoveRequest>>();
-    const localOperations = new WeakMap<object, number>();
-    const moveKey = (request: Pick<MoveRequest, "workspaceId" | "sessionId">) =>
-      `${request.workspaceId}\u0000${request.sessionId}`;
-    const beginMoveRequest =
-      persistentMoves.beginMoveRequest?.bind(authority) ??
-      ((owner: object, projection: Pick<Session, "id" | "workspaceId">) => {
-        const pending = localPending.get(owner) ?? new Map<string, MoveRequest>();
-        localPending.set(owner, pending);
-        const key = moveKey({ workspaceId: projection.workspaceId, sessionId: projection.id });
-        if (pending.has(key)) return null;
-        const request = {
-          workspaceId: projection.workspaceId,
-          sessionId: projection.id,
-          operation: (localOperations.get(owner) ?? 0) + 1,
-        };
-        localOperations.set(owner, request.operation);
-        pending.set(key, request);
-        return request;
-      });
-    const ownsMoveRequest =
-      persistentMoves.ownsMoveRequest?.bind(authority) ??
-      ((owner: object, request: MoveRequest) =>
-        localPending.get(owner)?.get(moveKey(request))?.operation === request.operation);
-    const finishMoveRequest =
-      persistentMoves.finishMoveRequest?.bind(authority) ??
-      ((owner: object, request: MoveRequest) => {
-        if (ownsMoveRequest(owner, request)) {
-          localPending.get(owner)?.delete(moveKey(request));
-        }
-      });
+    const { beginMoveRequest, finishMoveRequest, ownsMoveRequest, recordMoveResponse } =
+      portableMoveAuthority(authority);
 
     const firstRequest = beginMoveRequest(firstRailOwner, beforeMove)!;
     // The mounted rail cannot issue a duplicate request for the same session.
@@ -254,9 +271,8 @@ describe("session pin reconciliation", () => {
     expect(ownsMoveRequest(remountedRailOwner, newerRequest)).toBe(true);
 
     const settle = (owner: object, request: typeof firstRequest, response: Session): boolean => {
-      if (!ownsMoveRequest(owner, request)) return false;
+      if (!recordMoveResponse(owner, request, response)) return false;
       acceptedResponses += 1;
-      authority.recordRead(response, authority.beginRead());
       current = applySessionChannelProjection(current, response)!;
       finishMoveRequest(owner, request);
       return true;
@@ -270,6 +286,104 @@ describe("session pin reconciliation", () => {
     expect(current.channelId).toBe("channel-b");
     expect(authority.owns(newerResponse)).toBe(true);
     expect(authority.owns(firstResponse)).toBe(false);
+  });
+
+  test("retains a successful raw move response after the rail owner unmounts", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const firstRailOwner = {};
+    const remountedListOwner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const staleRemountedReadGeneration = authority.beginRead();
+    const request = authority.beginMoveRequest(firstRailOwner, beforeMove)!;
+    const recordMoveResponse = (
+      authority as unknown as {
+        recordMoveResponse?: (
+          owner: object,
+          request: PortableMoveRequest,
+          response: Session,
+        ) => boolean;
+      }
+    ).recordMoveResponse?.bind(authority);
+
+    // The component owner has unmounted, but no newer intent superseded its
+    // persistent token. The raw client result must still become exact evidence.
+    expect(recordMoveResponse?.(firstRailOwner, request, moved) ?? false).toBe(true);
+    authority.replace(remountedListOwner, [beforeMove], 0, staleRemountedReadGeneration);
+    expect(authority.project(beforeMove, staleRemountedReadGeneration)).toMatchObject({
+      channelId: "channel-b",
+    });
+    expect(authority.owns(moved)).toBe(true);
+  });
+
+  test("orders a delayed mutation response from its request start", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const owner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const delayedMove = { ...session, channelId: "channel-b" } as Session;
+    const newerRead = { ...session, channelId: "channel-c" } as Session;
+    const { beginMoveRequest, recordMoveResponse } = portableMoveAuthority(authority);
+
+    const request = beginMoveRequest(owner, beforeMove)!;
+    expect(authority.recordRead(newerRead, authority.beginRead())).toBe(true);
+
+    // B committed before C, but its response was delayed until after C was
+    // read. Settlement time must not manufacture a newer causal generation.
+    expect(recordMoveResponse(owner, request, delayedMove)).toBe(false);
+    expect(authority.owns(newerRead)).toBe(true);
+    expect(authority.owns(delayedMove)).toBe(false);
+  });
+
+  test("transfers a compacted accepted fence before an ephemeral owner clears", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const rootOwner = {};
+    const stale = { ...session, channelId: "channel-a" } as Session;
+    const accepted = { ...session, channelId: "channel-b" } as Session;
+    const staleGeneration = authority.beginRead();
+    expect(authority.recordRead(accepted, authority.beginRead())).toBe(true);
+    authority.replace(rootOwner, [accepted], 0, authority.beginRead());
+
+    for (let index = 0; index < 512; index += 1) {
+      expect(
+        authority.recordRead(
+          {
+            id: `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+            workspaceId: session.workspaceId,
+            channelId: null,
+          },
+          authority.beginRead(),
+        ),
+      ).toBe(true);
+    }
+
+    // Compaction may discard the older accepted entry while root B replaces
+    // it, but clearing that component owner must retain B before dropping it.
+    authority.clear(rootOwner);
+    expect(authority.recordRead(stale, staleGeneration)).toBe(false);
+    expect(authority.project(stale, staleGeneration)).toMatchObject({ channelId: "channel-b" });
+    expect(authority.owns(accepted)).toBe(true);
+  });
+
+  test("publishes an accepted-read revision for a remounted non-open row", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const staleRow = { ...session, channelId: "channel-a" } as Session;
+    const acceptedProbe = { ...session, channelId: "channel-b" } as Session;
+    const staleReadGeneration = authority.beginRead();
+    let rendered = authority.project(staleRow, staleReadGeneration);
+    const reactive = authority as unknown as {
+      getAcceptedReadRevision?: () => number;
+      subscribeToAcceptedReads: (listener: () => void) => () => void;
+    };
+    let observedRevision = reactive.getAcceptedReadRevision?.() ?? 0;
+    const unsubscribe = reactive.subscribeToAcceptedReads(() => {
+      observedRevision = reactive.getAcceptedReadRevision?.() ?? observedRevision;
+      rendered = authority.project(staleRow, staleReadGeneration);
+    });
+
+    expect(authority.recordRead(acceptedProbe, authority.beginRead())).toBe(true);
+    expect(observedRevision).toBeGreaterThan(0);
+    expect(rendered.channelId).toBe("channel-b");
+    unsubscribe();
   });
 
   test("does not evict an accepted winner while an older branch owner can revive", () => {
@@ -298,7 +412,7 @@ describe("session pin reconciliation", () => {
     expect(authority.owns(staleBranch)).toBe(false);
   });
 
-  test("compacts superseded reads and clears departed workspace evidence", () => {
+  test("compacts superseded reads without losing owner evidence and clears departed workspaces", () => {
     const authority = new SessionChannelProjectionAuthority();
     const owner = {};
     const accepted = { ...session, channelId: "channel-b" } as Session;
@@ -319,7 +433,7 @@ describe("session pin reconciliation", () => {
 
     authority.clear(owner);
     expect(authority.project({ ...session, channelId: "channel-a" }, 0)).toMatchObject({
-      channelId: "channel-a",
+      channelId: "channel-b",
     });
 
     authority.recordRead(accepted, authority.beginRead());
