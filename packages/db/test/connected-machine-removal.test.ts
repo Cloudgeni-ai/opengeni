@@ -15,6 +15,7 @@ import {
   MachineRemovalRevisionConflictError,
   setActiveSandbox,
   touchEnrollmentLastSeen,
+  updateSessionTitle,
   type DbClient,
   type Database,
 } from "../src/index";
@@ -247,7 +248,14 @@ describe("connected machine removal lifecycle", () => {
       latencyMode: "standard" as const,
       sandboxBackend: "selfhosted",
     });
-    await admin`update sessions set title = 'Machine home session' where id = ${session.id}`;
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: session.id,
+        title: "Machine home session",
+        source: "agent",
+      }),
+    ).toMatchObject({ updated: true, title: "Machine home session" });
     const routed = await setActiveSandbox(db, {
       accountId,
       workspaceId,
@@ -470,7 +478,14 @@ describe("connected machine removal lifecycle", () => {
       latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
-    await admin`update sessions set title = 'Second routed session' where id = ${secondSession.id}`;
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: secondSession.id,
+        title: "Second routed session",
+        source: "agent",
+      }),
+    ).toMatchObject({ updated: true, title: "Second routed session" });
     const secondRouted = await setActiveSandbox(db, {
       accountId,
       workspaceId,

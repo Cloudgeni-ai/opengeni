@@ -74,6 +74,7 @@ import {
   settleSessionIdleWithParentOutbox,
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
+  updateSessionTitle,
   upsertConnectorActionPolicy,
   deleteSessionQueueItemInTransaction,
   withWorkspaceSessionActivityRls,
@@ -681,26 +682,22 @@ describe("clean session control plane", () => {
       sandboxBackend: "none",
       parentSessionId: second.id,
     });
-    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
-      await db
-        .update(schema.sessions)
-        .set({ title: hugeTitle })
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, grant.workspaceId!),
-            eq(schema.sessions.id, second.id),
-          ),
-        );
-      await db
-        .update(schema.sessions)
-        .set({ title: hugeTitle })
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, grant.workspaceId!),
-            eq(schema.sessions.id, third.id),
-          ),
-        );
-    });
+    expect(
+      await updateSessionTitle(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: second.id,
+        title: hugeTitle,
+        source: "user",
+      }),
+    ).toMatchObject({ updated: true, title: hugeTitle });
+    expect(
+      await updateSessionTitle(client.db, {
+        workspaceId: grant.workspaceId!,
+        sessionId: third.id,
+        title: hugeTitle,
+        source: "user",
+      }),
+    ).toMatchObject({ updated: true, title: hugeTitle });
     await createSessionGoal(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,

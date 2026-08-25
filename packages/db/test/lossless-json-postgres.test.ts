@@ -324,7 +324,7 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
       await withWorkspaceRls(rollingApp.db, workspace!.id, (db) =>
         db
           .update(schema.sessions)
-          .set({ title: "unrelated new-app update" })
+          .set({ metadata: { codecProbe: "unrelated new-app update" } })
           .where(eq(schema.sessions.id, sessionId)),
       );
       expect(
@@ -374,7 +374,8 @@ describe("lossless canonical JSON PostgreSQL boundary", () => {
         await tx`select set_config('opengeni.account_id', ${account!.id}, true)`;
         await tx`select set_config('opengeni.workspace_id', ${workspace!.id}, true)`;
         await tx`
-          update sessions set title = 'old writer unrelated update'
+          update sessions
+          set metadata = metadata || '{"codecProbe":"old writer unrelated update"}'::jsonb
           where id = ${sessionId}
         `;
       });
