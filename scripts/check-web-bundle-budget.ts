@@ -214,8 +214,8 @@ const budgets = {
   // measures the direct-session graph at 2,175,302 raw / 607,439 gzip bytes.
   // Advance only raw to the next whole-KiB envelope that preserves at least
   // one KiB of headroom; gzip retains more than the 1.5-KiB platform-skew
-  // allowance, and every other cap remains unchanged. OPE-355 tracks removing
-  // this structural browser tax instead of continuing to grow the shared class.
+  // allowance, and every other cap remains unchanged. The separately tracked
+  // structural fix is to remove this browser tax, not keep growing the shared class.
   directSessionRaw: 2126 * kib,
   directSessionGzip: 595 * kib,
   directSessionFiles: 24,
