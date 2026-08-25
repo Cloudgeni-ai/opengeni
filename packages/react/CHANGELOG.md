@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 2.4.0
+
+### Patch Changes
+
+- c10f396: Keep one completed commentary reply visible when a tool-bearing turn settles without a final answer, including goal-wait holds, while preserving ordinary finals and avoiding disclosure duplicates.
+- Updated dependencies [c5e4684]
+- Updated dependencies [dc10a36]
+  - @opengeni/sdk@2.4.0
+
 ## 2.3.0
 
 ### Patch Changes

@@ -1,5 +1,18 @@
 # @opengeni/sdk
 
+## 2.4.0
+
+### Minor Changes
+
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- Updated dependencies [c5e4684]
+- Updated dependencies [dc10a36]
+  - @opengeni/contracts@2.4.0
+
 ## 2.3.0
 
 ### Minor Changes

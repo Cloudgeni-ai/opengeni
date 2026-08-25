@@ -1,5 +1,22 @@
 # @opengeni/db
 
+## 3.3.0
+
+### Minor Changes
+
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- d47da57: Add bounded connection-authority convergence evidence with global residual totals, fixed operator actions, deterministic membership remediation, and fail-closed command completion.
+- Updated dependencies [c5e4684]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/config@0.20.0
+  - @opengeni/codemode@0.4.14
+
 ## 3.2.0
 
 ### Minor Changes
