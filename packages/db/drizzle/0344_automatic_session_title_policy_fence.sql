@@ -14,6 +14,10 @@ DROP TRIGGER IF EXISTS sessions_automatic_title_policy_v1_fence ON sessions;
 -- Existing non-user titles predate the normalization policy and have no durable
 -- proof that they are safe. Preserve explicit human edits and quarantine every
 -- automatic/unversioned row before the trigger boundary becomes active.
+-- The migration owner has no BYPASSRLS, so temporarily relax FORCE RLS for the
+-- owner only; application roles remain policy-bound throughout the transaction.
+ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+
 UPDATE sessions
 SET title = 'New conversation', title_source = 'agent'
 WHERE title_source IS DISTINCT FROM 'user'
@@ -21,6 +25,8 @@ WHERE title_source IS DISTINCT FROM 'user'
     title IS DISTINCT FROM 'New conversation'
     OR title_source IS DISTINCT FROM 'agent'
   );
+
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 
 CREATE OR REPLACE FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()
 RETURNS trigger

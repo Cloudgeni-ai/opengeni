@@ -187,7 +187,9 @@ describe("migration 0344 automatic session title policy fence", () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(source).toContain("LOCK TABLE sessions IN SHARE ROW EXCLUSIVE MODE");
+    expect(source).toContain("ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY");
     expect(source).toContain("WHERE title_source IS DISTINCT FROM 'user'");
+    expect(source).toContain("ALTER TABLE sessions FORCE ROW LEVEL SECURITY");
     expect(source).toContain("opengeni.automatic_session_title_v1_candidate");
     expect(source).toContain("candidate IS DISTINCT FROM NEW.title");
     expect(source).toContain("NEW.title IS DISTINCT FROM 'New conversation'");
