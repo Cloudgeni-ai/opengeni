@@ -1404,7 +1404,8 @@ export function useComposer(
         const acceptedDestination =
           acceptedResult?.routing === "queued_for_execution"
             ? "queue"
-            : acceptedResult?.routing === "accepted_for_execution"
+            : acceptedResult?.routing === "accepted_for_execution" ||
+                acceptedResult?.routing === "accepted_for_steering"
               ? "chat"
               : operation.destination;
         if (options.events === undefined && acceptedDestination === "chat") {

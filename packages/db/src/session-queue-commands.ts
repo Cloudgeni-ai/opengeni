@@ -1723,12 +1723,23 @@ export async function submitHumanPromptInTransaction(
     );
   }
 
-  // Send is queue admission, never a hidden control mutation. A paused Send
-  // remains inert behind the existing gate until the user explicitly resumes.
-  // Steer is the intentional exception: it replaces the current direction and
-  // therefore activates the selected branch atomically.
+  // A normal Send received while the active branch is waiting in
+  // `requires_action` is the human choosing to continue conversationally
+  // instead of through the pending decision surface. Promote only that active
+  // wait to Steer semantics so the frozen wait is cancelled and the new prompt
+  // runs next. An explicitly paused branch remains inert until Resume or an
+  // explicit Steer; running, recovering, and capacity-waiting work also retain
+  // ordinary queue semantics.
+  const effectiveDelivery =
+    input.delivery === "send" &&
+    (input.actor.type === "human" || input.actor.type === "operator") &&
+    before.state === "active" &&
+    session.status === "requires_action" &&
+    session.activeTurnId !== null
+      ? "steer"
+      : input.delivery;
   const resumed =
-    input.delivery === "send"
+    effectiveDelivery === "send"
       ? {
           revision: before.controlVersion,
           control: before,
@@ -1919,7 +1930,7 @@ export async function submitHumanPromptInTransaction(
       : (input.modelContext ?? null);
   const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
   const routing: SessionPromptRouting =
-    input.delivery === "steer"
+    effectiveDelivery === "steer"
       ? "accepted_for_steering"
       : before.state === "paused" || session.activeTurnId || existingQueued.length > 0
         ? "queued_for_execution"
@@ -1950,7 +1961,7 @@ export async function submitHumanPromptInTransaction(
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
-        delivery: input.delivery,
+        delivery: effectiveDelivery,
         routing,
         initiator: frozenInitiator.initiator,
       },
@@ -1971,7 +1982,7 @@ export async function submitHumanPromptInTransaction(
           status: "queued",
           source: input.source,
           promptRouting: routing,
-          position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
+          position: effectiveDelivery === "steer" ? 0 : existingQueued.length + 1,
           prompt: input.text,
           annotations,
           modelContext: effectiveModelContext,
@@ -2063,7 +2074,7 @@ export async function submitHumanPromptInTransaction(
   });
 
   const supersession =
-    input.delivery === "steer"
+    effectiveDelivery === "steer"
       ? await supersedeSessionCurrentDirectionInTransaction(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -2095,7 +2106,7 @@ export async function submitHumanPromptInTransaction(
   // attempt…" truthfully across refresh/reconnect, even though logical
   // settlement has already cleared sessions.active_turn_id. Do not infer this
   // state from a local request spinner or queue position.
-  if (input.delivery === "steer") {
+  if (effectiveDelivery === "steer") {
     const [updatedTurn] = await db
       .update(schema.sessionTurns)
       .set({
@@ -2179,7 +2190,7 @@ export async function submitHumanPromptInTransaction(
   }
 
   const ordered =
-    input.delivery === "steer" ? [turn, ...existingQueued] : [...existingQueued, turn];
+    effectiveDelivery === "steer" ? [turn, ...existingQueued] : [...existingQueued, turn];
   await normalizeQueuePositions(
     db,
     input.workspaceId,
@@ -2187,7 +2198,7 @@ export async function submitHumanPromptInTransaction(
     ordered.map((row) => row.id),
   );
   const noCurrentAfter =
-    input.delivery === "steer" ? liveCurrentTurnId === null : !session.activeTurnId;
+    effectiveDelivery === "steer" ? liveCurrentTurnId === null : !session.activeTurnId;
   const nextStatus = noCurrentAfter ? "queued" : session.status;
   if (nextStatus !== session.status) {
     eventValues.push({
@@ -2214,12 +2225,12 @@ export async function submitHumanPromptInTransaction(
       turnId,
       channel: null,
       text: renderRealtimeHumanInputContext({
-        delivery: input.delivery,
+        delivery: effectiveDelivery,
         routing,
         text: renderTimelineAnnotationsForModel(input.text, annotations),
       }),
       payload: {
-        delivery: input.delivery,
+        delivery: effectiveDelivery,
         routing,
         acceptedEventId,
         instruction: "OpenGeni accepted and routed this user input; do not delegate it again.",
@@ -2233,7 +2244,7 @@ export async function submitHumanPromptInTransaction(
     .set({
       resources: mergeResourceRefs(session.resources as ResourceRef[], input.resources),
       tools: session.tools,
-      activeTurnId: input.delivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
+      activeTurnId: effectiveDelivery === "steer" ? liveCurrentTurnId : session.activeTurnId,
       status: nextStatus,
       queueVersion,
       queueHeadPosition: 0,
@@ -2267,8 +2278,8 @@ export async function submitHumanPromptInTransaction(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     temporalWorkflowId: workflowId,
-    reason: input.delivery === "steer" ? "prompt_steer" : "prompt_send",
-    controlRequested: input.delivery === "steer",
+    reason: effectiveDelivery === "steer" ? "prompt_steer" : "prompt_send",
+    controlRequested: effectiveDelivery === "steer",
   });
   await db.insert(schema.auditEvents).values(
     withLosslessContentWriteVersion(
@@ -2279,7 +2290,7 @@ export async function submitHumanPromptInTransaction(
           input.actor.type === "agent_attempt"
             ? `attempt:${input.actor.attemptId}`
             : input.actor.subjectId,
-        action: input.delivery === "steer" ? "session.prompt.steer" : "session.prompt.send",
+        action: effectiveDelivery === "steer" ? "session.prompt.steer" : "session.prompt.send",
         targetType: "session_turn",
         targetId: turnId,
         metadata: {

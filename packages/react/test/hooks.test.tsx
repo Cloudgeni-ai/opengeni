@@ -1899,6 +1899,84 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("moves a normal Send into chat when the server promotes a human wait to Steer", async () => {
+    let serverDraft: ComposerDraft = {
+      revision: 0,
+      text: "",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => serverDraft,
+      saveComposerDraft: async (_workspaceId, _sessionId, request) => {
+        serverDraft = {
+          ...serverDraft,
+          ...request,
+          revision: request.expectedRevision + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        return serverDraft;
+      },
+      submitComposerDraft: async (_workspaceId, _sessionId, request) => {
+        const turn = fakeTurn({
+          prompt: request.text,
+          metadata: { delivery: "steer" },
+        });
+        const accepted = {
+          ...makeEvent(2, "user.message", {
+            text: request.text,
+            delivery: "steer",
+            routing: "accepted_for_steering",
+          }),
+          clientEventId: request.clientEventId,
+        };
+        serverDraft = {
+          ...serverDraft,
+          revision: request.expectedDraftRevision + 1,
+          text: "",
+          resources: [],
+        };
+        return {
+          accepted,
+          turn,
+          draft: serverDraft,
+          receipt: promptReceipt(turn.id),
+          routing: "accepted_for_steering" as const,
+          interruptionCount: 0,
+          replay: false,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          sendDestination: () => "queue",
+        }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("answer conversationally"));
+    await flush(600);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    await flush();
+
+    expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+      delivery: "send",
+      destination: "chat",
+      state: "queued",
+      text: "answer conversationally",
+    });
+    await hook.unmount();
+  });
+
   test("keeps rapid first and second Sends on stable chat and queue surfaces", async () => {
     const resolvers: Array<(event: SessionEvent) => void> = [];
     const inputs: SendMessageInput[] = [];

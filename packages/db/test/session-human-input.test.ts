@@ -16,6 +16,7 @@ import {
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   listTurnOpenSuffixToolCalls,
+  mutateSessionControlInTransaction,
   peekSessionWork,
   registerPendingSessionToolCall,
   submitHumanPromptInTransaction,
@@ -494,6 +495,77 @@ describe("durable structured human input", () => {
     expect(await peekSessionWork(client.db, frozen.grant.workspaceId!, frozen.session.id)).toEqual({
       kind: "runnable",
     });
+  });
+
+  test("normal Send replaces an active human wait instead of queueing behind it", async () => {
+    const frozen = await freezeRequest();
+    const submitted = await send(
+      frozen.grant,
+      frozen.session.id,
+      "I answered in the composer instead",
+    );
+
+    expect(submitted).toMatchObject({
+      routing: "accepted_for_steering",
+      interruptionCount: 0,
+      turn: {
+        metadata: {
+          delivery: "steer",
+          replacedTurnId: frozen.turn.id,
+        },
+      },
+      accepted: {
+        payload: {
+          delivery: "steer",
+          routing: "accepted_for_steering",
+        },
+      },
+    });
+    expect(
+      await getSessionHumanInputRequest(
+        client.db,
+        frozen.grant.workspaceId!,
+        frozen.session.id,
+        frozen.requestId,
+      ),
+    ).toMatchObject({
+      status: "cancelled",
+      response: { outcome: "cancelled" },
+    });
+    expect(await peekSessionWork(client.db, frozen.grant.workspaceId!, frozen.session.id)).toEqual({
+      kind: "runnable",
+    });
+  });
+
+  test("normal Send preserves a human wait when the session was explicitly paused", async () => {
+    const frozen = await freezeRequest();
+    await withWorkspaceSubjectRls(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as unknown as typeof db, {
+            accountId: frozen.grant.accountId,
+            workspaceId: frozen.grant.workspaceId!,
+            sessionId: frozen.session.id,
+            actor: { type: "human", subjectId: frozen.grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+        ),
+    );
+
+    const submitted = await send(frozen.grant, frozen.session.id, "queue this until resume");
+    expect(submitted.routing).toBe("queued_for_execution");
+    expect(
+      await getSessionHumanInputRequest(
+        client.db,
+        frozen.grant.workspaceId!,
+        frozen.session.id,
+        frozen.requestId,
+      ),
+    ).toMatchObject({ status: "pending", response: null });
   });
 
   test("attaches open-suffix reasoning onto the pending interruption receipt", async () => {
