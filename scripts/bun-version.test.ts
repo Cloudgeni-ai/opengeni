@@ -50,6 +50,7 @@ describe("canonical Bun version contract", () => {
 
   test("binds musl release checksums to the canonical version", () => {
     const source = [
+      '-e BUN_VERSION="$BUN_VERSION"',
       "bun_archive: bun-linux-x64-musl.zip",
       `bun_sha256: ${"a".repeat(64)} # bun-v1.4.0`,
       "bun_archive: bun-linux-aarch64-musl.zip",
@@ -59,5 +60,11 @@ describe("canonical Bun version contract", () => {
     expect(() => verifyMuslAssetChecksums("1.4.1", source)).toThrow(
       "checksum must be annotated for canonical bun-v1.4.1",
     );
+    expect(() =>
+      verifyMuslAssetChecksums(
+        "1.4.0",
+        source.replace('-e BUN_VERSION="$BUN_VERSION"', "-e BUN_VERSION"),
+      ),
+    ).toThrow("must pass the canonical Bun version into musl containers");
   });
 });

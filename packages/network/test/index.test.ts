@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createServer } from "node:net";
+import { createServer, type Socket } from "node:net";
 import {
   DestinationPolicyError,
   isNonPublicAddress,
@@ -335,7 +335,9 @@ describe("DNS-pinned outbound transport", () => {
   });
 
   test("omits a non-Fetch-compatible extension header without losing the response", async () => {
+    let acceptedSocket: Socket | undefined;
     const server = createServer((socket) => {
+      acceptedSocket = socket;
       socket.end(
         Buffer.from(
           "HTTP/1.1 200 OK\r\n" +
@@ -368,6 +370,12 @@ describe("DNS-pinned outbound transport", () => {
       expect(response.headers.get("x-tos-expiration")).toBeNull();
       expect(await response.text()).toBe("test");
     } finally {
+      // Bun 1.4 can retain the accepted half-closed node:net socket after this
+      // deliberately non-Fetch-compatible raw header. The response assertions
+      // above cover the transport contract; force the fixture socket closed so
+      // server.close() does not turn that runtime compatibility quirk into a
+      // 30-second unit-test leak.
+      acceptedSocket?.destroy();
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );

@@ -130,7 +130,7 @@ jobs:
             -e TARGET \
             -e BUN_ARCHIVE \
             -e BUN_SHA256 \
-            -e BUN_VERSION \
+            -e BUN_VERSION="$BUN_VERSION" \
             rust:1.97.0-alpine3.23@sha256:ca0daf101eef0c8cd1e49dfc137154a220efb8c458c85a3eacacc7dfd5d9e04c \
             sh -euc '
               apk add --no-cache bash build-base curl libstdc++ unzip

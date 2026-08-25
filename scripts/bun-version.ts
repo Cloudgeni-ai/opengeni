@@ -120,6 +120,9 @@ export async function verifyBunVersionContract(
 }
 
 export function verifyMuslAssetChecksums(version: string, source: string): void {
+  if (!source.includes('-e BUN_VERSION="$BUN_VERSION"')) {
+    throw new Error("artifact-runtime must pass the canonical Bun version into musl containers");
+  }
   const checksums = new Set<string>();
   for (const archive of ["bun-linux-x64-musl.zip", "bun-linux-aarch64-musl.zip"]) {
     const escapedArchive = archive.replaceAll(".", "\\.");
