@@ -182,8 +182,8 @@ export type MessageTimelineProps = {
   loadingOlder?: boolean | undefined;
   /**
    * Called when older history should backfill. Return the load promise when
-   * available so an underfilled timeline can expose a bounded retry after
-   * rejection or settlement without progress.
+   * available so an underfilled timeline can expose a bounded retry after a
+   * rejection or synchronous throw.
    */
   onLoadOlder?: (() => unknown) | undefined;
   /** Jump to the durable session start (bounded oldest window, no middle). */
@@ -241,20 +241,19 @@ const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 
 // State: 0 underfill, 1 prefetch pending, 2 prefetch settled.
 // The tuple identity is the exact ownership fence.
-type OlderLoadAttempt = [boundary: string | null, state: number];
+type OlderLoadAttempt = [boundary: string | undefined, state: number];
 
-function invokeOlderLoad(load: () => unknown, resolve: () => void, reject: () => void): 0 | 1 {
+function invokeOlderLoad(load: () => unknown, reject: () => void): 1 | undefined {
   try {
     const result = load();
-    if (result && typeof (result as PromiseLike<unknown>).then === "function") {
-      void (result as PromiseLike<unknown>).then(resolve, reject);
+    if (typeof (result as PromiseLike<unknown> | undefined)?.then == "function") {
+      void (result as PromiseLike<unknown>).then(null, reject);
       return 1;
     }
   } catch {
     reject();
     return 1;
   }
-  return 0;
 }
 
 /**
@@ -355,12 +354,15 @@ export function MessageTimeline({
   className,
 }: MessageTimelineProps) {
   const resolvedItems = useMemo(() => {
-    const projected = items ?? buildTimeline(events ?? []);
+    const projectedItems = items ?? buildTimeline(events ?? []);
     if (!shouldRenderAuthNeeded) {
-      return projected;
+      return projectedItems;
     }
-    return projected.filter((item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item));
+    return projectedItems.filter(
+      (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
+    );
   }, [items, events, shouldRenderAuthNeeded]);
+  const olderBoundaryKey = (items ?? events)?.[0]?.id;
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
@@ -399,6 +401,7 @@ export function MessageTimeline({
   const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<OlderLoadAttempt | null>(
     null,
   );
+  const underfillRetryReadyRef = useRef(false);
   const resizeFollowRafRef = useRef<number | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
@@ -476,14 +479,18 @@ export function MessageTimeline({
   const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
   const firstItemContentTopRef = useRef<number | null>(null);
   const firstItemId = resolvedItems[0]?.id ?? null;
-  const olderBoundaryKey = firstItemId;
-  const underfillRetryReady =
-    underfillSettledAttempt !== null &&
+  // Pagination ownership follows the oldest committed input, before host
+  // filtering and grouping. A page containing only suppressed auth notices
+  // still advances this receipt, while live-tail appends leave it unchanged.
+  // Promise fulfillment alone does neither, so delayed prepends stay fenced.
+  const underfillRetryReady = (underfillRetryReadyRef.current = !!(
+    underfillSettledAttempt &&
     underfillSettledAttempt === olderLoadAttemptRef.current &&
     underfillSettledAttempt[0] === olderBoundaryKey &&
     hasOlder &&
-    Boolean(onLoadOlder) &&
-    !loadingOlder;
+    onLoadOlder &&
+    !loadingOlder
+  ));
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk =
@@ -538,7 +545,7 @@ export function MessageTimeline({
   }, []);
 
   const cancelLeaveFallback = useCallback(() => {
-    if (leaveFallbackRafRef.current !== null) {
+    if (leaveFallbackRafRef.current != null) {
       cancelFrame(leaveFallbackRafRef.current);
       leaveFallbackRafRef.current = null;
     }
@@ -551,7 +558,7 @@ export function MessageTimeline({
 
   const stopFollow = useCallback(() => {
     followRef.current = tipFollowCancel(followRef.current);
-    if (followFrameRef.current !== null) {
+    if (followFrameRef.current != null) {
       cancelFrame(followFrameRef.current);
       followFrameRef.current = null;
     }
@@ -594,7 +601,7 @@ export function MessageTimeline({
       if (programmaticScrollRef.current > 0) {
         return;
       }
-      if (followRef.current.running || followFrameRef.current !== null) {
+      if (followRef.current.running || followFrameRef.current != null) {
         return;
       }
       if (isNearBottom(node) || maxScrollOf(node) <= 1) {
@@ -654,7 +661,7 @@ export function MessageTimeline({
     target: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
-    if (event.button !== 0 && event.pointerType === "mouse") {
+    if (event.button && event.pointerType === "mouse") {
       return;
     }
     // Clicks on chips/buttons/links must not arm — their settle collapse
@@ -764,7 +771,7 @@ export function MessageTimeline({
   );
 
   const requestOlderIfUnderfilled = useCallback(
-    (node: HTMLElement, retry = false) => {
+    (node: HTMLElement, retry?: boolean) => {
       let currentAttempt = olderLoadAttemptRef.current;
       if (
         retry &&
@@ -789,7 +796,7 @@ export function MessageTimeline({
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
-        (currentAttempt !== null && !retry)
+        (currentAttempt && !retry)
       ) {
         return;
       }
@@ -807,11 +814,10 @@ export function MessageTimeline({
       // that return the real promise opt into safe rejection/no-progress retry.
       // Fulfillment retains this exact owner until its prepend boundary
       // commits; promise settlement alone cannot prove progress or no-progress.
-      invokeOlderLoad(onLoadOlder, () => undefined, reject);
+      invokeOlderLoad(onLoadOlder, reject);
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder, underfillSettledAttempt],
   );
-
   // Promise settlement is not itself permission to auto-retry: the parent may
   // be about to commit a successful prepend. Once loading has settled, expose
   // one explicit retry only if this exact window still has older history.
@@ -835,7 +841,9 @@ export function MessageTimeline({
     }
   }, [hasOlder, olderBoundaryKey, rearmOlderPrefetchAfterLeavingTop, requestOlderIfUnderfilled]);
 
-  const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
+  const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
+    requestOlderIfUnderfilled as (node: HTMLElement, now?: number) => void,
+  );
   const driveFollow = useCallback(
     (node: HTMLElement, nowMs?: number) => {
       if (!pinnedRef.current || hasNewerRef.current) {
@@ -893,7 +901,7 @@ export function MessageTimeline({
           // A direct glue write re-based the camera — drop any stale fraction.
           cameraTop: null,
         };
-        if (followFrameRef.current === null) {
+        if (followFrameRef.current == null) {
           followFrameRef.current = requestFrame((frameNow) => {
             followFrameRef.current = null;
             const current = scrollRef.current;
@@ -927,7 +935,7 @@ export function MessageTimeline({
       syncScrollBaseline(node);
       if (result.state.running) {
         cancelLeaveFallback();
-        if (followFrameRef.current === null) {
+        if (followFrameRef.current == null) {
           followFrameRef.current = requestFrame((frameNow) => {
             followFrameRef.current = null;
             const current = scrollRef.current;
@@ -936,7 +944,7 @@ export function MessageTimeline({
             }
           });
         }
-      } else if (followFrameRef.current !== null) {
+      } else if (followFrameRef.current != null) {
         cancelFrame(followFrameRef.current);
         followFrameRef.current = null;
       }
@@ -967,7 +975,7 @@ export function MessageTimeline({
     const wasAtLiveTailBeforeCommit =
       previousMaxScroll <= 1 ||
       previousMaxScroll - previousScrollTop < Math.min(PIN_THRESHOLD_PX, previousMaxScroll);
-    const firstItemChanged = previousFirstItemId !== null && firstItemId !== previousFirstItemId;
+    const firstItemChanged = !!previousFirstItemId && firstItemId !== previousFirstItemId;
     const prepended =
       firstItemChanged && resolvedItems.some((item) => item.id === previousFirstItemId);
     const restorePrependAnchor = () => {
@@ -976,7 +984,7 @@ export function MessageTimeline({
       // then the retained group offset, then scrollHeight as a final fallback.
       // If native anchoring already applied the same shift, leave scrollTop.
       let delta: number | null = null;
-      if (previousFirstItemId !== null && previousItemContentTop !== null) {
+      if (previousFirstItemId && previousItemContentTop != null) {
         const itemEl = node.querySelector(
           `[data-og-item="${cssEscapeAttribute(previousFirstItemId)}"]`,
         );
@@ -988,24 +996,24 @@ export function MessageTimeline({
       }
       const anchorKey = previousFirstItemGroupKey;
       const previousAnchorTop =
-        anchorKey !== null ? previousGroupOffsetByKey.get(anchorKey) : undefined;
+        anchorKey != null ? previousGroupOffsetByKey.get(anchorKey) : undefined;
       const anchorEl =
-        anchorKey !== null
+        anchorKey != null
           ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(anchorKey)}"]`)
           : null;
-      if (delta === null && anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
+      if (delta == null && anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
         const moved = Math.round(anchorEl.offsetTop - previousAnchorTop);
-        if (moved !== 0) {
+        if (moved) {
           delta = moved;
         }
       }
-      if (delta === null) {
+      if (delta == null) {
         const heightDelta = Math.round(node.scrollHeight - previousScrollHeightRef.current);
         if (heightDelta > 0) {
           delta = heightDelta;
         }
       }
-      if (delta !== null) {
+      if (delta != null) {
         const expected = previousScrollTop + delta;
         if (Math.abs(node.scrollTop - expected) > 2) {
           writeScrollTop(node, expected);
@@ -1082,8 +1090,8 @@ export function MessageTimeline({
       prepended ||
       firstItemChanged ||
       !pinnedRef.current ||
-      Boolean(hasNewer) ||
-      firstItemContentTopRef.current === null;
+      hasNewer ||
+      firstItemContentTopRef.current == null;
     if (needOffsets) {
       const nextOffsetByKey = new Map<string, number>();
       for (const { key } of groups) {
@@ -1093,12 +1101,11 @@ export function MessageTimeline({
         }
       }
       groupOffsetByKeyRef.current = nextOffsetByKey;
-      const firstItemEl =
-        firstItemId !== null
-          ? node.querySelector(`[data-og-item="${cssEscapeAttribute(firstItemId)}"]`)
-          : null;
+      const firstItemEl = firstItemId
+        ? node.querySelector(`[data-og-item="${cssEscapeAttribute(firstItemId)}"]`)
+        : null;
       firstItemContentTopRef.current =
-        firstItemId !== null && firstItemEl instanceof HTMLElement
+        firstItemId && firstItemEl instanceof HTMLElement
           ? firstItemEl.getBoundingClientRect().top -
             node.getBoundingClientRect().top +
             node.scrollTop
@@ -1110,7 +1117,7 @@ export function MessageTimeline({
   // two animation frames (late sync layout), then reveal. Does not change the
   // tip-follow ease law used once `revealed` is true.
   useLayoutEffect(() => {
-    if (revealed || allGroups.length === 0) {
+    if (revealed || !allGroups.length) {
       return;
     }
     let cancelled = false;
@@ -1138,7 +1145,7 @@ export function MessageTimeline({
     return () => {
       cancelled = true;
       cancelFrame(frame1);
-      if (frame2 !== 0) {
+      if (frame2) {
         cancelFrame(frame2);
       }
     };
@@ -1252,10 +1259,7 @@ export function MessageTimeline({
         // synchronously returned, but this visit remains cooling until exit.
         // Fulfilled promises retain their pending owner until boundary commit;
         // otherwise a delayed prepend could overlap a same-boundary request.
-        if (
-          !invokeOlderLoad(onLoadOlder, () => undefined, reject) &&
-          olderLoadAttemptRef.current === attempt
-        ) {
+        if (!invokeOlderLoad(onLoadOlder, reject) && olderLoadAttemptRef.current === attempt) {
           attempt[1] = 2;
           requestOlderIfUnderfilled(root);
         }
@@ -1312,7 +1316,7 @@ export function MessageTimeline({
       return;
     }
     const observer = new ResizeObserver(() => {
-      if (resizeFollowRafRef.current !== null) {
+      if (resizeFollowRafRef.current != null) {
         return;
       }
       resizeFollowRafRef.current = requestFrame(() => {
@@ -1339,7 +1343,7 @@ export function MessageTimeline({
     observer.observe(node);
     return () => {
       observer.disconnect();
-      if (resizeFollowRafRef.current !== null) {
+      if (resizeFollowRafRef.current != null) {
         cancelFrame(resizeFollowRafRef.current);
         resizeFollowRafRef.current = null;
       }
@@ -1554,7 +1558,7 @@ export function MessageTimeline({
                     )}
                   >
                     <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
-                      {groups.length === 0
+                      {!groups.length
                         ? (emptyState ?? (
                             <p className="py-10 text-center text-og-menu text-og-fg-subtle">
                               No activity yet.
@@ -1672,7 +1676,10 @@ export function MessageTimeline({
                             onClick={() => {
                               const node = scrollRef.current;
                               if (underfillRetryReady) {
-                                if (node) {
+                                if (node && underfillRetryReadyRef.current) {
+                                  // AnimatePresence retains this handler during
+                                  // exit. Current authorization plus the exact
+                                  // attempt check prevent stale dispatch.
                                   requestOlderIfUnderfilled(node, true);
                                 }
                                 return;
@@ -2014,8 +2021,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   // turn that is the second layer — quiet nested chips under the outer turn
   // summary when contiguous activity naturally clusters (≥2 only).
   const activityShouldFold =
-    group.kind === "activity" &&
-    Boolean(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
+    group.kind === "activity" && !!(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
   const containsGeneratedImage = timelineGroupContainsGeneratedImage(group);
   // Latch live→folded so a top-level shell that was already mounted open can
   // start the settle beat without remounting bare rail → wrapper.
@@ -2036,7 +2042,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
     );
   }
   const settleFold =
-    group.kind === "turn" ? Boolean(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
+    group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
   switch (group.kind) {
     case "activity":
       if (insideTurn) {
@@ -2398,7 +2404,7 @@ export function trailingAgentTextAfterTurn(
   if (next?.kind === "item" && next.item.kind === "agent-message") {
     const turnIds = collectTurnIdsFromGroups(group.groups);
     // Degenerate body with no turnIds: do not guess — safer than lifting wrong.
-    if (turnIds.size === 0) {
+    if (!turnIds.size) {
       return undefined;
     }
     if (!next.item.turnId || !turnIds.has(next.item.turnId)) {
@@ -2417,7 +2423,7 @@ function collectTurnCopyText(
   const parts = [collectAgentMessageText(groups), trailingAgentText?.trim() ?? ""].filter(
     (part) => part.length > 0,
   );
-  if (parts.length === 0) {
+  if (!parts.length) {
     return undefined;
   }
   return parts.join("\n\n");
@@ -2502,11 +2508,11 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const trigger =
     item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
   const before =
-    item.estimatedTokensBefore !== null
+    item.estimatedTokensBefore != null
       ? Math.round(item.estimatedTokensBefore).toLocaleString("en-US")
       : null;
   const after =
-    item.estimatedTokensAfter !== null
+    item.estimatedTokensAfter != null
       ? Math.round(item.estimatedTokensAfter).toLocaleString("en-US")
       : null;
   const title =
@@ -2899,9 +2905,7 @@ function WorkerCompletionRow({
   // payloads can carry a leftover pausedReason/rationale from earlier in the
   // worker's life, and a "Worker completed" card must not show a pause section.
   const showPausedReason =
-    item.childStatus !== "failed" &&
-    item.goalStatus === "paused" &&
-    Boolean(item.pausedReason?.trim());
+    item.childStatus !== "failed" && item.goalStatus === "paused" && !!item.pausedReason?.trim();
   const details: { label: string; value: string; muted?: boolean }[] = [
     ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
     ...(item.evidence?.trim()
@@ -3454,7 +3458,7 @@ function AuthProviderLogo({ src, label }: { src: string | null; label: string })
     `capabilityMonogram` so the reconnect tile reads like every other logo tile. */
 function monogram(label: string): string {
   const words = label.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) {
+  if (!words.length) {
     return "?";
   }
   if (words.length === 1) {

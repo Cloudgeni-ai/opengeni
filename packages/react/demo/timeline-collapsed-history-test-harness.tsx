@@ -10,7 +10,9 @@ type TimelineCollapsedHistoryHarness = {
   appendLivePage: () => void;
   appendLivePageMarkNoOlderAndSettleOlder: () => Promise<void>;
   armOlder: () => void;
+  clickRetainedRetryAfterRemovingLoader: () => boolean;
   loadCalls: () => number;
+  prependFilteredOlderPage: () => void;
   prependUnderfilledPage: () => void;
   removeLoader: () => void;
   settleLoad: (call: number, outcome: "success" | "failure", complete?: boolean) => void;
@@ -69,6 +71,23 @@ function reasoning(sequence: number, turnId: string, prefix: string): TimelineIt
   };
 }
 
+function authNeeded(sequence: number): TimelineItem {
+  return {
+    kind: "auth-needed",
+    id: `hidden-auth-${sequence}`,
+    turnId: null,
+    serverId: null,
+    providerDomain: "example.com",
+    connectionId: null,
+    reason: null,
+    scopes: [],
+    resource: null,
+    toolName: null,
+    authorizationUrl: null,
+    occurredAt: occurredAt(sequence),
+  };
+}
+
 function turnEnd(sequence: number, turnId: string): TimelineItem {
   return {
     kind: "turn-end",
@@ -120,6 +139,7 @@ function Harness() {
   const overlapLoads = search.has("overlap-loads");
   const emptyWindow = search.has("empty-window");
   const omitLoadingOlder = search.has("omit-loading-older");
+  const suppressAuthNeeded = search.has("suppress-auth-needed");
   const usePrefetchWindow = search.has("prefetch-window");
   const syncCachedPrefetch = search.has("sync-cached-prefetch");
   const syncCachedUnderfill = search.has("sync-cached-underfill");
@@ -197,6 +217,21 @@ function Harness() {
       ...settledTurn(100 + call * 40, `overlap-turn-${call}`, `Overlap turn ${call}`, false),
       ...current,
     ]);
+  }, []);
+
+  const prependFilteredOlderPage = useCallback(() => {
+    const call = loadCallsRef.current;
+    setItems((current) => [authNeeded(50 + call), ...current]);
+  }, []);
+
+  const clickRetainedRetryAfterRemovingLoader = useCallback(() => {
+    const retry = document.querySelector<HTMLElement>("[data-og-retry]");
+    if (!retry) {
+      return false;
+    }
+    flushSync(() => setLoaderAvailable(false));
+    retry.click();
+    return true;
   }, []);
 
   const appendLiveItem = useCallback(() => {
@@ -299,7 +334,9 @@ function Harness() {
       appendLivePage,
       appendLivePageMarkNoOlderAndSettleOlder,
       armOlder: () => setHasOlder(true),
+      clickRetainedRetryAfterRemovingLoader,
       loadCalls: () => loadCallsRef.current,
+      prependFilteredOlderPage,
       prependUnderfilledPage,
       removeLoader: () => setLoaderAvailable(false),
       settleLoad,
@@ -329,7 +366,9 @@ function Harness() {
     appendLiveItem,
     appendLivePage,
     appendLivePageMarkNoOlderAndSettleOlder,
+    clickRetainedRetryAfterRemovingLoader,
     loadCalls,
+    prependFilteredOlderPage,
     prependUnderfilledPage,
     scroller,
     settleLoad,
@@ -346,6 +385,7 @@ function Harness() {
           hasOlder={hasOlder}
           loadingOlder={overlapLoads || omitLoadingOlder ? false : loadingOlder}
           onLoadOlder={loaderAvailable ? loadOlder : undefined}
+          shouldRenderAuthNeeded={suppressAuthNeeded ? () => false : undefined}
           renderMessageText={(text, item) => <div data-conversation-message={item.id}>{text}</div>}
         />
       </section>

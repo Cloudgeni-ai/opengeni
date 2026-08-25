@@ -672,6 +672,33 @@ describe("timeline scroll ownership browser regression", () => {
     await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
   }, 30_000);
 
+  test("continues pagination after a fulfilled fully filtered older page", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&omit-loading-older&suppress-auth-needed`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("success"),
+    );
+    await page.waitForTimeout(150);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+    expect(await page.getByRole("button", { name: "Retry earlier activity" }).count()).toBe(0);
+
+    // The committed durable page contains only a suppressed auth notice, so
+    // the visible first row does not change. Its pre-filter progress receipt
+    // must still release A and request page B.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.prependFilteredOlderPage());
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    expect(await page.getByText("example.com").count()).toBe(0);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("keeps an empty rejected page behind one explicit retry", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(
@@ -745,7 +772,11 @@ describe("timeline scroll ownership browser regression", () => {
     await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("failure"));
     const retry = page.getByRole("button", { name: "Retry earlier activity" });
     await retry.waitFor({ timeout: 5_000 });
-    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.removeLoader());
+    expect(
+      await page.evaluate(() =>
+        window.timelineCollapsedHistoryHarness!.clickRetainedRetryAfterRemovingLoader(),
+      ),
+    ).toBe(true);
     await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
 
     expect(await retry.count()).toBe(0);

@@ -72,6 +72,23 @@ function reasoningItem(id: string, text: string): TimelineItem {
   };
 }
 
+function authNeededItem(id: string): TimelineItem {
+  return {
+    kind: "auth-needed",
+    id,
+    turnId: null,
+    serverId: null,
+    providerDomain: "example.com",
+    connectionId: null,
+    reason: null,
+    scopes: [],
+    resource: null,
+    toolName: null,
+    authorizationUrl: null,
+    occurredAt: "2026-01-01T00:00:00.000Z",
+  };
+}
+
 function manyEvents(count: number): SessionEvent[] {
   return Array.from({ length: count }, (_, index) => event(index + 1));
 }
@@ -1688,6 +1705,85 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("a fulfilled fully filtered page advances pagination ownership", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const loads = [first, second];
+    let calls = 0;
+    const onLoadOlder = () => loads[calls++]!.promise;
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const shouldRenderAuthNeeded = () => false;
+    const r = await renderComponent(
+      <MessageTimeline
+        items={items}
+        hasOlder
+        onLoadOlder={onLoadOlder}
+        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
+      />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        status="idle"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
+      />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => first.resolve(false));
+    await flush();
+    expect(calls).toBe(1);
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
+
+    // The durable page commits, but its only row is host-filtered. The visible
+    // first item stays identical; the pre-filter progress receipt must release
+    // A and request the next still-underfilled page exactly once.
+    const filteredPage = [authNeededItem("hidden-auth-page"), ...items];
+    await r.rerender(
+      <MessageTimeline
+        items={filteredPage}
+        status="idle"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
+      />,
+    );
+    await drainFrames(frames);
+    expect(r.container.textContent).not.toContain("example.com");
+    expect(calls).toBe(2);
+
+    await r.rerender(
+      <MessageTimeline
+        items={[reasoningItem("visible-older-step", "visible older step"), ...filteredPage]}
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
+      />,
+    );
+    await actRun(() => second.resolve(false));
+    await flush();
+    expect(r.container.textContent).toContain("visible older step");
+    expect(calls).toBe(2);
+    await r.unmount();
+  });
+
   test("underfill rejection exposes one retry without observer loops or duplicates", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
@@ -1751,7 +1847,8 @@ describe("MessageTimeline pagination affordances", () => {
 
     await actRun(() => first.reject(new Error("transient listEvents failure")));
     await flush();
-    expect(r.container.querySelector("[data-og-retry]")).not.toBeNull();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
 
     // A later streamed append must retain the rejected owner and its explicit
     // retry instead of silently starting a new request for the same oldest
@@ -1769,8 +1866,6 @@ describe("MessageTimeline pagination affordances", () => {
     resizeCallback([], resizeObserver!);
     await drainFrames(frames);
     expect(calls).toBe(1);
-    const retry = r.container.querySelector("[data-og-retry]");
-    expect(retry).not.toBeNull();
 
     await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(calls).toBe(2);
@@ -1970,7 +2065,8 @@ describe("MessageTimeline pagination affordances", () => {
     expect(calls).toBe(1);
     await actRun(() => first.reject(new Error("transient listEvents failure")));
     await flush();
-    expect(r.container.querySelector("[data-og-retry]")).not.toBeNull();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
 
     await r.rerender(
       <MessageTimeline
@@ -1984,6 +2080,10 @@ describe("MessageTimeline pagination affordances", () => {
     expect(r.container.textContent).not.toContain("Retry earlier activity");
     expect(r.container.querySelector("[data-og-jump-to-start]")).not.toBeNull();
     expect(r.container.textContent).toContain("Jump to start");
+    // AnimatePresence may retain the captured node after the current render
+    // revoked its loader. Its stale handler must consult current authorization.
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(1);
     await r.unmount();
   });
 
