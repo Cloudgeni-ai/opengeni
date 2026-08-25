@@ -12,7 +12,9 @@ import {
   parseForwardMigrations,
   parseLedgerPaths,
   probeName,
+  parseFilteredMembershipTests,
   registrationFixLines,
+  unreachableContractReferences,
   unregisteredMigrations,
 } from "./migration-schema-contract";
 
@@ -79,6 +81,12 @@ function miniContract(sites: {
     "    });",
     '    const laterPin = "0004_later.sql";',
     "    const releaseSchemaContractHash = (includesActivation: boolean): string | null => {",
+    // The real contract always carries a ladder, and `parseFilteredMembershipTests` is
+    // strict about that so a refactor cannot silently disable the audit. Give
+    // every fixture a baseline rung, the same way it gets a baseline probe.
+    '      if (migrations.has("0001_first.sql")) {',
+    '        return includesActivation ? "cc" : "dd";',
+    "      }",
     ...(sites.ladder ?? []).flatMap((file) => [
       `      if (migrations.has("${file}")) {`,
       '        return includesActivation ? "aa" : "bb";',
@@ -244,6 +252,83 @@ describe("release-schema registration rule", () => {
         registration({}),
       ).map((violation) => violation.file),
     ).toEqual(["custom_probe.sql"]);
+  });
+});
+
+describe("unreachable contract references", () => {
+  const contract = (ladder: readonly string[], forward: readonly string[]) =>
+    miniContract({ ladder, forward });
+
+  test("reports a rung whose migration is forward-listed and present", () => {
+    expect(
+      unreachableContractReferences(
+        contract(["0003_new.sql"], ["0003_new.sql"]),
+        ["0003_new.sql"],
+        ["0003_new.sql"],
+      ),
+    ).toEqual(["0003_new.sql"]);
+  });
+
+  test("accepts a rung whose migration is not forward-listed", () => {
+    expect(
+      unreachableContractReferences(contract(["0003_new.sql"], []), ["0003_new.sql"], []),
+    ).toEqual([]);
+  });
+
+  /**
+   * A rung for a migration this tree does not carry is an ordinary
+   * compatibility rung: it fires on a branch holding fewer migrations, and the
+   * check must not touch it.
+   */
+  test("leaves a compatibility rung for an absent migration alone", () => {
+    expect(
+      unreachableContractReferences(
+        contract(["0003_new.sql"], ["0003_new.sql"]),
+        [],
+        ["0003_new.sql"],
+      ),
+    ).toEqual([]);
+  });
+
+  test("reads every membership test in source order", () => {
+    expect(parseFilteredMembershipTests(contract(["0004_next.sql", "0003_new.sql"], []))).toEqual([
+      "0001_first.sql",
+      "0004_next.sql",
+      "0003_new.sql",
+    ]);
+  });
+
+  /**
+   * The strictness is the anti-no-op guard: if a refactor removed every
+   * membership test the audit would otherwise pass vacuously forever.
+   */
+  test("fails loudly when nothing tests the filtered set at all", () => {
+    const stripped = contract(["0003_new.sql"], []).replaceAll("migrations.has(", "other.has(");
+    expect(() => parseFilteredMembershipTests(stripped)).toThrow(ContractParseError);
+  });
+
+  /**
+   * The `latestCompatibleMigration` shape resolves its entries through
+   * `.find((path) => migrations.has(path))`, so its names are membership tests
+   * too and a dead entry there is the same debris as a dead rung.
+   */
+  test.each([
+    ["annotated find callback", ".find((path: string) => migrations.has(path))"],
+    ["filter callback", ".filter((file) => migrations.has(file))"],
+    ["extra-argument callback", ".find((path, index) => migrations.has(path) && index >= 0)"],
+  ])("reads names resolved through an array %s", (_label, tail) => {
+    const withArray = contract([], []) + `\nconst picked = ["0003_new.sql"]${tail};\n`;
+    expect(parseFilteredMembershipTests(withArray)).toContain("0003_new.sql");
+  });
+
+  test("reads names resolved through a .find over migrations.has", () => {
+    const withFind =
+      contract([], []) +
+      '\nconst latestCompatibleMigration = ["0003_new.sql"].find((path) => migrations.has(path));\n';
+    expect(parseFilteredMembershipTests(withFind)).toContain("0003_new.sql");
+    expect(unreachableContractReferences(withFind, ["0003_new.sql"], ["0003_new.sql"])).toEqual([
+      "0003_new.sql",
+    ]);
   });
 });
 
@@ -461,6 +546,21 @@ describe("check-migration-schema-contract CLI", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("- 0003_bad-name.sql");
     expect(result.stderr).toContain("- custom_probe.sql");
+  });
+
+  test("fails on an unreachable ladder rung even when nothing new was added", async () => {
+    const root = await fixtureRepo({
+      added: [],
+      sites: { forward: ["0002_second.sql"], ladder: ["0002_second.sql"] },
+    });
+    const result = await run(root, guard);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toContain("where the check can never match");
+    expect(result.stderr).toContain("- 0002_second.sql");
+    expect(result.stderr).toContain("Delete every reference to them");
+    // Nothing new was added, so the registration report must stay suppressed
+    // rather than announcing "0 new migrations are not fully registered".
+    expect(result.stderr).not.toContain("not fully registered");
   });
 
   test("stays quiet when the head adds no migration at all", async () => {

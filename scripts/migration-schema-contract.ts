@@ -174,6 +174,43 @@ export function parseForwardMigrations(source: string): string[] {
   return forward;
 }
 
+/**
+ * Every migration the contract tests for membership of the FILTERED set.
+ *
+ * Two shapes carry that test: a direct `migrations.has("<file>")`, and an array
+ * of names resolved through `.find((path) => migrations.has(path))`. Both the
+ * hash ladders and the `fileCount` / `latestMigration` pins are built from them,
+ * so scanning the whole file rather than one ladder is what keeps the audit
+ * total.
+ */
+export function parseFilteredMembershipTests(source: string): string[] {
+  const clean = withoutLineComments(source);
+  const found: string[] = [];
+  for (const match of clean.matchAll(/migrations\.has\("(\d{4}_[A-Za-z0-9_]+\.sql)"\)/g)) {
+    if (!found.includes(match[1]!)) found.push(match[1]!);
+  }
+  for (const match of clean.matchAll(
+    // `.find` and `.filter` both resolve their entries through the same
+    // membership test. The callback shape is matched loosely - annotated
+    // parameter, extra arguments - for the same reason `PRESENCE_PROBE` is:
+    // rejecting a construct the contract itself accepts would make the audit
+    // wrong about a correct tree.
+    /\[([^\]]*?)\]\s*\.(?:find|filter)\(\(\s*[A-Za-z_$][\w$]*[^)]*\)\s*=>\s*migrations\.has\(/g,
+  )) {
+    for (const entry of match[1]!.matchAll(MIGRATION_LITERAL)) {
+      if (!found.includes(entry[1]!)) found.push(entry[1]!);
+    }
+  }
+  if (found.length === 0) {
+    throw new ContractParseError(
+      `${RELEASE_CONTRACT_TEST} tests no migration against the filtered set. ` +
+        "The registration guard cannot audit it; update " +
+        "scripts/migration-schema-contract.ts to match the contract.",
+    );
+  }
+  return found;
+}
+
 /** Every registration site the contract declares, parsed from its source. */
 export function parseContractRegistration(source: string): ContractRegistration {
   const clean = withoutLineComments(source);
@@ -208,6 +245,42 @@ export function parseContractRegistration(source: string): ContractRegistration 
     );
   }
   return { forward: parseForwardMigrations(source), fileCountProbes, latestMigrationPins };
+}
+
+/**
+ * Contract references that can never match.
+ *
+ * The hash ladders and the `fileCount` / `latestMigration` pins all ask
+ * `migrations.has(...)` over the ALREADY-FILTERED set, so a reference to a
+ * forward-listed migration present on this tree is unreachable: forward-listing
+ * is what removes it from that map, and if the file were absent the check would
+ * be false anyway.
+ *
+ * Such a reference is the residue of the wrong repair - pinning or counting your
+ * own migration instead of registering it - and a dead hash rung is worse than
+ * dead weight, because it reads as a live pin. It is not a fallback either: an
+ * aggregate pinned while the migration was still framed is already wrong for the
+ * only tree that could ever read it.
+ *
+ * A reference to a migration that is not on this tree is left alone. Those are
+ * the ordinary compatibility branches that fire where fewer migrations exist.
+ *
+ * Known limit: a NEGATED test (`if (!migrations.has(X))`) is live exactly when X
+ * is forward-listed, so flagging it would be wrong. No such test names a
+ * forward-listed migration today, and the contract has exactly one negated test
+ * at all, so this is left as a documented limit rather than special-cased on a
+ * shape that does not yet exist.
+ */
+export function unreachableContractReferences(
+  source: string,
+  ledger: readonly string[],
+  forwardMigrations: readonly string[],
+): string[] {
+  const present = new Set(ledger);
+  const forward = new Set(forwardMigrations);
+  return parseFilteredMembershipTests(source).filter(
+    (file) => present.has(file) && forward.has(file),
+  );
 }
 
 /**
