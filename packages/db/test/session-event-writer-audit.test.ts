@@ -512,6 +512,25 @@ const tenancyQuiescenceTables = {
   sandboxLeaseHolders: "sandbox_lease_holders",
 } as const;
 
+const tenancyCascadeRootTables = {
+  managedAccounts: "managed_accounts",
+  workspaces: "workspaces",
+  sandboxLeases: "sandbox_leases",
+} as const;
+
+const expectedTenancyCascadeRootDeletes: Record<string, string[]> = {
+  "packages/db/src/index.ts#deleteSessionTreeIfQuiescent": ["sandbox_leases"],
+  "packages/db/src/index.ts#deleteWorkspace": ["workspaces"],
+  "packages/db/src/index.ts#deleteWorkspaceIfQuiescent": ["workspaces"],
+  "scripts/operator/turn-density-profile.ts#deleteDensityProfileAccount": ["managed_accounts"],
+};
+
+const expectedTenancyCascadeRootFenceCalls: Record<string, string> = {
+  "packages/db/src/index.ts#deleteSessionTreeIfQuiescent": "withWorkspaceSubjectRls",
+  "packages/db/src/index.ts#deleteWorkspaceIfQuiescent": "withRlsContext",
+  "scripts/operator/turn-density-profile.ts#deleteDensityProfileAccount": "withWorkspaceRls",
+};
+
 function writesTenancyQuiescenceTable(node: t.CallExpression): boolean {
   if (!isMemberExpression(node.callee)) return false;
   const method = callName(node);
@@ -523,6 +542,19 @@ function writesTenancyQuiescenceTable(node: t.CallExpression): boolean {
     isIdentifier(table.property) &&
     table.property.name in tenancyQuiescenceTables,
   );
+}
+
+function deletedTenancyCascadeRoot(node: t.CallExpression): string | null {
+  if (!isMemberExpression(node.callee) || callName(node) !== "delete") return null;
+  const table = node.arguments[0];
+  const tableName =
+    table && isMemberExpression(table) && isIdentifier(table.property)
+      ? table.property.name
+      : table && isIdentifier(table)
+        ? table.name
+        : null;
+  if (!tableName) return null;
+  return tenancyCascadeRootTables[tableName as keyof typeof tenancyCascadeRootTables] ?? null;
 }
 
 function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
@@ -737,6 +769,78 @@ describe("session_events writer inventory", () => {
       /BEFORE INSERT OR UPDATE OR DELETE[\s\S]*?require_session_tenancy_fence/u,
     );
     expect(migration).toContain("session tenancy mutation requires the workspace fence");
+  });
+
+  test("pins every production TypeScript delete of a session-tenancy cascade root", () => {
+    const writers = new Map<
+      string,
+      {
+        roots: Set<string>;
+        sourceFile: SourceFile;
+        functionNode: FunctionLikeDeclaration;
+      }
+    >();
+    for (const path of productionTypeScriptFiles()) {
+      const source = readFileSync(path, "utf8");
+      if (
+        !Object.keys(tenancyCascadeRootTables).some((table) => source.includes(table)) &&
+        !Object.values(tenancyCascadeRootTables).some((table) => source.includes(table))
+      )
+        continue;
+      const file = relative(repoRoot, path).replaceAll("\\", "/");
+      const sourceFile = parseSourceFile(path, source);
+      const recordDelete = (node: t.Node, root: string): void => {
+        const enclosing = namedTopLevelFunction(node);
+        if (!enclosing) throw new Error(`Unnamed ${root} delete in ${file}`);
+        const key = `${file}#${enclosing.name}`;
+        const writer = writers.get(key) ?? {
+          roots: new Set<string>(),
+          sourceFile,
+          functionNode: enclosing.node,
+        };
+        writer.roots.add(root);
+        writers.set(key, writer);
+      };
+      const visit = (node: t.Node): void => {
+        if (isCallExpression(node)) {
+          const root = deletedTenancyCascadeRoot(node);
+          if (root) recordDelete(node, root);
+        }
+        if (isTaggedTemplateExpression(node)) {
+          const sqlText = source.slice(nodeStart(node.quasi), node.quasi.end);
+          for (const root of Object.values(tenancyCascadeRootTables)) {
+            if (new RegExp(`\\bdelete\\s+from\\s+(?:[a-z_]+\\.)?${root}\\b`, "i").test(sqlText)) {
+              recordDelete(node, root);
+            }
+          }
+        }
+        forEachChild(node, visit);
+      };
+      visit(sourceFile.program);
+    }
+
+    expect(
+      Object.fromEntries(
+        [...writers]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, writer]) => [key, [...writer.roots].sort()]),
+      ),
+    ).toEqual(expectedTenancyCascadeRootDeletes);
+
+    for (const [key, fenceCall] of Object.entries(expectedTenancyCascadeRootFenceCalls)) {
+      const writer = writers.get(key)!;
+      const firstFence = callPositions(writer.functionNode, fenceCall)[0];
+      const deletes = callPositions(writer.functionNode, "delete");
+      expect(firstFence, key).toBeLessThan(Math.min(...deletes));
+    }
+    const directWorkspaceDelete = writers.get("packages/db/src/index.ts#deleteWorkspace")!;
+    const directSource = directWorkspaceDelete.sourceFile.source.slice(
+      directWorkspaceDelete.functionNode.start,
+      directWorkspaceDelete.functionNode.end,
+    );
+    expect(directSource.indexOf("pg_advisory_xact_lock_shared"), "deleteWorkspace").toBeLessThan(
+      directSource.indexOf(".delete(schema.workspaces)"),
+    );
   });
 
   test("every production session-row writer requires the explicit activity gate", () => {
