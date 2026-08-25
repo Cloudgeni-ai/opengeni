@@ -9,7 +9,7 @@ import {
 import { and, asc, eq, gt, inArray, ne } from "drizzle-orm";
 
 import { type Database, withWorkspaceRls } from "./database";
-import { personalWorkspaceIdForSubject } from "./slack-routing-personal-workspace";
+import { namedSubjectPersonalWorkspaceId } from "./slack-routing-personal-workspace";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import * as schema from "./schema";
 import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
@@ -571,7 +571,7 @@ async function membershipAllowsSlackLink(database: Database, row: RequestRow) {
   // Once a Slack direct message can land there, that would tell people to
   // request access to their own workspace. The pointer is DERIVED from an
   // active organization membership; it is never accepted from the request row.
-  const personalWorkspaceId = await personalWorkspaceIdForSubject(database, {
+  const personalWorkspaceId = await namedSubjectPersonalWorkspaceId(database, {
     accountId: row.accountId,
     subjectId: row.subjectId,
   });

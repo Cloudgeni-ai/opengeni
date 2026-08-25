@@ -63,7 +63,7 @@ import {
   probeSlackActionHandleTenancy,
   getSlackChannelRoute,
   getSlackUserDmRoute,
-  listSlackRoutableWorkspacesForSubject,
+  listNamedSubjectSlackRoutableWorkspaces,
   getActiveSlackTaskPolicy,
   getSlackSharedTaskOrigin,
   getSessionEventByClientEventId,
@@ -1318,7 +1318,7 @@ async function resolveSlackRouteForEntry(
           slackUserId: entry.slackUserId,
         })
       : Promise.resolve(null),
-    listSlackRoutableWorkspacesForSubject(deps.db, { accountId: home.accountId, subjectId }),
+    listNamedSubjectSlackRoutableWorkspaces(deps.db, { accountId: home.accountId, subjectId }),
   ]);
   return resolveSlackWorkspaceRoute({
     ...base,
@@ -1423,6 +1423,7 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
   // A mapped thread keeps the workspace it was created in, so the continuation
   // lookup is connection-scoped rather than workspace-fenced.
   const existing = await getSlackInteractionByConnectionRoute(deps.db, {
+    accountId: home.accountId,
     connectionId: entry.connectionId,
     routeKey,
   });
@@ -2123,6 +2124,7 @@ async function processSlackReactionInboxEntry(
   });
   const routeKey = slackRouteKey(entry.slackChannelId, context.threadTimestamp);
   const existing = await getSlackInteractionByConnectionRoute(deps.db, {
+    accountId: home.accountId,
     connectionId: entry.connectionId,
     routeKey,
   });
@@ -2719,6 +2721,7 @@ async function processSlackBlockAction(deps: ApiRouteDeps, entry: SlackInteracti
   // check below is unchanged and still runs in the handle's own tenancy.
   const handleTenancy =
     (await probeSlackActionHandleTenancy(deps.db, {
+      accountId: home.accountId,
       connectionId: entry.connectionId,
       handleId,
     })) ?? home;

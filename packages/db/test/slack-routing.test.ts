@@ -16,9 +16,9 @@ import {
   getSlackChannelRoute,
   getSlackUserDmRoute,
   grantWorkspaceAccess,
-  listSlackRoutableWorkspacesForSubject,
+  listNamedSubjectSlackRoutableWorkspaces,
   managedPersonalWorkspacePermissions,
-  personalWorkspaceIdForSubject,
+  namedSubjectPersonalWorkspaceId,
   probeSlackInteractionTenancy,
   resolveSlackTargetAuthority,
   upsertSlackChannelRoute,
@@ -92,7 +92,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("listSlackRoutableWorkspacesForSubject", () => {
+describe("listNamedSubjectSlackRoutableWorkspaces", () => {
   test("offers writable memberships plus the subject's own personal workspace", async () => {
     if (!client) return;
     const human = await provisionHuman("candidates");
@@ -127,7 +127,7 @@ describe("listSlackRoutableWorkspacesForSubject", () => {
       name: "Unrelated",
     });
 
-    const candidates = await listSlackRoutableWorkspacesForSubject(client.db, {
+    const candidates = await listNamedSubjectSlackRoutableWorkspaces(client.db, {
       accountId: human.accountId,
       subjectId: human.subjectId,
     });
@@ -151,7 +151,7 @@ describe("listSlackRoutableWorkspacesForSubject", () => {
     const human = await provisionHuman("scoped");
     const stranger = await provisionHuman("stranger");
 
-    const candidates = await listSlackRoutableWorkspacesForSubject(client.db, {
+    const candidates = await listNamedSubjectSlackRoutableWorkspaces(client.db, {
       accountId: human.accountId,
       subjectId: human.subjectId,
     });
@@ -161,7 +161,7 @@ describe("listSlackRoutableWorkspacesForSubject", () => {
 
     // Asking about an organization the subject does not belong to yields nothing.
     await expect(
-      listSlackRoutableWorkspacesForSubject(client.db, {
+      listNamedSubjectSlackRoutableWorkspaces(client.db, {
         accountId: stranger.accountId,
         subjectId: human.subjectId,
       }),
@@ -183,7 +183,7 @@ describe("listSlackRoutableWorkspacesForSubject", () => {
         permissions: ["sessions:create"],
       });
     }
-    const candidates = await listSlackRoutableWorkspacesForSubject(client.db, {
+    const candidates = await listNamedSubjectSlackRoutableWorkspaces(client.db, {
       accountId: human.accountId,
       subjectId: human.subjectId,
     });
@@ -205,7 +205,7 @@ describe("listSlackRoutableWorkspacesForSubject", () => {
                    set_config('opengeni.workspace_id', ${human.sharedWorkspaceId}, true),
                    set_config('opengeni.subject_id', ${human.subjectId}, true)`,
       );
-      await personalWorkspaceIdForSubject(tx, {
+      await namedSubjectPersonalWorkspaceId(tx, {
         accountId: other.accountId,
         subjectId: other.subjectId,
       });
@@ -221,7 +221,7 @@ describe("listSlackRoutableWorkspacesForSubject", () => {
     if (!client) return;
     const human = await provisionHuman("machine");
     await expect(
-      listSlackRoutableWorkspacesForSubject(client.db, {
+      listNamedSubjectSlackRoutableWorkspaces(client.db, {
         accountId: human.accountId,
         subjectId: `api_key:${crypto.randomUUID()}`,
       }),
@@ -245,6 +245,43 @@ describe("resolveSlackTargetAuthority", () => {
       principalKind: "human_session",
     });
     expect(grant?.permissions).toContain("sessions:create");
+  });
+
+  test("refuses a suspended organization member holding a stale membership row", async () => {
+    if (!client) return;
+    // `getWorkspaceGrant` is a bare membership join: it cannot see that the
+    // organization membership behind the row was suspended. Returning it
+    // verbatim would keep serving someone the organization has removed, and
+    // Slack is the one surface where that person still has a live credential
+    // pointed at the workspace.
+    const human = await provisionHuman("suspended-member");
+    await expect(
+      resolveSlackTargetAuthority(client.db, {
+        subjectId: human.subjectId,
+        targetAccountId: human.accountId,
+        targetWorkspaceId: human.sharedWorkspaceId,
+      }),
+    ).resolves.not.toBeNull();
+
+    await shared!.admin`
+      update organization_memberships set status = 'suspended'
+      where id = ${human.membershipId}::uuid`;
+
+    await expect(
+      resolveSlackTargetAuthority(client.db, {
+        subjectId: human.subjectId,
+        targetAccountId: human.accountId,
+        targetWorkspaceId: human.sharedWorkspaceId,
+      }),
+    ).resolves.toBeNull();
+    // The personal-workspace arm was already fenced and stays fenced.
+    await expect(
+      resolveSlackTargetAuthority(client.db, {
+        subjectId: human.subjectId,
+        targetAccountId: human.accountId,
+        targetWorkspaceId: human.personalWorkspaceId,
+      }),
+    ).resolves.toBeNull();
   });
 
   test("mints the personal-workspace grant only for its own owner", async () => {
@@ -362,7 +399,11 @@ describe("probeSlackInteractionTenancy", () => {
 
     // The caller here is scoped nowhere near the target workspace; the probe is
     // what makes thread continuation work across a routed workspace at all.
-    const probed = await probeSlackInteractionTenancy(client.db, { connectionId, routeKey });
+    const probed = await probeSlackInteractionTenancy(client.db, {
+      accountId: human.accountId,
+      connectionId,
+      routeKey,
+    });
     expect(probed).toEqual({
       accountId: human.accountId,
       workspaceId: target.id,
@@ -372,7 +413,22 @@ describe("probeSlackInteractionTenancy", () => {
     expect(Object.keys(probed ?? {}).sort()).toEqual(["accountId", "interactionId", "workspaceId"]);
 
     await expect(
-      probeSlackInteractionTenancy(client.db, { connectionId, routeKey: "absent" }),
+      probeSlackInteractionTenancy(client.db, {
+        accountId: human.accountId,
+        connectionId,
+        routeKey: "absent",
+      }),
+    ).resolves.toBeNull();
+
+    // Crossing workspaces inside one organization is the point. Crossing
+    // organizations never is, so another organization's id resolves nothing
+    // even with the right connection and route key.
+    await expect(
+      probeSlackInteractionTenancy(client.db, {
+        accountId: crypto.randomUUID(),
+        connectionId,
+        routeKey,
+      }),
     ).resolves.toBeNull();
   });
 });

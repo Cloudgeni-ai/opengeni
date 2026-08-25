@@ -1980,10 +1980,20 @@ export const slackUserDmRoutes = pgTable(
  * own `block_action` inbox row - so this column is provenance, not a live edge.
  *
  * `requestText` mirrors the inbox's exact 12000 byte bound so a prompt can
- * always carry the originating row's text losslessly, and `providerEventId` is
- * the ORIGINAL event so the answer can re-materialize it under the inbox's own
- * `(connection_id, provider_event_id)` dedupe unique. That is also what makes a
- * double-click unable to create two sessions.
+ * always carry the originating row's text losslessly.
+ *
+ * `providerEventId` is the ORIGINAL event, and it is PROVENANCE, not the id the
+ * answer re-materializes under. Migration 0335's comment claims the answer can
+ * re-insert the original event id under the inbox's own
+ * `(connection_id, provider_event_id)` dedupe unique; that is wrong, and the
+ * migration's bytes are frozen so the claim is corrected here instead. The
+ * original inbox row still exists and is settled `processed`, so re-inserting
+ * its id conflicts and does nothing, and the chosen workspace would never start
+ * any work at all. The answer must enqueue a DERIVED id -
+ * `<originalProviderEventId>:route:<promptId>` - which is unique per prompt and
+ * still idempotent, so a double-click cannot create two sessions. The
+ * `(connection_id, provider_event_id)` unique on this table is what makes
+ * Slack's retries of the same event unable to post a second picker.
  */
 export const slackRoutePrompts = pgTable(
   "slack_route_prompts",
