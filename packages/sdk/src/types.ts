@@ -5369,6 +5369,61 @@ export type DocumentDefaultCollectionBackfill = {
   completedAt: string | null;
 };
 
+export type DocumentDefaultCollectionBackfillRunAudit = Omit<
+  DocumentDefaultCollectionBackfill,
+  "operationId"
+> & {
+  actorSubjectId: string;
+  startedAt: string;
+  updatedAt: string;
+};
+
+export type DocumentDefaultCollectionBackfillOperationAudit = {
+  operationId: string;
+  result: DocumentDefaultCollectionBackfill;
+  createdAt: string;
+};
+
+export type DocumentDefaultCollectionBackfillReceiptAudit = {
+  workspaceId: string;
+  baseId: string;
+  outcome: "created" | "adopted";
+  createdAt: string;
+};
+
+export type ListDocumentDefaultCollectionBackfillRunsResponse = {
+  runs: DocumentDefaultCollectionBackfillRunAudit[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
+export type DocumentDefaultCollectionBackfillAudit = {
+  run: DocumentDefaultCollectionBackfillRunAudit;
+  operations: DocumentDefaultCollectionBackfillOperationAudit[];
+  receipts: DocumentDefaultCollectionBackfillReceiptAudit[];
+  operationsHasMore: boolean;
+  operationsNextCursor: string | null;
+  receiptsHasMore: boolean;
+  receiptsNextCursor: string | null;
+};
+
+export type GetDocumentDefaultCollectionBackfillAuditOptions = {
+  limit?: number | undefined;
+  operationCursor?: string | undefined;
+  receiptCursor?: string | undefined;
+};
+
+export type OrganizationDocumentAuthorityReclassification = DocumentAuthorityReclassification & {
+  actorSubjectId: string;
+  requestWorkspaceId: string;
+};
+
+export type ListOrganizationDocumentAuthorityReclassificationsResponse = {
+  receipts: OrganizationDocumentAuthorityReclassification[];
+  hasMore: boolean;
+  nextCursor: string | null;
+};
+
 export type DocumentSearchRequest = {
   query: string;
   baseIds?: string[] | undefined;
