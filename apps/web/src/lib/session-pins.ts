@@ -116,9 +116,16 @@ export class SessionChannelProjectionAuthority {
     ) {
       return "rejected";
     }
-    return this.recordRead(projection, request.readGeneration)
-      ? "accepted"
-      : "verification-required";
+    const key = sessionChannelProjectionKey(projection);
+    // Completed evidence newer than the mutation start may already be a
+    // post-commit value, so only a fresh point read can choose between it and
+    // this response. Otherwise settle the response at a new generation: every
+    // overlapping read already has an older generation even if it has not yet
+    // completed, and therefore cannot reassert a pre-commit snapshot later.
+    if (this.highestReadGeneration(key) > request.readGeneration) {
+      return "verification-required";
+    }
+    return this.recordRead(projection, this.beginRead()) ? "accepted" : "verification-required";
   }
 
   finishMoveRequest(owner: object, request: SessionChannelMoveRequest): void {

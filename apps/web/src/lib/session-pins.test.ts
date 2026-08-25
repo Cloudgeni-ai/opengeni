@@ -389,6 +389,24 @@ describe("session pin reconciliation", () => {
     expect(authority.project(beforeMove, overlappingReadGeneration).channelId).toBe("channel-b");
   });
 
+  test("fences an overlapping stale read that settles after a successful move response", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const owner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const { beginMoveRequest, recordMoveResponse } = portableMoveAuthority(authority);
+    const request = beginMoveRequest(owner, beforeMove)!;
+
+    // This GET snapshots pre-commit A while the PUT is pending, but does not
+    // settle until after the successful PUT response B has been accepted.
+    const overlappingReadGeneration = authority.beginRead();
+    expect(recordMoveResponse(owner, request, moved)).toBe("accepted");
+    expect(authority.recordRead(beforeMove, overlappingReadGeneration)).toBe(false);
+    expect(authority.project(beforeMove, overlappingReadGeneration).channelId).toBe("channel-b");
+    expect(authority.owns(moved)).toBe(true);
+    expect(authority.owns(beforeMove)).toBe(false);
+  });
+
   test("uses post-settlement authority before retiring an ambiguous move overlay", () => {
     const authority = new SessionChannelProjectionAuthority();
     const owner = {};

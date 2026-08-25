@@ -1114,9 +1114,9 @@ export function SessionList() {
           return;
         }
         if (moved) {
-          // The successful write response is exact evidence from this
-          // request's start. A later server read can therefore reject a
-          // delayed mutation response, while rail unmount cannot discard it.
+          // The successful write response is exact evidence. Settlement
+          // fences reads that started before it returned, while a completed
+          // newer read requires the post-response point verification below.
           const disposition = context.sessionChannelProjectionAuthority.recordMoveResponse(
             moveRequestOwner.current,
             moveRequest,
@@ -1136,13 +1136,11 @@ export function SessionList() {
               ? { ...current, channelId: moved.channelId ?? null }
               : current,
           );
-          if (disposition === "verification-required") {
-            // Start and await an exact read after the successful response has
-            // settled. It distinguishes an overlapping pre-commit A from a
-            // genuinely newer C while the persistent move token survives rail
-            // remounts and the committed B remains visible.
-            await verifySessionChannelMove(session.id, operation);
-          }
+          // Always start and await an exact read after the successful response
+          // settles. It distinguishes the committed B from a genuinely newer
+          // C; if it fails, the persistent move token and settlement fence keep
+          // B visible through rail remounts and late overlapping reads.
+          await verifySessionChannelMove(session.id, operation);
         } else {
           setChannelMoveOverrides((current) =>
             rollbackSessionChannelMove(current, session.id, operation),

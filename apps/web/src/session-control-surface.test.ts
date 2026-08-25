@@ -127,7 +127,7 @@ describe("session control surface architecture", () => {
     expect(list).toContain("sessionChannelProjectionAuthority.ownsMoveRequest(");
     expect(list).toContain("sessionChannelProjectionAuthority.recordMoveResponse(");
     expect(list).toContain('if (disposition === "rejected")');
-    expect(list).toContain('if (disposition === "verification-required")');
+    expect(list).not.toContain('if (disposition === "verification-required")');
     expect(list).toContain("await verifySessionChannelMove(session.id, operation)");
     expect(list).toContain("sessionChannelProjectionAuthority.finishMoveRequest(");
     expect(list).toContain("context.client.updateSessionChannel(");
