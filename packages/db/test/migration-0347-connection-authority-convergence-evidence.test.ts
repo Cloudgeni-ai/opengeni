@@ -37,7 +37,8 @@ function nestedErrorMessages(error: unknown): string {
 beforeAll(async () => {
   owned = await acquireOwnerMigratedTestDatabase("connection-authority-convergence-0347");
   if (!owned) {
-    if (requireRealDatabase) throw new Error("OPE-204 real PostgreSQL fixture is unavailable");
+    if (requireRealDatabase)
+      throw new Error("connection convergence real PostgreSQL fixture is unavailable");
     return;
   }
   await migrate(owned.ownerUrl);
@@ -90,13 +91,13 @@ describe("migration 0347 connection authority convergence evidence", () => {
     const workspaceId = crypto.randomUUID();
     await owned.admin`
       insert into managed_accounts (id, name, external_source, external_id)
-      values (${accountId}, 'OPE-204 convergence', 'better-auth:user', ${userId})`;
+      values (${accountId}, 'Connection convergence', 'better-auth:user', ${userId})`;
     await owned.admin`
       insert into auth_users (id, name, email)
-      values (${userId}, 'OPE-204 owner', ${`${userId}@example.test`})`;
+      values (${userId}, 'Connection convergence owner', ${`${userId}@example.test`})`;
     await owned.admin`
       insert into workspaces (id, account_id, name)
-      values (${workspaceId}, ${accountId}, 'OPE-204 shared')`;
+      values (${workspaceId}, ${accountId}, 'Connection convergence shared')`;
     await owned.admin`
       insert into workspace_inference_controls (workspace_id, account_id)
       values (${workspaceId}, ${accountId})`;
@@ -215,7 +216,7 @@ describe("migration 0347 connection authority convergence evidence", () => {
       organizationId: accountId,
       limit: 25,
       dryRun: false,
-      runKey: `ope204-membership-${crypto.randomUUID()}`,
+      runKey: `connection-membership-${crypto.randomUUID()}`,
     });
     expect(membership).toMatchObject({ drained: true, receiptStatus: "completed" });
     expect(membership.counts.provisioned).toBe(1);
@@ -430,7 +431,7 @@ describe("migration 0347 connection authority convergence evidence", () => {
       organizationId: accountId,
       limit: 25,
       dryRun: false,
-      runKey: `ope204-terminal-${crypto.randomUUID()}`,
+      runKey: `connection-terminal-${crypto.randomUUID()}`,
     });
     expect(remediation.counts.unresolved).toBeGreaterThanOrEqual(1);
     expect(remediation.unresolved).toEqual(

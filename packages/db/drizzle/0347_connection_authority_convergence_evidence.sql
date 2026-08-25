@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-204: bounded, tenant-fenced, actionable evidence for every connection
+-- Bounded, tenant-fenced, actionable evidence for every connection
 -- authority row that has not reached one of migration 0340's terminal shapes.
 
 SET LOCAL lock_timeout = '5s';
