@@ -128,6 +128,63 @@ describe("session pin reconciliation", () => {
     expect(authority.owns(beforeMove)).toBe(false);
   });
 
+  test("reconciles a committed move when a newer accepted detail wins before its probe", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const moveOwner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const movedAgain = { ...session, channelId: "channel-c" } as Session;
+    let overrides = beginSessionChannelMove(new Map(), session.id, moved.channelId ?? null, 1);
+    let current = beforeMove;
+
+    const subscribeToAcceptedReads = (
+      authority as SessionChannelProjectionAuthority & {
+        subscribeToAcceptedReads?: (
+          listener: (accepted: Pick<Session, "id" | "workspaceId" | "channelId">) => void,
+        ) => () => void;
+      }
+    ).subscribeToAcceptedReads?.bind(authority);
+    const unsubscribe =
+      subscribeToAcceptedReads?.((accepted) => {
+        const override = overrides.get(accepted.id);
+        if (override?.committed) {
+          overrides = reconcileSessionChannelMovePointRead(
+            overrides,
+            accepted.id,
+            override.operation,
+            accepted,
+          );
+        }
+        current = applySessionChannelProjection(current, accepted)!;
+      }) ?? (() => {});
+
+    const moveEvidenceGeneration = authority.beginRead();
+    expect(authority.recordRead(moved, moveEvidenceGeneration)).toBe(true);
+    overrides = commitSessionChannelMove(overrides, session.id, moved.channelId ?? null, 1);
+    current = moved;
+    authority.replace(moveOwner, [moved], 1);
+    const staleProbeGeneration = authority.beginRead();
+    const newerDetailGeneration = authority.beginRead();
+
+    expect(authority.recordRead(movedAgain, newerDetailGeneration)).toBe(true);
+    current = mergeSessionContextProjection(current, movedAgain, authority, "detail")!;
+    authority.replace(
+      moveOwner,
+      [{ ...moved, channelId: overrides.get(session.id)?.channelId ?? null }],
+      1,
+    );
+    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    expect(current.channelId).toBe("channel-c");
+
+    // A probe started before the newer detail is stale if it returns B, and a
+    // failed probe contributes no observation at all. Neither path can put B
+    // back after the accepted detail has reconciled the committed override.
+    expect(authority.recordRead(moved, staleProbeGeneration)).toBe(false);
+    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    expect(current.channelId).toBe("channel-c");
+    unsubscribe();
+  });
+
   test("does not evict an accepted winner while an older branch owner can revive", () => {
     const authority = new SessionChannelProjectionAuthority();
     const branchOwner = {};

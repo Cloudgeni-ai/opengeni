@@ -415,6 +415,28 @@ export function SessionList() {
   const [channelMoveOverrides, setChannelMoveOverrides] = useState<SessionChannelMoveOverrides>(
     () => new Map(),
   );
+  useEffect(
+    () =>
+      context.sessionChannelProjectionAuthority.subscribeToAcceptedReads((accepted) => {
+        if (accepted.workspaceId !== rail.workspaceId) return;
+        setChannelMoveOverrides((current) => {
+          const override = current.get(accepted.id);
+          return override?.committed
+            ? reconcileSessionChannelMovePointRead(
+                current,
+                accepted.id,
+                override.operation,
+                accepted,
+              )
+            : current;
+        });
+        // The route records an exact read before merging its full detail
+        // projection. Apply the accepted channel immediately so that merge
+        // cannot preserve an older committed move owner in the same batch.
+        setContextSession((current) => applySessionChannelProjection(current, accepted));
+      }),
+    [context.sessionChannelProjectionAuthority, rail.workspaceId, setContextSession],
+  );
   const [archiveTransitions, setArchiveTransitions] = useState<ReadonlySet<string>>(
     () => new Set(),
   );

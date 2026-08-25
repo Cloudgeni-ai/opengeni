@@ -107,7 +107,7 @@ export function reconcileSessionChannelMovePointRead(
   current: SessionChannelMoveOverrides,
   sessionId: string,
   operation: number,
-  authoritative: Session | null,
+  authoritative: Pick<Session, "channelId"> | null,
 ): SessionChannelMoveOverrides {
   const override = current.get(sessionId);
   if (!override || override.operation !== operation || !override.committed) return current;

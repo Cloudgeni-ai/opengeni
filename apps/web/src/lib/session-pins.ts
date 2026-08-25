@@ -21,6 +21,9 @@ type SessionChannelRead = {
   present: boolean;
   readGeneration: number;
 };
+type SessionChannelAcceptedRead = SessionChannelProjection & {
+  readGeneration: number;
+};
 
 function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspaceId">): string {
   return `${projection.workspaceId}\u0000${projection.id}`;
@@ -36,9 +39,18 @@ export class SessionChannelProjectionAuthority {
     ReadonlyMap<string, SessionChannelEvidence>
   >();
   private readonly acceptedReads = new Map<string, SessionChannelRead>();
+  private readonly acceptedReadListeners = new Set<
+    (accepted: SessionChannelAcceptedRead) => void
+  >();
   private nextReadGeneration = 0;
 
   readonly beginRead = (): number => ++this.nextReadGeneration;
+
+  /** Reconcile component-owned optimistic state when a newer exact read wins. */
+  subscribeToAcceptedReads(listener: (accepted: SessionChannelAcceptedRead) => void): () => void {
+    this.acceptedReadListeners.add(listener);
+    return () => this.acceptedReadListeners.delete(listener);
+  }
 
   replace(
     owner: object,
@@ -125,6 +137,15 @@ export class SessionChannelProjectionAuthority {
       readGeneration,
     });
     this.compactAcceptedReads();
+    if (present) {
+      const accepted = {
+        id: projection.id,
+        workspaceId: projection.workspaceId,
+        channelId: projection.channelId ?? null,
+        readGeneration,
+      };
+      for (const listener of this.acceptedReadListeners) listener(accepted);
+    }
     return true;
   }
 
