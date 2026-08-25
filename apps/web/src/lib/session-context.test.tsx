@@ -6,10 +6,18 @@ import type { Session } from "@/types";
 import { sameSessionForContext } from "./session-context";
 import {
   applySessionPinProjection,
+  applySessionRailProjection,
   mergeSessionContextProjection,
   SessionChannelProjectionAuthority,
 } from "./session-pins";
 import { beginSessionChannelMove, rollbackSessionChannelMove } from "./session-channel-move";
+import {
+  authoritativeSessionContinuation,
+  emptySessionContinuation,
+  mergeSessionContinuation,
+  rebaseSessionContinuation,
+  reconcileRetainedSessionContinuationChannel,
+} from "./session-pagination";
 
 registerDom();
 
@@ -141,9 +149,97 @@ describe("session context equality", () => {
     expect(reconciled?.status).toBe("running");
   });
 
+  test("lets a fresh detail move supersede a continuation row retained past page one", () => {
+    const listOwner = {};
+    const authority = new SessionChannelProjectionAuthority();
+    const retainedPageRow = {
+      ...session(false, 0),
+      channelId: "00000000-0000-4000-8000-000000000202",
+      status: "idle",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+      },
+    } as Session;
+    const remoteMoveDetail = {
+      ...retainedPageRow,
+      channelId: "00000000-0000-4000-8000-000000000203",
+      status: "running",
+      treeStats: undefined,
+    } as Session;
+    let continuation = mergeSessionContinuation(
+      emptySessionContinuation(3),
+      3,
+      3,
+      { sessions: [retainedPageRow], nextCursor: null },
+      10,
+    );
+
+    // The continuation page was loaded from the current page-one snapshot, so
+    // it is genuine list evidence and still wins over a conflicting detail.
+    authority.replace(listOwner, authoritativeSessionContinuation(continuation, 3, 10));
+    expect(
+      mergeSessionContextProjection(retainedPageRow, remoteMoveDetail, authority, "detail")
+        ?.channelId,
+    ).toBe(retainedPageRow.channelId);
+
+    // A newer page-one poll omits this old page-N row. Keep it visible for
+    // stable pagination, but release its channel authority so the causally
+    // fresh point/detail read can move both context and the selected rail row.
+    authority.replace(listOwner, authoritativeSessionContinuation(continuation, 3, 11));
+    const afterDetail = mergeSessionContextProjection(
+      retainedPageRow,
+      remoteMoveDetail,
+      authority,
+      "detail",
+    );
+    expect(afterDetail?.channelId).toBe(remoteMoveDetail.channelId);
+    continuation = reconcileRetainedSessionContinuationChannel(continuation, 3, 11, afterDetail);
+    expect(continuation.sessions[0]?.channelId).toBe(remoteMoveDetail.channelId);
+    expect(
+      applySessionRailProjection(afterDetail!, retainedPageRow, { channelOwned: false }),
+    ).toMatchObject({
+      channelId: remoteMoveDetail.channelId,
+      status: "running",
+      treeStats: retainedPageRow.treeStats,
+    });
+
+    // A stale route/SSE projection cannot put the accepted detail move back.
+    expect(
+      mergeSessionContextProjection(afterDetail, retainedPageRow, authority, "live")?.channelId,
+    ).toBe(remoteMoveDetail.channelId);
+
+    // Re-paging from a fresh snapshot restores exact list authority without
+    // duplicating the display row.
+    continuation = rebaseSessionContinuation(continuation, 3, 3, "fresh-next", 11);
+    continuation = mergeSessionContinuation(
+      continuation,
+      3,
+      3,
+      { sessions: [remoteMoveDetail], nextCursor: null },
+      11,
+    );
+    expect(continuation.sessions.map((candidate) => candidate.id)).toEqual([retainedPageRow.id]);
+    authority.replace(listOwner, authoritativeSessionContinuation(continuation, 3, 11));
+    const laterConflictingDetail = {
+      ...remoteMoveDetail,
+      channelId: "00000000-0000-4000-8000-000000000204",
+    } as Session;
+    expect(
+      mergeSessionContextProjection(afterDetail, laterConflictingDetail, authority, "detail")
+        ?.channelId,
+    ).toBe(remoteMoveDetail.channelId);
+  });
+
   test("releases a rolled-back move fence so detail can restore the prior project", () => {
     const authority = new SessionChannelProjectionAuthority();
-    const owner = {};
+    const listOwner = {};
+    const moveOwner = {};
     const optimistic = {
       ...session(false, 0),
       channelId: "00000000-0000-4000-8000-000000000202",
@@ -159,8 +255,9 @@ describe("session context equality", () => {
       optimistic.channelId ?? null,
       1,
     );
+    authority.replace(listOwner, [staleRoute]);
     authority.replace(
-      owner,
+      moveOwner,
       [...overrides].map(([id, override]) => ({
         id,
         workspaceId: optimistic.workspaceId,
@@ -175,7 +272,7 @@ describe("session context equality", () => {
 
     overrides = rollbackSessionChannelMove(overrides, optimistic.id, 1);
     authority.replace(
-      owner,
+      moveOwner,
       [...overrides].map(([id, override]) => ({
         id,
         workspaceId: optimistic.workspaceId,
@@ -183,8 +280,20 @@ describe("session context equality", () => {
       })),
       1,
     );
+    const afterRollback = mergeSessionContextProjection(
+      optimistic,
+      staleRoute,
+      authority,
+      "detail",
+    );
+    expect(afterRollback?.channelId).toBe(staleRoute.channelId);
     expect(
-      mergeSessionContextProjection(optimistic, staleRoute, authority, "detail")?.channelId,
+      mergeSessionContextProjection(
+        afterRollback,
+        { ...staleRoute, channelId: "00000000-0000-4000-8000-000000000204" },
+        authority,
+        "detail",
+      )?.channelId,
     ).toBe(staleRoute.channelId);
   });
 

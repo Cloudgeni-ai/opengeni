@@ -188,9 +188,16 @@ export function mergeSessionContextProjection(
  * content. A route/SSE object must never overwrite a newer cross-device unpin,
  * while a list poll must never regress lifecycle state or message content.
  */
-export function applySessionRailProjection(current: Session, projected: Session): Session {
+export function applySessionRailProjection(
+  current: Session,
+  projected: Session,
+  options: { channelOwned?: boolean } = {},
+): Session {
   const pinned = applySessionPinProjection(current, projected) ?? current;
-  const merged = applySessionChannelProjection(pinned, projected) ?? pinned;
+  const merged =
+    options.channelOwned === false
+      ? pinned
+      : (applySessionChannelProjection(pinned, projected) ?? pinned);
   if (sameTreeStats(merged.treeStats, projected.treeStats)) {
     return merged;
   }

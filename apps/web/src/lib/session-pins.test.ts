@@ -187,6 +187,33 @@ describe("session pin reconciliation", () => {
     });
   });
 
+  test("retains display-only list fields without copying an expired channel projection", () => {
+    const current = { ...session, channelId: "channel-new" } as Session;
+    const retained = {
+      ...session,
+      channelId: "channel-old",
+      pinned: true,
+      pinnedAt: "2026-07-10T00:05:00.000Z",
+      pinVersion: 5,
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 1,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+      },
+    } as Session;
+
+    expect(applySessionRailProjection(current, retained, { channelOwned: false })).toMatchObject({
+      channelId: "channel-new",
+      pinned: true,
+      pinVersion: 5,
+      treeStats: retained.treeStats,
+    });
+  });
+
   test("preserves rail identity when a fresh equal tree summary is returned", () => {
     const treeStats = {
       directChildren: 2,

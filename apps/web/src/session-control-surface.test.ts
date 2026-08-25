@@ -111,6 +111,10 @@ describe("session control surface architecture", () => {
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
     expect(list).toContain("readSessionChannelMovePoint(sessionClient");
     expect(list).toContain("sessionChannelProjectionAuthority.replace(");
+    expect(list).toContain("authoritativeSessionContinuation(");
+    expect(list).toContain("replace(owner, channelAuthoritySessions)");
+    expect(list).not.toContain("replace(owner, listedSessions)");
+    expect(list).toContain("applySessionRailProjection(session, projected, { channelOwned })");
     expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
     expect(list).toContain("reconcileSessionChannelMovePointRead(");
     expect(list).toContain("requestError.status === 404");

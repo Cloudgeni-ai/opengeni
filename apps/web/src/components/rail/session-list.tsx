@@ -76,9 +76,11 @@ import { useAppContext } from "@/context";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
+  authoritativeSessionContinuation,
   emptySessionContinuation,
   mergeSessionContinuation,
   rebaseSessionContinuation,
+  reconcileRetainedSessionContinuationChannel,
   sessionPageKey,
 } from "@/lib/session-pagination";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
@@ -310,7 +312,14 @@ export function SessionList() {
   const [sessionPendingDelete, setSessionPendingDelete] = useState<Session | null>(null);
   const [draggedProjectId, setDraggedProjectId] = useState<string | null>(null);
   const [dragOverProjectId, setDragOverProjectId] = useState<string | null>(null);
-  const { sessions, nextCursor, loading, error, refresh } = rootPage;
+  const {
+    sessions,
+    nextCursor,
+    loading,
+    error,
+    readRevision: rootReadRevision,
+    refresh,
+  } = rootPage;
   const { sessions: archivedSessions, refresh: refreshArchivedSessions } = archivedRootPage;
   const {
     pinned: globalPinned,
@@ -347,8 +356,19 @@ export function SessionList() {
   const [continuation, setContinuation] = useState(() => emptySessionContinuation(pageGeneration));
   const activeContinuation = activeSessionContinuation(continuation, pageGeneration);
   const extraSessions = activeContinuation.sessions;
+  const authoritativeExtraSessions = authoritativeSessionContinuation(
+    activeContinuation,
+    pageGeneration,
+    rootReadRevision,
+  );
   const continuationCursor =
     activeContinuation.nextCursor === undefined ? nextCursor : activeContinuation.nextCursor;
+  const continuationSnapshotReadRevision =
+    activeContinuation.nextCursor === undefined
+      ? rootReadRevision
+      : activeContinuation.snapshotReadRevision;
+  const rootReadRevisionRef = useRef(rootReadRevision);
+  rootReadRevisionRef.current = rootReadRevision;
   const [loadingMoreGeneration, setLoadingMoreGeneration] = useState<number | null>(null);
   const loadingMore = loadingMoreGeneration === pageGeneration;
   const loadMoreAttempt = useRef(0);
@@ -424,11 +444,33 @@ export function SessionList() {
     }
     return [...source.values()];
   }, [extraSessions, loadedChildren, pinned, sessions]);
+  const channelAuthoritySessions = useMemo(() => {
+    const source = new Map<string, Session>();
+    for (const session of [...authoritativeExtraSessions, ...sessions, ...pinned]) {
+      const current = source.get(session.id);
+      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
+    }
+    return [...source.values()];
+  }, [authoritativeExtraSessions, pinned, sessions]);
+  const channelAuthorityById = useMemo(
+    () => new Map(channelAuthoritySessions.map((session) => [session.id, session])),
+    [channelAuthoritySessions],
+  );
+  useEffect(() => {
+    setContinuation((current) =>
+      reconcileRetainedSessionContinuationChannel(
+        current,
+        pageGeneration,
+        rootReadRevision,
+        context.session,
+      ),
+    );
+  }, [context.session, pageGeneration, rootReadRevision]);
   useLayoutEffect(() => {
     const owner = listChannelProjectionOwner.current;
-    context.sessionChannelProjectionAuthority.replace(owner, listedSessions);
+    context.sessionChannelProjectionAuthority.replace(owner, channelAuthoritySessions);
     return () => context.sessionChannelProjectionAuthority.clear(owner);
-  }, [context.sessionChannelProjectionAuthority, listedSessions]);
+  }, [channelAuthoritySessions, context.sessionChannelProjectionAuthority]);
   useLayoutEffect(() => {
     const owner = moveChannelProjectionOwner.current;
     context.sessionChannelProjectionAuthority.replace(
@@ -459,10 +501,23 @@ export function SessionList() {
       : [];
     for (const session of lineageSessions) {
       const projected = source.get(session.id);
-      source.set(session.id, projected ? applySessionRailProjection(session, projected) : session);
+      const authoritative = channelAuthorityById.get(session.id);
+      const channelOwned =
+        authoritative !== undefined &&
+        (authoritative.channelId ?? null) === (projected?.channelId ?? null);
+      source.set(
+        session.id,
+        projected ? applySessionRailProjection(session, projected, { channelOwned }) : session,
+      );
     }
     return [...source.values()];
-  }, [activeLineage.lineage?.ancestors, context.session, hierarchyMode, listedSessions]);
+  }, [
+    activeLineage.lineage?.ancestors,
+    channelAuthorityById,
+    context.session,
+    hierarchyMode,
+    listedSessions,
+  ]);
   const allSessions = useMemo(() => {
     const source = new Map(serverSessions.map((session) => [session.id, session]));
     for (const [id, override] of pinOverrides) {
@@ -1396,6 +1451,7 @@ export function SessionList() {
   const loadMore = useCallback(async () => {
     if (!continuationCursor || loadingMore) return;
     const requestGeneration = pageGeneration;
+    let requestSnapshotReadRevision = continuationSnapshotReadRevision;
     const attempt = ++loadMoreAttempt.current;
     const requestIsCurrent = (): boolean =>
       paginationIdentity.current.generation === requestGeneration &&
@@ -1426,12 +1482,14 @@ export function SessionList() {
         // instead of creating an unbounded cursor-refresh loop.
         const freshFirstPage = await listPage();
         if (!requestIsCurrent()) return;
+        requestSnapshotReadRevision = rootReadRevisionRef.current;
         setContinuation((current) =>
           rebaseSessionContinuation(
             current,
             pageGeneration,
             requestGeneration,
             freshFirstPage.nextCursor,
+            requestSnapshotReadRevision,
           ),
         );
         if (!freshFirstPage.nextCursor) {
@@ -1442,7 +1500,13 @@ export function SessionList() {
       }
       if (!requestIsCurrent()) return;
       setContinuation((current) =>
-        mergeSessionContinuation(current, pageGeneration, requestGeneration, page),
+        mergeSessionContinuation(
+          current,
+          pageGeneration,
+          requestGeneration,
+          page,
+          requestSnapshotReadRevision,
+        ),
       );
       setAnnouncement(
         page.sessions.length === 0
@@ -1466,6 +1530,7 @@ export function SessionList() {
   }, [
     context.client,
     continuationCursor,
+    continuationSnapshotReadRevision,
     hierarchyMode,
     loadingMore,
     pageGeneration,

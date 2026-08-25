@@ -210,6 +210,7 @@ describe("useWorkspaceSessions", () => {
       "pinned",
       "ordinary",
     ]);
+    expect(hook.result.current.readRevision).toBe(1);
     expect(hook.result.current.pinned.map((session) => session.id)).toEqual(["pinned"]);
     expect(hook.result.current.pinnedTruncated).toBe(true);
     expect(hook.result.current.nextCursor).toBe("next-page");
@@ -277,8 +278,37 @@ describe("useWorkspaceSessions", () => {
     });
     await flush();
     expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["stable"]);
+    expect(hook.result.current.readRevision).toBe(1);
     expect(hook.result.current.error?.message).toBe("poll unavailable");
     expect(hook.result.current.loading).toBe(false);
+    await hook.unmount();
+  });
+
+  test("increments the authoritative list revision only after successful reads", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      listSessionPage: async () => {
+        calls += 1;
+        return {
+          pinned: [],
+          sessions: [{ id: `session-${calls}` } as never],
+          nextCursor: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useWorkspaceSessions({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.readRevision).toBe(1);
+
+    await reactAct(async () => {
+      await hook.result.current.refresh();
+    });
+    await flush();
+    expect(hook.result.current.readRevision).toBe(2);
+    expect(hook.result.current.sessions.map((session) => session.id)).toEqual(["session-2"]);
     await hook.unmount();
   });
 
