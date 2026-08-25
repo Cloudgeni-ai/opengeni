@@ -408,9 +408,25 @@ describe("timeline scroll ownership browser regression", () => {
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
 
+    // Streaming at the live edge changes the newest item and row count only.
+    // The pending older-page owner must survive so its rejection can still
+    // authorize the explicit retry.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.appendLiveItem());
+    await page.locator('[data-conversation-message="user-1001"]').waitFor({ timeout: 5_000 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
     await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("failure"));
     const retry = page.getByRole("button", { name: "Retry earlier activity" });
     await retry.waitFor({ timeout: 5_000 });
+
+    // Tail-only growth after failure must preserve Retry and must not become a
+    // silent automatic retry for hosts without synchronous loading state.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.appendLiveItem());
+    await page.locator('[data-conversation-message="user-1002"]').waitFor({ timeout: 5_000 });
+    await page.waitForTimeout(250);
+    expect(await retry.count()).toBe(1);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
 
     // A timeline/chrome resize can make the rejected window scrollable.
     // Observing that geometry must not auto-load, and the explicit retry must

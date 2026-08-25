@@ -5,6 +5,7 @@ import { MessageTimeline, type TimelineItem } from "@opengeni/react";
 import "./styles.css";
 
 type TimelineCollapsedHistoryHarness = {
+  appendLiveItem: () => void;
   armOlder: () => void;
   loadCalls: () => number;
   prependUnderfilledPage: () => void;
@@ -112,6 +113,7 @@ function Harness() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadCalls, setLoadCalls] = useState(0);
   const loadCallsRef = useRef(0);
+  const liveAppendRef = useRef(0);
   const pendingLoadRef = useRef<{
     promise: Promise<boolean>;
     resolve: (value: boolean) => void;
@@ -156,6 +158,11 @@ function Harness() {
       ...settledTurn(100 + call * 40, `overlap-turn-${call}`, `Overlap turn ${call}`, false),
       ...current,
     ]);
+  }, []);
+
+  const appendLiveItem = useCallback(() => {
+    const append = ++liveAppendRef.current;
+    setItems((current) => [...current, userMessage(1_000 + append)]);
   }, []);
 
   const settleLoad = useCallback(
@@ -212,6 +219,7 @@ function Harness() {
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
+      appendLiveItem,
       armOlder: () => setHasOlder(true),
       loadCalls: () => loadCallsRef.current,
       prependUnderfilledPage,
@@ -237,7 +245,7 @@ function Harness() {
     return () => {
       delete window.timelineCollapsedHistoryHarness;
     };
-  }, [loadCalls, prependUnderfilledPage, scroller, settleLoad, settleOlder]);
+  }, [appendLiveItem, loadCalls, prependUnderfilledPage, scroller, settleLoad, settleOlder]);
 
   return (
     <main style={{ padding: 32 }} data-og-theme="light">

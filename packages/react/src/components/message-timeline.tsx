@@ -377,11 +377,13 @@ export function MessageTimeline({
   // A collapsed history tail can be shorter than the viewport. In that state
   // there is no upward scroll range, so reader intent can never arm the top
   // sentinel. Request one older page per loaded window until history either
-  // fills the viewport or the host reports that no older rows remain.
-  const underfillLoadAttemptRef = useRef<readonly [string] | null>(null);
-  const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<readonly [string] | null>(
-    null,
-  );
+  // fills the viewport or the host reports that no older rows remain. Each
+  // attempt owns the oldest loaded item boundary; live-tail appends do not
+  // advance older pagination or release that owner.
+  const underfillLoadAttemptRef = useRef<readonly [string | null] | null>(null);
+  const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<
+    readonly [string | null] | null
+  >(null);
   const underfillRetryReadyRef = useRef(false);
   const [underfillRetryReady, setUnderfillRetryReady] = useState(false);
   const resizeFollowRafRef = useRef<number | null>(null);
@@ -461,8 +463,7 @@ export function MessageTimeline({
   const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
   const firstItemContentTopRef = useRef<number | null>(null);
   const firstItemId = resolvedItems[0]?.id ?? null;
-  const lastItemId = resolvedItems.at(-1)?.id ?? null;
-  const loadedWindowKey = JSON.stringify([firstItemId, lastItemId, resolvedItems.length]);
+  const olderBoundaryKey = firstItemId;
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk =
@@ -746,7 +747,7 @@ export function MessageTimeline({
         return;
       }
       let attempt = underfillLoadAttemptRef.current;
-      if (attempt && (attempt[0] !== loadedWindowKey || !hasOlder)) {
+      if (attempt && (attempt[0] !== olderBoundaryKey || !hasOlder)) {
         // The requested page landed. Ordinary sentinel prefetch may own the
         // next approach to the top once this window has a usable scroll range.
         underfillLoadAttemptRef.current = null;
@@ -762,11 +763,11 @@ export function MessageTimeline({
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
-        (attempt?.[0] === loadedWindowKey && !retry)
+        (attempt?.[0] === olderBoundaryKey && !retry)
       ) {
         return;
       }
-      attempt = [loadedWindowKey];
+      attempt = [olderBoundaryKey];
       underfillLoadAttemptRef.current = attempt;
       underfillRetryReadyRef.current = false;
       setUnderfillRetryReady(false);
@@ -794,7 +795,7 @@ export function MessageTimeline({
       }
       void Promise.resolve(result).then(settle, settle);
     },
-    [hasOlder, loadedWindowKey, loadingOlder, onLoadOlder],
+    [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
 
   // Promise settlement is not itself permission to auto-retry: the parent may
@@ -805,7 +806,7 @@ export function MessageTimeline({
     if (!attempt || underfillLoadAttemptRef.current !== attempt) {
       return;
     }
-    if (loadedWindowKey !== attempt[0] || !hasOlder) {
+    if (olderBoundaryKey !== attempt[0] || !hasOlder) {
       underfillLoadAttemptRef.current = null;
       underfillRetryReadyRef.current = false;
       setUnderfillRetryReady(false);
@@ -816,7 +817,7 @@ export function MessageTimeline({
     }
     underfillRetryReadyRef.current = true;
     setUnderfillRetryReady(true);
-  }, [hasOlder, loadedWindowKey, loadingOlder, underfillSettledAttempt]);
+  }, [hasOlder, loadingOlder, olderBoundaryKey, underfillSettledAttempt]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
   const driveFollow = useCallback(

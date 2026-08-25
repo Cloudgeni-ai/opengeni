@@ -1401,8 +1401,18 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     expect(calls).toBe(1);
 
-    // ResizeObserver can fire repeatedly while the same request is pending.
-    resizeCallback([], resizeObserver!);
+    // A streamed append changes the live tail, not the older-page boundary.
+    // It must retain the pending owner even for hosts that do not synchronously
+    // reflect loadingOlder or deduplicate their callback.
+    const pendingAppendItems = [...items, userItem("live-tail-1", "live tail 1")];
+    await r.rerender(
+      <MessageTimeline
+        items={pendingAppendItems}
+        status="running"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+      />,
+    );
     resizeCallback([], resizeObserver!);
     resizeCallback([], resizeObserver!);
     await drainFrames(frames);
@@ -1410,18 +1420,26 @@ describe("MessageTimeline pagination affordances", () => {
 
     await actRun(() => first.reject(new Error("transient listEvents failure")));
     await flush();
-    const retry = r.container.querySelector("[data-og-retry]");
-    expect(retry).not.toBeNull();
+    expect(r.container.querySelector("[data-og-retry]")).not.toBeNull();
 
-    // Failure never becomes an automatic retry loop, even across unrelated
-    // commits and repeated resize notifications against the same short window.
+    // A later streamed append must retain the rejected owner and its explicit
+    // retry instead of silently starting a new request for the same oldest
+    // boundary.
+    const rejectedAppendItems = [...pendingAppendItems, userItem("live-tail-2", "live tail 2")];
     await r.rerender(
-      <MessageTimeline items={items} status="running" hasOlder onLoadOlder={onLoadOlder} />,
+      <MessageTimeline
+        items={rejectedAppendItems}
+        status="idle"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+      />,
     );
     resizeCallback([], resizeObserver!);
     resizeCallback([], resizeObserver!);
     await drainFrames(frames);
     expect(calls).toBe(1);
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
 
     await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(calls).toBe(2);
@@ -1436,7 +1454,7 @@ describe("MessageTimeline pagination affordances", () => {
 
     await r.rerender(
       <MessageTimeline
-        items={[reasoningItem("older-step", "older step"), ...items]}
+        items={[reasoningItem("older-step", "older step"), ...rejectedAppendItems]}
         hasOlder={false}
         onLoadOlder={onLoadOlder}
       />,
