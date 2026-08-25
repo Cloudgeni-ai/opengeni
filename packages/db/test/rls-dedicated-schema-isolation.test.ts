@@ -25,6 +25,7 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   rlsStrategyFor,
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
@@ -588,7 +589,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           name,
           owner: "postgres",
           execute: true,
-          publicExecute: false,
+          publicExecute: (
+            RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
+          ).includes(name),
           securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
             name,
           ),
