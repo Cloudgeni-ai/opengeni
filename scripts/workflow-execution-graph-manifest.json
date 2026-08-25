@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "50a3d99bcc370d90fe7fd0763c278cc5487f96be128157abd7837e0329d0a8dc"
+      "sha256": "1a532e5004b6a09bafb34d77e83d67619470585718a70858778596ef21f28319"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -217,7 +217,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "build",
       "step": "Build interaction helpers (macOS universal)",
-      "sha256": "c6d3fe6759106ce4d97dd131b7cff51174284b2194851234d67f98adfdce70ad"
+      "sha256": "c867bd7327a3eeb76ba10d2d58568856f06af4fc8cfe84eb2495cf055531eb31"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",

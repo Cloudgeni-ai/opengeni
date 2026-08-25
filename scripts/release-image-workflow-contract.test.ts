@@ -1228,6 +1228,24 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain(
       'rcodesign notary-submit --api-key-path /tmp/asc.json --wait "${{ matrix.asset }}"',
     );
+    const macHelperBuild = agentRelease.slice(
+      agentRelease.indexOf("Build interaction helpers (macOS universal)"),
+      agentRelease.indexOf("Intel cargo test (macOS coverage)"),
+    );
+    const armCompile = macHelperBuild.indexOf("bun build --compile --target=bun-darwin-arm64");
+    const armSign = macHelperBuild.indexOf("codesign --force --sign - opengeni-browserd-arm64");
+    const armVerify = macHelperBuild.indexOf("codesign --verify --strict opengeni-browserd-arm64");
+    const universalBrowserd = macHelperBuild.indexOf(
+      "lipo -create opengeni-browserd-x64 opengeni-browserd-arm64",
+    );
+    const armEmbed = macHelperBuild.indexOf(
+      'OPENGENI_EMBEDDED_BROWSERD="$GITHUB_WORKSPACE/opengeni-browserd-arm64"',
+    );
+    expect(armCompile).toBeGreaterThan(-1);
+    expect(armSign).toBeGreaterThan(armCompile);
+    expect(armVerify).toBeGreaterThan(armSign);
+    expect(universalBrowserd).toBeGreaterThan(armVerify);
+    expect(armEmbed).toBeGreaterThan(armVerify);
     const finalBundleArchive = agentRelease.lastIndexOf(
       'ditto -c -k --keepParent "$APP" "OpenGeni-Agent.app.zip"',
     );

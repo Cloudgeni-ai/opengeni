@@ -226,6 +226,12 @@ jobs:
           bun build --compile --target=bun-darwin-arm64 packages/browserd/src/main.ts \
             --define "process.env.OPENGENI_RUNTIME_BUILD_ID=\"${GITHUB_SHA}\"" \
             --outfile opengeni-browserd-arm64
+          # Bun 1.4.0's darwin-arm64 compiler emits an invalid ad-hoc signature
+          # that macOS 27 rejects at launch. Replace and verify the signature on
+          # the exact thin bytes before either lipo or Cargo embeds them; signing
+          # the outer agent or app bundle later cannot repair a materialized child.
+          codesign --force --sign - opengeni-browserd-arm64
+          codesign --verify --strict opengeni-browserd-arm64
           lipo -create opengeni-browserd-x64 opengeni-browserd-arm64 \
             -output "opengeni-browserd-${{ matrix.target }}"
           OPENGENI_BROWSERD_TARGET_PLATFORM=darwin \
