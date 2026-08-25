@@ -445,7 +445,20 @@ export async function resolvePinnedDestination(
       `${label} may not target a private or special-use network address`,
     );
   }
-  return { url, hostname, addresses: normalizedAddresses };
+  return { url, hostname, addresses: preferIpv4Addresses(normalizedAddresses) };
+}
+
+/**
+ * Keep every vetted resolver answer pinned, but prefer IPv4 when both public
+ * families are available. Docker hosts commonly advertise public IPv6 DNS
+ * without an IPv6 egress route; selecting that answer first turns a healthy
+ * dual-stack destination into a deterministic connection failure.
+ */
+function preferIpv4Addresses(addresses: readonly DnsAddress[]): DnsAddress[] {
+  return [
+    ...addresses.filter((entry) => entry.family === 4),
+    ...addresses.filter((entry) => entry.family === 6),
+  ];
 }
 
 /**
