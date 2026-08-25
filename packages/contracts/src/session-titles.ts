@@ -24,13 +24,18 @@ const KNOWN_SENSITIVE_VALUE_PATTERNS = [
   /\bAKIA[0-9A-Z]{16}\b/u,
   /\bAIza[0-9A-Za-z_-]{20,}\b/u,
   /\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u,
-  /\b(?:file|git|https?|ssh):\/\/\S+/iu,
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/iu,
+  /\b[a-z][a-z0-9+.-]*:\S+/iu,
   /[?&](?:access_token|api_key|apikey|password|secret|token)=[^\s&#]+/iu,
 ] as const;
 
 const SCHEMELESS_HOST_CANDIDATE_PATTERN =
   /\b(?:www\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?(?::\d{1,5})?(?:[/?#][^\s]*)?/giu;
+
+const SCHEMELESS_LOCAL_NETWORK_PATTERNS = [
+  /\blocalhost(?:(?::\d{1,5})(?:[/?#][^\s]*)?|[/?#][^\s]*)/iu,
+  /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:(?::\d{1,5})(?:[/?#][^\s]*)?|[/?#][^\s]*)/u,
+  /\[(?=[0-9a-f:.]*:[0-9a-f:.]*\])[0-9a-f:.]+\](?:(?::\d{1,5})(?:[/?#][^\s]*)?|[/?#][^\s]*)/iu,
+] as const;
 
 const FILE_LIKE_HOST_SUFFIXES = new Set([
   "css",
@@ -118,6 +123,8 @@ function containsSensitiveAssignment(value: string): boolean {
 }
 
 function containsSchemelessUrl(value: string): boolean {
+  if (SCHEMELESS_LOCAL_NETWORK_PATTERNS.some((pattern) => pattern.test(value))) return true;
+
   for (const match of value.matchAll(SCHEMELESS_HOST_CANDIDATE_PATTERN)) {
     const candidate = match[0];
     if (candidate.toLowerCase().startsWith("www.")) return true;

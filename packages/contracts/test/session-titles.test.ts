@@ -110,6 +110,35 @@ describe("automatic session titles", () => {
     );
   });
 
+  test("rejects non-HTTP schemes and local network URL forms", () => {
+    expect(normalizeAutomaticSessionTitle("Connect nats://localhost:4222")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Open ftp://files.internal")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Use ws://[::1]/socket")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Inspect custom+tls://service.internal/path")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Email mailto:ops@example.com")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Resolve urn:example:service")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Open localhost:3000/admin")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Inspect 10.0.0.5/reset")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Use [::1]/socket")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Open [2001:db8::7]:8443/admin")).toBeNull();
+  });
+
+  test("preserves benign localhost, IP-version, IPv6, and protocol discussion", () => {
+    expect(normalizeAutomaticSessionTitle("Review localhost development setup")).toBe(
+      "Review localhost development setup",
+    );
+    expect(normalizeAutomaticSessionTitle("Compare release 10.0.0.5 notes")).toBe(
+      "Compare release 10.0.0.5 notes",
+    );
+    expect(normalizeAutomaticSessionTitle("Discuss IPv6 ::1 routing")).toBe(
+      "Discuss IPv6 ::1 routing",
+    );
+    expect(normalizeAutomaticSessionTitle("FTP protocol migration")).toBe("FTP protocol migration");
+    expect(normalizeAutomaticSessionTitle("Status: ready for review")).toBe(
+      "Status: ready for review",
+    );
+  });
+
   test("rejects secret key and access key assignment suffix chains", () => {
     expect(normalizeAutomaticSessionTitle("STRIPE_SECRET_KEY=sesame")).toBeNull();
     expect(normalizeAutomaticSessionTitle("AWS_SECRET_ACCESS_KEY=swordfish")).toBeNull();
