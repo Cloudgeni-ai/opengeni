@@ -3381,6 +3381,9 @@ describe("runtime event normalization", () => {
     });
     expect(agent.instructions).toContain("Session-scoped rule.");
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
+    expect(GENESIS_TITLE_DIRECTIVE).toContain("topic label");
+    expect(GENESIS_TITLE_DIRECTIVE).toContain("not a quote or prefix");
+    expect(GENESIS_TITLE_DIRECTIVE).toContain("credentials");
 
     const filter = oneShotGenesisTitleInputFilter();
     const first = await filter({

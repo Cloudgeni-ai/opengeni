@@ -93,26 +93,25 @@ function session(patch: Partial<Session> = {}): Session {
 }
 
 describe("sessionDisplayTitle", () => {
-  test("prefers the durable title, then the initial message, then a placeholder", () => {
+  test("prefers the durable title and never falls back to raw prompt text", () => {
     expect(sessionDisplayTitle(session({ title: "  Ship the rename UI  " }))).toBe(
       "Ship the rename UI",
     );
-    expect(sessionDisplayTitle(session({ title: null }))).toBe("Inspect the repo");
-    expect(sessionDisplayTitle(session({ title: null, initialMessage: "   " }))).toBe(
-      "Untitled session",
-    );
+    expect(sessionDisplayTitle(session({ title: null }))).toBe("New conversation");
+    expect(
+      sessionDisplayTitle(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" })),
+    ).toBe("New conversation");
     expect(
       sessionDisplayTitle(session({ title: "   ", initialMessage: null as unknown as string })),
-    ).toBe("Untitled session");
+    ).toBe("New conversation");
   });
 });
 
 describe("renameSeedValue", () => {
-  test("seeds the editor from the real title/message, never the placeholder", () => {
-    // The editor must open onto editable text, not the "Untitled session"
-    // placeholder, and an empty session opens to an empty field.
+  test("seeds the editor only from durable title metadata, never prompt text or fallback", () => {
     expect(renameSeedValue(session({ title: "Existing title" }))).toBe("Existing title");
-    expect(renameSeedValue(session({ title: null }))).toBe("Inspect the repo");
+    expect(renameSeedValue(session({ title: "New conversation", titleSource: "agent" }))).toBe("");
+    expect(renameSeedValue(session({ title: null }))).toBe("");
     expect(
       renameSeedValue(session({ title: null, initialMessage: null as unknown as string })),
     ).toBe("");
@@ -184,8 +183,8 @@ describe("performRename (the commit every rename surface runs)", () => {
     expect(await performRename(session({ title: "Keep me" }), "   ", rename.fn)).toBeNull();
     // Unchanged from the displayed title.
     expect(await performRename(session({ title: "Keep me" }), "Keep me", rename.fn)).toBeNull();
-    // Unchanged from the initial-message fallback display.
-    expect(await performRename(session({ title: null }), "Inspect the repo", rename.fn)).toBeNull();
+    // Unchanged from the prompt-free fallback display.
+    expect(await performRename(session({ title: null }), "New conversation", rename.fn)).toBeNull();
     expect(rename.calls).toEqual([]);
   });
 });

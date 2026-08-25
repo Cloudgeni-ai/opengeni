@@ -82,7 +82,11 @@ import {
   sessionPageKey,
 } from "@/lib/session-pagination";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
-import { SESSION_TITLE_MAX_LENGTH, useInlineRename } from "@/lib/session-rename";
+import {
+  SESSION_TITLE_MAX_LENGTH,
+  sessionDisplayTitle,
+  useInlineRename,
+} from "@/lib/session-rename";
 import {
   applySessionChannelMove,
   beginSessionChannelMove,
@@ -1348,7 +1352,7 @@ export function SessionList() {
         }
         await refreshSessionPages();
         if (!context.ownsWorkspaceInvocation(target.workspaceId, acceptedTransition)) return null;
-        const label = target.title?.trim() || target.initialMessage?.trim() || "Untitled session";
+        const label = sessionDisplayTitle(target);
         announcePinResult(
           updated
             ? `${nextPinned ? "Pinned" : "Unpinned"} ${label}.`
@@ -2009,7 +2013,9 @@ export function SessionList() {
         onOpenChange={(open) => {
           if (!open) setSessionPendingDelete(null);
         }}
-        title={<>Delete “{sessionPendingDelete?.title?.trim() || "Untitled session"}”?</>}
+        title={
+          <>Delete “{sessionPendingDelete ? sessionDisplayTitle(sessionPendingDelete) : ""}”?</>
+        }
         description={
           sessionPendingDelete?.treeStats?.totalDescendants
             ? `This permanently deletes the complete workstream and its ${sessionPendingDelete.treeStats.totalDescendants} spawned sessions. This cannot be undone.`
@@ -2277,8 +2283,7 @@ function SessionTreeRow(props: {
   const collapsedSelectedNode = !isExpanded
     ? selectedDescendantNode(node, props.activeSessionId)
     : null;
-  const title =
-    node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
+  const title = sessionDisplayTitle(node.session);
   const hasVisibleChildRegion = Boolean(collapsedSelectedNode || (isExpanded && childCount > 0));
   return (
     <div role="listitem" className="min-w-0">
@@ -2433,8 +2438,7 @@ function SessionRow(props: {
   onRequestDelete: RequestDeleteFn;
 }) {
   const rail = useRail();
-  const title =
-    props.session.title?.trim() || props.session.initialMessage?.trim() || "Untitled session";
+  const title = sessionDisplayTitle(props.session);
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
   const hasChildren = props.hasChildren;
@@ -2717,9 +2721,7 @@ function RowActionsMenu({
           type="button"
           variant="ghost"
           size="icon-xs"
-          aria-label={`Actions for ${
-            session.title?.trim() || session.initialMessage?.trim() || "Untitled session"
-          }`}
+          aria-label={`Actions for ${sessionDisplayTitle(session)}`}
           data-session-actions={session.id}
           onClick={(event) => event.stopPropagation()}
           className="absolute right-0.5 top-1/2 z-10 -translate-y-1/2 bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 pointer-coarse:right-0 pointer-coarse:size-11 pointer-coarse:opacity-100"

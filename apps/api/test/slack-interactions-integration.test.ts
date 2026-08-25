@@ -37,6 +37,7 @@ import {
 import {
   acceptSessionUserMessage,
   createSessionForRequest,
+  updateSessionTitle,
   type ApiRouteDeps,
   type SessionWorkflowClient,
 } from "@opengeni/core";
@@ -993,11 +994,17 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
   test("App Home publishes only currently authorized tasks from the linked workspace", async () => {
     if (!available) return;
     const value = await fixture();
-    await createSessionForRequest(value.deps, value.owner, value.owner.workspaceId, {
-      initialMessage: "Visible App Home task",
-      model: "gpt-5.6-terra",
-      sandboxBackend: "none",
-    });
+    const visible = await createSessionForRequest(
+      value.deps,
+      value.owner,
+      value.owner.workspaceId,
+      {
+        initialMessage: "Visible App Home task",
+        model: "gpt-5.6-terra",
+        sandboxBackend: "none",
+      },
+    );
+    await updateSessionTitle(value.deps, value.owner, visible.id, "Visible App Home task", "user");
     const crossWorkspace = await bootstrapWorkspace(client.db, {
       accountExternalSource: "slack-app-home-cross-workspace",
       accountExternalId: `account-${crypto.randomUUID()}`,
@@ -1008,7 +1015,7 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       subjectId: value.owner.subjectId,
     });
     const crossWorkspaceGrant = crossWorkspace.workspaceGrants[0]!;
-    await createSessionForRequest(
+    const hidden = await createSessionForRequest(
       value.deps,
       crossWorkspaceGrant,
       crossWorkspaceGrant.workspaceId,
@@ -1017,6 +1024,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
         model: "gpt-5.6-terra",
         sandboxBackend: "none",
       },
+    );
+    await updateSessionTitle(
+      value.deps,
+      crossWorkspaceGrant,
+      hidden.id,
+      "Cross-workspace task must stay hidden",
+      "user",
     );
 
     const event = {
@@ -1884,6 +1898,13 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       model: "gpt-5.6-terra",
       sandboxBackend: "none",
     });
+    await updateSessionTitle(
+      value.deps,
+      value.owner,
+      urgent.id,
+      "Older urgent task remains visible",
+      "user",
+    );
     await withWorkspaceSessionActivityRls(client.db, value.owner.workspaceId, async (db) => {
       await db.execute(sql`
         update sessions

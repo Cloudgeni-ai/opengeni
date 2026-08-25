@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { AUTOMATIC_SESSION_TITLE_FALLBACK } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
@@ -336,7 +337,7 @@ describe("connected machine removal lifecycle", () => {
     expect(removed).toMatchObject({
       outcome: "removed",
       removed: true,
-      dependentSessions: [{ id: session.id, title: null }],
+      dependentSessions: [{ id: session.id, title: AUTOMATIC_SESSION_TITLE_FALLBACK }],
     });
     const [pointer] = await admin<
       { active_sandbox_id: string | null; active_epoch: number; sandbox_backend: string }[]
@@ -494,7 +495,7 @@ describe("connected machine removal lifecycle", () => {
       removed: false,
       code: "active_commands",
       dependentSessions: [
-        { id: session.id, title: null },
+        { id: session.id, title: AUTOMATIC_SESSION_TITLE_FALLBACK },
         { id: secondSession.id, title: "Second routed session" },
       ],
     });
@@ -540,7 +541,7 @@ describe("connected machine removal lifecycle", () => {
       outcome: "removed",
       removed: true,
       dependentSessions: [
-        { id: session.id, title: null },
+        { id: session.id, title: AUTOMATIC_SESSION_TITLE_FALLBACK },
         { id: secondSession.id, title: "Second routed session" },
       ],
     });

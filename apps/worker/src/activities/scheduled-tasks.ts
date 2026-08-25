@@ -1,4 +1,5 @@
 import {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
@@ -6,6 +7,7 @@ import {
   resolveWorkspaceCodexCompactionDefault,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   ScheduledTaskRunAcceptedExecution,
+  normalizeAutomaticSessionTitle,
   scheduledOccurrencePayloadUtf8Bytes,
   stableJson,
   type ScheduledTask,
@@ -122,16 +124,12 @@ export function scheduledTaskRunProducerKey(
   })}`;
 }
 
-// Same bound the manual rename field and the set_session_title tool enforce.
-const SCHEDULED_SESSION_TITLE_MAX_LENGTH = 200;
-
 /**
  * Display title for a session the scheduler generates for a task.
  *
  * A scheduled session's `initialMessage` is the task prompt, byte-identical for
- * every run, so an untitled scheduled session falls back to that prompt in the
- * rail and reads exactly like every other run of the task. The task name is the
- * short human-chosen label that actually identifies it, so that is the title.
+ * every run. The task name is the short human-chosen label that actually
+ * identifies it, so that is the title.
  *
  * The title is the task name and NOTHING else. It deliberately does not name the
  * run's fire instant, for two independent reasons:
@@ -162,11 +160,7 @@ const SCHEDULED_SESSION_TITLE_MAX_LENGTH = 200;
  * texts differ.
  */
 export function scheduledTaskSessionTitle(taskName: string): string {
-  // `ScheduledTask.name` has no length bound of its own, so it is bounded here
-  // to the same ceiling a human rename and set_session_title are held to.
-  const name = taskName.trim() || "Scheduled run";
-  if (name.length <= SCHEDULED_SESSION_TITLE_MAX_LENGTH) return name;
-  return `${name.slice(0, SCHEDULED_SESSION_TITLE_MAX_LENGTH - 1).trimEnd()}…`;
+  return normalizeAutomaticSessionTitle(taskName) ?? "Scheduled run";
 }
 
 /**
@@ -191,10 +185,10 @@ export function scheduledTaskSessionTitle(taskName: string): string {
  * session into a way to fail a dispatch. Authorization belongs to callers with
  * grants; the durable write and its event are the part that is shared.
  *
- * Only an untitled row is stamped. A keyed create replay can hand back a session
- * that has already run, and recovery re-enters this path for a session the dead
- * dispatch may already have titled; in both cases whatever the agent or a human
- * chose is newer truth than this stamp.
+ * Only the neutral create fallback is replaced. A keyed create replay can hand
+ * back a session that has already run, and recovery re-enters this path for a
+ * session the dead dispatch may already have titled; in both cases whatever the
+ * agent or a human chose is newer truth than this stamp.
  *
  * `source: "agent"` is deliberate, and is the only system-assigned value the
  * schema offers (`Session.titleSource` is "user" | "agent" | null). The database
@@ -210,11 +204,19 @@ async function stampScheduledSessionTitle(
   db: Database,
   input: {
     workspaceId: string;
-    session: { id: string; title: string | null };
+    session: { id: string; title: string | null; titleSource: "user" | "agent" | null };
     taskName: string;
   },
 ): Promise<Awaited<ReturnType<typeof appendSessionEvents>>> {
-  if (input.session.title !== null) return [];
+  if (
+    input.session.title !== null &&
+    !(
+      input.session.titleSource === "agent" &&
+      input.session.title === AUTOMATIC_SESSION_TITLE_FALLBACK
+    )
+  ) {
+    return [];
+  }
   const title = scheduledTaskSessionTitle(input.taskName);
   const result = await updateSessionTitle(db, {
     workspaceId: input.workspaceId,

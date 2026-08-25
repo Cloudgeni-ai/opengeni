@@ -18,9 +18,11 @@ import {
   OrganizationMember,
   WorkspaceMember as WorkspaceMemberContract,
   SessionGoalSnapshot,
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
   SessionGoalRootConstraintsWrite,
   normalizeSessionGoalRootConstraints,
+  normalizeAutomaticSessionTitle,
   sessionVisibilityToPublic,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
@@ -27451,6 +27453,8 @@ async function createSessionInTransaction(
             workspaceId: input.workspaceId,
             initialMessage: input.initialMessage,
             initialModelContext: input.initialModelContext ?? null,
+            title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+            titleSource: "agent",
             resources: input.resources,
             skills: input.skills ?? [],
             tools: input.tools ?? [],
@@ -52773,8 +52777,10 @@ export async function recordSessionGoalProgressWithEvent(
 /**
  * Sets a session's display title. The clobber guard lives entirely in this
  * single atomic UPDATE: a user-set title is permanent, so agent/auto writes
- * carry an `AND title_source IS DISTINCT FROM 'user'` guard (NULL-safe in
- * Postgres) while user writes are unconditional. Never read-modify-write.
+ * are first normalized through the shared short/sensitive-safe automatic-title
+ * policy, then carry an `AND title_source IS DISTINCT FROM 'user'` guard
+ * (NULL-safe in Postgres) while user writes are unconditional. Never
+ * read-modify-write.
  * Re-applying the exact title is also a no-op so a confused agent cannot churn
  * `updated_at` every turn. Returns `{ updated, title }`: `updated` is false when
  * the value was unchanged or an agent write was skipped because a user title
@@ -52791,10 +52797,25 @@ export async function updateSessionTitle(
   },
 ): Promise<{ updated: boolean; title: string | null }> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    const title =
+      input.source === "agent" ? normalizeAutomaticSessionTitle(input.title) : input.title;
+    if (title === null) {
+      const [existing] = await scopedDb
+        .select({ title: schema.sessions.title })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      return { updated: false, title: existing?.title ?? null };
+    }
     const [row] = await scopedDb
       .update(schema.sessions)
       .set({
-        title: input.title,
+        title,
         titleSource: input.source,
         updatedAt: new Date(),
       })
@@ -52802,7 +52823,7 @@ export async function updateSessionTitle(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),
           eq(schema.sessions.id, input.sessionId),
-          sql`${schema.sessions.title} is distinct from ${input.title}`,
+          sql`${schema.sessions.title} is distinct from ${title}`,
           ...(input.source === "agent"
             ? [sql`${schema.sessions.titleSource} is distinct from 'user'`]
             : []),

@@ -11,23 +11,25 @@ import type { Session } from "@/types";
 /** The maximum length a session title may be renamed to. */
 export const SESSION_TITLE_MAX_LENGTH = 200;
 
+const AUTOMATIC_SESSION_TITLE_FALLBACK = "New conversation";
+
 /**
  * The title shown for a session: the durable agent/user-set title, falling back
- * to the initial message, then a stable placeholder. Mirrors the rail list and
- * the header so every surface reads identically.
+ * to a stable prompt-free placeholder. Mirrors the rail list and the header so
+ * every surface reads identically.
  */
 export function sessionDisplayTitle(session: Session): string {
-  return session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
+  return session.title?.trim() || AUTOMATIC_SESSION_TITLE_FALLBACK;
 }
 
 /**
  * The value the editor seeds from when entering edit mode: the raw current
- * title (or initial message) without the "Untitled session" placeholder, so the
- * user edits the real text — not the placeholder — and an empty session opens to
- * an empty field.
+ * title without the fallback placeholder, so the user edits durable metadata
+ * rather than prompt content and an untitled legacy session opens empty.
  */
 export function renameSeedValue(session: Session): string {
-  return session.title?.trim() || session.initialMessage?.trim() || "";
+  const title = session.title?.trim() || "";
+  return session.titleSource === "agent" && title === AUTOMATIC_SESSION_TITLE_FALLBACK ? "" : title;
 }
 
 /**

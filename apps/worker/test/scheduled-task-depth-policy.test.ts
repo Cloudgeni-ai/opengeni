@@ -138,10 +138,26 @@ describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => 
         await updateSessionTitle(client.db, {
           workspaceId: workspace!.id,
           sessionId: result.sessionId,
+          title: "Debug token sk-proj-abc123456789XYZ",
+          source: "agent",
+        }),
+      ).toMatchObject({ updated: false, title: "scheduled nested policy" });
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: workspace!.id,
+          sessionId: result.sessionId,
           title: "agent chosen title",
           source: "agent",
         }),
       ).toMatchObject({ updated: true, title: "agent chosen title" });
+      expect(
+        await updateSessionTitle(client.db, {
+          workspaceId: workspace!.id,
+          sessionId: result.sessionId,
+          title: "OAuth callback failures",
+          source: "agent",
+        }),
+      ).toMatchObject({ updated: true, title: "OAuth callback failures" });
       expect(
         await updateSessionTitle(client.db, {
           workspaceId: workspace!.id,
