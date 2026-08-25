@@ -348,6 +348,9 @@ describe("durable host export (real PostgreSQL)", () => {
     const delayedCommit = delayedSql.begin(async (tx) => {
       await tx`select set_config('opengeni.account_id', ${delayed.grant.accountId}, true)`;
       await tx`select set_config('opengeni.workspace_id', ${delayed.grant.workspaceId!}, true)`;
+      await tx`select pg_advisory_xact_lock_shared(
+        hashtextextended(${`session-tenancy:${delayed.grant.workspaceId!}`}, 0)
+      )`;
       const [sequence] = await tx<Array<{ value: number }>>`
         update sessions set last_sequence = last_sequence + 1
         where workspace_id = ${delayed.grant.workspaceId!} and id = ${delayed.session.id}
