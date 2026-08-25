@@ -16,6 +16,8 @@ describe("migration 0345 ordered session Variable Set attachments", () => {
     expect(source).toContain("FOREIGN KEY (workspace_id, session_id)");
     expect(source).toContain("REFERENCES sessions(workspace_id, id) ON DELETE CASCADE");
     expect(source).not.toContain("REFERENCES sessions(account_id, workspace_id, id)");
+    expect(source.match(/variable_set_authority_capability_active\('write'\)/gu)).toHaveLength(4);
+    expect(source).not.toContain("FROM opengeni_private.variable_set_authority_capabilities");
     expect(source).toContain("session_variable_set_attachments_session_set_uq");
     expect(source).toContain("resource_count BETWEEN 1 AND 52");
     expect(source).toContain("IF selected_count > 52 THEN");

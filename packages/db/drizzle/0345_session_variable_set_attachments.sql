@@ -304,45 +304,21 @@ ALTER TABLE session_variable_set_attachments FORCE ROW LEVEL SECURITY;
 CREATE POLICY workspace_isolation ON session_variable_set_attachments
   USING (
     opengeni_private.workspace_rls_visible(account_id, workspace_id)
-    OR EXISTS (
-      SELECT 1
-      FROM opengeni_private.variable_set_authority_capabilities capability
-      WHERE capability.backend_pid = pg_backend_pid()
-        AND capability.transaction_id = pg_current_xact_id_if_assigned()
-        AND capability.capability_kind = 'write'
-    )
+    OR opengeni_private.variable_set_authority_capability_active('write')
   )
   WITH CHECK (
     opengeni_private.workspace_rls_visible(account_id, workspace_id)
-    OR EXISTS (
-      SELECT 1
-      FROM opengeni_private.variable_set_authority_capabilities capability
-      WHERE capability.backend_pid = pg_backend_pid()
-        AND capability.transaction_id = pg_current_xact_id_if_assigned()
-        AND capability.capability_kind = 'write'
-    )
+    OR opengeni_private.variable_set_authority_capability_active('write')
   );
 CREATE POLICY session_visibility_isolation
   ON session_variable_set_attachments AS RESTRICTIVE
   USING (
     session_reference_visible(account_id, workspace_id, session_id)
-    OR EXISTS (
-      SELECT 1
-      FROM opengeni_private.variable_set_authority_capabilities capability
-      WHERE capability.backend_pid = pg_backend_pid()
-        AND capability.transaction_id = pg_current_xact_id_if_assigned()
-        AND capability.capability_kind = 'write'
-    )
+    OR opengeni_private.variable_set_authority_capability_active('write')
   )
   WITH CHECK (
     session_reference_visible(account_id, workspace_id, session_id)
-    OR EXISTS (
-      SELECT 1
-      FROM opengeni_private.variable_set_authority_capabilities capability
-      WHERE capability.backend_pid = pg_backend_pid()
-        AND capability.transaction_id = pg_current_xact_id_if_assigned()
-        AND capability.capability_kind = 'write'
-    )
+    OR opengeni_private.variable_set_authority_capability_active('write')
   );
 
 -- A restart/fork with runtime setup is one database transaction. The original
