@@ -5,6 +5,12 @@ import { RailTrailingMetadata } from "./session-row-content";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
 const active = { kind: "active", count: 1, total: 1, label: "Running" } as const;
+const activeWork = {
+  kind: "active_work",
+  count: 1,
+  total: 1,
+  label: "1 actively working",
+} as const;
 
 describe("RailTrailingMetadata", () => {
   test.each(["1 Aug", "12 Aug", "now", "30m", "3h"])(
@@ -33,6 +39,16 @@ describe("RailTrailingMetadata", () => {
 
   test("reserves no trailing rail width when a row has no metadata", () => {
     expect(renderToStaticMarkup(<RailTrailingMetadata summary={neutral} />)).toBe("");
+  });
+
+  test("renders the approved two-cut active-work marker", () => {
+    const markup = renderToStaticMarkup(<RailTrailingMetadata summary={activeWork} />);
+
+    expect(markup).toContain("<mask");
+    expect(markup).toContain('stroke-width="21"');
+    expect(markup).toContain('d="M-8 43 C35 40 71 29 116 16"');
+    expect(markup).toContain('d="M-8 86 C35 83 71 72 116 59"');
+    expect(markup).not.toContain("repeating-linear-gradient");
   });
 });
 
