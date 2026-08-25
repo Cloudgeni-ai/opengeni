@@ -92,9 +92,14 @@ async function send(
   );
 }
 
-async function freezeRequest(options: { expiresAt?: Date | null; parallel?: boolean } = {}) {
+async function freezeRequest(
+  options: { expiresAt?: Date | null; parallel?: boolean; queueEditPrompt?: boolean } = {},
+) {
   const { grant, session } = await createFixture();
-  const queuedPrompt = await send(grant, session.id, "continue with my decision");
+  await send(grant, session.id, "continue with my decision");
+  const queuedPrompt = options.queueEditPrompt
+    ? await send(grant, session.id, "revise this queued prompt later")
+    : null;
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
     sessionId: session.id,
@@ -579,7 +584,9 @@ describe("durable structured human input", () => {
   });
 
   test("resubmitting a queue-edit draft preserves an unrelated active human wait", async () => {
-    const frozen = await freezeRequest();
+    const frozen = await freezeRequest({ queueEditPrompt: true });
+    const queuedPrompt = frozen.queuedPrompt;
+    if (!queuedPrompt) throw new Error("queue-edit fixture did not create a queued prompt");
     const edited = await withWorkspaceSubjectRls(
       client.db,
       frozen.grant.workspaceId!,
@@ -590,9 +597,9 @@ describe("durable structured human input", () => {
             accountId: frozen.grant.accountId,
             workspaceId: frozen.grant.workspaceId!,
             sessionId: frozen.session.id,
-            turnId: frozen.queuedPrompt.turn.id,
+            turnId: queuedPrompt.turn.id,
             subjectId: frozen.grant.subjectId,
-            expectedTurnVersion: frozen.queuedPrompt.turn.version,
+            expectedTurnVersion: queuedPrompt.turn.version,
             expectedDraftRevision: 0,
             replaceDraft: false,
             actor: { type: "human", subjectId: frozen.grant.subjectId },
