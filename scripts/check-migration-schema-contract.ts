@@ -31,6 +31,7 @@ import {
   readContractSource,
   declaredIdentifiers,
   registrationFixLines,
+  unreachableContractReferences,
   unregisteredMigrations,
 } from "./migration-schema-contract";
 
@@ -85,12 +86,32 @@ async function main(): Promise<void> {
   const registration = parseContractRegistration(source);
   const head = listLedger(root);
   const violations = unregisteredMigrations(head, base, registration);
-  if (violations.length === 0) {
+
+  // Independent of what this head adds: a ladder rung naming a forward-listed
+  // migration can never fire, and reads as a live pin that it is not.
+  const unreachable = unreachableContractReferences(source, head, registration.forward);
+  if (unreachable.length > 0) {
+    const plural = unreachable.length === 1 ? "migration is" : "migrations are";
+    console.error(
+      `[migration-schema-contract] ${unreachable.length} forward-listed ${plural} still referenced in ${RELEASE_CONTRACT_TEST} where the check can never match, because forward-listing removes it from the filtered set those checks query:`,
+    );
+    for (const file of unreachable) console.error(`  - ${file}`);
+    console.error("");
+    console.error("Delete every reference to them: the hash ladders, the `fileCount` sum, and");
+    console.error("the `latestMigration` chain. They are the residue of pinning or counting your");
+    console.error("own migration instead of registering it, and a dead hash rung reads as a live");
+    console.error("pin. It is not a fallback either: an aggregate pinned while the migration was");
+    console.error("still framed is already wrong for the only tree that could ever read it.");
+  }
+
+  if (violations.length === 0 && unreachable.length === 0) {
     console.log(
       `[migration-schema-contract] ok: ${head.length} migrations, base ${base.ref}, ${registration.forward.length} forward additions`,
     );
     return;
   }
+
+  if (violations.length === 0) process.exit(1);
 
   const plural = violations.length === 1 ? "migration is" : "migrations are";
   console.error(
