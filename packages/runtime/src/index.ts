@@ -3494,10 +3494,9 @@ export async function prepareAgentTools(
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
   const aggregateToolBudget = new McpAggregateToolListBudget();
-  // npm Undici's dispatcher transport can hang indefinitely under Bun even
-  // after an AbortSignal fires. Bun's native fetch is the supported runtime
-  // transport there; destination policy validation still runs before every
-  // credential-bearing MCP request.
+  // Codex Apps retains its sanitizer-specific Bun fetch path. Ordinary MCP
+  // traffic uses @opengeni/network's explicit undici.request() adapter under
+  // Bun so the vetted DNS answer remains the actual connection destination.
   const useBunNativeFetch = options.mcpFetchImpl === undefined && !!process.versions.bun;
   const mcpFetchImpl =
     options.mcpFetchImpl ?? (useBunNativeFetch ? globalThis.fetch.bind(globalThis) : undiciFetch);
@@ -3558,7 +3557,11 @@ export async function prepareAgentTools(
           baseFetch,
           {
             ...(firstParty ? { requireHttpsOutsideLocalTest: false } : {}),
-            ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
+            ...(useBunNativeFetch && !isCodexAppsMcpServer(config)
+              ? { usePinnedRequestTransport: true }
+              : useBunNativeFetch
+                ? { pinResolvedDestination: false }
+                : {}),
           },
         );
         const optional = tool.optional === true;

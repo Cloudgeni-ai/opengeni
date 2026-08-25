@@ -573,6 +573,7 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
     dnsLookup?: DnsLookup;
     pinResolvedDestination?: boolean;
     requireHttpsOutsideLocalTest?: boolean;
+    usePinnedRequestTransport?: boolean;
   } = {},
 ): (input: TInput, init?: RequestInit) => Promise<Response> {
   return async (input: TInput, init?: RequestInit) => {
@@ -592,7 +593,7 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
         response = await fetchImpl(input, { ...init, redirect: "manual" });
       } else {
         response = await pinnedFetch(input, init, settings, {
-          fetchImpl: fetchImpl as FetchLike,
+          ...(options.usePinnedRequestTransport ? {} : { fetchImpl: fetchImpl as FetchLike }),
           ...destinationOptions,
         });
       }
