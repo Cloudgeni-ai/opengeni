@@ -4,9 +4,13 @@ import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
 } from "@opengeni/contracts";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireOwnerMigratedTestDatabase,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import postgres from "postgres";
-import { parseConcurrentIndexMigration } from "../src/migrate";
+import { migrate, parseConcurrentIndexMigration } from "../src/migrate";
 import {
   addSessionSystemUpdateWithSourceMutation,
   appendSessionEvents,
@@ -38,6 +42,7 @@ const quarantineMigrationUrl = new URL(
   "../drizzle/0349_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -62,7 +67,9 @@ async function quarantineStatement(batchSize = 500): Promise<string> {
     .filter((line) => !line.trim().startsWith("--"))
     .join("\n")
     .trim();
-  return batchSize === 500 ? statement : statement.replace("LIMIT 500", `LIMIT ${batchSize}`);
+  return batchSize === 500
+    ? statement
+    : statement.replace("500::integer AS batch_size", `${batchSize}::integer AS batch_size`);
 }
 
 async function runQuarantineBatch(
@@ -248,6 +255,17 @@ describe("migrations 0347-0349 automatic session title policy fence", () => {
     expect(fence).toContain("'session_events'::regclass");
     expect(fence).toContain("pg_catalog.pg_get_userbyid(relation.relowner)");
     expect(fence).toContain("opengeni.automatic_session_title_quarantine_v1");
+    expect(fence).toContain(
+      "DROP FUNCTION IF EXISTS acquire_automatic_session_title_quarantine_fences_v1(integer)",
+    );
+    expect(fence).toContain("CREATE FUNCTION acquire_automatic_session_title_quarantine_fences_v1");
+    expect(fence).toContain("RETURNS uuid[]");
+    expect(fence).toMatch(
+      /ORDER BY bounded\.workspace_id[\s\S]*acquire_session_tenancy_fence\(workspace_id_value\)/u,
+    );
+    expect(fence).toContain(
+      "REVOKE ALL ON FUNCTION\n  acquire_automatic_session_title_quarantine_fences_v1(integer)",
+    );
     expect(fence).toContain("opengeni.automatic_session_title_v1_candidate");
     expect(fence).toContain("candidate IS DISTINCT FROM NEW.title");
     expect(fence).toContain("NEW.title IS DISTINCT FROM 'New conversation'");
@@ -288,8 +306,13 @@ describe("migrations 0347-0349 automatic session title policy fence", () => {
         "-- deployment-mode: rolling\n-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s\n",
       ),
     ).toBe(true);
-    expect(quarantine).toContain("LIMIT 500");
+    expect(quarantine).toContain("500::integer AS batch_size");
+    expect(quarantine).toContain("LIMIT (SELECT batch_size FROM settings)");
+    expect(quarantine).toContain("session.workspace_id = ANY(scope.workspace_ids)");
     expect(quarantine).toContain("FOR UPDATE OF session");
+    expect(quarantine.indexOf("acquire_automatic_session_title_quarantine_fences_v1")).toBeLessThan(
+      quarantine.indexOf("FOR UPDATE OF session"),
+    );
     expect(quarantine).toContain("last_sequence = session.last_sequence + 1");
     expect(quarantine).toContain("INSERT INTO session_events");
     expect(quarantine).toContain("'session.title_set'");
@@ -438,6 +461,94 @@ describe("migrations 0347-0349 automatic session title policy fence", () => {
       ),
     ).toBe("New conversation");
   }, 180_000);
+
+  test("quarantines under the non-superuser, non-BYPASSRLS migration owner", async () => {
+    const owned = await acquireOwnerMigratedTestDatabase("automatic-title-quarantine-owner");
+    if (!owned) {
+      if (requireRealDatabase) throw new Error("real owner-migrated database unavailable");
+      return;
+    }
+
+    let ownerClient: DbClient | null = null;
+    let ownerSql: postgres.Sql | null = null;
+    try {
+      await migrate(owned.ownerUrl);
+      ownerClient = createDb(owned.ownerUrl, { max: 4 });
+      const suffix = crypto.randomUUID();
+      const access = await bootstrapWorkspace(ownerClient.db, {
+        accountExternalSource: "test",
+        accountExternalId: `title-owner-account-${suffix}`,
+        accountName: "Title owner quarantine",
+        workspaceExternalSource: "test",
+        workspaceExternalId: `title-owner-workspace-${suffix}`,
+        workspaceName: "Title owner quarantine",
+        subjectId: `subject-${suffix}`,
+      });
+      const grant = access.workspaceGrants[0]!;
+      const session = await createSession(ownerClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: "legacy owner title",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+
+      await owned.admin`alter table sessions disable trigger sessions_automatic_title_policy_v1_fence`;
+      try {
+        await owned.admin`
+          update sessions
+          set title = 'DATABASE_APIKEY=swordfish', title_source = 'agent'
+          where id = ${session.id}
+        `;
+      } finally {
+        await owned.admin`alter table sessions enable trigger sessions_automatic_title_policy_v1_fence`;
+      }
+
+      const [posture] = await owned.admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
+        select rolsuper as superuser, rolbypassrls as "bypassRls"
+        from pg_roles
+        where rolname = ${owned.ownerRole}
+      `;
+      expect(posture).toEqual({ superuser: false, bypassRls: false });
+
+      ownerSql = postgres(owned.ownerUrl, { max: 1, prepare: false });
+      const rows = await ownerSql.begin(async (transaction) => {
+        await transaction`select
+          set_config('lock_timeout', '1s', true),
+          set_config('statement_timeout', '10s', true)`;
+        return await transaction.unsafe<Array<{ id: string }>>(await quarantineStatement());
+      });
+      expect([...rows]).toEqual([{ id: session.id }]);
+
+      expect(await getSession(ownerClient.db, grant.workspaceId!, session.id)).toMatchObject({
+        title: "New conversation",
+        titleSource: "agent",
+      });
+      const events = await owned.admin<
+        Array<{ type: string; payload: { title?: unknown; source?: unknown } }>
+      >`
+        select type, payload
+        from session_events
+        where session_id = ${session.id}
+        order by sequence desc
+        limit 1
+      `;
+      expect([...events]).toEqual([
+        {
+          type: "session.title_set",
+          payload: { title: "New conversation", source: "agent" },
+        },
+      ]);
+    } finally {
+      await ownerSql?.end({ timeout: 5 }).catch(() => undefined);
+      await ownerClient?.close().catch(() => undefined);
+      await owned.release();
+    }
+  }, 900_000);
 
   test("commits bounded progress, rolls back a failed batch, and resumes safely", async () => {
     const database = shared;

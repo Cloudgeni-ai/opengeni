@@ -7,25 +7,36 @@
 -- remaining unsafe rows instead of repeatedly scanning the cleaned prefix. A
 -- contended writer aborts a batch quickly and leaves the migration retryable;
 -- ordinary readers remain compatible with the row-level locks throughout.
-WITH quarantine_capability AS MATERIALIZED (
+WITH settings AS MATERIALIZED (
+  SELECT 500::integer AS batch_size
+),
+quarantine_capability AS MATERIALIZED (
   SELECT pg_catalog.set_config(
     'opengeni.automatic_session_title_quarantine_v1',
     '1',
     true
   ) AS enabled
 ),
+quarantine_scope AS MATERIALIZED (
+  SELECT acquire_automatic_session_title_quarantine_fences_v1(
+    settings.batch_size
+  ) AS workspace_ids
+  FROM settings
+  CROSS JOIN quarantine_capability capability
+  WHERE capability.enabled = '1'
+),
 candidates AS MATERIALIZED (
   SELECT session.id
   FROM sessions session
-  CROSS JOIN quarantine_capability capability
-  WHERE capability.enabled = '1'
+  CROSS JOIN quarantine_scope scope
+  WHERE session.workspace_id = ANY(scope.workspace_ids)
     AND session.title_source IS DISTINCT FROM 'user'
     AND (
       session.title IS DISTINCT FROM 'New conversation'
       OR session.title_source IS DISTINCT FROM 'agent'
     )
   ORDER BY session.id
-  LIMIT 500
+  LIMIT (SELECT batch_size FROM settings)
   FOR UPDATE OF session
 ),
 quarantined AS (

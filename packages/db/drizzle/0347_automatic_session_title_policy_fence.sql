@@ -69,6 +69,62 @@ WITH CHECK (
   ) = '1'
 );
 
+-- The 0345 session-tenancy trigger requires every non-superuser migration
+-- owner to hold the affected workspace fence before PostgreSQL takes a session
+-- row lock. Discover only the workspaces represented by the next bounded id
+-- batch, then acquire their shared fences in canonical UUID order. Return the
+-- exact locked set so the later row-locking query cannot race into a newly
+-- eligible workspace that this invocation did not fence.
+DROP FUNCTION IF EXISTS acquire_automatic_session_title_quarantine_fences_v1(integer);
+CREATE FUNCTION acquire_automatic_session_title_quarantine_fences_v1(
+  p_batch_size integer
+)
+RETURNS uuid[]
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $automatic_title_quarantine_fences$
+DECLARE
+  workspace_id_value uuid;
+  workspace_ids uuid[] := ARRAY[]::uuid[];
+BEGIN
+  IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+    RETURN workspace_ids;
+  END IF;
+
+  PERFORM pg_catalog.set_config(
+    'opengeni.automatic_session_title_quarantine_v1',
+    '1',
+    true
+  );
+  FOR workspace_id_value IN
+    SELECT DISTINCT bounded.workspace_id
+    FROM (
+      SELECT session.id, session.workspace_id
+      FROM sessions session
+      WHERE session.title_source IS DISTINCT FROM 'user'
+        AND (
+          session.title IS DISTINCT FROM 'New conversation'
+          OR session.title_source IS DISTINCT FROM 'agent'
+        )
+      ORDER BY session.id
+      LIMIT p_batch_size
+    ) bounded
+    WHERE bounded.workspace_id IS NOT NULL
+    ORDER BY bounded.workspace_id
+  LOOP
+    PERFORM acquire_session_tenancy_fence(workspace_id_value);
+    workspace_ids := pg_catalog.array_append(workspace_ids, workspace_id_value);
+  END LOOP;
+
+  RETURN workspace_ids;
+END
+$automatic_title_quarantine_fences$;
+
+REVOKE ALL ON FUNCTION
+  acquire_automatic_session_title_quarantine_fences_v1(integer)
+  FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()
 RETURNS trigger
 LANGUAGE plpgsql

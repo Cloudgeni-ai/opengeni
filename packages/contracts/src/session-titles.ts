@@ -94,6 +94,7 @@ const OPAQUE_IDENTIFIER_PATTERN =
   /\b(?=[A-Za-z0-9_-]{32,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b/u;
 
 const DEFAULT_IGNORABLE_CODE_POINTS = /\p{Default_Ignorable_Code_Point}+/gu;
+const ESCAPED_QUOTE_DELIMITERS = /\\+(?=["'])/gu;
 
 const TITLE_LABEL_PATTERN =
   /^(?:(?:suggested|generated|concise)\s+)?(?:(?:session|chat|conversation|task)\s+)?title\s*[:\-–—]\s*/iu;
@@ -107,12 +108,24 @@ const LEADING_BOILERPLATE_PATTERNS = [
   /^please(?:\s*[,!:.\-–—]+\s*|\s+|$)/iu,
 ] as const;
 
-function containsSensitiveAutomaticTitleValue(value: string): boolean {
+function automaticTitleDetectionValue(value: string): string {
   // Detection uses a compatibility-normalized shadow value so fullwidth
-  // punctuation/letters and invisible token splits cannot evade the policy.
+  // punctuation/letters, invisible token splits, and serialized quote
+  // delimiters cannot evade the policy.
   // The accepted title itself stays byte-for-byte in the user's language and
   // emoji form; this shadow is never returned or persisted.
-  const detectionValue = value.normalize("NFKC").replace(DEFAULT_IGNORABLE_CODE_POINTS, "");
+  return value
+    .normalize("NFKC")
+    .replace(DEFAULT_IGNORABLE_CODE_POINTS, "")
+    .replace(ESCAPED_QUOTE_DELIMITERS, "");
+}
+
+function hasVisibleAutomaticTitleContent(value: string): boolean {
+  return automaticTitleDetectionValue(value).trim().length > 0;
+}
+
+function containsSensitiveAutomaticTitleValue(value: string): boolean {
+  const detectionValue = automaticTitleDetectionValue(value);
 
   if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(detectionValue))) return true;
   if (SECRET_LABEL_ASSIGNMENT_PATTERN.test(detectionValue)) return true;
@@ -193,17 +206,29 @@ export function normalizeAutomaticSessionTitle(value: string): string | null {
     .split(/\n+/u)
     .map((line) => line.trim())
     .find(Boolean);
-  if (!firstLine || containsSensitiveAutomaticTitleValue(firstLine)) return null;
+  if (
+    !firstLine ||
+    !hasVisibleAutomaticTitleContent(firstLine) ||
+    containsSensitiveAutomaticTitleValue(firstLine)
+  ) {
+    return null;
+  }
 
   let title = stripAutomaticTitleBoilerplate(firstLine)
     .replace(/\s+/gu, " ")
     .replace(/[\s.!?,;:\-–—]+$/u, "")
     .trim();
-  if (!title || containsSensitiveAutomaticTitleValue(title)) return null;
+  if (
+    !title ||
+    !hasVisibleAutomaticTitleContent(title) ||
+    containsSensitiveAutomaticTitleValue(title)
+  ) {
+    return null;
+  }
 
   title = boundAutomaticTitle(title)
     .replace(/[\s.!?,;:\-–—]+$/u, "")
     .trim();
-  if (!title) return null;
+  if (!title || !hasVisibleAutomaticTitleContent(title)) return null;
   return title;
 }

@@ -74,6 +74,16 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("｛＂CLIENT_PRIVATEKEY＂：＂secretword＂｝")).toBeNull();
   });
 
+  test("rejects literal backslash-escaped object and JSON secret assignments", () => {
+    expect(
+      normalizeAutomaticSessionTitle(String.raw`{\"DATABASE_APIKEY\":\"swordfish\"}`),
+    ).toBeNull();
+    expect(normalizeAutomaticSessionTitle(String.raw`{\"password\":\"swordfish\"}`)).toBeNull();
+    expect(
+      normalizeAutomaticSessionTitle(String.raw`{\\\"OAUTH_ACCESSTOKEN\\\":\\\"sesame\\\"}`),
+    ).toBeNull();
+  });
+
   test("rejects secret key and access key assignment suffix chains", () => {
     expect(normalizeAutomaticSessionTitle("STRIPE_SECRET_KEY=sesame")).toBeNull();
     expect(normalizeAutomaticSessionTitle("AWS_SECRET_ACCESS_KEY=swordfish")).toBeNull();
@@ -107,12 +117,16 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("PRIVATEKEYSTONE=secretword rollout")).toBe(
       "PRIVATEKEYSTONE=secretword rollout",
     );
+    const escapedBenignObject = String.raw`{\"MONKEY\":\"swordfish\"} review`;
+    expect(normalizeAutomaticSessionTitle(escapedBenignObject)).toBe(escapedBenignObject);
   });
 
   test("uses Unicode normalization only for detection and preserves accepted international text", () => {
     const international = "日本語のデプロイ調査 👩🏽‍💻";
     expect(normalizeAutomaticSessionTitle(international)).toBe(international);
     expect(normalizeAutomaticSessionTitle("ＡＰＩ設計の確認")).toBe("ＡＰＩ設計の確認");
+    expect(normalizeAutomaticSessionTitle("👩🏽‍💻 deployment review")).toBe("👩🏽‍💻 deployment review");
+    expect(normalizeAutomaticSessionTitle("Coffee ☕️ rollout")).toBe("Coffee ☕️ rollout");
   });
 
   test("bounds long output at words and complete Unicode graphemes without truncation markers", () => {
@@ -133,6 +147,8 @@ describe("automatic session titles", () => {
   test("returns null for empty/boilerplate-only candidates so callers retain the safe fallback", () => {
     expect(normalizeAutomaticSessionTitle("Title: please")).toBeNull();
     expect(normalizeAutomaticSessionTitle("\n\t\u0000")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("\u200B\u2060\uFE0F\u2066\u2069")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Title: \u200B\u2060")).toBeNull();
     expect(AUTOMATIC_SESSION_TITLE_FALLBACK).toBe("New conversation");
   });
 });
