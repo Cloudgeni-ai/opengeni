@@ -16355,7 +16355,7 @@ export class VariableSetAttachedError extends Error {
 
   constructor(cause?: unknown) {
     super(
-      "variable set remains attached to a scheduled task or session",
+      "variable set remains attached to a scheduled task or active session",
       cause === undefined ? undefined : { cause },
     );
   }

@@ -89,6 +89,7 @@ CREATE TABLE session_variable_set_attachments (
   session_id uuid NOT NULL,
   variable_set_id uuid NOT NULL REFERENCES workspace_variable_sets(id) ON DELETE CASCADE,
   position integer NOT NULL,
+  session_status text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT session_variable_set_attachments_workspace_account_fk
     FOREIGN KEY (workspace_id, account_id)
@@ -98,6 +99,11 @@ CREATE TABLE session_variable_set_attachments (
     REFERENCES sessions(workspace_id, id) ON DELETE CASCADE,
   CONSTRAINT session_variable_set_attachments_position_check
     CHECK (position >= 0 AND position < 25),
+  CONSTRAINT session_variable_set_attachments_status_check
+    CHECK (session_status IN (
+      'queued', 'running', 'idle', 'requires_action', 'recovering',
+      'waiting_capacity', 'failed', 'cancelled'
+    )),
   CONSTRAINT session_variable_set_attachments_session_position_uq
     UNIQUE (workspace_id, session_id, position),
   CONSTRAINT session_variable_set_attachments_session_set_uq
@@ -105,12 +111,14 @@ CREATE TABLE session_variable_set_attachments (
 );
 
 CREATE INDEX session_variable_set_attachments_set_sessions_idx
-  ON session_variable_set_attachments (variable_set_id, workspace_id, session_id);
+  ON session_variable_set_attachments (
+    variable_set_id, session_status, workspace_id, session_id
+  );
 
 INSERT INTO session_variable_set_attachments (
-  account_id, workspace_id, session_id, variable_set_id, position
+  account_id, workspace_id, session_id, variable_set_id, position, session_status
 )
-SELECT account_id, workspace_id, id, variable_set_id, 0
+SELECT account_id, workspace_id, id, variable_set_id, 0, status
 FROM sessions
 WHERE variable_set_id IS NOT NULL;
 
@@ -188,14 +196,32 @@ BEGIN
   ) USING NEW.workspace_id, NEW.id;
   EXECUTE pg_catalog.format(
     'INSERT INTO %I.session_variable_set_attachments (
-       account_id, workspace_id, session_id, variable_set_id, position
+       account_id, workspace_id, session_id, variable_set_id, position, session_status
      )
      SELECT $1, $2, $3, selected.value::uuid,
-       selected.position::integer - 1
+       selected.position::integer - 1, $5
      FROM pg_catalog.jsonb_array_elements_text($4)
        WITH ORDINALITY selected(value, position)',
     TG_TABLE_SCHEMA
-  ) USING NEW.account_id, NEW.workspace_id, NEW.id, NEW.variable_set_ids;
+  ) USING NEW.account_id, NEW.workspace_id, NEW.id, NEW.variable_set_ids, NEW.status;
+  RETURN NEW;
+END
+$body$;
+
+CREATE OR REPLACE FUNCTION sync_session_variable_set_attachment_status()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $body$
+BEGIN
+  EXECUTE pg_catalog.format(
+    'UPDATE %I.session_variable_set_attachments
+     SET session_status = $1
+     WHERE workspace_id = $2 AND session_id = $3
+       AND session_status IS DISTINCT FROM $1',
+    TG_TABLE_SCHEMA
+  ) USING NEW.status, NEW.workspace_id, NEW.id;
   RETURN NEW;
 END
 $body$;
@@ -265,13 +291,19 @@ BEGIN
   PERFORM set_config('opengeni.workspace_id', '', true);
   PERFORM set_config('opengeni.subject_id', '', true);
   EXECUTE format(
+    'DELETE FROM %I.session_variable_set_attachments
+     WHERE variable_set_id = $1
+       AND session_status IN (''idle'', ''failed'', ''cancelled'')',
+    TG_TABLE_SCHEMA
+  ) USING OLD.id;
+  EXECUTE format(
     'SELECT count(*)::integer
      FROM %I.session_variable_set_attachments
      WHERE variable_set_id = $1',
     TG_TABLE_SCHEMA
   ) INTO attachment_count USING OLD.id;
   IF attachment_count > 0 THEN
-    RAISE EXCEPTION 'variable set remains attached to % sessions', attachment_count
+    RAISE EXCEPTION 'variable set remains attached to % active sessions', attachment_count
       USING ERRCODE = '23503';
   END IF;
   PERFORM set_config('opengeni.account_id', coalesce(previous_account, ''), true);
@@ -294,6 +326,10 @@ CREATE TRIGGER sessions_variable_set_attachments_sync
 AFTER INSERT OR UPDATE OF variable_set_ids, variable_set_id ON sessions
 FOR EACH ROW EXECUTE FUNCTION sync_session_variable_set_attachments();
 
+CREATE TRIGGER sessions_variable_set_attachment_status_sync
+AFTER UPDATE OF status ON sessions
+FOR EACH ROW EXECUTE FUNCTION sync_session_variable_set_attachment_status();
+
 CREATE TRIGGER session_variable_set_attachments_refresh
 AFTER INSERT OR UPDATE OR DELETE ON session_variable_set_attachments
 FOR EACH ROW EXECUTE FUNCTION refresh_session_variable_set_selection();
@@ -304,6 +340,7 @@ FOR EACH ROW EXECUTE FUNCTION guard_variable_set_session_attachments();
 
 REVOKE ALL ON FUNCTION normalize_session_variable_set_selection() FROM PUBLIC;
 REVOKE ALL ON FUNCTION sync_session_variable_set_attachments() FROM PUBLIC;
+REVOKE ALL ON FUNCTION sync_session_variable_set_attachment_status() FROM PUBLIC;
 REVOKE ALL ON FUNCTION refresh_session_variable_set_selection() FROM PUBLIC;
 REVOKE ALL ON FUNCTION guard_variable_set_session_attachments() FROM PUBLIC;
 

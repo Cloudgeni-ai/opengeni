@@ -177,7 +177,12 @@ export async function sessionAttachEnvironment(
     );
     Object.assign(workspaceEnvironmentValues, workspaceEnvironment?.values ?? {});
   }
-  for (const variableSetId of session.variableSetIds) {
+  // Older persisted/test projections can omit the plural field. Preserve the
+  // legacy final alias as the single explicit selection until every caller is
+  // guaranteed to have crossed the plural contract boundary.
+  const explicitVariableSetIds =
+    session.variableSetIds ?? (session.variableSetId ? [session.variableSetId] : []);
+  for (const variableSetId of explicitVariableSetIds) {
     const workspaceEnvironment = await loadWorkspaceEnvironmentForRun(
       services.db,
       services.settings,

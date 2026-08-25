@@ -10,6 +10,8 @@ describe("migration 0346 ordered session Variable Set attachments", () => {
     expect(source).toContain("ADD COLUMN variable_set_ids jsonb NOT NULL DEFAULT '[]'::jsonb");
     expect(source).toContain("CREATE TABLE session_variable_set_attachments");
     expect(source).toContain("CHECK (position >= 0 AND position < 25)");
+    expect(source).toContain("session_status text NOT NULL");
+    expect(source).toContain("session_variable_set_attachments_status_check");
     expect(source).toContain("variable_set_id uuid NOT NULL REFERENCES workspace_variable_sets");
     expect(source).toContain("FOREIGN KEY (workspace_id, account_id)");
     expect(source).toContain("REFERENCES workspaces(id, account_id) ON DELETE CASCADE");
@@ -27,7 +29,12 @@ describe("migration 0346 ordered session Variable Set attachments", () => {
     expect(source).toContain("IF selected_count > 52 THEN");
     expect(source).toContain("targetSessionExecution' -> 'variableSets'");
     expect(source).toContain("session_row.variable_set_ids");
-    expect(source).toContain("variable set remains attached to % sessions");
+    expect(source).toContain(
+      "CREATE OR REPLACE FUNCTION sync_session_variable_set_attachment_status",
+    );
+    expect(source).toContain("AFTER UPDATE OF status ON sessions");
+    expect(source).toContain("session_status IN (''idle'', ''failed'', ''cancelled'')");
+    expect(source).toContain("variable set remains attached to % active sessions");
     expect(source).toContain("CREATE FUNCTION fork_session_content_with_runtime");
     expect(source).toContain("CREATE FUNCTION replay_applied_session_fork_with_runtime");
     expect(source).toContain("opengeni_private.configure_fork_session_runtime");

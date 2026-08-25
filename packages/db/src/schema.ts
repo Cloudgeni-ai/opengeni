@@ -4040,6 +4040,7 @@ export const sessionVariableSetAttachments = pgTable(
       .notNull()
       .references(() => workspaceVariableSets.id, { onDelete: "cascade" }),
     position: integer("position").notNull(),
+    sessionStatus: text("session_status").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -4065,12 +4066,20 @@ export const sessionVariableSetAttachments = pgTable(
     ),
     variableSetSessions: index("session_variable_set_attachments_set_sessions_idx").on(
       table.variableSetId,
+      table.sessionStatus,
       table.workspaceId,
       table.sessionId,
     ),
     positionValid: check(
       "session_variable_set_attachments_position_check",
       sql`${table.position} >= 0 and ${table.position} < 25`,
+    ),
+    statusValid: check(
+      "session_variable_set_attachments_status_check",
+      sql`${table.sessionStatus} in (
+        'queued', 'running', 'idle', 'requires_action', 'recovering',
+        'waiting_capacity', 'failed', 'cancelled'
+      )`,
     ),
   }),
 );
