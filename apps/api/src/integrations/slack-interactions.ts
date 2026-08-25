@@ -79,6 +79,7 @@ import {
   getSessionEventByClientEventId,
   getWorkspace,
   getWorkspaceGrant,
+  namedSubjectPersonalWorkspaceId,
   resolveSlackTargetAuthority,
   listSlackInteractionProgressDeliveryEvidence,
   listSessionEventPage,
@@ -951,6 +952,22 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     // themselves, and only inside this organization. The table's own CHECK
     // enforces the second half; this refuses before writing rather than
     // surfacing a constraint error.
+    // A channel may never be pointed at a personal workspace. The routing
+    // resolver already refuses to treat one as a candidate in a channel, and
+    // this is the same rule at the write boundary, where a durable route would
+    // otherwise smuggle it back in: every message in that channel would land
+    // somewhere nobody else in the channel can see.
+    //
+    // Only the caller's OWN personal workspace has to be excluded, and that is
+    // the whole rule rather than a partial one. `resolveSlackTargetAuthority`
+    // admits exactly two shapes - a `workspace_memberships` row, or this
+    // subject's own personal-workspace pointer - and migration 0219 forbids a
+    // membership row on any personal workspace. So no other person's personal
+    // workspace can survive the authorization above in the first place.
+    const callerPersonalWorkspaceId = await namedSubjectPersonalWorkspaceId(deps.db, {
+      accountId: grant.accountId,
+      subjectId: grant.subjectId,
+    });
     for (const route of payload.routes) {
       if (route.targetWorkspaceId === null) continue;
       const authorized = await resolveSlackTargetAuthority(deps.db, {
@@ -961,6 +978,14 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       if (!authorized || !hasPermission(authorized.permissions, "sessions:create")) {
         throw new HTTPException(403, {
           message: `you cannot start work in the workspace chosen for ${route.slackChannelId}`,
+        });
+      }
+      if (
+        callerPersonalWorkspaceId !== null &&
+        route.targetWorkspaceId === callerPersonalWorkspaceId
+      ) {
+        throw new HTTPException(422, {
+          message: `a channel cannot be routed to a personal workspace: work started in ${route.slackChannelId} would be invisible to everyone else in it`,
         });
       }
     }
@@ -1515,7 +1540,7 @@ async function postSlackRouteRefusal(
   const available = refusal.candidates.map((candidate) => candidate.label);
   const text =
     refusal.reason === "no_access_to_named"
-      ? `OpenGeni does not see a workspace named ${JSON.stringify(refusal.requested ?? "")} that you can start work in.${
+      ? `OpenGeni does not see a workspace named ${JSON.stringify(refusal.requested ?? "")} that you can start work in from here.${
           available.length > 0 ? ` You can use: ${available.join(", ")}.` : ""
         } No session was created.`
       : refusal.reason === "no_access_to_route"
@@ -1534,7 +1559,11 @@ async function postSlackRouteRefusal(
             },
             entry.createdAt.getTime(),
           )}. No session was created.`
-        : "OpenGeni has no workspace it can start this task in for you. Ask an OpenGeni administrator to give you access to one. No session was created.";
+        : // Deliberately "from this conversation" rather than "for you": in a
+          // channel this also fires for someone whose only workspace is their
+          // own personal one, and telling that person they have no workspace
+          // at all would be false. Their bot DM still works.
+          "OpenGeni has no workspace it can start this task in from this conversation. Ask an OpenGeni administrator to give you access to one, or message OpenGeni directly to work in your own workspace. No session was created.";
   await client.postMessage({
     operationId: deterministicUuid(`slack-route-denied:${entry.id}:${refusal.reason}`),
     userId: entry.slackUserId,

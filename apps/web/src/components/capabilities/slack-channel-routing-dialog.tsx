@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
+import { personalWorkspaceMembership } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 
 /** The null option: the channel asks the person once and remembers the answer. */
@@ -84,11 +85,16 @@ function SlackChannelRoutingDialogBody({
   // Only workspaces in this installation's own organization, and only ones this
   // admin could start work in themselves. The API refuses anything else, so
   // offering it here would be a promise it cannot keep.
+  // A personal workspace is excluded even though this admin can start work in
+  // it: a channel routed there would put every message in that channel
+  // somewhere nobody else in it can see. The API refuses it with a 422, and the
+  // routing resolver does not treat one as a candidate in a channel either.
   const account = context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId;
   const choices = context.workspaces.filter(
     (candidate) =>
       candidate.accountId === account &&
-      hasWorkspacePermission(context.accessContext, candidate.id, "sessions:create"),
+      hasWorkspacePermission(context.accessContext, candidate.id, "sessions:create") &&
+      personalWorkspaceMembership(candidate, context.managedSelfContext) === null,
   );
 
   useEffect(() => {
