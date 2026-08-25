@@ -146,10 +146,12 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
     credentials: "include",
     headers: {
       "content-type": "application/json",
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
       ...init?.headers,
     },
   });
   if (!response.ok) {
+    handleApiContractResponse(response);
     const text = await response.text();
     let code: string | null = null;
     let message = "Authentication request failed";
@@ -187,6 +189,51 @@ export async function signUpEmail(input: {
   password: string;
 }): Promise<unknown> {
   return await authRequest<unknown>("/sign-up/email", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export type SelfServiceOrganizationOnboardingState =
+  | "required"
+  | "invitation_pending"
+  | "unavailable"
+  | "complete";
+
+export async function getSelfServiceOrganizationOnboardingStatus(): Promise<{
+  state: SelfServiceOrganizationOnboardingState;
+}> {
+  return await authRequest<{ state: SelfServiceOrganizationOnboardingState }>(
+    "/organization-onboarding",
+    { method: "GET" },
+  );
+}
+
+export async function completeSelfServiceOrganizationSetup(input: {
+  organizationName: string;
+  operationId: string;
+}): Promise<{
+  status: "complete";
+  organizationId: string;
+  personalWorkspaceId: string;
+}> {
+  return await authRequest<{
+    status: "complete";
+    organizationId: string;
+    personalWorkspaceId: string;
+  }>("/organization-onboarding", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function completeOrganizationUserSetup(input: {
+  token: string;
+  name: string;
+  password: string;
+  operationId: string;
+}): Promise<{ status: "complete" }> {
+  return await authRequest<{ status: "complete" }>("/organization-setup", {
     method: "POST",
     body: JSON.stringify(input),
   });

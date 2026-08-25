@@ -31,6 +31,10 @@ export type SessionChannelMoveRequest = Readonly<{
   operation: number;
   readGeneration: number;
 }>;
+export type SessionChannelMoveResponseDisposition =
+  | "accepted"
+  | "verification-required"
+  | "rejected";
 
 function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspaceId">): string {
   return `${projection.workspaceId}\u0000${projection.id}`;
@@ -104,15 +108,17 @@ export class SessionChannelProjectionAuthority {
     owner: object,
     request: SessionChannelMoveRequest,
     projection: SessionChannelProjection,
-  ): boolean {
+  ): SessionChannelMoveResponseDisposition {
     if (
       projection.id !== request.sessionId ||
       projection.workspaceId !== request.workspaceId ||
       !this.ownsMoveRequest(owner, request)
     ) {
-      return false;
+      return "rejected";
     }
-    return this.recordRead(projection, request.readGeneration);
+    return this.recordRead(projection, request.readGeneration)
+      ? "accepted"
+      : "verification-required";
   }
 
   finishMoveRequest(owner: object, request: SessionChannelMoveRequest): void {
@@ -446,6 +452,27 @@ export function mergeSessionContextProjection(
   return source === "live" || channelAuthority.owns(current)
     ? (applySessionChannelProjection(pinned, current ?? projected) ?? pinned)
     : pinned;
+}
+
+/**
+ * Merge a completed detail request only through the channel evidence that won
+ * its request generation. A rejected late detail may still contribute its
+ * route-owned fields when persistent authority can project the newer channel;
+ * without such a winner it cannot seed stale route context after the rail (and
+ * its transient owner evidence) has unmounted.
+ */
+export function mergeSessionDetailReadProjection(
+  current: Session | null,
+  projected: Session,
+  channelAuthority: SessionChannelProjectionAuthority,
+  readGeneration: number,
+  accepted: boolean,
+): Session | null {
+  const authoritative = accepted ? projected : channelAuthority.project(projected, readGeneration);
+  if (!accepted && authoritative === projected && !channelAuthority.owns(projected)) {
+    return current;
+  }
+  return mergeSessionContextProjection(current, authoritative, channelAuthority, "detail");
 }
 
 /**

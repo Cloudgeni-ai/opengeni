@@ -14,6 +14,7 @@ import {
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
   type RuntimeTablePosture,
@@ -182,6 +183,8 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_user_retention_object_deletion_receipts",
     "organization_user_retention_object_obligations",
     "organization_user_retention_policies",
+    "organization_user_setup_intents",
+    "self_service_organization_setup_receipts",
   ].map((name) => ({
     name,
     owner: "opengeni_migrator",
@@ -355,7 +358,9 @@ function safePosture(): RuntimeDatabasePosture {
         name,
         owner: "opengeni_migrator",
         execute: true,
-        publicExecute: false,
+        publicExecute: (
+          RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
+        ).includes(name),
         securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
           name,
         ),
@@ -457,14 +462,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 290],
+            [FORCE_RLS_TABLES, 292],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 55],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 57],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
@@ -489,7 +494,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 302 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 304 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -1174,6 +1179,27 @@ describe("runtime database posture evaluator", () => {
         "runtime role lacks target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
         "PUBLIC has forbidden target-schema capability knowledge_source_sync_lock_authority(uuid, uuid, uuid)",
       ]),
+    );
+  });
+
+  test("allows PUBLIC execution only for the exact shared-table policy predicate", () => {
+    const missing = safePosture();
+    missing.targetRoutines.find(
+      (routine) =>
+        routine.name === "connection_authority_convergence_audit_capability_active(uuid)",
+    )!.publicExecute = false;
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      "PUBLIC lacks required shared-policy predicate connection_authority_convergence_audit_capability_active(uuid)",
+    );
+
+    const excess = safePosture();
+    excess.targetRoutines.find(
+      (routine) =>
+        routine.name ===
+        "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
+    )!.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(excess, options)).toContain(
+      "PUBLIC has forbidden target-schema capability inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
     );
   });
 

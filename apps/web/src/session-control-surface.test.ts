@@ -109,7 +109,8 @@ describe("session control surface architecture", () => {
     const route = await source("routes/session.tsx");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
-    expect(list).toContain("readSessionChannelMovePoint(sessionClient");
+    expect(list).toContain("const promise = readSessionChannelMovePoint(");
+    expect(list).toContain("sessionClient,");
     expect(list).toContain("sessionChannelProjectionAuthority.replace(");
     expect(list).toContain("rootReadGeneration");
     expect(list).toContain("globalPinsReadGeneration");
@@ -125,9 +126,9 @@ describe("session control surface architecture", () => {
     expect(list).toContain("sessionChannelProjectionAuthority.beginMoveRequest(");
     expect(list).toContain("sessionChannelProjectionAuthority.ownsMoveRequest(");
     expect(list).toContain("sessionChannelProjectionAuthority.recordMoveResponse(");
-    expect(list).toMatch(
-      /!context\.sessionChannelProjectionAuthority\.recordMoveResponse\([\s\S]*?\)\s*\)\s*\{\s*setChannelMoveOverrides\(\(current\) =>\s*discardRejectedSessionChannelMove\(current, session\.id, operation\),?\s*\);\s*return;/,
-    );
+    expect(list).toContain('if (disposition === "rejected")');
+    expect(list).toContain('if (disposition === "verification-required")');
+    expect(list).toContain("await verifySessionChannelMove(session.id, operation)");
     expect(list).toContain("sessionChannelProjectionAuthority.finishMoveRequest(");
     expect(list).toContain("context.client.updateSessionChannel(");
     expect(list).not.toContain("moveSession: requestMoveSession");
@@ -151,7 +152,11 @@ describe("session control surface architecture", () => {
     expect(route).toContain("readRevision: sessionReadRevision");
     expect(route).toContain("readGeneration: sessionReadGeneration");
     expect(route).toContain("sessionChannelProjectionAuthority.recordRead(");
-    expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "detail"');
+    expect(route).toContain(
+      "const accepted = context.sessionChannelProjectionAuthority.recordRead(",
+    );
+    expect(route).toContain("mergeSessionDetailReadProjection(");
+    expect(route).toContain("sessionReadGeneration,\n        accepted,");
     expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "live"');
   });
 

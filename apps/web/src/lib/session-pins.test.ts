@@ -20,14 +20,6 @@ const {
   reconcileSessionChannelMovePointRead,
 } = sessionChannelMove;
 
-const discardRejectedSessionChannelMove =
-  (
-    sessionChannelMove as typeof sessionChannelMove & {
-      discardRejectedSessionChannelMove?: typeof sessionChannelMove.rollbackSessionChannelMove;
-    }
-  ).discardRejectedSessionChannelMove ??
-  ((current: Parameters<typeof sessionChannelMove.rollbackSessionChannelMove>[0]) => current);
-
 const session = {
   id: "00000000-0000-4000-8000-000000000026",
   workspaceId: "00000000-0000-4000-8000-000000000001",
@@ -46,6 +38,13 @@ type PortableMoveRequest = Readonly<{
   operation: number;
   readGeneration: number;
 }>;
+type PortableMoveResponseDisposition = "accepted" | "verification-required" | "rejected";
+
+function normalizeMoveResponseDisposition(value: unknown): PortableMoveResponseDisposition {
+  if (value === true || value === "accepted") return "accepted";
+  if (value === "verification-required") return "verification-required";
+  return "rejected";
+}
 
 function portableMoveAuthority(authority: SessionChannelProjectionAuthority) {
   const persistent = authority as unknown as {
@@ -58,7 +57,7 @@ function portableMoveAuthority(authority: SessionChannelProjectionAuthority) {
       owner: object,
       request: PortableMoveRequest,
       response: Pick<Session, "id" | "workspaceId" | "channelId">,
-    ) => boolean;
+    ) => unknown;
     finishMoveRequest?: (owner: object, request: PortableMoveRequest) => void;
   };
   const localPending = new WeakMap<object, Map<string, PortableMoveRequest>>();
@@ -86,14 +85,17 @@ function portableMoveAuthority(authority: SessionChannelProjectionAuthority) {
     persistent.ownsMoveRequest?.bind(authority) ??
     ((owner: object, request: PortableMoveRequest) =>
       localPending.get(owner)?.get(moveKey(request))?.operation === request.operation);
-  const recordMoveResponse =
-    persistent.recordMoveResponse?.bind(authority) ??
-    ((owner: object, request: PortableMoveRequest, response: Session) => {
-      if (!ownsMoveRequest(owner, request)) return false;
-      // Reviewed-head behavior assigned the response a generation only when
-      // its promise settled, making an older mutation look causally newest.
-      return authority.recordRead(response, authority.beginRead());
-    });
+  const persistentRecordMoveResponse = persistent.recordMoveResponse?.bind(authority);
+  const recordMoveResponse = (
+    owner: object,
+    request: PortableMoveRequest,
+    response: Session,
+  ): PortableMoveResponseDisposition =>
+    normalizeMoveResponseDisposition(
+      persistentRecordMoveResponse
+        ? persistentRecordMoveResponse(owner, request, response)
+        : ownsMoveRequest(owner, request) && authority.recordRead(response, authority.beginRead()),
+    );
   const finishMoveRequest =
     persistent.finishMoveRequest?.bind(authority) ??
     ((owner: object, request: PortableMoveRequest) => {
@@ -161,7 +163,7 @@ describe("session pin reconciliation", () => {
       current = applySessionChannelProjection(current, stalePoint)!;
     }
     expect(acceptedStalePoint).toBe(false);
-    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    expect(overrides.size).toBe(0);
     expect(current).toBe(newer);
 
     const acceptedStaleMissing = authority.recordMissing(
@@ -172,7 +174,7 @@ describe("session pin reconciliation", () => {
       overrides = reconcileSessionChannelMovePointRead(overrides, session.id, 1, null);
     }
     expect(acceptedStaleMissing).toBe(false);
-    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    expect(overrides.size).toBe(0);
     expect(current).toBe(newer);
   });
 
@@ -242,19 +244,15 @@ describe("session pin reconciliation", () => {
 
     expect(authority.recordRead(movedAgain, newerDetailGeneration)).toBe(true);
     current = mergeSessionContextProjection(current, movedAgain, authority, "detail")!;
-    authority.replace(
-      moveOwner,
-      [{ ...moved, channelId: overrides.get(session.id)?.channelId ?? null }],
-      1,
-    );
-    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    authority.clear(moveOwner);
+    expect(overrides.size).toBe(0);
     expect(current.channelId).toBe("channel-c");
 
     // A probe started before the newer detail is stale if it returns B, and a
     // failed probe contributes no observation at all. Neither path can put B
     // back after the accepted detail has reconciled the committed override.
     expect(authority.recordRead(moved, staleProbeGeneration)).toBe(false);
-    expect(overrides.get(session.id)?.channelId).toBe("channel-c");
+    expect(overrides.size).toBe(0);
     expect(current.channelId).toBe("channel-c");
     unsubscribe();
   });
@@ -282,7 +280,7 @@ describe("session pin reconciliation", () => {
     expect(ownsMoveRequest(remountedRailOwner, newerRequest)).toBe(true);
 
     const settle = (owner: object, request: typeof firstRequest, response: Session): boolean => {
-      if (!recordMoveResponse(owner, request, response)) return false;
+      if (recordMoveResponse(owner, request, response) !== "accepted") return false;
       acceptedResponses += 1;
       current = applySessionChannelProjection(current, response)!;
       finishMoveRequest(owner, request);
@@ -313,13 +311,15 @@ describe("session pin reconciliation", () => {
           owner: object,
           request: PortableMoveRequest,
           response: Session,
-        ) => boolean;
+        ) => unknown;
       }
     ).recordMoveResponse?.bind(authority);
 
     // The component owner has unmounted, but no newer intent superseded its
     // persistent token. The raw client result must still become exact evidence.
-    expect(recordMoveResponse?.(firstRailOwner, request, moved) ?? false).toBe(true);
+    expect(
+      normalizeMoveResponseDisposition(recordMoveResponse?.(firstRailOwner, request, moved)),
+    ).toBe("accepted");
     authority.replace(remountedListOwner, [beforeMove], 0, staleRemountedReadGeneration);
     expect(authority.project(beforeMove, staleRemountedReadGeneration)).toMatchObject({
       channelId: "channel-b",
@@ -327,7 +327,7 @@ describe("session pin reconciliation", () => {
     expect(authority.owns(moved)).toBe(true);
   });
 
-  test("orders a delayed mutation response from its request start", () => {
+  test("requires a post-settlement read when newer evidence overlaps a move response", () => {
     const authority = new SessionChannelProjectionAuthority();
     const owner = {};
     const beforeMove = { ...session, channelId: "channel-a" } as Session;
@@ -338,14 +338,58 @@ describe("session pin reconciliation", () => {
     const request = beginMoveRequest(owner, beforeMove)!;
     expect(authority.recordRead(newerRead, authority.beginRead())).toBe(true);
 
-    // B committed before C, but its response was delayed until after C was
-    // read. Settlement time must not manufacture a newer causal generation.
-    expect(recordMoveResponse(owner, request, delayedMove)).toBe(false);
+    // The response cannot distinguish a read that observed a later C from one
+    // that merely returned pre-commit A. Preserve start ordering, then require
+    // an exact request that starts after the response settles.
+    expect(recordMoveResponse(owner, request, delayedMove)).toBe("verification-required");
+    expect(authority.recordRead(newerRead, authority.beginRead())).toBe(true);
     expect(authority.owns(newerRead)).toBe(true);
     expect(authority.owns(delayedMove)).toBe(false);
   });
 
-  test("discards a pending move overlay when a newer read rejects its delayed response", () => {
+  test("keeps a successful move through an overlapping stale read until verification", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const owner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const { beginMoveRequest, recordMoveResponse } = portableMoveAuthority(authority);
+    const request = beginMoveRequest(owner, beforeMove)!;
+    const overlappingReadGeneration = authority.beginRead();
+
+    // This GET starts after the PUT, but returns the pre-commit A before the
+    // successful PUT response B settles.
+    expect(authority.recordRead(beforeMove, overlappingReadGeneration)).toBe(true);
+    expect(recordMoveResponse(owner, request, moved)).toBe("verification-required");
+
+    let overrides = beginSessionChannelMove(
+      new Map(),
+      session.id,
+      moved.channelId ?? null,
+      request.operation,
+    );
+    overrides = commitSessionChannelMove(
+      overrides,
+      session.id,
+      moved.channelId ?? null,
+      request.operation,
+    );
+    expect(applySessionChannelMove(beforeMove, overrides.get(session.id)).channelId).toBe(
+      "channel-b",
+    );
+
+    const verificationGeneration = authority.beginRead();
+    expect(authority.recordRead(moved, verificationGeneration)).toBe(true);
+    overrides = reconcileSessionChannelMovePointRead(
+      overrides,
+      session.id,
+      request.operation,
+      moved,
+    );
+    expect(overrides.size).toBe(0);
+    expect(authority.project(beforeMove, overlappingReadGeneration).channelId).toBe("channel-b");
+  });
+
+  test("uses post-settlement authority before retiring an ambiguous move overlay", () => {
     const authority = new SessionChannelProjectionAuthority();
     const owner = {};
     const beforeMove = { ...session, channelId: "channel-a" } as Session;
@@ -361,9 +405,20 @@ describe("session pin reconciliation", () => {
     );
 
     expect(authority.recordRead(newerRead, authority.beginRead())).toBe(true);
-    if (!recordMoveResponse(owner, request, delayedMove)) {
-      overrides = discardRejectedSessionChannelMove(overrides, session.id, request.operation);
-    }
+    expect(recordMoveResponse(owner, request, delayedMove)).toBe("verification-required");
+    overrides = commitSessionChannelMove(
+      overrides,
+      session.id,
+      delayedMove.channelId ?? null,
+      request.operation,
+    );
+    expect(authority.recordRead(newerRead, authority.beginRead())).toBe(true);
+    overrides = reconcileSessionChannelMovePointRead(
+      overrides,
+      session.id,
+      request.operation,
+      newerRead,
+    );
 
     expect(overrides.has(session.id)).toBe(false);
     expect(applySessionChannelMove(newerRead, overrides.get(session.id)).channelId).toBe(

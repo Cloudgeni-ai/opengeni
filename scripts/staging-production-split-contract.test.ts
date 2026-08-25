@@ -36,6 +36,7 @@ describe("staging / production split workflows", () => {
     expect(source).toContain("bun scripts/publish-canary.ts");
     expect(source).toContain("group: publish-canary");
     expect(source).toContain('NPM_CONFIG_PROVENANCE: "true"');
+    expect(source).toContain('OPENGENI_RELEASE: "1"');
     expect(source).toContain("registry-url: https://registry.npmjs.org");
     expect(source).not.toContain("changeset publish");
     expect(source).not.toContain("--tag latest");

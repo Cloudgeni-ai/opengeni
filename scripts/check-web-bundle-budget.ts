@@ -169,7 +169,8 @@ const budgets = {
   // envelopes; initial, per-file, lazy-chunk, and CSS caps remain unchanged.
   // Managed organization bootstrap adds the authenticated principal routing
   // needed to accept an invitation or create an organization before a user has
-  // any workspace. The sign-in and onboarding surfaces remain lazy; the merged
+  // any workspace. The sign-in surface remains lazy while the authenticated
+  // no-workspace gate stays in the shell; the merged
   // macOS/arm64 graph measures 2,165,667 raw / 604,766 gzip bytes. Advance only
   // the raw aggregate to the next whole KiB above one KiB of headroom.
   // Restoring the rail creator monogram on root rows adds the shared chip
@@ -230,8 +231,17 @@ const budgets = {
   // Advance only this aggregate to the next whole-KiB envelope above one KiB
   // of headroom; every compressed, file-count, initial, lazy, and CSS cap stays
   // fixed.
-  directSessionRaw: 2132 * kib,
-  directSessionGzip: 596 * kib,
+  // The final one-time setup path keeps multiple pending invitations explicit,
+  // removes implicit shared-workspace creation, and scrubs setup authority from
+  // browser URLs. Main measured that graph at 2,180,307 raw / 608,688 gzip
+  // bytes on Bun 1.4 Linux/x64. Causal post-settlement move verification and
+  // rejected-detail projection bring the exact merged graph to 2,186,879 raw /
+  // 610,576 gzip bytes. Advance only these aggregates to 2,137 KiB raw and 598
+  // KiB gzip, preserving one KiB of raw headroom and the 1.5-KiB Linux/x64
+  // platform-skew allowance. The measured 31,498-byte CSS asset and every
+  // initial, per-file, file-count, lazy-chunk, and CSS cap stay fixed.
+  directSessionRaw: 2137 * kib,
+  directSessionGzip: 598 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

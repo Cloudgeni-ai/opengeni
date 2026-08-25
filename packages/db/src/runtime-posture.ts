@@ -85,6 +85,10 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "bind_pending_organization_invitations_for_verified_email(text, text)",
   "has_pending_organization_invitation_for_subject(text)",
   "accept_organization_invitation_v2(jsonb)",
+  "complete_self_service_organization_setup(jsonb)",
+  "ensure_organization_user_setup_intent(jsonb)",
+  "preflight_organization_user_setup(text)",
+  "complete_organization_user_setup(jsonb)",
   "organization_membership_command(jsonb)",
   "prepare_organization_membership_protocol_settlements(jsonb)",
   "assert_active_managed_human_organization_membership(uuid, text)",
@@ -108,6 +112,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_memberships",
   "organization_profile_events",
   "organization_shared_workspace_administration_capabilities",
+  "organization_user_setup_intents",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -115,6 +120,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_user_retention_object_deletion_receipts",
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "self_service_organization_setup_receipts",
 ] as const;
 const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE =
@@ -179,10 +185,14 @@ const USER_RESOURCE_LIFECYCLE_ROUTINES = [
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
+const CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE =
+  "connection_authority_convergence_audit_capability_active(uuid)";
 const CONNECTION_AUTHORITY_ROUTINES = [
+  CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
   "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
+  "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
 ] as const;
 const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES = [
   "get_self_personal_github_repository_selection(uuid, uuid, text, uuid)",
@@ -478,6 +488,19 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
 
+/**
+ * Boolean-only predicates that shared-table RLS policies must be able to
+ * evaluate under table owners and SECURITY DEFINER roles unknown at migration
+ * time. The capability ledger and the routine that mints its opaque token stay
+ * private; only these exact policy predicates may be PUBLIC-executable.
+ */
+export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
+  CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
+] as const;
+const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+);
+
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
@@ -665,6 +688,7 @@ export const FORCE_RLS_TABLES = [
   "organization_user_retention_object_deletion_receipts",
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "organization_user_setup_intents",
   "pack_installation_components",
   "pack_installations",
   "personal_document_once_consumption_receipts",
@@ -703,6 +727,7 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_run_personal_resource_snapshots",
   "scheduled_task_runs",
   "scheduled_tasks",
+  "self_service_organization_setup_receipts",
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
@@ -1146,6 +1171,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_retention_object_deletion_receipts",
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "organization_user_setup_intents",
   "personal_document_once_consumption_receipts",
   "personal_github_repository_selection_heads",
   "personal_github_repository_selection_operations",
@@ -1162,6 +1188,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "scheduled_task_run_personal_resource_admissions",
   "scheduled_task_run_personal_resource_once_receipts",
   "scheduled_task_run_personal_resource_snapshots",
+  "self_service_organization_setup_receipts",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
@@ -2271,7 +2298,12 @@ export function evaluateRuntimeDatabasePosture(
     if (!routine.execute) {
       violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
-    if (routine.publicExecute) {
+    const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
+      routine.name,
+    );
+    if (publicPolicyPredicate && !routine.publicExecute) {
+      violations.push(`PUBLIC lacks required shared-policy predicate ${routine.name}`);
+    } else if (!publicPolicyPredicate && routine.publicExecute) {
       violations.push(`PUBLIC has forbidden target-schema capability ${routine.name}`);
     }
   }

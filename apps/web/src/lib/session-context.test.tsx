@@ -4,6 +4,7 @@ import { createElement, useEffect, useState } from "react";
 import { registerDom, renderComponent } from "../../../../packages/react/test/render-hook";
 import type { Session } from "@/types";
 import { sameSessionForContext } from "./session-context";
+import * as sessionPins from "./session-pins";
 import {
   applySessionPinProjection,
   applySessionRailProjection,
@@ -20,6 +21,21 @@ import {
 } from "./session-pagination";
 
 registerDom();
+
+const mergeSessionDetailReadProjection =
+  (
+    sessionPins as typeof sessionPins & {
+      mergeSessionDetailReadProjection?: (
+        current: Session | null,
+        projected: Session,
+        authority: SessionChannelProjectionAuthority,
+        readGeneration: number,
+        accepted: boolean,
+      ) => Session | null;
+    }
+  ).mergeSessionDetailReadProjection ??
+  ((current: Session | null, projected: Session, authority: SessionChannelProjectionAuthority) =>
+    mergeSessionContextProjection(current, projected, authority, "detail"));
 
 const effectiveControl: Session["effectiveControl"] = {
   state: "active",
@@ -122,6 +138,33 @@ describe("session context equality", () => {
 
     expect(reconciled).toBe(freshDetail);
     expect(reconciled?.channelId).toBe(freshDetail.channelId);
+  });
+
+  test("does not seed stale route context from a detail rejected after rail unmount", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const staleDetail = {
+      ...session(false, 0),
+      channelId: "00000000-0000-4000-8000-000000000201",
+    } as Session;
+    const moved = {
+      ...staleDetail,
+      channelId: "00000000-0000-4000-8000-000000000202",
+    } as Session;
+    const staleDetailGeneration = authority.beginRead();
+
+    expect(authority.recordRead(moved, authority.beginRead())).toBe(true);
+    const accepted = authority.recordRead(staleDetail, staleDetailGeneration);
+    expect(accepted).toBe(false);
+
+    expect(
+      mergeSessionDetailReadProjection(
+        null,
+        staleDetail,
+        authority,
+        staleDetailGeneration,
+        accepted,
+      )?.channelId,
+    ).toBe(moved.channelId);
   });
 
   test("keeps a loaded list project over a conflicting detail read", () => {

@@ -9,6 +9,7 @@ import {
 } from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
+import { hashPassword } from "better-auth/crypto";
 import { Pool } from "pg";
 import { Resend } from "resend";
 
@@ -32,6 +33,11 @@ export function managedAuthUserCreateOverride(
 ): { data: typeof user } | undefined {
   if (managedAuthRequiresEmailVerification(settings)) return undefined;
   return { data: { ...user, emailVerified: true } };
+}
+
+/** Keep Better Auth password policy and storage format behind this boundary. */
+export async function hashManagedAuthPassword(password: string): Promise<string> {
+  return await hashPassword(password);
 }
 
 export function createManagedAuth(settings: Settings, db: Database): ManagedAuth | null {
@@ -147,7 +153,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       onExistingUserSignUp: async ({ user }) => {
         if (requireEmailVerification && !user.emailVerified) {
           const url = await verificationUrl(settings, user.email);
-          await sendEmail(settings, {
+          await sendManagedAuthEmail(settings, {
             to: user.email,
             subject: "Verify your OpenGeni email",
             text: `Verify your OpenGeni email: ${url}`,
@@ -156,7 +162,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
         }
       },
       sendResetPassword: async ({ user, url }) => {
-        await sendEmail(settings, {
+        await sendManagedAuthEmail(settings, {
           to: user.email,
           subject: "Reset your OpenGeni password",
           text: `Reset your OpenGeni password: ${url}`,
@@ -167,7 +173,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
     emailVerification: {
       sendOnSignUp: requireEmailVerification,
       sendVerificationEmail: async ({ user, url }) => {
-        await sendEmail(settings, {
+        await sendManagedAuthEmail(settings, {
           to: user.email,
           subject: "Verify your OpenGeni email",
           text: `Verify your OpenGeni email: ${url}`,
@@ -180,6 +186,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
           email: user.email,
           name: user.name,
           emailVerified: true,
+          provisionFallbackOrganization: false,
         });
       },
     },
@@ -266,6 +273,7 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
               email: user.email,
               name: user.name,
               emailVerified: true,
+              provisionFallbackOrganization: false,
             });
           },
         },
@@ -297,13 +305,14 @@ function betterAuthTrustedOrigins(settings: Settings): string[] {
   return [...origins];
 }
 
-async function sendEmail(
+export async function sendManagedAuthEmail(
   settings: Settings,
   input: {
     to: string;
     subject: string;
     text: string;
     html: string;
+    idempotencyKey?: string;
   },
 ): Promise<void> {
   if (!settings.resendApiKey) {
@@ -316,13 +325,16 @@ async function sendEmail(
     throw new Error("OPENGENI_RESEND_API_KEY is required to send managed auth email");
   }
   const resend = new Resend(settings.resendApiKey);
-  const result = await resend.emails.send({
-    from: settings.emailFrom,
-    to: input.to,
-    subject: input.subject,
-    text: input.text,
-    html: input.html,
-  });
+  const result = await resend.emails.send(
+    {
+      from: settings.emailFrom,
+      to: input.to,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+    },
+    input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined,
+  );
   if (result.error) {
     throw new Error(result.error.message);
   }

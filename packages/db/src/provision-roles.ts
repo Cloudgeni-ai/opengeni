@@ -501,6 +501,10 @@ async function grantAppRoleIfSchemaExists(
     "bind_pending_organization_invitations_for_verified_email(text,text)",
     "has_pending_organization_invitation_for_subject(text)",
     "accept_organization_invitation_v2(jsonb)",
+    "complete_self_service_organization_setup(jsonb)",
+    "ensure_organization_user_setup_intent(jsonb)",
+    "preflight_organization_user_setup(text)",
+    "complete_organization_user_setup(jsonb)",
     "organization_membership_command(jsonb)",
     "prepare_organization_membership_protocol_settlements(jsonb)",
     "assert_active_managed_human_organization_membership(uuid,text)",
@@ -676,6 +680,7 @@ BEGIN
     FOREACH routine_signature IN ARRAY ARRAY[
       'classify_organization_connection_authority(uuid,text)',
       'backfill_organization_connection_authority(uuid,integer,boolean)',
+      'inspect_organization_connection_authority_convergence(uuid,integer,uuid)',
       'check_organization_tenancy_parity(uuid,integer,integer)'
     ] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature))
@@ -689,6 +694,18 @@ BEGIN
         );
       END IF;
     END LOOP;
+    IF to_regclass(
+      format(
+        '%I.connection_authority_convergence_audit_capabilities',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE %I.connection_authority_convergence_audit_capabilities FROM %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to

@@ -175,11 +175,24 @@ function labelFor(
  * override beats configuration beats derivation beats asking.
  */
 export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteResolution {
+  // A personal workspace is only ever a destination for that person's own bot
+  // DM. Offering it in a channel would be wrong twice over: routing a shared
+  // conversation into one member's private space hides it from everyone else
+  // in the channel, and - because managed tenancy provisions a personal
+  // workspace for every member - counting it as a candidate means nobody ever
+  // has exactly one. That defeats the sole-candidate rule below, so an
+  // organization with a single shared workspace would be asked to choose in
+  // every channel despite having no choice to make.
+  const directMessage = isSlackDirectMessageConversation(input.entry);
+  const candidates = directMessage
+    ? input.candidates
+    : input.candidates.filter((candidate) => !candidate.personal);
+
   const installation = {
     kind: "resolved" as const,
     accountId: input.home.accountId,
     workspaceId: input.home.workspaceId,
-    label: labelFor(input.candidates, input.home.workspaceId),
+    label: labelFor(candidates, input.home.workspaceId),
     source: "installation" as const,
   };
 
@@ -206,7 +219,7 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
       kind: "resolved",
       accountId: input.threadTenancy.accountId,
       workspaceId: input.threadTenancy.workspaceId,
-      label: labelFor(input.candidates, input.threadTenancy.workspaceId),
+      label: labelFor(candidates, input.threadTenancy.workspaceId),
       source: "thread",
     };
   }
@@ -221,13 +234,13 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
     ? parseSlackWorkspacePrefix(splitSlackLeadingMention(input.entry.text, input.botUserId).rest)
     : null;
   if (prefix) {
-    const named = matchCandidate(input.candidates, prefix.requested);
+    const named = matchCandidate(candidates, prefix.requested);
     if (named === "ambiguous" || !named) {
       return {
         kind: "denied",
         reason: "no_access_to_named",
         requested: prefix.requested,
-        candidates: input.candidates,
+        candidates: candidates,
       };
     }
     return {
@@ -245,7 +258,7 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
       kind: "resolved",
       accountId: input.channelRoute.targetAccountId,
       workspaceId: input.channelRoute.targetWorkspaceId,
-      label: labelFor(input.candidates, input.channelRoute.targetWorkspaceId),
+      label: labelFor(candidates, input.channelRoute.targetWorkspaceId),
       source: "channel",
     };
   }
@@ -254,13 +267,13 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
   //    lands in their own workspace unless they chose otherwise. The personal
   //    workspace id is DERIVED from an active organization membership pointer;
   //    it is never accepted from a Slack payload or a route row.
-  if (isSlackDirectMessageConversation(input.entry)) {
+  if (directMessage) {
     if (input.dmRoute) {
       return {
         kind: "resolved",
         accountId: input.dmRoute.targetAccountId,
         workspaceId: input.dmRoute.targetWorkspaceId,
-        label: labelFor(input.candidates, input.dmRoute.targetWorkspaceId),
+        label: labelFor(candidates, input.dmRoute.targetWorkspaceId),
         source: "dm_route",
       };
     }
@@ -269,7 +282,7 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
         kind: "resolved",
         accountId: input.home.accountId,
         workspaceId: input.personalWorkspaceId,
-        label: labelFor(input.candidates, input.personalWorkspaceId),
+        label: labelFor(candidates, input.personalWorkspaceId),
         source: "dm_personal",
       };
     }
@@ -280,8 +293,8 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
 
   // 5. One workspace is not a choice. This is what keeps the flag quiet for
   //    installs that only ever had one workspace.
-  const sole = input.candidates[0];
-  if (input.candidates.length === 1 && sole) {
+  const sole = candidates[0];
+  if (candidates.length === 1 && sole) {
     return {
       kind: "resolved",
       accountId: sole.accountId,
@@ -291,13 +304,13 @@ export function resolveSlackWorkspaceRoute(input: SlackRouteInputs): SlackRouteR
     };
   }
 
-  if (input.candidates.length === 0) {
+  if (candidates.length === 0) {
     return { kind: "denied", reason: "no_candidates", requested: null, candidates: [] };
   }
 
   // 6. Genuinely ambiguous. Until the picker exists, keep the installation's
   //    workspace rather than inventing an answer.
-  return input.askEnabled ? { kind: "ask", candidates: input.candidates } : installation;
+  return input.askEnabled ? { kind: "ask", candidates: candidates } : installation;
 }
 
 /**

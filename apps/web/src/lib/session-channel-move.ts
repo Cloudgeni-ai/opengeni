@@ -107,25 +107,20 @@ export function reconcileSessionChannelMoves(
 }
 
 /**
- * Reconcile a committed optimistic move with an exact point read started after
- * the write. Matching state proves the list row is stale and keeps the overlay;
- * a different channel supersedes it immediately, while a missing session
- * retires the otherwise-unconfirmable override.
+ * Reconcile a committed optimistic move with an accepted exact point read
+ * started after the write. Persistent read authority now owns either the
+ * matching destination or a newer cross-client destination, so the temporary
+ * priority overlay must retire in both cases. A missing session retires it too.
  */
 export function reconcileSessionChannelMovePointRead(
   current: SessionChannelMoveOverrides,
   sessionId: string,
   operation: number,
-  authoritative: Pick<Session, "channelId"> | null,
+  _authoritative: Pick<Session, "channelId"> | null,
 ): SessionChannelMoveOverrides {
   const override = current.get(sessionId);
   if (!override || override.operation !== operation || !override.committed) return current;
-  if (!authoritative) {
-    const next = new Map(current);
-    next.delete(sessionId);
-    return next;
-  }
-  const channelId = authoritative.channelId ?? null;
-  if (channelId === override.channelId) return current;
-  return new Map(current).set(sessionId, { ...override, channelId });
+  const next = new Map(current);
+  next.delete(sessionId);
+  return next;
 }

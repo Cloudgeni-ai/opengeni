@@ -132,7 +132,7 @@ describe("optimistic session channel moves", () => {
     });
   });
 
-  test("keeps a committed destination over a stale refetch until the server confirms it", () => {
+  test("retires a committed destination after an exact point read confirms it", () => {
     const stale = session({ id: "session-1", channelId: "channel-old" });
     let overrides: SessionChannelMoveOverrides = beginSessionChannelMove(
       new Map(),
@@ -144,20 +144,16 @@ describe("optimistic session channel moves", () => {
 
     const afterStaleRefetch = reconcileSessionChannelMoves(overrides, [stale]);
     expect(afterStaleRefetch).toBe(overrides);
-    expect(
-      reconcileSessionChannelMovePointRead(
-        afterStaleRefetch,
-        stale.id,
-        1,
-        session({ id: stale.id, channelId: "channel-new" }),
-      ),
-    ).toBe(afterStaleRefetch);
-    expect(applySessionChannelMove(stale, afterStaleRefetch.get(stale.id)).channelId).toBe(
-      "channel-new",
+    const afterPointRead = reconcileSessionChannelMovePointRead(
+      afterStaleRefetch,
+      stale.id,
+      1,
+      session({ id: stale.id, channelId: "channel-new" }),
     );
+    expect(afterPointRead.size).toBe(0);
 
     const authoritative = session({ id: stale.id, channelId: "channel-new" });
-    const reconciled = reconcileSessionChannelMoves(afterStaleRefetch, [authoritative]);
+    const reconciled = reconcileSessionChannelMoves(afterPointRead, [authoritative]);
     expect(reconciled.size).toBe(0);
     expect(applySessionChannelMove(authoritative, reconciled.get(stale.id))).toBe(authoritative);
   });
@@ -223,7 +219,8 @@ describe("optimistic session channel moves", () => {
 
     const movedAgain = session({ id: stale.id, channelId: "channel-latest" });
     const superseded = reconcileSessionChannelMovePointRead(overrides, stale.id, 1, movedAgain);
-    expect(applySessionChannelMove(stale, superseded.get(stale.id)).channelId).toBe(
+    expect(superseded.size).toBe(0);
+    expect(applySessionChannelMove(movedAgain, superseded.get(stale.id)).channelId).toBe(
       "channel-latest",
     );
 

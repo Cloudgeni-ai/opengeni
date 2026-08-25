@@ -468,7 +468,9 @@ export function SessionList() {
   const listRef = useRef<HTMLDivElement>(null);
   const pendingSessionFocus = useRef<PendingSessionFocus | null>(null);
   const [focusRestoreRevision, setFocusRestoreRevision] = useState(0);
-  const channelMoveProbes = useRef(new Map<string, string>());
+  const channelMoveProbes = useRef(
+    new Map<string, { operation: number; promise: Promise<void> }>(),
+  );
   const rootChannelProjectionOwner = useRef({});
   const continuationChannelProjectionOwner = useRef({});
   const branchChannelProjectionOwner = useRef({});
@@ -677,6 +679,81 @@ export function SessionList() {
     return [...source.values()];
   }, [attentionOverrides, channelMoveOverrides, pinOverrides, serverSessions]);
 
+  const verifySessionChannelMove = useCallback(
+    (sessionId: string, operation: number): Promise<void> => {
+      const existing = channelMoveProbes.current.get(sessionId);
+      if (existing?.operation === operation) return existing.promise;
+
+      let readGeneration = 0;
+      const promise = readSessionChannelMovePoint(
+        sessionClient,
+        rail.workspaceId,
+        sessionId,
+        () => {
+          readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+        },
+      )
+        .then((authoritative) => {
+          const currentProbe = channelMoveProbes.current.get(sessionId);
+          if (currentProbe?.operation !== operation) return;
+          const accepted = context.sessionChannelProjectionAuthority.recordRead(
+            authoritative,
+            readGeneration,
+          );
+          if (accepted) {
+            setChannelMoveOverrides((current) =>
+              reconcileSessionChannelMovePointRead(current, sessionId, operation, authoritative),
+            );
+            setContextSession((current) => applySessionChannelProjection(current, authoritative));
+            return;
+          }
+
+          // A still-newer accepted detail/point read won while this request was
+          // in flight. Retire only this operation's overlay, then expose that
+          // persistent winner instead of the rejected response.
+          setChannelMoveOverrides((current) =>
+            discardRejectedSessionChannelMove(current, sessionId, operation),
+          );
+          const winner = context.sessionChannelProjectionAuthority.project(
+            authoritative,
+            readGeneration,
+          );
+          if (context.sessionChannelProjectionAuthority.owns(winner)) {
+            setContextSession((current) => applySessionChannelProjection(current, winner));
+          }
+        })
+        .catch((requestError: unknown) => {
+          const currentProbe = channelMoveProbes.current.get(sessionId);
+          if (
+            currentProbe?.operation !== operation ||
+            !(requestError instanceof OpenGeniApiError) ||
+            requestError.status !== 404
+          ) {
+            return;
+          }
+          // Whether this absence is accepted or loses to a still-newer read,
+          // exact post-settlement evidence makes the temporary move overlay
+          // redundant. Persistent authority retains any newer present winner.
+          context.sessionChannelProjectionAuthority.recordMissing(
+            { id: sessionId, workspaceId: rail.workspaceId },
+            readGeneration,
+          );
+          setChannelMoveOverrides((current) =>
+            reconcileSessionChannelMovePointRead(current, sessionId, operation, null),
+          );
+        });
+      const probe = { operation, promise };
+      channelMoveProbes.current.set(sessionId, probe);
+      void promise.finally(() => {
+        if (channelMoveProbes.current.get(sessionId) === probe) {
+          channelMoveProbes.current.delete(sessionId);
+        }
+      });
+      return promise;
+    },
+    [context.sessionChannelProjectionAuthority, rail.workspaceId, sessionClient, setContextSession],
+  );
+
   // Matching causally authoritative list/page evidence confirms the optimistic
   // destination. Display-only retained rows cannot confirm or disagree: their
   // channel may have been patched from context after their list authority
@@ -700,63 +777,9 @@ export function SessionList() {
       ) {
         continue;
       }
-      const key = `${override.operation}:${authoritativeEvidence?.channelId ?? "absent"}`;
-      if (channelMoveProbes.current.get(sessionId) === key) continue;
-      channelMoveProbes.current.set(sessionId, key);
-      let readGeneration = 0;
-      void readSessionChannelMovePoint(sessionClient, rail.workspaceId, sessionId, () => {
-        readGeneration = context.sessionChannelProjectionAuthority.beginRead();
-      })
-        .then((authoritative) => {
-          if (channelMoveProbes.current.get(sessionId) !== key) return;
-          if (
-            !context.sessionChannelProjectionAuthority.recordRead(authoritative, readGeneration)
-          ) {
-            return;
-          }
-          setChannelMoveOverrides((current) =>
-            reconcileSessionChannelMovePointRead(
-              current,
-              sessionId,
-              override.operation,
-              authoritative,
-            ),
-          );
-          setContextSession((current) => applySessionChannelProjection(current, authoritative));
-        })
-        .catch((requestError: unknown) => {
-          if (
-            channelMoveProbes.current.get(sessionId) === key &&
-            requestError instanceof OpenGeniApiError &&
-            requestError.status === 404
-          ) {
-            if (
-              !context.sessionChannelProjectionAuthority.recordMissing(
-                { id: sessionId, workspaceId: rail.workspaceId },
-                readGeneration,
-              )
-            ) {
-              return;
-            }
-            setChannelMoveOverrides((current) =>
-              reconcileSessionChannelMovePointRead(current, sessionId, override.operation, null),
-            );
-          }
-        })
-        .finally(() => {
-          if (channelMoveProbes.current.get(sessionId) === key) {
-            channelMoveProbes.current.delete(sessionId);
-          }
-        });
+      void verifySessionChannelMove(sessionId, override.operation);
     }
-  }, [
-    channelMoveOverrides,
-    channelAuthoritySessions,
-    context.sessionChannelProjectionAuthority,
-    rail.workspaceId,
-    sessionClient,
-    setContextSession,
-  ]);
+  }, [channelMoveOverrides, channelAuthoritySessions, verifySessionChannelMove]);
 
   useEffect(() => {
     channelMoveProbes.current.clear();
@@ -1094,13 +1117,12 @@ export function SessionList() {
           // The successful write response is exact evidence from this
           // request's start. A later server read can therefore reject a
           // delayed mutation response, while rail unmount cannot discard it.
-          if (
-            !context.sessionChannelProjectionAuthority.recordMoveResponse(
-              moveRequestOwner.current,
-              moveRequest,
-              moved,
-            )
-          ) {
+          const disposition = context.sessionChannelProjectionAuthority.recordMoveResponse(
+            moveRequestOwner.current,
+            moveRequest,
+            moved,
+          );
+          if (disposition === "rejected") {
             setChannelMoveOverrides((current) =>
               discardRejectedSessionChannelMove(current, session.id, operation),
             );
@@ -1114,6 +1136,13 @@ export function SessionList() {
               ? { ...current, channelId: moved.channelId ?? null }
               : current,
           );
+          if (disposition === "verification-required") {
+            // Start and await an exact read after the successful response has
+            // settled. It distinguishes an overlapping pre-commit A from a
+            // genuinely newer C while the persistent move token survives rail
+            // remounts and the committed B remains visible.
+            await verifySessionChannelMove(session.id, operation);
+          }
         } else {
           setChannelMoveOverrides((current) =>
             rollbackSessionChannelMove(current, session.id, operation),
@@ -1133,7 +1162,7 @@ export function SessionList() {
         }
       }
     },
-    [context, refreshSessionPages],
+    [context, refreshSessionPages, verifySessionChannelMove],
   );
   const onToggleProjectPin = useCallback(
     async (project: Channel) => {

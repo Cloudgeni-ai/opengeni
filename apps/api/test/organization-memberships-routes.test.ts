@@ -3,6 +3,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   createDb,
   ensureManagedAccessForUserWithOrganizationMemberships,
+  getSelfServiceOrganizationOnboardingState,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
@@ -22,6 +23,12 @@ let subjectId = "";
 let accountId = "";
 let authSessionId = "";
 
+const managedSettings = testSettings({
+  productAccessMode: "managed",
+  publicBaseUrl: "http://opengeni.test",
+  betterAuthSecret: "organization-membership-route-secret-at-least-32-bytes",
+});
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("api-organization-memberships");
   if (!shared) return;
@@ -35,6 +42,12 @@ beforeAll(async () => {
   await shared.admin`
     insert into auth_users (id, name, email, email_verified)
     values (${userId}, 'Organization member', ${email}, true)`;
+  await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+    userId,
+    email,
+    name: "Organization member",
+    emailVerified: true,
+  });
   await shared.admin`
     insert into auth_identities (id, user_id, provider_id, account_id)
     values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
@@ -51,7 +64,7 @@ beforeAll(async () => {
   app = new Hono();
   registerOrganizationMembershipRoutes(app, {
     db: client.db,
-    settings: testSettings({ productAccessMode: "managed" }),
+    settings: managedSettings,
     managedAuth: {
       api: {
         getSession: async () => ({
@@ -90,7 +103,7 @@ describe("organization membership routes", () => {
     const delegated = new Hono();
     registerOrganizationMembershipRoutes(delegated, {
       db: {} as never,
-      settings: testSettings({ productAccessMode: "managed" }),
+      settings: managedSettings,
       managedAuth: {} as never,
     } as ApiRouteDeps);
     expect(
@@ -105,8 +118,48 @@ describe("organization membership routes", () => {
     ).toBe(401);
   });
 
-  test("creates an organization with its initial workspace and replays idempotently", async () => {
-    if (!shared || !app) return;
+  test("creates an organization with only its Personal workspace and replays idempotently", async () => {
+    if (!shared || !client) return;
+    const setupUserId = `organization-setup-${crypto.randomUUID()}`;
+    const setupSubjectId = `user:${setupUserId}`;
+    const setupSessionId = `session-${crypto.randomUUID()}`;
+    const setupEmail = `${setupUserId}@example.test`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${setupUserId}, 'Organization setup owner', ${setupEmail}, true)`;
+    await shared.admin`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${setupUserId}, 'credential', ${setupUserId})`;
+    const setupIdentity = await synchronizeCanonicalHumanLoginBindings(client.db, setupUserId);
+    await shared.admin`
+      insert into auth_sessions (
+        id, user_id, token, expires_at,
+        identity_id, identity_revision, auth_revision
+      ) values (
+        ${setupSessionId}, ${setupUserId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${setupIdentity.identityId}, ${setupIdentity.identityRevision}, ${setupIdentity.authRevision}
+      )`;
+    const setupApp = new Hono();
+    registerOrganizationMembershipRoutes(setupApp, {
+      db: client.db,
+      settings: managedSettings,
+      managedAuth: {
+        api: {
+          getSession: async () => ({
+            headers: new Headers(),
+            response: {
+              session: { id: setupSessionId },
+              user: {
+                id: setupUserId,
+                email: setupEmail,
+                name: "Organization setup owner",
+                emailVerified: true,
+              },
+            },
+          }),
+        },
+      } as never,
+    } as ApiRouteDeps);
     const operationId = crypto.randomUUID();
     let createdOrganizationId = "";
     try {
@@ -115,7 +168,7 @@ describe("organization membership routes", () => {
         operationId,
       };
       const [response, concurrentRetry] = await Promise.all([
-        app.request("http://x/v1/organizations", {
+        setupApp.request("http://x/v1/organizations", {
           method: "POST",
           headers: {
             cookie: "session=present",
@@ -123,7 +176,7 @@ describe("organization membership routes", () => {
           },
           body: JSON.stringify(request),
         }),
-        app.request("http://x/v1/organizations", {
+        setupApp.request("http://x/v1/organizations", {
           method: "POST",
           headers: {
             cookie: "session=present",
@@ -144,7 +197,7 @@ describe("organization membership routes", () => {
         organization: { name: "Product team" },
       });
 
-      const replay = await app.request("http://x/v1/organizations", {
+      const replay = await setupApp.request("http://x/v1/organizations", {
         method: "POST",
         headers: {
           cookie: "session=present",
@@ -161,20 +214,23 @@ describe("organization membership routes", () => {
         select
           (select count(*)::int from organization_memberships
             where account_id = ${createdOrganizationId}
-              and subject_id = ${subjectId}
+              and subject_id = ${setupSubjectId}
               and role = 'owner'
               and status = 'active') as memberships,
           (select count(*)::int from workspace_memberships
             where account_id = ${createdOrganizationId}
               and workspace_id = ${created.workspaceId}
-              and subject_id = ${subjectId}
+              and subject_id = ${setupSubjectId}
               and role = 'owner') as "sharedWorkspaces",
           (select count(*)::int from workspaces
             where account_id = ${createdOrganizationId}
               and external_source = 'opengeni:organization-membership') as "personalWorkspaces"`;
-      expect(authority).toEqual({ memberships: 1, sharedWorkspaces: 1, personalWorkspaces: 1 });
+      expect(authority).toEqual({ memberships: 1, sharedWorkspaces: 0, personalWorkspaces: 1 });
     } finally {
       if (createdOrganizationId) {
+        await shared.admin`
+          delete from self_service_organization_setup_receipts
+          where account_id = ${createdOrganizationId}`;
         await shared.admin`delete from managed_accounts where id = ${createdOrganizationId}`;
       }
     }
@@ -211,7 +267,7 @@ describe("organization membership routes", () => {
     const targetApp = new Hono();
     registerOrganizationMembershipRoutes(targetApp, {
       db: client.db,
-      settings: testSettings({ productAccessMode: "managed" }),
+      settings: managedSettings,
       managedAuth: {
         api: {
           getSession: async () => ({
@@ -250,6 +306,23 @@ describe("organization membership routes", () => {
       revision: number;
     };
     expect(invitation).not.toHaveProperty("targetRegistrationStatus");
+    const redundantOrganization = await targetApp.request("http://x/v1/organizations", {
+      method: "POST",
+      headers: {
+        cookie: "session=present",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "Must not be created",
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(redundantOrganization.status).toBe(409);
+    const [fallbackAfterBlockedSetup] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from managed_accounts
+      where external_source = 'better-auth:user'
+        and external_id = ${targetUserId}`;
+    expect(fallbackAfterBlockedSetup?.count).toBe(0);
     const [storedBeforeBinding] = await shared.admin<Array<{ targetSubjectId: string | null }>>`
       select target_subject_id as "targetSubjectId"
       from organization_membership_invitations
@@ -820,7 +893,55 @@ describe("organization membership routes", () => {
     expect(after[0]).toEqual({ actorCount: 0, targetCount: 0 });
   }, 180_000);
 
-  test("returns only the current active membership and denies terminal membership state", async () => {
+  test("refuses invitation creation before committing when setup delivery is unconfigured", async () => {
+    if (!shared || !client) return;
+    const unconfigured = new Hono();
+    registerOrganizationMembershipRoutes(unconfigured, {
+      db: client.db,
+      // Managed mode with integrations disabled is a valid deployment that never
+      // requires OPENGENI_PUBLIC_BASE_URL, so this precondition is reachable.
+      settings: testSettings({ productAccessMode: "managed" }),
+      managedAuth: {
+        api: {
+          getSession: async () => ({
+            headers: new Headers(),
+            response: {
+              session: { id: authSessionId },
+              user: {
+                id: userId,
+                email: `${userId}@example.test`,
+                name: "Organization member",
+                emailVerified: true,
+              },
+            },
+          }),
+        },
+      } as never,
+    } as ApiRouteDeps);
+    const targetEmail = `unconfigured-${crypto.randomUUID()}@example.test`;
+    const response = await unconfigured.request(
+      `http://x/v1/organizations/${accountId}/invitations`,
+      {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          email: targetEmail,
+          role: "member",
+          operationId: crypto.randomUUID(),
+          initialWorkspaceIds: [],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      },
+    );
+    expect(response.status).toBe(503);
+    // The point of the precondition: no orphaned invitation row is left behind.
+    const [committed] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from organization_membership_invitations
+      where target_email = ${targetEmail}`;
+    expect(committed?.count).toBe(0);
+  });
+
+  test("returns only the current active membership and reports terminal state as empty", async () => {
     if (!shared || !app) return;
 
     const response = await app.request("http://x/v1/organization-memberships", {
@@ -872,12 +993,23 @@ describe("organization membership routes", () => {
       set status = 'suspended', revoked_at = null
       where account_id = ${accountId}
         and subject_id = ${subjectId}`;
-    const denied = await app.request("http://x/v1/organization-memberships", {
+    // Terminal-only membership is a bounded EMPTY projection, not a 403. The
+    // route lists only the caller's own memberships, so an empty list leaks
+    // nothing, and it is the exact state the onboarding contract reports as
+    // `unavailable` - a 403 here used to come from the fallback-organization
+    // projection that 0348 removed, and made the caller look unauthenticated
+    // rather than un-onboarded.
+    const terminal = await app.request("http://x/v1/organization-memberships", {
       headers: { cookie: "session=present" },
     });
-    expect(denied.status).toBe(403);
-    // This minimal route harness has no application-level JSON error adapter,
-    // so bare Hono renders HTTPException messages as plain text.
-    expect(await denied.text()).toBe("organization membership is not active");
+    expect(terminal.status).toBe(200);
+    expect(await terminal.json()).toEqual({ memberships: [] });
+    expect(
+      await getSelfServiceOrganizationOnboardingState(client!.db, {
+        authUserId: userId,
+        email: `${userId}@example.test`,
+        emailVerified: true,
+      }),
+    ).toBe("unavailable");
   });
 });

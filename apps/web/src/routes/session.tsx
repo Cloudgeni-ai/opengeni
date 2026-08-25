@@ -103,7 +103,10 @@ import {
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
 } from "@/lib/session-attention";
-import { mergeSessionContextProjection } from "@/lib/session-pins";
+import {
+  mergeSessionContextProjection,
+  mergeSessionDetailReadProjection,
+} from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
@@ -312,13 +315,17 @@ export function SessionRoute({
       return;
     }
     reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
-    context.sessionChannelProjectionAuthority.recordRead(fetchedSession, sessionReadGeneration);
+    const accepted = context.sessionChannelProjectionAuthority.recordRead(
+      fetchedSession,
+      sessionReadGeneration,
+    );
     setContextSession((current) =>
-      mergeSessionContextProjection(
+      mergeSessionDetailReadProjection(
         current,
         fetchedSession,
         context.sessionChannelProjectionAuthority,
-        "detail",
+        sessionReadGeneration,
+        accepted,
       ),
     );
   }, [
