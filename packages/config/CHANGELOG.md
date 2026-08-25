@@ -1,5 +1,18 @@
 # @opengeni/config
 
+## 0.19.1
+
+### Patch Changes
+
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [47ccfab]
+- Updated dependencies [b74e557]
+- Updated dependencies [b2cd0f0]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/codex@0.2.19
+  - @opengeni/xai-subscription@0.1.2
+
 ## 0.19.0
 
 ### Minor Changes

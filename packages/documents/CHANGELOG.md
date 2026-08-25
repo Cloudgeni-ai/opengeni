@@ -1,5 +1,38 @@
 # @opengeni/documents
 
+## 0.7.0
+
+### Minor Changes
+
+- b74e557: Add an explicit, replay-safe Document authority-reclassification lifecycle and
+  a resumable organization Default-collection backfill. Reclassification requires
+  the exact expected authority tuple, updates the Document and every chunk in one
+  transaction, and retains immutable before/after receipts. The SDK and API expose
+  the account-admin and actor-fenced operations, bounded cursor-paginated receipt
+  history, and same-organization portable-personal behavior without making
+  collections an authority boundary.
+
+### Patch Changes
+
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [4d83368]
+- Updated dependencies [47ccfab]
+- Updated dependencies [cb116e0]
+- Updated dependencies [b74e557]
+- Updated dependencies [b2cd0f0]
+- Updated dependencies [fc80fdf]
+- Updated dependencies [1789977]
+- Updated dependencies [4e48785]
+- Updated dependencies [e720d3e]
+- Updated dependencies [3e3b09a]
+- Updated dependencies [64d8d2c]
+- Updated dependencies [ad6acbe]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/db@3.2.0
+  - @opengeni/config@0.19.1
+  - @opengeni/storage@0.2.106
+
 ## 0.6.9
 
 ### Patch Changes

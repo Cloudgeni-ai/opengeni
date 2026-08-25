@@ -1,5 +1,16 @@
 # @opengeni/codemode
 
+## 0.4.13
+
+### Patch Changes
+
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [47ccfab]
+- Updated dependencies [b74e557]
+- Updated dependencies [b2cd0f0]
+  - @opengeni/contracts@2.3.0
+
 ## 0.4.12
 
 ### Patch Changes
