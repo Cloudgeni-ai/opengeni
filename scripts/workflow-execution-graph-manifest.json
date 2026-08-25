@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "f1a0843536e08f2298c4361a73b6ccea630a41b44a11498978b0803a6c70cf6c"
+      "sha256": "84ccb57e7c6a4bb767dd6e5d13f3ec9263e63a2f7c760d6c64f9ebb99001b89e"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -548,6 +548,12 @@
       "job": "browser-acceptance",
       "step": "Stabilize Ubuntu package downloads",
       "sha256": "fab7e78dd1d412f10650b97447bc8742deff4000c1f2ca13c40d21ce4edaf912"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "browser-acceptance",
+      "step": "Timeline pagination browser regressions",
+      "sha256": "1e63777b6c45012b47e62e4c067000f60fd4e0e746cf949204b299f8b4bbe09c"
     },
     {
       "workflow": ".github/workflows/ci.yml",
