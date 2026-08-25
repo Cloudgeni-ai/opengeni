@@ -646,7 +646,7 @@ describe("organization administration component fences", () => {
       name: "Second Owner",
       email: "owner-2@example.com",
     };
-    const listOrganizationMembers = mock(async () => ({
+    const listOrganizationAdministrationMembers = mock(async () => ({
       members: [actor, secondOwner],
     }));
     const updateOrganizationMember = mock(async () => ({
@@ -656,7 +656,7 @@ describe("organization administration component fences", () => {
     }));
     const onAuthorityChanged = mock(() => undefined);
     const client = {
-      listOrganizationMembers,
+      listOrganizationAdministrationMembers,
       listOrganizationInvitationsForOrganization: async () => ({
         invitations: [],
         nextCursor: null,
@@ -686,7 +686,7 @@ describe("organization administration component fences", () => {
     });
     await flush();
 
-    expect(listOrganizationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(listOrganizationAdministrationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("Second Owner");
     const roleSelect = container.querySelector<HTMLSelectElement>(
       'select[aria-label="Organization role for Test person (you)"]',

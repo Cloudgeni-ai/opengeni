@@ -3,6 +3,7 @@ import {
   getOrganizationPrivateSessionSettings,
   updateOrganizationPrivateSessionSettings,
 } from "@opengeni/sdk/organization-private-session-settings";
+import { retryOrganizationUserSetupDelivery } from "@opengeni/sdk/organization-user-setup";
 import {
   Building2Icon,
   CheckIcon,
@@ -1736,7 +1737,8 @@ export function OrganizationPeopleSection(props: {
     setBusyOwnerKey(identityKey);
     setBusyResource("admin-invitations");
     try {
-      const delivery = await props.client.retryOrganizationUserSetupDelivery(
+      const delivery = await retryOrganizationUserSetupDelivery(
+        props.client,
         props.identity.organizationId,
         invitation.id,
         { operationId: crypto.randomUUID() },

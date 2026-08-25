@@ -50,6 +50,10 @@
       "types": "./src/organization-private-session-settings.ts",
       "default": "./src/organization-private-session-settings.ts"
     },
+    "./organization-user-setup": {
+      "types": "./src/organization-user-setup.ts",
+      "default": "./src/organization-user-setup.ts"
+    },
     "./realtime": {
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"

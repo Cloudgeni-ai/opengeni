@@ -266,9 +266,6 @@ import type {
   CreateOrganizationResponse,
   CreateOrganizationWorkspaceRequest,
   OrganizationInvitation,
-  OrganizationUserSetupDelivery,
-  OrganizationUserSetupPreview,
-  PreviewOrganizationUserSetupRequest,
   OrganizationAdministrationOverview,
   OrganizationMember,
   OrganizationWorkspaceAccess,
@@ -276,7 +273,6 @@ import type {
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationInvitationRequest,
-  RetryOrganizationUserSetupDeliveryRequest,
   RevokeOrganizationWorkspaceMemberRequest,
   RevokeOrganizationWorkspaceMemberResponse,
   PutOrganizationWorkspaceMemberRequest,
@@ -3812,30 +3808,6 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationInvitation>(
       "POST",
       `/v1/organizations/${organizationId}/invitations`,
-      request,
-    );
-  }
-
-  /** Safe signed-out projection of the exact organization role and shared access in a setup link. */
-  async previewOrganizationUserSetup(
-    request: PreviewOrganizationUserSetupRequest,
-  ): Promise<OrganizationUserSetupPreview> {
-    return await this.requestJson<OrganizationUserSetupPreview>(
-      "POST",
-      "/v1/auth/organization-setup/preview",
-      request,
-    );
-  }
-
-  /** Retry a failed or explicitly outcome-unknown invitation delivery with a stable provider key. */
-  async retryOrganizationUserSetupDelivery(
-    organizationId: string,
-    invitationId: string,
-    request: RetryOrganizationUserSetupDeliveryRequest,
-  ): Promise<OrganizationUserSetupDelivery> {
-    return await this.requestJson<OrganizationUserSetupDelivery>(
-      "POST",
-      `/v1/organizations/${organizationId}/invitations/${invitationId}/delivery/retry`,
       request,
     );
   }
