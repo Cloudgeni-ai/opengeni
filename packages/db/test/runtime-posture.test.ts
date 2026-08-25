@@ -282,6 +282,7 @@ function safePosture(): RuntimeDatabasePosture {
     ownedSchemas: [],
     ownedRelations: [],
     sessionTenancyProductActivationPresent: false,
+    sessionVariableSetAttachmentsCutoverPresent: true,
     tables: [
       {
         name: "tenant_rows",
@@ -419,6 +420,15 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("requires the 0348 session Variable Set runtime receipt", () => {
+    const posture = safePosture();
+    posture.sessionVariableSetAttachmentsCutoverPresent = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the 0348 session Variable Set attachment runtime receipt",
+    );
+  });
+
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const hasOpe121SlackPublicationLedger = FORCE_RLS_TABLES.includes("memory_slack_publications");
     if (hasOpe121SlackPublicationLedger) {

@@ -7003,7 +7003,7 @@ export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftReque
  * deliberately narrower than CreateSessionRequest: idempotency/event keys and
  * credential-bearing MCP server inputs are per-attempt data, never draft state.
  */
-export const NewSessionDraftOptions = z.object({
+export const NewSessionDraftOptions = withVariableSetIdAlias({
   visibility: SessionVisibility.optional(),
   sandboxBackend: SandboxBackend.optional(),
   targetSandboxId: z.string().uuid().optional(),

@@ -1316,6 +1316,7 @@ export type RuntimeDatabasePosture = {
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
   sessionTenancyProductActivationPresent: boolean;
+  sessionVariableSetAttachmentsCutoverPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1422,6 +1423,15 @@ export async function inspectRuntimeDatabasePosture(
         await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
       );
       const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
+      const variableSetCutoverRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`
+          select to_regprocedure(
+            'opengeni_private.session_variable_set_attachments_protocol_v1_active()'
+          ) is not null as present
+        `),
+      );
+      const sessionVariableSetAttachmentsCutoverPresent =
+        variableSetCutoverRows[0]?.present === true;
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -1438,6 +1448,7 @@ export async function inspectRuntimeDatabasePosture(
           targetRoutines: [],
           privateRoutines: [],
           sessionTenancyProductActivationPresent,
+          sessionVariableSetAttachmentsCutoverPresent,
         };
       }
 
@@ -1683,6 +1694,7 @@ export async function inspectRuntimeDatabasePosture(
         targetRoutines,
         privateRoutines,
         sessionTenancyProductActivationPresent,
+        sessionVariableSetAttachmentsCutoverPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -1696,6 +1708,10 @@ export function evaluateRuntimeDatabasePosture(
 ): string[] {
   const violations: string[] = [];
   const identity = posture.identity;
+
+  if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
+    violations.push("database is missing the 0348 session Variable Set attachment runtime receipt");
+  }
 
   if (
     posture.sessionTenancyProductActivationPresent &&

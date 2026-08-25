@@ -382,7 +382,8 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   await db.execute(sql`select set_config('opengeni.lossless_content_writer', '1', true)`);
   await db.execute(sql`select
     set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
-    set_config('opengeni.pending_tool_event_output_v1', '1', true)`);
+    set_config('opengeni.pending_tool_event_output_v1', '1', true),
+    set_config('opengeni.session_variable_set_attachments_v1', '1', true)`);
   const sessionActor = sessionRlsActorContext.getStore();
   if (sessionActor) {
     await setSubjectRlsContext(db, sessionActor.subjectId);

@@ -1,7 +1,7 @@
 -- deployment-mode: maintenance
 -- Activate ordered, FK-backed session Variable Set attachments. Runtime
 -- injection now consumes the complete ordered selection, so every API/control/
--- turn worker must be stopped before this cutover and no pre-0347 image may
+-- turn worker must be stopped before this cutover and no pre-0348 image may
 -- restart afterwards.
 
 SET LOCAL lock_timeout = '5s';
@@ -94,6 +94,58 @@ SET variable_set_ids = CASE
   ELSE jsonb_build_array(variable_set_id::text)
 END;
 ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+
+-- A maintenance drain prevents a mixed fleet during the DDL, while this
+-- restrictive policy prevents an old API/control/turn worker from rejoining
+-- afterwards. Current binaries stamp the transaction-local protocol receipt in
+-- setRlsContext before any tenant session access; pre-0348 binaries do not.
+CREATE FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active()
+RETURNS boolean
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+  IF current_setting('opengeni.session_variable_set_attachments_v1', true) = '1' THEN
+    RETURN true;
+  END IF;
+  RAISE EXCEPTION
+    'session Variable Set attachments require an OpenGeni 0348-or-newer runtime'
+    USING ERRCODE = '55000';
+END
+$function$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.session_variable_set_attachments_protocol_v1_active()
+FROM PUBLIC;
+
+DO $session_variable_set_protocol_grants$
+DECLARE
+  configured_role text;
+BEGIN
+  FOR configured_role IN
+    SELECT value
+    FROM jsonb_array_elements_text(
+      current_setting('opengeni.migration_application_roles')::jsonb
+    ) roles(value)
+  LOOP
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active() TO %I',
+      configured_role
+    );
+  END LOOP;
+END
+$session_variable_set_protocol_grants$;
+
+SELECT set_config('opengeni.session_variable_set_attachments_v1', '1', true);
+
+CREATE POLICY sessions_variable_set_attachments_protocol_v1
+ON sessions
+AS RESTRICTIVE
+FOR ALL
+TO PUBLIC
+USING (opengeni_private.session_variable_set_attachments_protocol_v1_active())
+WITH CHECK (opengeni_private.session_variable_set_attachments_protocol_v1_active());
 
 CREATE TABLE session_variable_set_attachments (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -29,6 +29,11 @@ import { useAppContext } from "@/context";
 import { eventDisplayLabel, isTerminalSessionStatus } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
 import { withOccurrenceKeys } from "@/lib/react-key";
+import {
+  retainSessionRestartAttemptAfterFailure,
+  sessionRestartOperationController,
+} from "@/lib/session-restart-operation-controller";
+import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import type { Session, SessionEvent } from "@/types";
 
@@ -53,6 +58,20 @@ export function SessionInspector(props: {
   const [savingVariableSets, setSavingVariableSets] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [runtimeFailure, setRuntimeFailure] = useState<string | null>(null);
+  const restartScope = useMemo(
+    () => ({
+      principalId: `${context.accessContext.subjectId}:${context.accessKeyVersion}`,
+      workspaceId: props.session.workspaceId,
+      sessionId: props.session.id,
+    }),
+    [
+      context.accessContext.subjectId,
+      context.accessKeyVersion,
+      props.session.id,
+      props.session.workspaceId,
+    ],
+  );
+  const pendingRestartAttempt = sessionRestartOperationController.snapshot(restartScope);
   useEffect(() => {
     setSelectedVariableSetIds(sessionVariableSetIds);
     setSelectedRigId(props.session.rigId ?? "");
@@ -83,16 +102,34 @@ export function SessionInspector(props: {
   };
   const restartWithSetup = async () => {
     if (!props.session.tenancy) return;
-    setRestarting(true);
-    setRuntimeFailure(null);
-    try {
-      const result = await context.client.forkSession(props.session.workspaceId, props.session.id, {
-        idempotencyKey: crypto.randomUUID(),
+    const attempt = sessionRestartOperationController.prepare(
+      restartScope,
+      {
         visibility: props.session.tenancy.visibility,
-        workspaceSharedAcknowledged: false,
         rigId: selectedRigId || null,
         variableSetIds: selectedVariableSetIds,
+      },
+      () => crypto.randomUUID(),
+    );
+    setRestarting(true);
+    setRuntimeFailure(null);
+    let receiptConfirmed = false;
+    try {
+      const result = await context.client.forkSession(props.session.workspaceId, props.session.id, {
+        idempotencyKey: attempt.idempotencyKey,
+        visibility: attempt.visibility,
+        workspaceSharedAcknowledged: false,
+        rigId: attempt.rigId,
+        variableSetIds: attempt.variableSetIds,
       });
+      receiptConfirmed = true;
+      const destination = await context.client.getSession(result.workspaceId, result.sessionId, {
+        fresh: true,
+      });
+      if (destination.workspaceId !== result.workspaceId || destination.id !== result.sessionId) {
+        throw new Error("The restart receipt did not resolve to the expected session.");
+      }
+      sessionRestartOperationController.settle(restartScope, attempt);
       toast.success("Restarted with new setup", {
         description: "The original session and sandbox were left unchanged.",
       });
@@ -101,7 +138,11 @@ export function SessionInspector(props: {
         params: { workspaceId: result.workspaceId, sessionId: result.sessionId },
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const classified = classifySessionTenancyFailure(error);
+      if (!retainSessionRestartAttemptAfterFailure(error, receiptConfirmed)) {
+        sessionRestartOperationController.settle(restartScope, attempt);
+      }
+      const message = classified.message;
       setRuntimeFailure(message);
       toast.error("Session could not be restarted", { description: message });
     } finally {
@@ -237,7 +278,12 @@ export function SessionInspector(props: {
                               variant="ghost"
                               size="icon-xs"
                               aria-label="Move Variable Set earlier"
-                              disabled={index === 0 || savingVariableSets || restarting}
+                              disabled={
+                                index === 0 ||
+                                savingVariableSets ||
+                                restarting ||
+                                Boolean(pendingRestartAttempt)
+                              }
                               onClick={() => {
                                 const next = [...selectedVariableSetIds];
                                 [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
@@ -254,7 +300,8 @@ export function SessionInspector(props: {
                               disabled={
                                 index === selectedVariableSetIds.length - 1 ||
                                 savingVariableSets ||
-                                restarting
+                                restarting ||
+                                Boolean(pendingRestartAttempt)
                               }
                               onClick={() => {
                                 const next = [...selectedVariableSetIds];
@@ -269,7 +316,9 @@ export function SessionInspector(props: {
                               variant="ghost"
                               size="icon-xs"
                               aria-label="Detach Variable Set"
-                              disabled={savingVariableSets || restarting}
+                              disabled={
+                                savingVariableSets || restarting || Boolean(pendingRestartAttempt)
+                              }
                               onClick={() =>
                                 setSelectedVariableSetIds((current) =>
                                   current.filter((id) => id !== variableSetId),
@@ -286,7 +335,7 @@ export function SessionInspector(props: {
                   {availableVariableSets.length > 0 && selectedVariableSetIds.length < 25 ? (
                     <Select
                       value=""
-                      disabled={savingVariableSets || restarting}
+                      disabled={savingVariableSets || restarting || Boolean(pendingRestartAttempt)}
                       onChange={(event) => {
                         if (!event.target.value) return;
                         setSelectedVariableSetIds((current) => [...current, event.target.value]);
@@ -309,7 +358,12 @@ export function SessionInspector(props: {
                     type="button"
                     size="sm"
                     variant="secondary"
-                    disabled={!selectedChanged || savingVariableSets || restarting}
+                    disabled={
+                      !selectedChanged ||
+                      savingVariableSets ||
+                      restarting ||
+                      Boolean(pendingRestartAttempt)
+                    }
                     onClick={() => void saveVariableSets()}
                   >
                     {savingVariableSets ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}
@@ -321,7 +375,7 @@ export function SessionInspector(props: {
                     <div className="text-xs font-medium">Restart with rig</div>
                     <Select
                       value={selectedRigId}
-                      disabled={savingVariableSets || restarting}
+                      disabled={savingVariableSets || restarting || Boolean(pendingRestartAttempt)}
                       onChange={(event) => setSelectedRigId(event.target.value)}
                       className="h-8 w-full text-xs"
                     >
@@ -345,7 +399,7 @@ export function SessionInspector(props: {
                       onClick={() => void restartWithSetup()}
                     >
                       {restarting ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}
-                      Restart with setup
+                      {pendingRestartAttempt ? "Retry restart" : "Restart with setup"}
                     </Button>
                   </div>
                 ) : null}

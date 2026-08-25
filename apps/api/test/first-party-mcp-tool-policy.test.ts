@@ -4,6 +4,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
+  MAX_SELECTED_VARIABLE_SETS,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
   type AccessGrant,
@@ -216,6 +217,7 @@ describe("first-party MCP tool visibility policy", () => {
   });
 
   test("model-facing session_create omits absolute depth and literal shared traps", async () => {
+    const variableSetId = crypto.randomUUID();
     let databaseTouches = 0;
     const routeDeps = deps();
     routeDeps.db = new Proxy(
@@ -249,6 +251,8 @@ describe("first-party MCP tool visibility policy", () => {
       expect(serialized).not.toContain('"const":"shared"');
       expect(serialized).not.toContain('"enum":["shared"');
       expect(serialized).toContain("machineTarget");
+      expect(serialized).toContain("variableSetIds");
+      expect(serialized).toContain(`"maxItems":${MAX_SELECTED_VARIABLE_SETS}`);
       expect(serialized).toContain("targetSandboxId");
       expect(serialized).toContain("workingDir");
       expect(serialized).toContain('"required":["targetSandboxId"]');
@@ -270,6 +274,15 @@ describe("first-party MCP tool visibility policy", () => {
           sandbox: "shared",
         },
         { initialMessage: "bad depth", maxNestedAgentDepth: 0 },
+        {
+          initialMessage: "duplicate variable sets",
+          variableSetIds: [variableSetId, variableSetId],
+        },
+        {
+          initialMessage: "mismatched variable set alias",
+          variableSetIds: [variableSetId, crypto.randomUUID()],
+          variableSetId,
+        },
       ]) {
         const result = await client.callTool({ name: "session_create", arguments: arguments_ });
         expect(result).toMatchObject({ isError: true });
@@ -278,6 +291,47 @@ describe("first-party MCP tool visibility policy", () => {
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
+  });
+
+  test("model-facing session_create accepts ordered Variable Sets and authorizes attachment before storage", async () => {
+    const firstVariableSetId = crypto.randomUUID();
+    const secondVariableSetId = crypto.randomUUID();
+    let databaseTouches = 0;
+    const routeDeps = deps();
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          databaseTouches += 1;
+          throw new Error("accepted model request reached storage");
+        },
+      },
+    ) as ApiRouteDeps["db"];
+
+    const authorized = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create", "variable-sets:attach", "variable-sets:use"], ["session_create"]),
+    );
+    const accepted = await callRegisteredTool(authorized, "session_create", {
+      initialMessage: "use both sets",
+      variableSetIds: [firstVariableSetId, secondVariableSetId],
+      variableSetId: secondVariableSetId,
+    });
+    expect(accepted.isError).toBe(true);
+    expect(databaseTouches).toBeGreaterThan(0);
+
+    databaseTouches = 0;
+    const denied = buildOpenGeniMcpServer(
+      routeDeps,
+      grant(["sessions:create"], ["session_create"]),
+    );
+    const databaseTouchesBeforeDeniedCall = databaseTouches;
+    const rejected = await callRegisteredTool(denied, "session_create", {
+      initialMessage: "must not attach",
+      variableSetIds: [firstVariableSetId, secondVariableSetId],
+    });
+    expect(rejected.isError).toBe(true);
+    expect(databaseTouches).toBe(databaseTouchesBeforeDeniedCall);
   });
 
   test("orchestration failures return bounded structured code and message", async () => {

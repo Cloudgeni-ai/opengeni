@@ -1,4 +1,25 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
+import { createDb, setRlsContext, type DbClient } from "../src";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+
+let available = true;
+let shared: SharedTestDatabase | null = null;
+let client: DbClient | null = null;
+
+beforeAll(async () => {
+  shared = await acquireSharedTestDatabase("migration-0348-runtime-protocol");
+  if (!shared) {
+    available = false;
+    return;
+  }
+  client = createDb(shared.appUrl);
+}, 180_000);
+
+afterAll(async () => {
+  await client?.close();
+  await shared?.release();
+}, 180_000);
 
 describe("migration 0348 ordered session Variable Set attachments", () => {
   test("declares one drained FK-backed cutover with authority and rotation fences", async () => {
@@ -7,6 +28,17 @@ describe("migration 0348 ordered session Variable Set attachments", () => {
     ).text();
 
     expect(source).toStartWith("-- deployment-mode: maintenance");
+    expect(source).toContain("no pre-0348 image may");
+    expect(source).not.toContain("no pre-0347 image may");
+    expect(source).toContain(
+      "opengeni_private.session_variable_set_attachments_protocol_v1_active()",
+    );
+    expect(source).toContain(
+      "current_setting('opengeni.session_variable_set_attachments_v1', true) = '1'",
+    );
+    expect(source).toContain("CREATE POLICY sessions_variable_set_attachments_protocol_v1");
+    expect(source).toContain("AS RESTRICTIVE");
+    expect(source).toContain("0348-or-newer runtime");
     expect(source).toContain("ADD COLUMN variable_set_ids jsonb NOT NULL DEFAULT '[]'::jsonb");
     const backfillFence = source.indexOf(
       "PERFORM acquire_session_tenancy_fence(workspace_id_value);",
@@ -75,4 +107,27 @@ describe("migration 0348 ordered session Variable Set attachments", () => {
     expect(source).toContain("FK-backed lifecycle-only projection");
     expect(source).not.toContain("value_encrypted");
   });
+
+  test("rejects a pre-0348 transaction and admits the current runtime receipt", async () => {
+    if (!available) return;
+    await expect(
+      client!.db.transaction((tx) =>
+        tx.execute(
+          sql`select opengeni_private.session_variable_set_attachments_protocol_v1_active()`,
+        ),
+      ),
+    ).rejects.toThrow("0348-or-newer runtime");
+
+    await expect(
+      client!.db.transaction(async (tx) => {
+        await setRlsContext(tx, {
+          accountId: crypto.randomUUID(),
+          workspaceId: crypto.randomUUID(),
+        });
+        return await tx.execute<{ active: boolean }>(
+          sql`select opengeni_private.session_variable_set_attachments_protocol_v1_active() as active`,
+        );
+      }),
+    ).resolves.toEqual([{ active: true }]);
+  }, 180_000);
 });
