@@ -430,6 +430,7 @@ BEGIN
       USING ERRCODE = '22023';
   END IF;
 
+  PERFORM acquire_session_tenancy_fence(p_workspace_id);
   SELECT session_value.* INTO destination_session
   FROM sessions session_value
   WHERE session_value.account_id = p_account_id

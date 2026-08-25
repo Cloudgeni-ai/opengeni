@@ -56,6 +56,7 @@ const directHotMutatorInventory = [
   "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)",
+  "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
   "opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)",
   "opengeni_private.reap_stale_interaction_transitions(bigint)",
   "opengeni_private.request_due_sandbox_rotations(bigint,integer)",
@@ -71,6 +72,10 @@ const internalHotMutatorCallers = new Map<string, string>([
     "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   ],
   ["organization_membership_command_0263(jsonb)", "organization_membership_command(jsonb)"],
+]);
+
+const selfFencedInternalHotMutators = new Set<string>([
+  "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
 ]);
 
 const firstFenceIndex = (source: string): number => {
@@ -460,7 +465,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         expect(routine.appExecutable, routine.signature).toBe(false);
         continue;
       }
-      expect(routine.appExecutable, routine.signature).toBe(true);
+      if (selfFencedInternalHotMutators.has(routine.signature)) {
+        expect(routine.appExecutable, routine.signature).toBe(false);
+      } else {
+        expect(routine.appExecutable, routine.signature).toBe(true);
+      }
       const fence = firstFenceIndex(routine.source);
       const protectedAction = firstRowLockOrHotMutationIndex(routine.source);
       expect(fence, routine.signature).toBeGreaterThanOrEqual(0);

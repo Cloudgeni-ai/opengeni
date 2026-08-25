@@ -46,6 +46,15 @@ describe("migration 0347 ordered session Variable Set attachments", () => {
     expect(source).toContain("CREATE FUNCTION fork_session_content_with_runtime");
     expect(source).toContain("CREATE FUNCTION replay_applied_session_fork_with_runtime");
     expect(source).toContain("opengeni_private.configure_fork_session_runtime");
+    const forkRuntimeFence = source.indexOf(
+      "PERFORM acquire_session_tenancy_fence(p_workspace_id);",
+    );
+    const forkRuntimeLock = source.indexOf(
+      "SELECT session_value.* INTO destination_session",
+      forkRuntimeFence,
+    );
+    expect(forkRuntimeFence).toBeGreaterThanOrEqual(0);
+    expect(forkRuntimeLock).toBeGreaterThan(forkRuntimeFence);
     expect(source).toContain("rig_version.default_variable_set_ids");
     expect(source).toContain("'session.runtime.configured', 'session'");
     expect(source).toContain("SET CONSTRAINTS sessions_activity_insert_commit_guard");
