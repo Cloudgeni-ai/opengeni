@@ -2171,6 +2171,32 @@ the global boundary before the operator's source locks would introduce a
 RowExclusive/global-lock deadlock and is forbidden. Migration 0340 does not
 itself auto-activate new organizations.
 
+Migration 0349 consumes that frozen boundary only inside
+`complete_self_service_organization_setup`. The setup transaction first writes
+and validates exactly one newly inserted `better-auth:user` organization, one
+active owner membership, its canonical Personal workspace and control row, no
+`workspace_memberships`, and its immutable setup receipt. The explicit 0348
+orphan-account adoption branch is excluded even when the adopted account was
+otherwise empty. Only after that proof does the owner-only helper take the
+canonical boundary and inspect a committed activation witness. With no witness,
+the setup commits unactivated and remains on the operator procedure above; with
+a witness, the same transaction appends the existing version-1 activation
+receipt shape, an enabled version-1 private-session setting and immutable
+setting event, plus `session_tenancy_greenfield_activation_evidence` binding the
+exact setup operation, Personal-only graph digest, witness, parity digest, and
+setting event. A failure rolls back the account graph, setup receipt, activation,
+setting/event, and evidence together, so retry is deterministic and no
+unreceipted private authority can escape. Setup replay returns its existing
+receipt and never re-runs activation; a changed operation remains a conflict.
+
+The greenfield helper and evidence table have no runtime-role or PUBLIC access,
+use FORCE RLS under the real non-superuser/non-BYPASSRLS owner posture, and are
+not an alternate activation API for existing organizations. Migration 0349 also
+opens and restores a subject-and-organization-fenced owner policy window around
+the two Personal private-create membership readers; without that repair those
+readers were blind under FORCE RLS and an otherwise activated fresh owner could
+not create the immediate private session promised by the signup contract.
+
 ### What an operator must not do
 
 - Do not restart a pre-activation image after an activation migration has

@@ -399,6 +399,8 @@ const SESSION_TENANCY_QUIESCENCE_ROUTINE =
   "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
 const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
   "check_tenancy_backfill_activation_evidence(uuid)";
+const GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE =
+  "activate_greenfield_session_tenancy_from_setup(text)";
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
@@ -504,6 +506,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
+  GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
   ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
@@ -757,6 +760,7 @@ export const FORCE_RLS_TABLES = [
   "session_system_update_outbox",
   "session_system_updates",
   "session_tenancy_activations",
+  "session_tenancy_greenfield_activation_evidence",
   "session_turn_attempts",
   "session_turn_startup_milestones",
   "session_turns",
@@ -1194,6 +1198,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
+  "session_tenancy_greenfield_activation_evidence",
   "session_visibility_write_capabilities",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
