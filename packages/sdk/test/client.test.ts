@@ -660,6 +660,70 @@ describe("OpenGeniClient", () => {
     expect(requests).toBe(3);
   });
 
+  test("queues a fresh generation after a started successor clears its active slot", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let releaseQueued!: () => void;
+    let markQueuedStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const queuedGate = new Promise<void>((resolve) => {
+      releaseQueued = resolve;
+    });
+    const queuedStarted = new Promise<void>((resolve) => {
+      markQueuedStarted = resolve;
+    });
+    let queuedRead!: Promise<Session & { request: number }>;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        throw new Error("single-flight regression uses the selected read directly");
+      },
+    });
+    const singleFlightRead = (
+      client as unknown as {
+        singleFlightRead<T>(
+          key: string,
+          read: () => Promise<T>,
+          options?: { fresh?: boolean },
+        ): Promise<T>;
+      }
+    ).singleFlightRead.bind(client);
+    const read = () => {
+      requests += 1;
+      const request = requests;
+      const result = { id: SESSION_ID, workspaceId: WORKSPACE_ID, request } as Session & {
+        request: number;
+      };
+      if (request === 1) return initialGate.then(() => result);
+      if (request === 2) {
+        queuedRead = queuedGate.then(() => result);
+        markQueuedStarted();
+        return queuedRead;
+      }
+      return Promise.resolve(result);
+    };
+
+    const initial = singleFlightRead("session", read);
+    const queuedFresh = singleFlightRead("session", read, { fresh: true });
+    releaseInitial();
+    await queuedStarted;
+
+    // launchSingleFlightRead's finally clears the active slot before the
+    // queued entry's public promise settles. A write continuation in that gap
+    // still requires a successor generation, not the completed queued read.
+    const postWriteFresh = queuedRead.then(() =>
+      singleFlightRead("session", read, { fresh: true }),
+    );
+    releaseQueued();
+
+    expect((await initial).request).toBe(1);
+    expect((await queuedFresh).request).toBe(2);
+    expect((await postWriteFresh).request).toBe(3);
+    expect(requests).toBe(3);
+  });
+
   test("notifies queued fresh callers only when their shared GET actually starts", async () => {
     let requests = 0;
     let releaseActive!: () => void;

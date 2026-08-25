@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Session } from "@/types";
-import {
-  beginSessionChannelMove,
-  commitSessionChannelMove,
-  reconcileSessionChannelMovePointRead,
-} from "./session-channel-move";
+import * as sessionChannelMove from "./session-channel-move";
 import {
   applySessionChannelProjection,
   applySessionPinProjection,
@@ -16,6 +12,21 @@ import {
   SessionChannelProjectionAuthority,
   subscribeToSessionPinChanges,
 } from "./session-pins";
+
+const {
+  applySessionChannelMove,
+  beginSessionChannelMove,
+  commitSessionChannelMove,
+  reconcileSessionChannelMovePointRead,
+} = sessionChannelMove;
+
+const discardRejectedSessionChannelMove =
+  (
+    sessionChannelMove as typeof sessionChannelMove & {
+      discardRejectedSessionChannelMove?: typeof sessionChannelMove.rollbackSessionChannelMove;
+    }
+  ).discardRejectedSessionChannelMove ??
+  ((current: Parameters<typeof sessionChannelMove.rollbackSessionChannelMove>[0]) => current);
 
 const session = {
   id: "00000000-0000-4000-8000-000000000026",
@@ -332,6 +343,32 @@ describe("session pin reconciliation", () => {
     expect(recordMoveResponse(owner, request, delayedMove)).toBe(false);
     expect(authority.owns(newerRead)).toBe(true);
     expect(authority.owns(delayedMove)).toBe(false);
+  });
+
+  test("discards a pending move overlay when a newer read rejects its delayed response", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const owner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const delayedMove = { ...session, channelId: "channel-b" } as Session;
+    const newerRead = { ...session, channelId: "channel-c" } as Session;
+    const { beginMoveRequest, recordMoveResponse } = portableMoveAuthority(authority);
+    const request = beginMoveRequest(owner, beforeMove)!;
+    let overrides = beginSessionChannelMove(
+      new Map(),
+      session.id,
+      delayedMove.channelId ?? null,
+      request.operation,
+    );
+
+    expect(authority.recordRead(newerRead, authority.beginRead())).toBe(true);
+    if (!recordMoveResponse(owner, request, delayedMove)) {
+      overrides = discardRejectedSessionChannelMove(overrides, session.id, request.operation);
+    }
+
+    expect(overrides.has(session.id)).toBe(false);
+    expect(applySessionChannelMove(newerRead, overrides.get(session.id)).channelId).toBe(
+      "channel-c",
+    );
   });
 
   test("transfers a compacted accepted fence before an ephemeral owner clears", () => {

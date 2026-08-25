@@ -90,6 +90,7 @@ import {
   applySessionChannelMove,
   beginSessionChannelMove,
   commitSessionChannelMove,
+  discardRejectedSessionChannelMove,
   readSessionChannelMovePoint,
   reconcileSessionChannelMovePointRead,
   reconcileSessionChannelMoves,
@@ -1100,6 +1101,9 @@ export function SessionList() {
               moved,
             )
           ) {
+            setChannelMoveOverrides((current) =>
+              discardRejectedSessionChannelMove(current, session.id, operation),
+            );
             return;
           }
           setChannelMoveOverrides((current) =>

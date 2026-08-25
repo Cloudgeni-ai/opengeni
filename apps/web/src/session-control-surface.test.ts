@@ -125,6 +125,9 @@ describe("session control surface architecture", () => {
     expect(list).toContain("sessionChannelProjectionAuthority.beginMoveRequest(");
     expect(list).toContain("sessionChannelProjectionAuthority.ownsMoveRequest(");
     expect(list).toContain("sessionChannelProjectionAuthority.recordMoveResponse(");
+    expect(list).toMatch(
+      /!context\.sessionChannelProjectionAuthority\.recordMoveResponse\([\s\S]*?\)\s*\)\s*\{\s*setChannelMoveOverrides\(\(current\) =>\s*discardRejectedSessionChannelMove\(current, session\.id, operation\),?\s*\);\s*return;/,
+    );
     expect(list).toContain("sessionChannelProjectionAuthority.finishMoveRequest(");
     expect(list).toContain("context.client.updateSessionChannel(");
     expect(list).not.toContain("moveSession: requestMoveSession");

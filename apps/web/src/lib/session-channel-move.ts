@@ -76,6 +76,15 @@ export function rollbackSessionChannelMove(
   return next;
 }
 
+/** Retire an exact pending overlay when newer server evidence rejects its response. */
+export function discardRejectedSessionChannelMove(
+  current: SessionChannelMoveOverrides,
+  sessionId: string,
+  operation: number,
+): SessionChannelMoveOverrides {
+  return rollbackSessionChannelMove(current, sessionId, operation);
+}
+
 /**
  * Drop committed overlays only after a server list projection confirms the
  * destination. Pending moves and rows omitted by pagination stay projected.
