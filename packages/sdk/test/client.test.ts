@@ -561,6 +561,59 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("queues a new fresh generation behind an active trailing read", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let releaseTrailing!: () => void;
+    let markTrailingStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const trailingGate = new Promise<void>((resolve) => {
+      releaseTrailing = resolve;
+    });
+    const trailingStarted = new Promise<void>((resolve) => {
+      markTrailingStarted = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await initialGate;
+        if (request === 2) {
+          markTrailingStarted();
+          await trailingGate;
+        }
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+
+    const initial = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const preWriteFresh = client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true });
+    releaseInitial();
+    await trailingStarted;
+
+    const ordinaryDuringTrailing = client.getSession(WORKSPACE_ID, SESSION_ID);
+    const postWriteFresh = [
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+      client.getSession(WORKSPACE_ID, SESSION_ID, { fresh: true }),
+    ];
+    await Bun.sleep(1);
+    expect(requests).toBe(2);
+
+    releaseTrailing();
+    expect(((await initial) as Session & { request: number }).request).toBe(1);
+    expect(((await preWriteFresh) as Session & { request: number }).request).toBe(2);
+    expect(((await ordinaryDuringTrailing) as Session & { request: number }).request).toBe(2);
+    expect(
+      (await Promise.all(postWriteFresh)).map(
+        (session) => (session as Session & { request: number }).request,
+      ),
+    ).toEqual([3, 3]);
+    expect(requests).toBe(3);
+  });
+
   test("updates an existing session MCP approval policy through the dedicated route", async () => {
     const response = {
       server: {

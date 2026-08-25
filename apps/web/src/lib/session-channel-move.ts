@@ -1,10 +1,11 @@
+import type { GetSessionOptions } from "@opengeni/sdk/core";
 import type { Session } from "@/types";
 
 type SessionChannelPointReadClient = {
   getSession: (
     workspaceId: string,
     sessionId: string,
-    options?: { fresh?: boolean },
+    options?: GetSessionOptions,
   ) => Promise<Session>;
 };
 
@@ -16,7 +17,7 @@ export type SessionChannelMoveOverride = Readonly<{
 
 export type SessionChannelMoveOverrides = ReadonlyMap<string, SessionChannelMoveOverride>;
 
-/** Queue a trailing detail read behind any pre-write single-flight request. */
+/** Await a detail-read generation whose network request starts after this call. */
 export function readSessionChannelMovePoint(
   client: SessionChannelPointReadClient,
   workspaceId: string,

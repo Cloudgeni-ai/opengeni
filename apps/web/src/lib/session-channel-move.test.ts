@@ -60,23 +60,37 @@ function sectionSessionIds(sessions: readonly Session[]): Record<string, string[
 }
 
 describe("optimistic session channel moves", () => {
-  test("queues the post-write point read behind a pre-write session read", async () => {
+  test("queues the post-write point read behind an active pre-write fresh generation", async () => {
     let requests = 0;
-    let releasePreWrite!: () => void;
-    const preWriteGate = new Promise<void>((resolve) => {
-      releasePreWrite = resolve;
+    let releaseInitial!: () => void;
+    let releasePreWriteFresh!: () => void;
+    let markPreWriteFreshStarted!: () => void;
+    let writeCommitted = false;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const preWriteFreshGate = new Promise<void>((resolve) => {
+      releasePreWriteFresh = resolve;
+    });
+    const preWriteFreshStarted = new Promise<void>((resolve) => {
+      markPreWriteFreshStarted = resolve;
     });
     const client = new OpenGeniCoreClient({
       baseUrl: "https://api.example.test",
       fetch: async () => {
         requests += 1;
         const request = requests;
-        if (request === 1) await preWriteGate;
+        const channelId = writeCommitted ? "channel-new" : "channel-old";
+        if (request === 1) await initialGate;
+        if (request === 2) {
+          markPreWriteFreshStarted();
+          await preWriteFreshGate;
+        }
         return new Response(
           JSON.stringify(
             session({
               id: "session-1",
-              channelId: request === 1 ? "channel-old" : "channel-new",
+              channelId,
             }),
           ),
           { status: 200, headers: { "content-type": "application/json" } },
@@ -84,15 +98,21 @@ describe("optimistic session channel moves", () => {
       },
     });
 
-    const preWrite = client.getSession("workspace-1", "session-1");
+    const initial = client.getSession("workspace-1", "session-1");
+    const preWriteFresh = client.getSession("workspace-1", "session-1", { fresh: true });
+    releaseInitial();
+    await preWriteFreshStarted;
+
+    writeCommitted = true;
     const postWrite = readSessionChannelMovePoint(client, "workspace-1", "session-1");
     await Bun.sleep(1);
-    expect(requests).toBe(1);
-
-    releasePreWrite();
-    expect((await preWrite).channelId).toBe("channel-old");
-    expect((await postWrite).channelId).toBe("channel-new");
     expect(requests).toBe(2);
+
+    releasePreWriteFresh();
+    expect((await initial).channelId).toBe("channel-old");
+    expect((await preWriteFresh).channelId).toBe("channel-old");
+    expect((await postWrite).channelId).toBe("channel-new");
+    expect(requests).toBe(3);
   });
 
   test("moves the row to the destination immediately without leaving an old-folder duplicate", () => {

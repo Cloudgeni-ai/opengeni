@@ -569,6 +569,14 @@ export type OpenGeniRequestOptions = {
   timeoutMs?: number | undefined;
 };
 
+export type GetSessionOptions = {
+  /**
+   * Require a network read generation that starts no earlier than this call.
+   * Concurrent callers targeting the same successor generation still share it.
+   */
+  fresh?: boolean;
+};
+
 /** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
 export type SendMessageInput = UserMessageEventInput["payload"] & {
   clientEventId?: string;
@@ -637,7 +645,11 @@ export class OpenGeniClient {
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
   private readonly readInFlight = new Map<string, Promise<unknown>>();
-  private readonly readTrailing = new Map<string, Promise<unknown>>();
+  private readonly readGeneration = new Map<string, number>();
+  private readonly readTrailing = new Map<
+    string,
+    { generation: number; promise: Promise<unknown> }
+  >();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
 
@@ -904,7 +916,7 @@ export class OpenGeniClient {
   async getSession(
     workspaceId: string,
     sessionId: string,
-    options: { fresh?: boolean } = {},
+    options: GetSessionOptions = {},
   ): Promise<Session> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
     return await this.singleFlightRead(path, () => this.requestJson<Session>("GET", path), options);
@@ -1189,26 +1201,37 @@ export class OpenGeniClient {
   private singleFlightRead<T>(
     key: string,
     read: () => Promise<T>,
-    options: { fresh?: boolean } = {},
+    options: GetSessionOptions = {},
   ): Promise<T> {
     const existing = this.readInFlight.get(key);
     if (existing) {
       if (!options.fresh) return existing as Promise<T>;
+      const requiredGeneration = (this.readGeneration.get(key) ?? 0) + 1;
       const queued = this.readTrailing.get(key);
-      if (queued) return queued as Promise<T>;
-      const trailing = existing.then(
+      if (queued && queued.generation >= requiredGeneration) {
+        return queued.promise as Promise<T>;
+      }
+      const predecessor = queued?.promise ?? existing;
+      const trailing = predecessor.then(
         () => this.singleFlightRead(key, read),
         () => this.singleFlightRead(key, read),
       );
-      this.readTrailing.set(key, trailing);
+      const entry = { generation: requiredGeneration, promise: trailing };
+      this.readTrailing.set(key, entry);
       const clear = () => {
-        if (this.readTrailing.get(key) === trailing) this.readTrailing.delete(key);
+        if (this.readTrailing.get(key) !== entry) return;
+        this.readTrailing.delete(key);
+        if (!this.readInFlight.has(key)) this.readGeneration.delete(key);
       };
       void trailing.then(clear, clear);
       return trailing;
     }
+    const generation = (this.readGeneration.get(key) ?? 0) + 1;
+    this.readGeneration.set(key, generation);
     const promise = read().finally(() => {
-      if (this.readInFlight.get(key) === promise) this.readInFlight.delete(key);
+      if (this.readInFlight.get(key) !== promise) return;
+      this.readInFlight.delete(key);
+      if (!this.readTrailing.has(key)) this.readGeneration.delete(key);
     });
     this.readInFlight.set(key, promise);
     return promise;

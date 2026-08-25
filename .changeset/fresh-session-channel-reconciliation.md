@@ -1,5 +1,6 @@
 ---
+"@opengeni/sdk": patch
 "@opengeni/react": patch
 ---
 
-Expose authoritative session read revisions and bypass stale single-flight detail reads so consumers can reconcile server state separately from live projections.
+Make fresh session reads generation-aware, expose authoritative React read revisions, and keep server reconciliation separate from live projections.
