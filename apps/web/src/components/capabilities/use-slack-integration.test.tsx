@@ -344,6 +344,169 @@ describe("useSlackIntegration model selection and gating", () => {
   });
 });
 
+describe("Slack channel routing", () => {
+  test("shows where each channel starts work, and says so when nothing is chosen", async () => {
+    const { bot, binding } = installedBot();
+    const listChannels = mock(async () => ({
+      channels: [
+        { id: "C_ROUTED", name: "eng-platform", isPrivate: false },
+        { id: "C_UNSET", name: "random", isPrivate: false },
+      ],
+      nextCursor: null,
+    }));
+    const listRoutes = mock(async () => ({
+      routingEnabled: true,
+      routes: [
+        {
+          slackChannelId: "C_ROUTED",
+          targetWorkspaceId: "11111111-1111-4111-8111-111111111111",
+          targetWorkspaceName: "Platform",
+          source: "admin" as const,
+          updatedAt: new Date(0).toISOString(),
+        },
+      ],
+    }));
+    mutableContext.current = {
+      ...appContext(["workspace:admin"]),
+      client: {
+        listOpenGeniSlackReactionChannels: listChannels,
+        listOpenGeniSlackChannelRoutes: listRoutes,
+      },
+      accessContext: accessContext(["workspace:admin"]),
+    };
+    let adapter: ReturnType<typeof useSlackIntegration> | null = null;
+    function Probe() {
+      adapter = useSlackIntegration({
+        workspaceId: WORKSPACE_ID,
+        items: [],
+        connections: [bot],
+        connectionsLoaded: true,
+        slackInstallationBindings: [binding],
+        sheetOpen: true,
+        refresh: async () => {},
+        onRuntimeChanged: () => {},
+      });
+      return <>{adapter.dialogs}</>;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Probe />));
+    try {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const access = adapter!.model.access;
+      expect(access?.editLabel).toBe("Manage routing");
+      const routed = access?.items.find((item) => item.name === "#eng-platform");
+      expect(routed?.meta).toContain("starts work in Platform");
+      const unset = access?.items.find((item) => item.name === "#random");
+      // A channel with no choice is not broken: it asks once and remembers.
+      expect(unset?.meta).toContain("asks once, then remembers");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("offers no routing affordance to a member who cannot administer the install", async () => {
+    const { bot, binding } = installedBot();
+    mutableContext.current = {
+      ...appContext(["connections:write"]),
+      client: {
+        listOpenGeniSlackReactionChannels: mock(async () => ({ channels: [], nextCursor: null })),
+        listOpenGeniSlackChannelRoutes: mock(async () => ({ routes: [], routingEnabled: true })),
+      },
+      accessContext: accessContext(["connections:write"]),
+    };
+    let adapter: ReturnType<typeof useSlackIntegration> | null = null;
+    function Probe() {
+      adapter = useSlackIntegration({
+        workspaceId: WORKSPACE_ID,
+        items: [],
+        connections: [bot],
+        connectionsLoaded: true,
+        slackInstallationBindings: [binding],
+        sheetOpen: true,
+        refresh: async () => {},
+        onRuntimeChanged: () => {},
+      });
+      return <>{adapter.dialogs}</>;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Probe />));
+    try {
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(adapter!.model.access?.editLabel).toBeUndefined();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+  test("advertises no routing control when routing is switched off", async () => {
+    const { bot, binding } = installedBot();
+    mutableContext.current = {
+      ...appContext(["workspace:admin"]),
+      client: {
+        listOpenGeniSlackReactionChannels: mock(async () => ({
+          channels: [{ id: "C_OFF", name: "general", isPrivate: false }],
+          nextCursor: null,
+        })),
+        // Stored routes exist but do not apply, so the sheet must not imply
+        // they do.
+        listOpenGeniSlackChannelRoutes: mock(async () => ({
+          routingEnabled: false,
+          routes: [
+            {
+              slackChannelId: "C_OFF",
+              targetWorkspaceId: "11111111-1111-4111-8111-111111111111",
+              targetWorkspaceName: "Platform",
+              source: "admin" as const,
+              updatedAt: new Date(0).toISOString(),
+            },
+          ],
+        })),
+      },
+      accessContext: accessContext(["workspace:admin"]),
+    };
+    let adapter: ReturnType<typeof useSlackIntegration> | null = null;
+    function Probe() {
+      adapter = useSlackIntegration({
+        workspaceId: WORKSPACE_ID,
+        items: [],
+        connections: [bot],
+        connectionsLoaded: true,
+        slackInstallationBindings: [binding],
+        sheetOpen: true,
+        refresh: async () => {},
+        onRuntimeChanged: () => {},
+      });
+      return <>{adapter.dialogs}</>;
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Probe />));
+    try {
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(adapter!.model.access?.editLabel).toBeUndefined();
+      const row = adapter!.model.access?.items.find((item) => item.name === "#general");
+      expect(row?.meta).toBe("invited");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+});
+
 describe("Slack reaction shortcut enablement", () => {
   test("enabling with an empty allowlist routes through the dialog and saves enabled", async () => {
     const { bot, binding } = installedBot();

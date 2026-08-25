@@ -190,6 +190,28 @@ export async function probeSlackActionHandleTenancy(
   return row ? { accountId: row.account_id, workspaceId: row.workspace_id } : null;
 }
 
+/** Every channel route this installation has, for the admin surface. */
+export async function listSlackChannelRoutes(
+  db: Database,
+  home: SlackRouteHome,
+  input: { connectionId: string },
+): Promise<SlackChannelRoute[]> {
+  return await withRlsContext(db, home, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.slackChannelRoutes)
+      .where(
+        and(
+          eq(schema.slackChannelRoutes.accountId, home.accountId),
+          eq(schema.slackChannelRoutes.workspaceId, home.workspaceId),
+          eq(schema.slackChannelRoutes.connectionId, input.connectionId),
+        ),
+      )
+      .orderBy(schema.slackChannelRoutes.slackChannelId);
+    return rows.map(mapChannelRoute);
+  });
+}
+
 export async function getSlackChannelRoute(
   db: Database,
   home: SlackRouteHome,

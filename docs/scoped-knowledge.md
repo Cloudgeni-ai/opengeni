@@ -242,6 +242,14 @@ zero rows. The referential pin is taken by the
 `organization_user_resource_authorities` foreign-key check instead, which bypasses
 row security. See [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
 
+Migration `0343_personal_document_force_rls_lock_repair.sql` removes the shipped
+0258 locks from both creation and exact-attempt admission and adds SQLSTATE
+`55000` control assertions for future visibility drift. It deliberately does
+not bulk-convert Documents already written on the wrong lane: their stored
+authority shape is identical to an intentional legacy personal Document.
+Migration 0339's explicit original-owner-fenced reclassification is the
+supported repair when a human chooses to make one portable.
+
 Personal Document ownership never becomes ambient agent authority. The exact
 attempt-admission transaction freezes only Documents covered by a live
 `document.read` once/session/always grant for the target workspace and exact
