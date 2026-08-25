@@ -209,7 +209,7 @@ Authenticated Slack users can start work through four configured entry points:
 - invoke `/opengeni <task>` in a channel (the single argument `info` is reserved for the ephemeral info card below and starts no work);
 - direct-message the OpenGeni bot, or use the **Open in OpenGeni** message shortcut when explicitly sending a human-to-human DM message. A human-DM shortcut imports only the selected message, then moves acknowledgement, progress, results, and continuation into that user's OpenGeni bot-DM thread; the bot never joins, reads, or posts workspace output into the source human DM.
 
-  **"Private" here is a Slack-surface fact, not session tenancy.** Slack never creates a `user_private` session: `createSessionForRequest` is deliberately called without its authorization argument, so every Slack-origin session is `workspace_shared` like any other. What is private is `slack_interactions.visibility`, which keeps the interaction and its delivery in the initiating person's bot DM and hides it from the other Slack participants. Anyone with ordinary access to the OpenGeni workspace can still see the session there.
+  **Privacy here is `slack_interactions.visibility`, not session tenancy.** Slack never creates a `user_private` session: it sends no `visibility` in the create payload, so every Slack-origin session takes the ordinary `workspace_shared` default. (`createSessionForRequest` is also called without its authorization argument, which is what an Only-me payload would additionally require.) That is a statement about the session row, not about who can read it. The interaction's `private` visibility is a real OpenGeni access boundary in its own right: `requireSessionAuthorization` denies every subject except the owning one, an agent reaches it only from the same root session, and `listSessionsForSubject` excludes it from every other subject's list. Keeping the privacy on the interaction rather than the session row is what leaves session tenancy, sandbox selection, and the Only-me create rules untouched.
 - after a workspace admin enables **Capabilities → Slack connections → Reaction summon**, add the configured exact emoji reaction (default `:genie:`) to one message in an allowed bot-member conversation.
 
 Reaction summon is disabled by default. Only `workspace:admin` can enable it, choose the exact emoji name without colons, and select all bot-member conversations or an explicit allowlist. Existing installations without `reactions:read` remain usable for mentions, commands, DMs, shortcuts, and tools, but the admin UI blocks reaction enablement until the bot is reinstalled with the canonical manifest. Slack Connect/shared conversations fail closed unless the separate shared-task policy below authorizes an exact private handoff.
@@ -218,7 +218,7 @@ Reaction summon is disabled by default. Only `workspace:admin` can enable it, ch
 
 Slack Connect, pending-external conversations, and MPIMs use an immutable workspace policy authority exposed at `GET`/`PUT /v1/workspaces/:workspaceId/slack-task-policy`. No active policy means deny. A workspace admin may activate a CAS-fenced revision containing exact Slack team and conversation allowlists, guest/external-initiator flags, an MPIM flag, `sharedConversationMode`, and `resultPublicationMode`.
 
-An allowed shared invocation is never delivered back into the shared conversation. After rechecking the exact installation, bot membership, conversation/user facts, and active policy immediately before reading Slack content, OpenGeni marks the interaction private and delivers progress and results in the initiating user's bot DM. As above, the session itself remains workspace-shared; the privacy is on the Slack surface. The immutable origin row retains the source team/conversation/thread plus the exact policy revision and version, but not the source message text.
+An allowed shared invocation is never delivered back into the shared conversation. After rechecking the exact installation, bot membership, conversation/user facts, and active policy immediately before reading Slack content, OpenGeni marks the interaction private and delivers progress and results in the initiating user's bot DM. As above, the session row itself remains `workspace_shared`; the privacy rides `slack_interactions.visibility`, which is enforced on both surfaces. The immutable origin row retains the source team/conversation/thread plus the exact policy revision and version, but not the source message text.
 
 Results return to the source thread only after the initiating user clicks the requester-bound publication action. The click rechecks the installation, live identity link and grants, exact active policy revision/version, conversation membership and shared facts, and terminal result immediately before the provider post. Policy drift, lost membership, installation drift, duplicate delivery, or an ambiguous provider outcome cannot produce a new post. `approval_required` and `allow` both require this deliberate click; the former records that workspace policy requires per-result approval, while the latter permits requester-initiated publication without a separate administrator decision. `never` exposes no publication action.
 
@@ -281,7 +281,7 @@ Two tenancies, not one relocated workspace. The bot credential is workspace-owne
 | **home** = the installation binding's `(account, workspace)` | the `connections` row and bot credential; the post, update and delete ledgers; `slack_interaction_inbox`; `slack_bot_user_links` identity; App Home; reaction-summon settings; Slack task policy; the route and prompt tables |
 | **target** = the routed `(account, workspace)` | the `slack_interactions` row; its action handles; progress deliveries; shared-task origins; the access grant; the session and every session event |
 
-The bot client is **always** built from home. Reaction-summon settings and Slack task policy stay home as well: they govern what may be read out of a Slack conversation, which is an installation-surface concern rather than a property of whoever the task belongs to. A shared-task origin follows the routed task but records the home tenancy of the exact policy revision it froze.
+Every client the interaction edge and the delivery pump build is **always** built from home. The one Slack surface that is not is the read-only bot tool set frozen onto a Slack-origin session: those run under the session's own grant, so on a routed session they resolve a connection from the *target* workspace. That is deliberate - a routed session must not be handed the installation workspace's Slack credential through a model-facing tool - and it means a target workspace with no Slack connection of its own simply has no bot tools. Reaction-summon settings and Slack task policy stay home as well: they govern what may be read out of a Slack conversation, which is an installation-surface concern rather than a property of whoever the task belongs to. A shared-task origin follows the routed task but records the home tenancy of the exact policy revision it froze.
 
 Cross-organization routing is blocked by a table CHECK (`target_account_id = account_id`). Relaxing that later is a rolling migration; adding it later would not be.
 
@@ -296,6 +296,8 @@ Made from durable facts before any agent runs, so it can never be a model judgem
 5. **A sole candidate**, because one workspace is not a choice. This is what keeps an ordinary installation quiet after the flag is turned on.
 6. Otherwise OpenGeni **asks once**.
 
+A reaction summon never reaches step 6. It carries no text of the reacting person, so there is no prefix to parse, and it never asks: an unresolved reaction keeps the installation's own workspace, exactly as it did before routing existed.
+
 ### Asking once
 
 The first message in a conversation OpenGeni has no route for gets a card in that person's own bot DM, listing only workspaces they can start work in. Nothing is created anywhere while the question is open: the request is parked and re-queued only once they answer, so a card nobody clicks leaves no session and no half-started work. Answering commits the choice, the remembered route, and the re-queued request together, and later messages in that conversation never ask again.
@@ -304,13 +306,19 @@ One live card per person per conversation. A shared channel has many people in i
 
 ### Nobody is quietly served from somewhere else
 
-A person who cannot reach the routed workspace is **never** silently given a session in another workspace they happen to belong to. They are told what happened, offered the ordinary Slack access-request link minted for the workspace they actually need, and no session is created. The identity link itself stays in the installation's workspace even when the request is for a routed one, because that is where the Slack pump reads it.
+A person who cannot reach the routed workspace is **never** silently given a session in another workspace they happen to belong to. No session is created either way, but how they hear about it depends on whether routing actually moved the work:
+
+- **Routing chose somewhere** - a prefix, a channel route, a DM route, or a personal workspace. They get a bot DM saying where this conversation works and the ordinary Slack access-request link, minted for the workspace they actually need rather than the installation's.
+- **Routing chose nothing** - the route was the installation's own workspace, or an existing mapped thread. This is the pre-routing case: someone lost access to the workspace this installation has always used. The behaviour is preserved exactly, which means a permanent `identity_access_revoked` failure and no post. Turning routing on must not start posting refusals into installations that never routed anything.
+- **A reaction summon** can only be denied by routing for having no reachable workspace at all, which gets the generic "ask an administrator" DM rather than an access-request link. A lost grant on a route it did resolve ends the same permanent way as the bullet above.
+
+The identity link itself stays in the installation's workspace even when the request is for a routed one, because that is where the Slack pump reads it.
 
 Routing never bypasses identity: an unlinked Slack user is still asked to link first.
 
 ### Saying where the work went
 
-Every acknowledgement and delivery for a routed task carries a quiet `-> Workspace` line, so work never lands somewhere surprising. It appears only when routing made a genuine choice: an installation whose people have one workspace made no choice, and a constant footer would be noise. The name is frozen on the interaction when it binds, read after authorization, because a rename between the original post and a reconciliation would make the post ledger's byte comparison raise.
+Every acknowledgement and delivery for a routed task carries a quiet `-> Workspace` line, so work never lands somewhere surprising. It appears only when routing made a genuine choice - a prefix, a channel route, a DM route, or a personal workspace. A sole candidate, an installation whose people have one workspace, and a reaction that fell back to the installation all made no choice, and a constant footer would be noise. A mapped thread inherits the label frozen on the interaction it reuses. The name is frozen on the interaction when it binds, read after authorization, because a rename between the original post and a reconciliation would make the post ledger's byte comparison raise.
 
 ### Administering it
 
