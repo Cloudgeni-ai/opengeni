@@ -207,6 +207,11 @@ export type SlackMessageBlock =
         style?: "primary" | "danger";
       }>;
     }
+  | {
+      type: "context";
+      block_id?: string;
+      elements: Array<{ type: "mrkdwn" | "plain_text"; text: string; emoji?: boolean }>;
+    }
   | { type: "divider" };
 
 export type SlackHomeBlock =

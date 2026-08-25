@@ -9531,6 +9531,16 @@ export type SlackInteraction = {
    * one-time onboarding hint. `null` means the decision is unresolved.
    */
   firstTaskHint: boolean | null;
+  /**
+   * The routed workspace's name, frozen when the interaction bound.
+   *
+   * Null means "do not say where this went": either routing is off, or the
+   * person had exactly one workspace to begin with, and a constant footer on
+   * every message would be noise. It is frozen rather than looked up at post
+   * time because a rename between the original post and a reconciliation would
+   * make the ledger's byte comparison raise.
+   */
+  routedWorkspaceLabel: string | null;
   progressCount: number;
   terminalDeliveryState: "open" | "completed" | "failed" | "cancelled" | "blocked";
   createdAt: Date;
@@ -10149,11 +10159,12 @@ export async function getOrCreateSlackInteraction(
     | "ackSlackMessageTs"
     // Owned by `resolveSlackInteractionFirstTaskHint`, never by the creator.
     | "firstTaskHint"
+    | "routedWorkspaceLabel"
     | "progressCount"
     | "terminalDeliveryState"
     | "createdAt"
     | "updatedAt"
-  > & { initiatingSlackUserId?: string | null },
+  > & { initiatingSlackUserId?: string | null; routedWorkspaceLabel?: string | null },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
   const outcome = await withRlsContext(db, input, async (scopedDb) => {
     const [created] = await scopedDb
@@ -10161,6 +10172,7 @@ export async function getOrCreateSlackInteraction(
       .values({
         ...input,
         initiatingSlackUserId: input.initiatingSlackUserId ?? null,
+        routedWorkspaceLabel: input.routedWorkspaceLabel ?? null,
       })
       .onConflictDoNothing()
       .returning();
@@ -11143,6 +11155,11 @@ function mapSlackInteraction(
     ),
     ackSlackMessageTs: slackRowNullableString(row, "ackSlackMessageTs", "ack_slack_message_ts"),
     firstTaskHint: slackRowNullableBoolean(row, "firstTaskHint", "first_task_hint"),
+    routedWorkspaceLabel: slackRowNullableString(
+      row,
+      "routedWorkspaceLabel",
+      "routed_workspace_label",
+    ),
     progressCount: slackRowNumber(row, "progressCount", "progress_count"),
     terminalDeliveryState: slackRowString(
       row,
