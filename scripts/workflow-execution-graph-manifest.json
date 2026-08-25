@@ -46,15 +46,15 @@
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
-      "sha256": "70b22095d09e553c573388f66686d4ad8d39488f4a823a3a885fe5386bde82f7"
+      "sha256": "3ac7c7c47aa5aa2f0176634acad4f61832435d9392520d2cc59bdf922d9ad2c0"
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "6cf774e02989e974b37826135683881a52cf1fa2d905afffd93904bec72e1ce3"
+      "sha256": "49d8a518d63f3b11ba8434a1238707831c83d1e8d01f9f37f5681d4d1183b535"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "1e7e7d55154fbc19f38a24698087969e38c700ff3b635858a4d60390cd1fd151"
+      "sha256": "e5b2603dbdeec1a5fe59a8e746f63acfab066f1b2cd3903e3f64cc6238e8f88c"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
@@ -66,7 +66,7 @@
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "7204e80493fea6239fe36ff39cff06c18f75715ac2c69df2a07e3831522c9e9f"
+      "sha256": "768babbcc762a889b872aa8548766196aa6cdb93682a5d223689ef70a0cf50b0"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",

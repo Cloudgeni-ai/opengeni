@@ -13,13 +13,13 @@ describe("canonical Bun version contract", () => {
     expect(await canonicalBunVersion()).toMatch(/^\d+\.\d+\.\d+$/u);
   });
 
-  test("requires every setup-bun step to consume .bun-version", () => {
+  test("requires every setup-bun step to consume an owner-specific canonical version file", () => {
     expect(() =>
       verifyWorkflowBunSetup(
-        "valid.yml",
+        "source.yml",
         [
           "steps:",
-          "  - name: Set up Bun",
+          "  - name: Set up source Bun",
           "    uses: oven-sh/setup-bun@v2",
           "    with:",
           "      bun-version-file: .bun-version",
@@ -29,10 +29,39 @@ describe("canonical Bun version contract", () => {
     ).not.toThrow();
     expect(() =>
       verifyWorkflowBunSetup(
+        "controller.yml",
+        [
+          "steps:",
+          "  - name: Set up controller Bun",
+          "    uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .release/controller/.bun-version",
+          "  - run: cd .release/controller && bun test",
+        ].join("\n"),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyWorkflowBunSetup(
         "floating.yml",
         ["steps:", "  - uses: oven-sh/setup-bun@v2", "  - run: bun test"].join("\n"),
       ),
-    ).toThrow("floating.yml setup-bun step must read the canonical .bun-version file");
+    ).toThrow(
+      "floating.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+    );
+
+    expect(() =>
+      verifyWorkflowBunSetup(
+        "source-data.yml",
+        [
+          "steps:",
+          "  - uses: oven-sh/setup-bun@v2",
+          "    with:",
+          "      bun-version-file: .release/source/.bun-version",
+        ].join("\n"),
+      ),
+    ).toThrow(
+      "source-data.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+    );
 
     expect(() =>
       verifyWorkflowBunSetup(
@@ -45,7 +74,9 @@ describe("canonical Bun version contract", () => {
           "      bun-version-file: .bun-version",
         ].join("\n"),
       ),
-    ).toThrow("mixed.yml setup-bun step must read the canonical .bun-version file");
+    ).toThrow(
+      "mixed.yml setup-bun step must read the canonical source or retained-controller .bun-version file",
+    );
   });
 
   test("binds musl release checksums to the canonical version", () => {

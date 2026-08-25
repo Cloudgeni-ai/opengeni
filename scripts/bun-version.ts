@@ -147,6 +147,7 @@ function majorMinor(version: string): string {
 }
 
 export function verifyWorkflowBunSetup(name: string, source: string): void {
+  const canonicalVersionFiles = [".bun-version", ".release/controller/.bun-version"];
   const lines = source.split("\n");
   for (const [index, line] of lines.entries()) {
     if (!line.includes("oven-sh/setup-bun@")) continue;
@@ -157,10 +158,13 @@ export function verifyWorkflowBunSetup(name: string, source: string): void {
       if (/^\s*-\s+/u.test(candidate) && candidateIndent <= actionIndent) break;
       stepLines.push(candidate);
     }
-    if (
-      !stepLines.some((candidate) => /^\s*bun-version-file:\s*\.bun-version\s*$/u.test(candidate))
-    ) {
-      throw new Error(`${name} setup-bun step must read the canonical .bun-version file`);
+    const versionFile = stepLines
+      .map((candidate) => /^\s*bun-version-file:\s*(\S+)\s*$/u.exec(candidate)?.[1])
+      .find((candidate) => candidate !== undefined);
+    if (!versionFile || !canonicalVersionFiles.includes(versionFile)) {
+      throw new Error(
+        `${name} setup-bun step must read the canonical source or retained-controller .bun-version file`,
+      );
     }
   }
 }
