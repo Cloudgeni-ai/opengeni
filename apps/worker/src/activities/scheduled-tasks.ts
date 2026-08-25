@@ -188,7 +188,9 @@ export function scheduledTaskSessionTitle(taskName: string): string {
  * Only the neutral create fallback is replaced. A keyed create replay can hand
  * back a session that has already run, and recovery re-enters this path for a
  * session the dead dispatch may already have titled; in both cases whatever the
- * agent or a human chose is newer truth than this stamp.
+ * agent or a human chose is newer truth than this stamp. The fallback check is
+ * part of the UPDATE itself, not a stale session-object precheck, so a title
+ * committed between dispatch read and stamp cannot be overwritten.
  *
  * `source: "agent"` is deliberate, and is the only system-assigned value the
  * schema offers (`Session.titleSource` is "user" | "agent" | null). The database
@@ -200,32 +202,27 @@ export function scheduledTaskSessionTitle(taskName: string): string {
  * Returns the appended events so the caller can route them through the same
  * defer-or-publish path as every other event this dispatch produces.
  */
-async function stampScheduledSessionTitle(
+export async function stampScheduledSessionTitle(
   db: Database,
   input: {
     workspaceId: string;
-    session: { id: string; title: string | null; titleSource: "user" | "agent" | null };
+    sessionId: string;
     taskName: string;
   },
 ): Promise<Awaited<ReturnType<typeof appendSessionEvents>>> {
-  if (
-    input.session.title !== null &&
-    !(
-      input.session.titleSource === "agent" &&
-      input.session.title === AUTOMATIC_SESSION_TITLE_FALLBACK
-    )
-  ) {
-    return [];
-  }
   const title = scheduledTaskSessionTitle(input.taskName);
   const result = await updateSessionTitle(db, {
     workspaceId: input.workspaceId,
-    sessionId: input.session.id,
+    sessionId: input.sessionId,
     title,
     source: "agent",
+    expectedCurrent: {
+      title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+      source: "agent",
+    },
   });
   if (!result.updated) return [];
-  return await appendSessionEvents(db, input.workspaceId, input.session.id, [
+  return await appendSessionEvents(db, input.workspaceId, input.sessionId, [
     { type: "session.title_set", payload: { title: result.title ?? title, source: "agent" } },
   ]);
 }
@@ -1223,7 +1220,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             // into the rail, and this lands on its heels.
             const titleEvents = await stampScheduledSessionTitle(dispatchDb, {
               workspaceId: task.workspaceId,
-              session,
+              sessionId: session.id,
               taskName: task.name,
             });
             if (titleEvents.length > 0) {
@@ -2086,7 +2083,7 @@ async function recoverBoundScheduledTaskDispatch(input: {
     // already titled is left alone.
     const titleEvents = await stampScheduledSessionTitle(input.db, {
       workspaceId: task.workspaceId,
-      session,
+      sessionId: session.id,
       taskName: task.name,
     });
     if (titleEvents.length > 0) {

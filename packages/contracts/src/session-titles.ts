@@ -38,6 +38,8 @@ const SECRET_COLON_PATTERN =
 const OPAQUE_IDENTIFIER_PATTERN =
   /\b(?=[A-Za-z0-9_-]{32,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b/u;
 
+const DEFAULT_IGNORABLE_CODE_POINTS = /\p{Default_Ignorable_Code_Point}+/gu;
+
 const TITLE_LABEL_PATTERN =
   /^(?:(?:suggested|generated|concise)\s+)?(?:(?:session|chat|conversation|task)\s+)?title\s*[:\-–—]\s*/iu;
 
@@ -51,12 +53,18 @@ const LEADING_BOILERPLATE_PATTERNS = [
 ] as const;
 
 function containsSensitiveAutomaticTitleValue(value: string): boolean {
-  if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(value))) return true;
-  if (SECRET_ASSIGNMENT_PATTERN.test(value)) return true;
-  if (OPAQUE_IDENTIFIER_PATTERN.test(value)) return true;
+  // Detection uses a compatibility-normalized shadow value so fullwidth
+  // punctuation/letters and invisible token splits cannot evade the policy.
+  // The accepted title itself stays byte-for-byte in the user's language and
+  // emoji form; this shadow is never returned or persisted.
+  const detectionValue = value.normalize("NFKC").replace(DEFAULT_IGNORABLE_CODE_POINTS, "");
+
+  if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(detectionValue))) return true;
+  if (SECRET_ASSIGNMENT_PATTERN.test(detectionValue)) return true;
+  if (OPAQUE_IDENTIFIER_PATTERN.test(detectionValue)) return true;
 
   SECRET_COLON_PATTERN.lastIndex = 0;
-  for (const match of value.matchAll(SECRET_COLON_PATTERN)) {
+  for (const match of detectionValue.matchAll(SECRET_COLON_PATTERN)) {
     const candidate = match[1] ?? "";
     if (candidate.length >= 12 || /\d/u.test(candidate) || /[^\p{L}\p{N}_-]/u.test(candidate)) {
       return true;

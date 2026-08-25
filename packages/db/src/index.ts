@@ -52779,8 +52779,14 @@ export async function recordSessionGoalProgressWithEvent(
  * single atomic UPDATE: a user-set title is permanent, so agent/auto writes
  * are first normalized through the shared short/sensitive-safe automatic-title
  * policy, then carry an `AND title_source IS DISTINCT FROM 'user'` guard
- * (NULL-safe in Postgres) while user writes are unconditional. Never
- * read-modify-write.
+ * (NULL-safe in Postgres) while user writes are unconditional. Automatic
+ * writes also bind the exact normalized candidate to a transaction-local
+ * database capability, so a pre-policy binary cannot bypass normalization
+ * during a rolling deployment. Never read-modify-write.
+ *
+ * `expectedCurrent`, when supplied, is an additional NULL-safe compare-and-set
+ * fence. It is used by stale/retry-prone producers such as scheduled dispatch:
+ * the write succeeds only if both the durable title and source still match.
  * Re-applying the exact title is also a no-op so a confused agent cannot churn
  * `updated_at` every turn. Returns `{ updated, title }`: `updated` is false when
  * the value was unchanged or an agent write was skipped because a user title
@@ -52794,6 +52800,10 @@ export async function updateSessionTitle(
     sessionId: string;
     title: string;
     source: "user" | "agent";
+    expectedCurrent?: {
+      title: string | null;
+      source: "user" | "agent" | null;
+    };
   },
 ): Promise<{ updated: boolean; title: string | null }> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
@@ -52812,6 +52822,11 @@ export async function updateSessionTitle(
         .limit(1);
       return { updated: false, title: existing?.title ?? null };
     }
+    if (input.source === "agent") {
+      await scopedDb.execute(
+        sql`select pg_catalog.set_config('opengeni.automatic_session_title_v1_candidate', ${title}, true)`,
+      );
+    }
     const [row] = await scopedDb
       .update(schema.sessions)
       .set({
@@ -52826,6 +52841,12 @@ export async function updateSessionTitle(
           sql`${schema.sessions.title} is distinct from ${title}`,
           ...(input.source === "agent"
             ? [sql`${schema.sessions.titleSource} is distinct from 'user'`]
+            : []),
+          ...(input.expectedCurrent
+            ? [
+                sql`${schema.sessions.title} is not distinct from ${input.expectedCurrent.title}`,
+                sql`${schema.sessions.titleSource} is not distinct from ${input.expectedCurrent.source}`,
+              ]
             : []),
         ),
       )

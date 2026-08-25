@@ -34,6 +34,19 @@ describe("automatic session titles", () => {
     ).toBeNull();
   });
 
+  test("detects sensitive values through compatibility characters and invisible splits", () => {
+    expect(normalizeAutomaticSessionTitle("Password：hunter2 database repair")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Ｐａｓｓｗｏｒｄ=hunter2 database repair")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Debug token sk-proj-abc\u200B123456789XYZ")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Pass\u2060word=hunter2 database repair")).toBeNull();
+  });
+
+  test("uses Unicode normalization only for detection and preserves accepted international text", () => {
+    const international = "日本語のデプロイ調査 👩🏽‍💻";
+    expect(normalizeAutomaticSessionTitle(international)).toBe(international);
+    expect(normalizeAutomaticSessionTitle("ＡＰＩ設計の確認")).toBe("ＡＰＩ設計の確認");
+  });
+
   test("bounds long output at words and complete Unicode graphemes without truncation markers", () => {
     const longWords = normalizeAutomaticSessionTitle(
       "Investigate automatic conversation title generation across retries recovery providers interfaces dashboards integrations and notifications",

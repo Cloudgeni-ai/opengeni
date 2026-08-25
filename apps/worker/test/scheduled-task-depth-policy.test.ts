@@ -15,7 +15,10 @@ import {
 } from "@opengeni/testing";
 import { migrate } from "@opengeni/db/migrate";
 import postgres from "postgres";
-import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
+import {
+  createScheduledTaskActivities,
+  stampScheduledSessionTitle,
+} from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
 
 let available = true;
@@ -150,6 +153,31 @@ describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => 
           source: "agent",
         }),
       ).toMatchObject({ updated: true, title: "agent chosen title" });
+      const eventsBeforeStaleStamp = await listSessionEvents(
+        client.db,
+        workspace!.id,
+        result.sessionId,
+        0,
+        20,
+      );
+      // Model the dispatch race deterministically: the scheduler still intends
+      // to replace its creation fallback, but another agent title committed
+      // first. The database CAS must reject the stale stamp and no title event
+      // may be emitted for a write that did not happen.
+      expect(
+        await stampScheduledSessionTitle(client.db, {
+          workspaceId: workspace!.id,
+          sessionId: result.sessionId,
+          taskName: "stale scheduler title",
+        }),
+      ).toEqual([]);
+      expect(await getSession(client.db, workspace!.id, result.sessionId)).toMatchObject({
+        title: "agent chosen title",
+        titleSource: "agent",
+      });
+      expect(
+        await listSessionEvents(client.db, workspace!.id, result.sessionId, 0, 20),
+      ).toHaveLength(eventsBeforeStaleStamp.length);
       expect(
         await updateSessionTitle(client.db, {
           workspaceId: workspace!.id,
