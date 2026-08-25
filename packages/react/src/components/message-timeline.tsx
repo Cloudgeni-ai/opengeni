@@ -746,12 +746,10 @@ export function MessageTimeline({
         return;
       }
       let attempt = underfillLoadAttemptRef.current;
-      if (attempt !== null && (attempt[0] !== loadedWindowKey || !hasOlder)) {
+      if (attempt && (attempt[0] !== loadedWindowKey || !hasOlder)) {
         // The requested page landed. Ordinary sentinel prefetch may own the
         // next approach to the top once this window has a usable scroll range.
         underfillLoadAttemptRef.current = null;
-        attempt = null;
-        setUnderfillSettledAttempt(null);
         underfillRetryReadyRef.current = false;
         setUnderfillRetryReady(false);
         olderLoadGateRef.current = "armed";
@@ -770,7 +768,6 @@ export function MessageTimeline({
       }
       attempt = [loadedWindowKey];
       underfillLoadAttemptRef.current = attempt;
-      setUnderfillSettledAttempt(null);
       underfillRetryReadyRef.current = false;
       setUnderfillRetryReady(false);
       // If the reader had already armed ordinary prefetch, do not let its
@@ -805,12 +802,11 @@ export function MessageTimeline({
   // one explicit retry only if this exact window still has older history.
   useEffect(() => {
     const attempt = underfillSettledAttempt;
-    if (attempt === null || underfillLoadAttemptRef.current !== attempt) {
+    if (!attempt || underfillLoadAttemptRef.current !== attempt) {
       return;
     }
     if (loadedWindowKey !== attempt[0] || !hasOlder) {
       underfillLoadAttemptRef.current = null;
-      setUnderfillSettledAttempt(null);
       underfillRetryReadyRef.current = false;
       setUnderfillRetryReady(false);
       return;
@@ -820,7 +816,6 @@ export function MessageTimeline({
     }
     underfillRetryReadyRef.current = true;
     setUnderfillRetryReady(true);
-    setUnderfillSettledAttempt(null);
   }, [hasOlder, loadedWindowKey, loadingOlder, underfillSettledAttempt]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
@@ -1165,7 +1160,6 @@ export function MessageTimeline({
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
     underfillLoadAttemptRef.current = null;
-    setUnderfillSettledAttempt(null);
     underfillRetryReadyRef.current = false;
     setUnderfillRetryReady(false);
     seenActivityIdsRef.current.clear();
