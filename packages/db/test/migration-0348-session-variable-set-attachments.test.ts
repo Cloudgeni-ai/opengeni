@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
-import { createDb, setRlsContext, type DbClient } from "../src";
+import postgres from "postgres";
+import { createDb, type DbClient } from "../src";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 let available = true;
@@ -35,6 +36,10 @@ describe("migration 0348 ordered session Variable Set attachments", () => {
     );
     expect(source).toContain(
       "current_setting('opengeni.session_variable_set_attachments_v1', true) = '1'",
+    );
+    expect(source).toContain("'opengeni-lossless-v1-session-variable-sets-v1'");
+    expect(source).toMatch(
+      /fence_legacy_lossless_content_update\(\)[\s\S]*?'opengeni-lossless-v1'[\s\S]*?'opengeni-lossless-v1-session-variable-sets-v1'/u,
     );
     expect(source).toContain("CREATE POLICY sessions_variable_set_attachments_protocol_v1");
     expect(source).toContain("AS RESTRICTIVE");
@@ -113,24 +118,37 @@ describe("migration 0348 ordered session Variable Set attachments", () => {
 
   test("rejects a pre-0348 transaction and admits the current runtime receipt", async () => {
     if (!available) return;
-    await expect(
-      client!.db.transaction((tx) =>
-        tx.execute(
-          sql`select opengeni_private.session_variable_set_attachments_protocol_v1_active()`,
-        ),
-      ),
-    ).rejects.toThrow("0348-or-newer runtime");
+    const legacy = postgres(shared!.appUrl, { max: 1, prepare: false });
+    try {
+      await expect(
+        legacy`select opengeni_private.session_variable_set_attachments_protocol_v1_active()`,
+      ).rejects.toThrow("0348-or-newer runtime");
 
-    await expect(
-      client!.db.transaction(async (tx) => {
-        await setRlsContext(tx, {
-          accountId: crypto.randomUUID(),
-          workspaceId: crypto.randomUUID(),
-        });
-        return await tx.execute<{ active: boolean }>(
-          sql`select opengeni_private.session_variable_set_attachments_protocol_v1_active() as active`,
-        );
-      }),
-    ).resolves.toEqual([{ active: true }]);
+      await expect(
+        client!.db.execute<{ active: boolean; applicationName: string }>(
+          sql`select
+            opengeni_private.session_variable_set_attachments_protocol_v1_active() as active,
+            current_setting('application_name') as "applicationName"`,
+        ),
+      ).resolves.toEqual([
+        {
+          active: true,
+          applicationName: "opengeni-lossless-v1-session-variable-sets-v1",
+        },
+      ]);
+
+      const injectedReceipt = await legacy.begin(async (tx) => {
+        await tx`select set_config(
+          'opengeni.session_variable_set_attachments_v1', '1', true
+        )`;
+        return await tx<{ active: boolean }[]>`
+          select opengeni_private.session_variable_set_attachments_protocol_v1_active()
+            as active
+        `;
+      });
+      expect([...injectedReceipt]).toEqual([{ active: true }]);
+    } finally {
+      await legacy.end();
+    }
   }, 180_000);
 });

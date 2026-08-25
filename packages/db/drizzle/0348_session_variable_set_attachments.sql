@@ -97,8 +97,9 @@ ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
 
 -- A maintenance drain prevents a mixed fleet during the DDL, while this
 -- restrictive policy prevents an old API/control/turn worker from rejoining
--- afterwards. Current binaries stamp the transaction-local protocol receipt in
--- setRlsContext before any tenant session access; pre-0348 binaries do not.
+-- afterwards. Current standalone connections use the PgBouncer-supported
+-- application_name startup receipt; injected/embedded handles stamp the
+-- transaction-local GUC in setRlsContext. Pre-0348 binaries carry neither.
 CREATE FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active()
 RETURNS boolean
 LANGUAGE plpgsql
@@ -106,7 +107,10 @@ STABLE
 SET search_path = pg_catalog
 AS $function$
 BEGIN
-  IF current_setting('opengeni.session_variable_set_attachments_v1', true) = '1' THEN
+  IF current_setting('opengeni.session_variable_set_attachments_v1', true) = '1'
+    OR current_setting('application_name', true) =
+      'opengeni-lossless-v1-session-variable-sets-v1'
+  THEN
     RETURN true;
   END IF;
   RAISE EXCEPTION
@@ -140,6 +144,156 @@ END
 $session_variable_set_protocol_grants$;
 
 SELECT set_config('opengeni.session_variable_set_attachments_v1', '1', true);
+
+-- Migration 0176 admitted the then-current createDb application_name as a
+-- lossless-content writer. The 0348 startup receipt rotates that name, so keep
+-- both generations lossless-aware while the sessions protocol gate separately
+-- rejects the old generation.
+CREATE OR REPLACE FUNCTION opengeni_private.fence_legacy_lossless_content_update()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+  IF current_setting('opengeni.lossless_content_writer', true) = '1'
+    OR current_setting('application_name', true) IN (
+      'opengeni-lossless-v1',
+      'opengeni-lossless-v1-session-variable-sets-v1'
+    )
+  THEN
+    RETURN NEW;
+  END IF;
+
+  CASE TG_TABLE_NAME
+    WHEN 'sessions' THEN
+      IF NEW.initial_message IS DISTINCT FROM OLD.initial_message
+        AND NEW.initial_message_codec_version IS NOT DISTINCT FROM OLD.initial_message_codec_version THEN
+        NEW.initial_message_codec_version := NULL;
+      END IF;
+    WHEN 'session_realtime_entries' THEN
+      IF NEW.text IS DISTINCT FROM OLD.text
+        AND NEW.text_codec_version IS NOT DISTINCT FROM OLD.text_codec_version THEN
+        NEW.text_codec_version := NULL;
+      END IF;
+      IF NEW.payload IS DISTINCT FROM OLD.payload
+        AND NEW.payload_codec_version IS NOT DISTINCT FROM OLD.payload_codec_version THEN
+        NEW.payload_codec_version := NULL;
+      END IF;
+    WHEN 'knowledge_memories' THEN
+      IF NEW.text IS DISTINCT FROM OLD.text
+        AND NEW.text_codec_version IS NOT DISTINCT FROM OLD.text_codec_version THEN
+        NEW.text_codec_version := NULL;
+      END IF;
+    WHEN 'session_turns' THEN
+      IF NEW.prompt IS DISTINCT FROM OLD.prompt
+        AND NEW.prompt_codec_version IS NOT DISTINCT FROM OLD.prompt_codec_version THEN
+        NEW.prompt_codec_version := NULL;
+      END IF;
+    WHEN 'session_system_updates' THEN
+      IF NEW.summary IS DISTINCT FROM OLD.summary
+        AND NEW.summary_codec_version IS NOT DISTINCT FROM OLD.summary_codec_version THEN
+        NEW.summary_codec_version := NULL;
+      END IF;
+      IF NEW.payload IS DISTINCT FROM OLD.payload
+        AND NEW.payload_codec_version IS NOT DISTINCT FROM OLD.payload_codec_version THEN
+        NEW.payload_codec_version := NULL;
+      END IF;
+    WHEN 'session_system_update_outbox' THEN
+      IF NEW.summary IS DISTINCT FROM OLD.summary
+        AND NEW.summary_codec_version IS NOT DISTINCT FROM OLD.summary_codec_version THEN
+        NEW.summary_codec_version := NULL;
+      END IF;
+      IF NEW.payload IS DISTINCT FROM OLD.payload
+        AND NEW.payload_codec_version IS NOT DISTINCT FROM OLD.payload_codec_version THEN
+        NEW.payload_codec_version := NULL;
+      END IF;
+    WHEN 'session_events' THEN
+      IF NEW.payload IS DISTINCT FROM OLD.payload
+        AND NEW.payload_codec_version IS NOT DISTINCT FROM OLD.payload_codec_version THEN
+        NEW.payload_codec_version := NULL;
+      END IF;
+    WHEN 'host_export_outbox' THEN
+      IF NEW.payload IS DISTINCT FROM OLD.payload
+        AND NEW.payload_codec_version IS NOT DISTINCT FROM OLD.payload_codec_version THEN
+        NEW.payload_codec_version := NULL;
+      END IF;
+    WHEN 'host_export_consumers' THEN
+      IF NEW.last_error IS DISTINCT FROM OLD.last_error
+        AND NEW.last_error_codec_version IS NOT DISTINCT FROM OLD.last_error_codec_version THEN
+        NEW.last_error_codec_version := NULL;
+      END IF;
+    WHEN 'agent_run_states' THEN
+      IF NEW.serialized_run_state IS DISTINCT FROM OLD.serialized_run_state
+        AND NEW.serialized_run_state_codec_version IS NOT DISTINCT FROM OLD.serialized_run_state_codec_version THEN
+        NEW.serialized_run_state_codec_version := NULL;
+      END IF;
+      IF NEW.pending_approvals IS DISTINCT FROM OLD.pending_approvals
+        AND NEW.pending_approvals_codec_version IS NOT DISTINCT FROM OLD.pending_approvals_codec_version THEN
+        NEW.pending_approvals_codec_version := NULL;
+      END IF;
+    WHEN 'session_history_items' THEN
+      IF NEW.item IS DISTINCT FROM OLD.item
+        AND NEW.item_codec_version IS NOT DISTINCT FROM OLD.item_codec_version THEN
+        NEW.item_codec_version := NULL;
+      END IF;
+    WHEN 'session_pending_tool_calls' THEN
+      IF NEW.call_item IS DISTINCT FROM OLD.call_item
+        AND NEW.call_item_codec_version IS NOT DISTINCT FROM OLD.call_item_codec_version THEN
+        NEW.call_item_codec_version := NULL;
+      END IF;
+      IF NEW.result_item IS DISTINCT FROM OLD.result_item
+        AND NEW.result_item_codec_version IS NOT DISTINCT FROM OLD.result_item_codec_version THEN
+        NEW.result_item_codec_version := NULL;
+      END IF;
+    WHEN 'sandbox_session_envelopes' THEN
+      IF NEW.envelope IS DISTINCT FROM OLD.envelope
+        AND NEW.envelope_codec_version IS NOT DISTINCT FROM OLD.envelope_codec_version THEN
+        NEW.envelope_codec_version := NULL;
+      END IF;
+    WHEN 'session_recordings' THEN
+      IF NEW.reason IS DISTINCT FROM OLD.reason
+        AND NEW.reason_codec_version IS NOT DISTINCT FROM OLD.reason_codec_version THEN
+        NEW.reason_codec_version := NULL;
+      END IF;
+    WHEN 'host_export_dead_letters' THEN
+      IF NEW.envelope IS DISTINCT FROM OLD.envelope
+        AND NEW.envelope_codec_version IS NOT DISTINCT FROM OLD.envelope_codec_version THEN
+        NEW.envelope_codec_version := NULL;
+      END IF;
+      IF NEW.envelope #> '{event,payload}' IS DISTINCT FROM OLD.envelope #> '{event,payload}'
+        AND NEW.event_payload_codec_version IS NOT DISTINCT FROM OLD.event_payload_codec_version THEN
+        NEW.event_payload_codec_version := NULL;
+      END IF;
+    WHEN 'audit_events' THEN
+      IF NEW.metadata IS DISTINCT FROM OLD.metadata
+        AND NEW.metadata_codec_version IS NOT DISTINCT FROM OLD.metadata_codec_version THEN
+        NEW.metadata_codec_version := NULL;
+      END IF;
+    WHEN 'rig_changes' THEN
+      IF NEW.payload IS DISTINCT FROM OLD.payload
+        AND NEW.payload_codec_version IS NOT DISTINCT FROM OLD.payload_codec_version THEN
+        NEW.payload_codec_version := NULL;
+      END IF;
+      IF NEW.verification IS DISTINCT FROM OLD.verification
+        AND NEW.verification_codec_version IS NOT DISTINCT FROM OLD.verification_codec_version THEN
+        NEW.verification_codec_version := NULL;
+      END IF;
+    WHEN 'transcription_recordings' THEN
+      IF NEW.transcript_text IS DISTINCT FROM OLD.transcript_text
+        AND NEW.transcript_text_codec_version IS NOT DISTINCT FROM OLD.transcript_text_codec_version THEN
+        NEW.transcript_text_codec_version := NULL;
+      END IF;
+    WHEN 'transcription_recording_segments' THEN
+      IF NEW.transcript_text IS DISTINCT FROM OLD.transcript_text
+        AND NEW.transcript_text_codec_version IS NOT DISTINCT FROM OLD.transcript_text_codec_version THEN
+        NEW.transcript_text_codec_version := NULL;
+      END IF;
+    ELSE
+      RAISE EXCEPTION 'unsupported lossless-content fence table: %', TG_TABLE_NAME;
+  END CASE;
+  RETURN NEW;
+END
+$function$;
 
 CREATE POLICY sessions_variable_set_attachments_protocol_v1
 ON sessions
