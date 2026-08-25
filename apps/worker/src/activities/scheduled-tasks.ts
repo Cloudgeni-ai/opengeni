@@ -58,7 +58,7 @@ import {
   settleScheduledTaskRunInTransaction,
   SessionSpawnDeniedDbError,
   updateScheduledTaskRun,
-  updateSessionTitle,
+  updateSessionTitleWithEvent,
   upsertScheduledSessionGoalForRun,
   withSessionActivityRlsContext,
 } from "@opengeni/db";
@@ -167,13 +167,14 @@ export function scheduledTaskSessionTitle(taskName: string): string {
  * Title a session the scheduler generated, and emit the same `session.title_set`
  * event every other title write in the product emits.
  *
- * This is the write half of the shared path in `@opengeni/core`
- * `updateSessionTitle`: the db `updateSessionTitle` UPDATE (which is where the
- * clobber guard lives in full) followed by the identical `session.title_set`
- * append, emitted only on a real write. Without the event a live subscriber sees
- * nothing: `packages/react/src/hooks/use-session.ts` patches an open session's
- * title exclusively on `session.title_set`, so a bare row write leaves the
- * viewer on the stale title until an unrelated refetch.
+ * This uses the same database operation as `@opengeni/core`
+ * `updateSessionTitle`: the clobber/CAS guarded row update and its identical
+ * `session.title_set` append commit together under the session event lock. A
+ * newer writer therefore cannot land between the authoritative row change and
+ * an older event. Without the event a live subscriber sees nothing:
+ * `packages/react/src/hooks/use-session.ts` patches an open session's title
+ * exclusively on `session.title_set`, so a bare row write leaves the viewer on
+ * the stale title until an unrelated refetch.
  *
  * The core wrapper itself is not called, because its only additional behavior is
  * `requireSessionAuthorization(grant, ...)` - a check on an HTTP/MCP caller's
@@ -209,9 +210,9 @@ export async function stampScheduledSessionTitle(
     sessionId: string;
     taskName: string;
   },
-): Promise<Awaited<ReturnType<typeof appendSessionEvents>>> {
+): Promise<Awaited<ReturnType<typeof updateSessionTitleWithEvent>>["events"]> {
   const title = scheduledTaskSessionTitle(input.taskName);
-  const result = await updateSessionTitle(db, {
+  const result = await updateSessionTitleWithEvent(db, {
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     title,
@@ -221,10 +222,7 @@ export async function stampScheduledSessionTitle(
       source: "agent",
     },
   });
-  if (!result.updated) return [];
-  return await appendSessionEvents(db, input.workspaceId, input.sessionId, [
-    { type: "session.title_set", payload: { title: result.title ?? title, source: "agent" } },
-  ]);
+  return result.events;
 }
 
 export function createScheduledTaskActivities(services: () => Promise<ControlActivityServices>) {

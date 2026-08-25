@@ -41,6 +41,22 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("Pass\u2060word=hunter2 database repair")).toBeNull();
   });
 
+  test("rejects short alphabetic values assigned to recognized secret labels", () => {
+    expect(normalizeAutomaticSessionTitle("Password: swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("api key: secretword")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("Token：sesame")).toBeNull();
+  });
+
+  test("does not reject benign discussion of secret-management concepts", () => {
+    expect(normalizeAutomaticSessionTitle("Password reset flow")).toBe("Password reset flow");
+    expect(normalizeAutomaticSessionTitle("API key rotation policy")).toBe(
+      "API key rotation policy",
+    );
+    expect(normalizeAutomaticSessionTitle("Secret management rollout")).toBe(
+      "Secret management rollout",
+    );
+  });
+
   test("uses Unicode normalization only for detection and preserves accepted international text", () => {
     const international = "日本語のデプロイ調査 👩🏽‍💻";
     expect(normalizeAutomaticSessionTitle(international)).toBe(international);

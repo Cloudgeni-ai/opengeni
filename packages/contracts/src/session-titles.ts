@@ -33,7 +33,7 @@ const SECRET_ASSIGNMENT_PATTERN =
   /\b(?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|credential|password|passwd|private[_ -]?key|secret|token)\b\s*=\s*[^\s,;]+/iu;
 
 const SECRET_COLON_PATTERN =
-  /\b(?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|credential|password|passwd|private[_ -]?key|secret|token)\b\s*:\s*([^\s,;]+)/giu;
+  /\b(?:api[_ -]?key|access[_ -]?token|auth[_ -]?token|credential|password|passwd|private[_ -]?key|secret|token)\b\s*:\s*[^\s,;]+/iu;
 
 const OPAQUE_IDENTIFIER_PATTERN =
   /\b(?=[A-Za-z0-9_-]{32,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+\b/u;
@@ -61,15 +61,8 @@ function containsSensitiveAutomaticTitleValue(value: string): boolean {
 
   if (KNOWN_SENSITIVE_VALUE_PATTERNS.some((pattern) => pattern.test(detectionValue))) return true;
   if (SECRET_ASSIGNMENT_PATTERN.test(detectionValue)) return true;
+  if (SECRET_COLON_PATTERN.test(detectionValue)) return true;
   if (OPAQUE_IDENTIFIER_PATTERN.test(detectionValue)) return true;
-
-  SECRET_COLON_PATTERN.lastIndex = 0;
-  for (const match of detectionValue.matchAll(SECRET_COLON_PATTERN)) {
-    const candidate = match[1] ?? "";
-    if (candidate.length >= 12 || /\d/u.test(candidate) || /[^\p{L}\p{N}_-]/u.test(candidate)) {
-      return true;
-    }
-  }
   return false;
 }
 

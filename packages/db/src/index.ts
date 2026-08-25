@@ -52775,8 +52775,11 @@ export async function recordSessionGoalProgressWithEvent(
 }
 
 /**
- * Sets a session's display title. The clobber guard lives entirely in this
- * single atomic UPDATE: a user-set title is permanent, so agent/auto writes
+ * Low-level row-only session-title update used by database-specific callers and
+ * tests. Public product writers should use `updateSessionTitleWithEvent` so the
+ * observable event commits atomically with this state transition. The clobber
+ * guard lives entirely in this single atomic UPDATE: a user-set title is
+ * permanent, so agent/auto writes
  * are first normalized through the shared short/sensitive-safe automatic-title
  * policy, then carry an `AND title_source IS DISTINCT FROM 'user'` guard
  * (NULL-safe in Postgres) while user writes are unconditional. Automatic
@@ -52866,6 +52869,113 @@ export async function updateSessionTitle(
       .limit(1);
     return { updated: false, title: existing?.title ?? null };
   });
+}
+
+/**
+ * Atomically set a session title and append its public `session.title_set`
+ * event under the canonical workspace/session event-write lock. The row CAS,
+ * durable sequence, and event either all commit or all roll back, so a newer
+ * title writer can never commit between the authoritative update and an older
+ * event append.
+ *
+ * Exact retries are naturally idempotent: the unchanged-title predicate (and,
+ * for stale producers, `expectedCurrent`) makes a committed retry a no-op with
+ * no duplicate event. Automatic titles retain the rolling-deployment trigger's
+ * exact transaction-local candidate capability.
+ */
+export async function updateSessionTitleWithEvent(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    title: string;
+    source: "user" | "agent";
+    expectedCurrent?: {
+      title: string | null;
+      source: "user" | "agent" | null;
+    };
+  },
+): Promise<{ updated: boolean; title: string | null; events: SessionEvent[] }> {
+  const title =
+    input.source === "agent" ? normalizeAutomaticSessionTitle(input.title) : input.title;
+  return await retryWorkspaceSessionEventActivityPersistence(
+    db,
+    input.workspaceId,
+    true,
+    {
+      stage: "session_title.update_with_event",
+      eventTypes: ["session.title_set"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) return { updated: false, title: null, events: [] };
+        if (title === null) {
+          return { updated: false, title: session.title, events: [] };
+        }
+        if (input.source === "agent") {
+          await tx.execute(
+            sql`select pg_catalog.set_config('opengeni.automatic_session_title_v1_candidate', ${title}, true)`,
+          );
+        }
+        const now = new Date();
+        const sequence = session.lastSequence + 1;
+        const [updated] = await tx
+          .update(schema.sessions)
+          .set({
+            title,
+            titleSource: input.source,
+            lastSequence: sequence,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              sql`${schema.sessions.title} is distinct from ${title}`,
+              ...(input.source === "agent"
+                ? [sql`${schema.sessions.titleSource} is distinct from 'user'`]
+                : []),
+              ...(input.expectedCurrent
+                ? [
+                    sql`${schema.sessions.title} is not distinct from ${input.expectedCurrent.title}`,
+                    sql`${schema.sessions.titleSource} is not distinct from ${input.expectedCurrent.source}`,
+                  ]
+                : []),
+            ),
+          )
+          .returning({ title: schema.sessions.title });
+        if (!updated) {
+          return { updated: false, title: session.title, events: [] };
+        }
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence,
+                type: "session.title_set",
+                payload: { title: updated.title ?? title, source: input.source },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append session.title_set event");
+        return { updated: true, title: updated.title, events: [mapEvent(event)] };
+      }),
+  );
 }
 
 /**

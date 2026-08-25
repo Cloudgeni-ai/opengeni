@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   createDb,
+  createSession,
   createScheduledTask,
   getSession,
   listSessionEvents,
   updateSessionTitle,
+  updateSessionTitleWithEvent,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -25,6 +27,7 @@ let available = true;
 let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
+let competitor: DbClient;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("worker-scheduled-depth-policy");
@@ -35,14 +38,132 @@ beforeAll(async () => {
   }
   admin = shared.admin;
   client = createDb(shared.appUrl);
+  competitor = createDb(shared.appUrl, { max: 1 });
 }, 180_000);
 
 afterAll(async () => {
+  await competitor?.close().catch(() => undefined);
   await client?.close().catch(() => undefined);
   await shared?.release();
 });
 
+async function appSessionLockWaiters(): Promise<number> {
+  const [row] = await admin<Array<{ count: number }>>`
+    select count(*)::int as count
+    from pg_stat_activity
+    where datname = current_database()
+      and usename = 'opengeni_app'
+      and wait_event_type = 'Lock'
+      and lower(query) like '%sessions%'
+      and lower(query) like '%no key update%'`;
+  return row?.count ?? 0;
+}
+
+async function waitForAppSessionLockWaiters(minimum: number): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if ((await appSessionLockWaiters()) >= minimum) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`Timed out waiting for ${minimum} app session lock waiters`);
+}
+
 describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => {
+  test("keeps the fallback CAS and title event ordered against a concurrent newer writer", async () => {
+    if (!available) return;
+    const [account] = await admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('scheduled title race') returning id`;
+    const [workspace] = await admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'scheduled title race') returning id`;
+    await admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace!.id}, ${account!.id})`;
+    const session = await createSession(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initialMessage: "run the scheduled title race",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+
+    let releaseBlocker!: () => void;
+    const blockerRelease = new Promise<void>((resolve) => {
+      releaseBlocker = resolve;
+    });
+    let blockerReady!: () => void;
+    const blockerLocked = new Promise<void>((resolve) => {
+      blockerReady = resolve;
+    });
+    const blocker = admin.begin(async (tx) => {
+      await tx`select id from sessions where id = ${session.id} for no key update`;
+      blockerReady();
+      await blockerRelease;
+    });
+    await blockerLocked;
+
+    const baselineWaiters = await appSessionLockWaiters();
+    let scheduledStamp: ReturnType<typeof stampScheduledSessionTitle> | undefined;
+    let newerWrite: ReturnType<typeof updateSessionTitleWithEvent> | undefined;
+    try {
+      scheduledStamp = stampScheduledSessionTitle(client.db, {
+        workspaceId: workspace!.id,
+        sessionId: session.id,
+        taskName: "scheduler fallback title",
+      });
+      await waitForAppSessionLockWaiters(baselineWaiters + 1);
+      newerWrite = updateSessionTitleWithEvent(competitor.db, {
+        workspaceId: workspace!.id,
+        sessionId: session.id,
+        title: "newer agent title",
+        source: "agent",
+      });
+      await waitForAppSessionLockWaiters(baselineWaiters + 2);
+    } finally {
+      releaseBlocker();
+    }
+
+    const [scheduledEvents, newerResult] = await Promise.all([
+      scheduledStamp!,
+      newerWrite!,
+      blocker,
+    ]).then(([events, result]) => [events, result] as const);
+    expect(scheduledEvents).toHaveLength(1);
+    expect(newerResult).toMatchObject({ updated: true, title: "newer agent title" });
+    expect(newerResult.events).toHaveLength(1);
+
+    const titleEvents = (
+      await listSessionEvents(client.db, workspace!.id, session.id, 0, 20)
+    ).filter((event) => event.type === "session.title_set");
+    expect(titleEvents.map((event) => event.payload)).toEqual([
+      { title: "scheduler fallback title", source: "agent" },
+      { title: "newer agent title", source: "agent" },
+    ]);
+    expect(await getSession(client.db, workspace!.id, session.id)).toMatchObject({
+      title: "newer agent title",
+      titleSource: "agent",
+      lastSequence: titleEvents.at(-1)!.sequence,
+    });
+
+    const beforeRetry = titleEvents.length;
+    expect(
+      await stampScheduledSessionTitle(client.db, {
+        workspaceId: workspace!.id,
+        sessionId: session.id,
+        taskName: "scheduler fallback title",
+      }),
+    ).toEqual([]);
+    expect(
+      (await listSessionEvents(client.db, workspace!.id, session.id, 0, 20)).filter(
+        (event) => event.type === "session.title_set",
+      ),
+    ).toHaveLength(beforeRetry);
+  }, 60_000);
+
   test("persists the durable agent override on the dispatched root session", async () => {
     if (!available) return;
     await migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth: 7 });
