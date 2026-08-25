@@ -17,9 +17,11 @@ import {
   createSession,
   deleteWorkspaceIfQuiescent,
   ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
   listSelfOrganizationMemberships,
   settleTemporalScheduleCleanup,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   updateOrganizationMember,
 } from "../src";
 
@@ -64,7 +66,7 @@ beforeAll(async () => {
   sql = await shared.admin.reserve();
   await sql`set lock_timeout = '5s'`;
   await sql`set statement_timeout = '15s'`;
-});
+}, 180_000);
 
 afterAll(async () => {
   sql?.release();
@@ -664,6 +666,17 @@ describe("migration 0275 scheduled connection authority", () => {
           account_id, activation_version, inventory_digest, parity_digest, activated_by
         ) values (${organizationId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
         on conflict (account_id) do nothing`;
+      const privateSessionSettings = await getOrganizationPrivateSessionSettings(client.db, {
+        organizationId,
+        actorSubjectId: ownerSubject,
+      });
+      await updateOrganizationPrivateSessionSettings(client.db, {
+        organizationId,
+        actorSubjectId: ownerSubject,
+        enabled: true,
+        expectedVersion: privateSessionSettings.version,
+        operationId: crypto.randomUUID(),
+      });
       const invitation = await createOrganizationInvitation(client.db, {
         organizationId,
         actorSubjectId: ownerSubject,

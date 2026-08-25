@@ -129,8 +129,9 @@ For a map of every app, package, and how the parts fit together, start at [`docs
   that, together with the 0303 readiness receipt, gates new Only-me creates in
   shared workspaces; migration 0336 applies the same product decision to a
   private fork destination in a shared workspace, after keyed replay so a
-  committed fork still replays once an owner disables the setting. The setting
-  grants no access. Owner derivation reads STATED
+  committed fork still replays once an owner disables the setting; and migration
+  0344 gates a fresh transition to Only me while preserving the same replay and
+  Personal-workspace exemption. The setting grants no access. Owner derivation reads STATED
   authority only: an active membership's own `personal_workspace_id` pointer or
   an explicit `workspace_memberships` row (migration 0302). Never widen it to a
   default workspace, `created_by`, or current access, and never let an
@@ -329,7 +330,16 @@ When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform
 
 Every new SQL migration must declare its reviewed production path on the first lines: `-- deployment-mode: rolling` for online-compatible expand-and-contract work, or `-- deployment-mode: maintenance` for an incompatible one-way cutover. The protected production gate hashes the ordered SQL history and rejects rewrites or unclassified additions.
 
+Migration `0345_tenant_scoped_session_tenancy_fence.sql` is a maintenance-only
+writer-protocol cutover. Stop every old API, control worker, and turn worker
+before applying it, and never restart a pre-0345 image afterward: the migration
+replaces schema-wide session-tenancy table locks with a workspace advisory
+protocol and installs database triggers that reject all 17 hot-table mutations
+unless the acting backend already holds that workspace fence.
+
 **A migration-time backfill over a FORCE-RLS table must open the owner-only posture window.** `FORCE ROW LEVEL SECURITY` binds the table *owner*, and OpenGeni migrates as a NON-superuser owner without `BYPASSRLS`, with no tenant GUC set. A bare `UPDATE`/`DELETE`/`INSERT ... SELECT`/`DO $$` backfill therefore matches **zero rows and reports success**, and an `IF EXISTS ... RAISE EXCEPTION` preflight certifies a cutover it cannot see. Wrap the statement in `ALTER TABLE "t" NO FORCE ROW LEVEL SECURITY; ... ALTER TABLE "t" FORCE ROW LEVEL SECURITY;` (relaxes only the owner; the app role stays policy-bound; the file is one implicit transaction), set the tenant GUC around it, or use an RLS-immune `ADD COLUMN ... NOT NULL DEFAULT`. `VALIDATE CONSTRAINT`, `SET NOT NULL`, unique-index builds, and RI checks *do* see every row — which is why a CHECK that evaluates to NULL (and therefore passes) is the trap. `bun run check:migration-rls-backfills` is the CI guard; migration bytes are frozen, so never add to its grandfathered lists. Drive `migrate()` through `acquireOwnerMigratedTestDatabase` to test this boundary. See [`docs/force-rls-migration-backfills.md`](docs/force-rls-migration-backfills.md).
+
+**A test that replays the migration ledger needs an explicit timeout.** Calling `migrate()` - or any `acquire*TestDatabase` helper, which builds the shared template through `ensureTemplateBuilt` -> `migrate()` - rebuilds the whole schema against a fresh database. That cost grows with every migration that lands and is unrelated to the size of the file it lives in. CI packs unit shards by source-file *byte size*, so any unrelated file addition can cluster these tests into one shard, where they run concurrently against a single PostgreSQL container at several times their usual wall time - that is how commit `d13a9849b` turned `main` red without touching a migration. Declare a budget above the 30 s shard default (`180_000` is the convention); `bun run check:migration-test-budgets` (a CI guard, always on) fails otherwise and names each site.
 
 **Every new migration must be registered at all three release-schema contract sites.** `scripts/release-schema-contract.test.ts` pins the ledger in three places a new migration moves: `appendedMigrationPaths` (the forward list, which keeps the migration out of the governed host-export checkpoint input so the pinned aggregate SHA-256 never has to change), a `completeSourceContract.migrations.some(...)` presence probe feeding the pinned `fileCount`, and a `latestMigration` branch in that same assertion, prepended OUTERMOST so the newest migration wins the ternary. The last two pin the *unfiltered* ledger, so the forward-list entry alone still leaves the contract test red. Do **not** repair any of it by pinning a fresh hash in the `releaseSchemaContractHash` ladder: that aggregate covers the whole filtered ledger, so a hash computed on your branch is stale the moment another migration merges first - the pull request stays green and protected `main` lands red, which is how migrations 0331, 0332, 0333, and 0334 each broke `main` in one day. `bun run check:migration-schema-contract` (a CI guard) fails on any migration this head adds on top of its base that is missing from any of the three, names which ones, and prints the exact edit for each. Advancing the governed checkpoint itself is a deliberate, separate change against current `main`.
 

@@ -10,6 +10,7 @@ import {
   createSession,
   createTaskNote,
   ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
   grantWorkspaceAccess,
   getOrCreateWorkspaceLearningPolicySnapshot,
   listTaskNotes,
@@ -17,6 +18,7 @@ import {
   nestedPostgresSqlState,
   replaceTaskNote,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   writeCompanyBrainGovernedProposal,
   withSessionRlsActorContext,
   type DbClient,
@@ -67,6 +69,17 @@ async function fixture(options: { privateRoot?: boolean; child?: boolean } = {})
       account_id, activation_version, inventory_digest, parity_digest, activated_by
     ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
     on conflict (account_id) do nothing`;
+  const privateSessionSettings = await getOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: ownerSubjectId,
+  });
+  await updateOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: ownerSubjectId,
+    enabled: true,
+    expectedVersion: privateSessionSettings.version,
+    operationId: crypto.randomUUID(),
+  });
   const root = await withSessionRlsActorContext(
     { subjectId: ownerSubjectId },
     async () =>

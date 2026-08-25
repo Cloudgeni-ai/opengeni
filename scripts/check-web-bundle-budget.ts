@@ -210,15 +210,22 @@ const budgets = {
   // Held-turn commentary projection adds the bounded waiting-state copy to
   // the shared session graph. The exact Linux/x64 production builds measure
   // 2,173,426-2,173,468 raw bytes and 607,161-607,169 gzip bytes. Preserve the
-  // larger merged envelope for both changes: one-KiB raw headroom and the
-  // 1.5-KiB gzip platform-skew allowance. Every file-count, initial, per-file,
-  // lazy-chunk, and CSS cap stays fixed.
+  // larger merged envelope for the stacked growth below: one-KiB raw headroom
+  // and the 1.5-KiB gzip platform-skew allowance. Every file-count, initial,
+  // per-file, lazy-chunk, and CSS cap stays fixed.
+  // The organization-admin document migration audit adds three typed SDK
+  // methods to the same non-tree-shakeable client. Exact Linux/x64 PR CI
+  // measures the direct-session graph at 2,175,302 raw / 607,439 gzip bytes.
   // Causal channel authority for independently polled root, pins-only, detail,
   // and post-move reads measures 2,175,936 raw / 607,961 gzip bytes in the exact
-  // Linux/x64 production build. Advance only the raw graph to 2,126 KiB so the
-  // guard retains one KiB of headroom; every other cap remains fixed.
-  directSessionRaw: 2126 * kib,
-  directSessionGzip: 595 * kib,
+  // Linux/x64 production build. The current-main compatibility merge stacks
+  // both surfaces at 2,179,430 raw / 608,650 gzip bytes. Advance only these two
+  // aggregates to 2,130 KiB raw and 596 KiB gzip so the guard retains one KiB
+  // of raw headroom and the 1.5-KiB gzip platform-skew allowance; every other
+  // cap remains fixed. The separately tracked structural fix is to remove this
+  // browser tax, not keep growing the shared client class.
+  directSessionRaw: 2130 * kib,
+  directSessionGzip: 596 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,

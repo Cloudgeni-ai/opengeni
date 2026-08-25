@@ -7,6 +7,8 @@ import {
   DocumentAuthorityReclassification,
   DocumentBase,
   DocumentDefaultCollectionBackfill,
+  DocumentDefaultCollectionBackfillAudit,
+  GetDocumentDefaultCollectionBackfillAuditQuery,
   DocumentSearchRequest,
   DocumentSearchResponse,
   FileAsset,
@@ -15,6 +17,9 @@ import {
   KnowledgeMemorySearchRequest,
   ListDocumentAuthorityReclassificationsQuery,
   ListDocumentAuthorityReclassificationsResponse,
+  ListDocumentDefaultCollectionBackfillRunsResponse,
+  ListDocumentMigrationAuditQuery,
+  ListOrganizationDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
   ReclassifyDocumentAuthorityRequest,
   RunDocumentDefaultCollectionBackfillRequest,
@@ -40,10 +45,13 @@ import {
   getDocument,
   getDocumentOriginalFile,
   getDocumentBase,
+  getDocumentDefaultCollectionBackfillAudit,
   listAccessibleDocuments,
   listDocumentAuthorityReclassifications,
+  listDocumentDefaultCollectionBackfillRuns,
   listDocumentBasesEnsuringDefault,
   listDocuments,
+  listOrganizationDocumentAuthorityReclassifications,
   moveDocumentToBase,
   queueDocumentForReindex,
   reclassifyDocumentAuthority,
@@ -124,6 +132,106 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
             accountAdminAuthorization,
+          }),
+        ),
+      );
+    } catch (error) {
+      throw documentHttpException(error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/document-default-collection-backfills", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "documents:manage",
+    );
+    if (!hasAccountAdminAuthority(authorization)) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
+    const query = ListDocumentMigrationAuditQuery.safeParse(c.req.query());
+    if (!query.success) {
+      throw new HTTPException(400, { message: "invalid document migration audit query" });
+    }
+    try {
+      return c.json(
+        ListDocumentDefaultCollectionBackfillRunsResponse.parse(
+          await listDocumentDefaultCollectionBackfillRuns(db, {
+            accountId: authorization.grant.accountId,
+            workspaceId,
+            actorSubjectId: authorization.grant.subjectId,
+            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            ...query.data,
+          }),
+        ),
+      );
+    } catch (error) {
+      throw documentHttpException(error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/document-default-collection-backfills/:runId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "documents:manage",
+    );
+    if (!hasAccountAdminAuthority(authorization)) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
+    const runId = RunDocumentDefaultCollectionBackfillRequest.shape.runId.safeParse(
+      c.req.param("runId"),
+    );
+    const query = GetDocumentDefaultCollectionBackfillAuditQuery.safeParse(c.req.query());
+    if (!runId.success || !query.success) {
+      throw new HTTPException(400, { message: "invalid document migration audit query" });
+    }
+    try {
+      return c.json(
+        DocumentDefaultCollectionBackfillAudit.parse(
+          await getDocumentDefaultCollectionBackfillAudit(db, {
+            accountId: authorization.grant.accountId,
+            workspaceId,
+            actorSubjectId: authorization.grant.subjectId,
+            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            runId: runId.data,
+            ...query.data,
+          }),
+        ),
+      );
+    } catch (error) {
+      throw documentHttpException(error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/document-authority-reclassifications", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "documents:manage",
+    );
+    if (!hasAccountAdminAuthority(authorization)) {
+      throw new HTTPException(403, { message: "missing permission: account:admin" });
+    }
+    const query = ListDocumentMigrationAuditQuery.safeParse(c.req.query());
+    if (!query.success) {
+      throw new HTTPException(400, { message: "invalid document migration audit query" });
+    }
+    try {
+      return c.json(
+        ListOrganizationDocumentAuthorityReclassificationsResponse.parse(
+          await listOrganizationDocumentAuthorityReclassifications(db, {
+            accountId: authorization.grant.accountId,
+            workspaceId,
+            actorSubjectId: authorization.grant.subjectId,
+            accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
+            ...query.data,
           }),
         ),
       );
@@ -879,11 +987,14 @@ function dropFilename(preferred: string | undefined): string {
 }
 
 function documentHttpException(error: unknown): HTTPException {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = documentDomainErrorMessage(error);
   if (message.includes("organization document") && message.includes("exact account authority")) {
     return new HTTPException(403, { message: "missing permission: account:admin" });
   }
   if (message.includes("not found")) {
+    return new HTTPException(404, { message });
+  }
+  if (message.includes("document Default collection backfill audit run is unavailable")) {
     return new HTTPException(404, { message });
   }
   if (message.includes("already exists")) {
@@ -898,7 +1009,9 @@ function documentHttpException(error: unknown): HTTPException {
   }
   if (
     message.includes("reclassification requires") ||
-    message.includes("backfill requires organization administration")
+    message.includes("backfill requires organization administration") ||
+    message.includes("document migration audit requires organization administration") ||
+    message.includes("document migration audit scope is invalid")
   ) {
     return new HTTPException(403, { message });
   }
@@ -906,7 +1019,12 @@ function documentHttpException(error: unknown): HTTPException {
     message.includes("reclassification input is invalid") ||
     message.includes("reclassification authority is invalid") ||
     message.includes("invalid document authority receipt cursor") ||
-    message.includes("document authority receipt limit")
+    message.includes("document authority receipt limit") ||
+    message.includes("invalid document migration audit cursor") ||
+    message.includes("document migration audit cursor is invalid") ||
+    message.includes("document migration audit limit") ||
+    message.includes("document migration audit authority is incomplete") ||
+    message.includes("document Default collection backfill audit run id is required")
   ) {
     return new HTTPException(400, { message });
   }
@@ -927,6 +1045,19 @@ function documentHttpException(error: unknown): HTTPException {
     return new HTTPException(400, { message });
   }
   return new HTTPException(500, { message });
+}
+
+function documentDomainErrorMessage(error: unknown): string {
+  let current: unknown = error;
+  let message = error instanceof Error ? error.message : String(error);
+  const seen = new Set<unknown>();
+  while (current && typeof current === "object" && !seen.has(current) && seen.size < 8) {
+    seen.add(current);
+    const record = current as { cause?: unknown; message?: unknown };
+    if (typeof record.message === "string") message = record.message;
+    current = record.cause;
+  }
+  return message;
 }
 
 function hasAccountAdminAuthority(

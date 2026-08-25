@@ -16,7 +16,9 @@ const withheldMigrationNames = [
   "0185_temporal_schedule_cleanup_outbox.sql",
   "0186_sandbox_capture_provider_contract.sql",
   "0275_scheduled_connection_authority.sql",
+  "0299_organization_membership_lock_order.sql",
   "0315_personal_github_repository_selection.sql",
+  "0345_tenant_scoped_session_tenancy_fence.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -90,7 +92,9 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       `);
       // 0275 rewrites the 0185 cleanup outbox, so it must be withheld together
       // with the pre-0184 bridge and replayed through the real filename ledger
-      // in dependency order once the legacy claim exists.
+      // in dependency order once the legacy claim exists. 0299 must repair the
+      // replayed 0275 membership definitions before 0345 extends that exact
+      // prefix with the session-tenancy fences.
       await sql`
         insert into schema_migrations (name)
         select unnest(${withheldMigrationNames}::text[])`;

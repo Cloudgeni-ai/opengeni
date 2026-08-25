@@ -18,6 +18,7 @@ import {
   getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
+  getOrganizationPrivateSessionSettings,
   getSessionRealtimeContinuityEntries,
   renderSessionRealtimeTail,
   resolveCompanyBrainContextSelection,
@@ -26,6 +27,7 @@ import {
   SESSION_REALTIME_TAIL_SOURCE,
   syncSessionRealtimeLedgerInTransaction,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   type SessionActivityDatabase,
@@ -106,6 +108,17 @@ async function privateFixture() {
       account_id, activation_version, inventory_digest, parity_digest, activated_by
     ) values (${grant.accountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)}, 'database-test')
     on conflict (account_id) do nothing`;
+  const privateSessionSettings = await getOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: subjectId,
+  });
+  await updateOrganizationPrivateSessionSettings(client.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: subjectId,
+    enabled: true,
+    expectedVersion: privateSessionSettings.version,
+    operationId: crypto.randomUUID(),
+  });
   const session = await withSessionRlsActorContext({ subjectId }, () =>
     createSession(client.db, {
       accountId: grant.accountId,

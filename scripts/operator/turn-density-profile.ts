@@ -190,6 +190,16 @@ export type DensitySeedChild = {
   kill(signal?: number): void;
 };
 
+export async function deleteDensityProfileAccount(
+  db: Parameters<typeof withWorkspaceRls>[0],
+  accountId: string,
+  workspaceId: string,
+): Promise<void> {
+  await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    await scopedDb.delete(schema.managedAccounts).where(eq(schema.managedAccounts.id, accountId));
+  });
+}
+
 /**
  * Parse the allowed density candidates. The default is intentionally the exact
  * capacity sweep; custom profiles may select/reorder those candidates but may not
@@ -547,8 +557,7 @@ async function runDensityProfileMain(densityMcpUrl: string): Promise<void> {
     }
 
     await cleanupDensityWorkspace(
-      () =>
-        dbClient.db.delete(schema.managedAccounts).where(eq(schema.managedAccounts.id, accountId!)),
+      () => deleteDensityProfileAccount(dbClient.db, accountId!, workspaceId!),
       config.timeoutMs,
     );
     accountId = null;
@@ -570,10 +579,7 @@ async function runDensityProfileMain(densityMcpUrl: string): Promise<void> {
   } finally {
     if (accountId) {
       await cleanupDensityWorkspace(
-        () =>
-          dbClient.db
-            .delete(schema.managedAccounts)
-            .where(eq(schema.managedAccounts.id, accountId!)),
+        () => deleteDensityProfileAccount(dbClient.db, accountId!, workspaceId!),
         config.timeoutMs,
       ).catch((error) => {
         console.error(`Density account cleanup failed: ${errorMessage(error)}`);
