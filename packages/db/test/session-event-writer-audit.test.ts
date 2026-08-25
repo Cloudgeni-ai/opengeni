@@ -166,6 +166,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 3,
     contract: "canonical",
   },
+  "packages/db/src/index.ts#updateSessionTitleWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#recordSessionGoalProgressWithEvent": {
     inserts: 1,
     contract: "canonical",
@@ -315,6 +319,7 @@ const genericControlWriters = new Set([
   "packages/db/src/index.ts#appendSessionEvents",
   "packages/db/src/index.ts#appendSessionEventsAndUpdateSession",
   "packages/db/src/index.ts#appendSessionEventToSandboxGroup",
+  "packages/db/src/index.ts#updateSessionTitleWithEvent",
 ]);
 
 const callerOwnedControlWriters = new Set([
