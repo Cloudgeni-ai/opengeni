@@ -453,6 +453,27 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
+### Durable invited-user email delivery (0351)
+
+Migration 0351 is rolling and additive. Before inviting users, configure
+`OPENGENI_RESEND_API_KEY` and `OPENGENI_EMAIL_FROM`; production managed-mode
+configuration validation requires the provider key. Embedded hosts may bind an
+equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
+does not relax the deployment preflight today. Keep
+`OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
+bearers are stable HMAC identities and the browser receives them only in the
+email URL fragment.
+
+The API records a durable attempt and `provider_started` marker before provider
+I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,
+or released provider-started claim is shown as `outcome_unknown`. Do not repair
+either state with database DML or by crafting a new email. Use the People &
+invitations retry control after inspecting provider state; it reuses the exact
+delivery id, provider idempotency key, bearer digest, and frozen safe payload.
+Revoking the invitation is authoritative even if an earlier provider call later
+reports success. The database never stores the setup bearer or rendered email
+body.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one

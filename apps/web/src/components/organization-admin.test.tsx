@@ -109,6 +109,7 @@ function invitation(role: OrganizationInvitation["role"]): OrganizationInvitatio
     acceptedMembershipId: null,
     createdAt: timestamp,
     updatedAt: timestamp,
+    delivery: null,
   };
 }
 
@@ -379,7 +380,7 @@ describe("organization administration component fences", () => {
     const onOrganizationChanged = mock(() => undefined);
     const client = {
       getOrganizationAdministrationOverview,
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
@@ -447,7 +448,7 @@ describe("organization administration component fences", () => {
     }));
     const client = {
       getOrganizationAdministrationOverview: mock(async () => overview(identityA)),
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationWorkspace,
@@ -533,7 +534,7 @@ describe("organization administration component fences", () => {
     });
     const client = {
       getOrganizationAdministrationOverview,
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
@@ -590,7 +591,7 @@ describe("organization administration component fences", () => {
     }));
     const client = {
       getOrganizationAdministrationOverview,
-      listOrganizationMembers: mock(async () => ({
+      listOrganizationAdministrationMembers: mock(async () => ({
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
@@ -777,7 +778,7 @@ describe("organization administration component fences", () => {
     const createOrganizationInvitation = mock(() => createResult.promise);
     const revokeOrganizationInvitation = mock(() => revokeResult.promise);
     const client = {
-      listOrganizationMembers: async () => ({
+      listOrganizationAdministrationMembers: async () => ({
         members: [
           member(identityA, "actor"),
           { ...member(identityA, "owner-2"), subjectId: "user:owner-2" },
@@ -833,9 +834,9 @@ describe("organization administration component fences", () => {
     await flush();
     expect(container.textContent).toContain("new-member@example.test");
     expect(container.textContent).toContain(
-      "Invitation created for new-member@example.test. It is available in OpenGeni.",
+      "Invitation recorded for new-member@example.test; delivery has not started.",
     );
-    expect(toastSuccess).toHaveBeenCalledWith("Organization invitation created");
+    expect(toastSuccess).toHaveBeenCalledWith("Organization invitation recorded");
     expect(button(container, "Load more invitations").disabled).toBe(false);
 
     await act(async () => button(container, "Revoke invitation for member@example.test").click());
@@ -868,7 +869,7 @@ describe("organization administration component fences", () => {
     const acceptOrganizationInvitation = mock(() => acceptResult.promise);
     const onAuthorityChanged = mock(() => undefined);
     const client = {
-      listOrganizationMembers: async () => ({
+      listOrganizationAdministrationMembers: async () => ({
         members: [
           member(identityA, "actor"),
           { ...member(identityA, "owner-2"), subjectId: "user:owner-2" },
@@ -931,7 +932,7 @@ describe("organization administration component fences", () => {
     const updateOrganizationMember = mock(() => pendingUpdate.promise);
     const onAuthorityChanged = mock(() => undefined);
     const client = {
-      listOrganizationMembers: async (organizationId: string) => ({
+      listOrganizationAdministrationMembers: async (organizationId: string) => ({
         members: organizationId === identityA.organizationId ? [actorA, secondOwner] : [actorB],
       }),
       listOrganizationInvitationsForOrganization: async () => ({
@@ -1056,7 +1057,7 @@ describe("organization administration component fences", () => {
   test("does not expose or invoke owner/admin invitation revocation for an admin", async () => {
     const revokeOrganizationInvitation = mock(async () => invitation("member"));
     const client = {
-      listOrganizationMembers: async () => ({
+      listOrganizationAdministrationMembers: async () => ({
         members: [member(identityA, "admin", "admin")],
       }),
       listOrganizationInvitationsForOrganization: async () => ({

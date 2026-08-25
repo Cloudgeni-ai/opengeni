@@ -18,6 +18,16 @@ const completeSelfServiceSetup = mock(async () => ({
 mock.module("@/api", () => ({
   AuthApiError: class AuthApiError extends Error {},
   completeOrganizationUserSetup: completeSetup,
+  previewOrganizationUserSetup: mock(async () => ({
+    state: "pending" as const,
+    organizationId: "00000000-0000-4000-8000-000000000001",
+    organizationName: "Test Organization",
+    targetEmail: "invitee@example.test",
+    targetName: null,
+    organizationRole: "member" as const,
+    sharedWorkspaceAccess: [],
+    expiresAt: "2026-09-01T00:00:00.000Z",
+  })),
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
   getSelfServiceOrganizationOnboardingStatus: mock(async () => ({
     state: "required" as const,
