@@ -219,6 +219,17 @@ record whether an existing Default was adopted or a missing one was created.
 This changes grouping only. It does not reclassify a Document or widen
 retrieval, ranking, citation, or file access.
 
+Migration 0346 exposes that retained evidence through bounded organization-admin
+read APIs and SDK methods. Administrators can page account-scoped backfill runs,
+then independently page one run's operation and workspace receipts, and can page
+authority-reclassification receipts across actors and workspaces in the same
+account. Opaque cursors are bound to the account, evidence kind, and run where
+applicable. The database uses a target-schema-local exact-token capability with
+SELECT-only policies, so a read cannot reuse the destructive migration
+capability, cannot write an evidence table, and cannot collide with another
+OpenGeni schema in the same database. Expected scope, cursor, limit, and missing
+run failures are mapped to typed HTTP errors.
+
 One run writes a receipt for **every** workspace in the account, so those
 receipts - and the reclassification receipts - are workspace-owned evidence that
 cascades with its workspace rather than pinning it. `deleteWorkspaceIfQuiescent`

@@ -1597,6 +1597,21 @@ BEGIN
       EXECUTE format('GRANT SELECT ON TABLE %I.document_authority_reclassifications TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON TABLE %I.document_authority_reclassifications FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.document_default_collection_backfill_runs, %I.document_default_collection_backfill_operations, %I.document_default_collection_backfill_receipts FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(
+        format('%I.list_document_default_collection_backfill_runs(jsonb)', ${literal(schema)})
+      ) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.list_document_default_collection_backfill_runs(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_document_default_collection_backfill_runs(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.get_document_default_collection_backfill_audit(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_document_default_collection_backfill_audit(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.list_organization_document_authority_reclassifications(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_document_authority_reclassifications(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.document_migration_audit_capability_active(text) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.document_migration_audit_capability_active(text) FROM %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.assert_document_migration_audit_authority(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.assert_document_migration_audit_authority(jsonb) FROM %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.document_migration_audit_capabilities FROM %I', ${literal(schema)}, ${literal(role)});
+      END IF;
     END IF;
     IF to_regprocedure(
       format('%I.create_scoped_variable_set(uuid,uuid,text,text,text,jsonb,boolean)', ${literal(schema)})

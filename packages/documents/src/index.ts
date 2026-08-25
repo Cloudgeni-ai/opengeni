@@ -26,6 +26,13 @@ import {
   type ReclassifyDocumentAuthorityRequest,
   type RunDocumentDefaultCollectionBackfillRequest,
   DocumentDefaultCollectionBackfill,
+  DocumentDefaultCollectionBackfillAudit,
+  DocumentDefaultCollectionBackfillOperationAudit,
+  DocumentDefaultCollectionBackfillReceiptAudit,
+  DocumentDefaultCollectionBackfillRunAudit,
+  ListDocumentDefaultCollectionBackfillRunsResponse,
+  ListOrganizationDocumentAuthorityReclassificationsResponse,
+  OrganizationDocumentAuthorityReclassification,
 } from "@opengeni/contracts";
 import {
   createPersonalDocumentAuthority,
@@ -196,6 +203,15 @@ export type RunDocumentDefaultCollectionBackfillInput =
     actorSubjectId: string;
     accountAdminAuthorization: DocumentAccountAdminAuthorization;
   };
+
+export type DocumentMigrationAuditInput = {
+  accountId: string;
+  workspaceId: string;
+  actorSubjectId: string;
+  accountAdminAuthorization: DocumentAccountAdminAuthorization;
+  limit?: number | undefined;
+  cursor?: string | undefined;
+};
 
 export type AgentDocumentAuthorityContext = {
   sessionId: string;
@@ -1021,6 +1037,256 @@ export async function runDocumentDefaultCollectionBackfill(
       return DocumentDefaultCollectionBackfill.parse(row.result);
     },
   );
+}
+
+export async function listDocumentDefaultCollectionBackfillRuns(
+  db: Database,
+  input: DocumentMigrationAuditInput,
+) {
+  const limit = validateDocumentMigrationAuditLimit(input.limit);
+  const cursor = input.cursor
+    ? decodeDocumentMigrationAuditCursor(input.cursor, ["backfill-runs", input.accountId], true)
+    : null;
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    { viewerSubjectId: input.actorSubjectId },
+    async (scopedDb) => {
+      const command = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actorSubjectId: input.actorSubjectId,
+        accountAdminAuthorization: input.accountAdminAuthorization,
+        limit: limit + 1,
+        beforeStartedAt: cursor?.timestamp ?? null,
+        beforeRunId: cursor?.id ?? null,
+      };
+      const rows = (await scopedDb.execute(sql`
+        SELECT list_document_default_collection_backfill_runs(
+          ${JSON.stringify(command)}::jsonb
+        ) AS result
+      `)) as unknown as Array<{ result: unknown }>;
+      const parsed = rows.map((row) => DocumentDefaultCollectionBackfillRunAudit.parse(row.result));
+      const hasMore = parsed.length > limit;
+      const runs = parsed.slice(0, limit);
+      const tail = hasMore ? runs.at(-1) : null;
+      return ListDocumentDefaultCollectionBackfillRunsResponse.parse({
+        runs,
+        hasMore,
+        nextCursor: tail
+          ? encodeDocumentMigrationAuditCursor(["backfill-runs", input.accountId], {
+              timestamp: tail.startedAt,
+              id: tail.runId,
+            })
+          : null,
+      });
+    },
+  );
+}
+
+export async function getDocumentDefaultCollectionBackfillAudit(
+  db: Database,
+  input: DocumentMigrationAuditInput & {
+    runId: string;
+    operationCursor?: string | undefined;
+    receiptCursor?: string | undefined;
+  },
+) {
+  const limit = validateDocumentMigrationAuditLimit(input.limit);
+  const operationCursor = input.operationCursor
+    ? decodeDocumentMigrationAuditCursor(
+        input.operationCursor,
+        ["backfill-operations", input.accountId, input.runId],
+        true,
+      )
+    : null;
+  const receiptCursor = input.receiptCursor
+    ? decodeDocumentMigrationAuditCursor(
+        input.receiptCursor,
+        ["backfill-receipts", input.accountId, input.runId],
+        false,
+      )
+    : null;
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    { viewerSubjectId: input.actorSubjectId },
+    async (scopedDb) => {
+      const command = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actorSubjectId: input.actorSubjectId,
+        accountAdminAuthorization: input.accountAdminAuthorization,
+        runId: input.runId,
+        limit,
+        operationBeforeCreatedAt: operationCursor?.timestamp ?? null,
+        operationBeforeId: operationCursor?.id ?? null,
+        receiptAfterWorkspaceId: receiptCursor?.id ?? null,
+      };
+      const rows = (await scopedDb.execute(sql`
+        SELECT get_document_default_collection_backfill_audit(
+          ${JSON.stringify(command)}::jsonb
+        ) AS result
+      `)) as unknown as Array<{ result: unknown }>;
+      const raw = rows[0]?.result;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new Error("document Default collection backfill audit returned no result");
+      }
+      const value = raw as Record<string, unknown>;
+      const run = DocumentDefaultCollectionBackfillRunAudit.parse(value.run);
+      const operations = Array.isArray(value.operations)
+        ? value.operations.map((operation) =>
+            DocumentDefaultCollectionBackfillOperationAudit.parse(operation),
+          )
+        : [];
+      const receipts = Array.isArray(value.receipts)
+        ? value.receipts.map((receipt) =>
+            DocumentDefaultCollectionBackfillReceiptAudit.parse(receipt),
+          )
+        : [];
+      const operationsHasMore = operations.length > limit;
+      const receiptsHasMore = receipts.length > limit;
+      const operationPage = operations.slice(0, limit);
+      const receiptPage = receipts.slice(0, limit);
+      const operationTail = operationsHasMore ? operationPage.at(-1) : null;
+      const receiptTail = receiptsHasMore ? receiptPage.at(-1) : null;
+      return DocumentDefaultCollectionBackfillAudit.parse({
+        run,
+        operations: operationPage,
+        receipts: receiptPage,
+        operationsHasMore,
+        operationsNextCursor: operationTail
+          ? encodeDocumentMigrationAuditCursor(
+              ["backfill-operations", input.accountId, input.runId],
+              { timestamp: operationTail.createdAt, id: operationTail.operationId },
+            )
+          : null,
+        receiptsHasMore,
+        receiptsNextCursor: receiptTail
+          ? encodeDocumentMigrationAuditCursor(
+              ["backfill-receipts", input.accountId, input.runId],
+              { timestamp: null, id: receiptTail.workspaceId },
+            )
+          : null,
+      });
+    },
+  );
+}
+
+export async function listOrganizationDocumentAuthorityReclassifications(
+  db: Database,
+  input: DocumentMigrationAuditInput,
+) {
+  const limit = validateDocumentMigrationAuditLimit(input.limit);
+  const cursor = input.cursor
+    ? decodeDocumentMigrationAuditCursor(
+        input.cursor,
+        ["organization-reclassifications", input.accountId],
+        true,
+      )
+    : null;
+  return await withDocumentAccountRls(
+    db,
+    input.accountId,
+    input.workspaceId,
+    { viewerSubjectId: input.actorSubjectId },
+    async (scopedDb) => {
+      const command = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actorSubjectId: input.actorSubjectId,
+        accountAdminAuthorization: input.accountAdminAuthorization,
+        limit: limit + 1,
+        beforeCreatedAt: cursor?.timestamp ?? null,
+        beforeOperationId: cursor?.id ?? null,
+      };
+      const rows = (await scopedDb.execute(sql`
+        SELECT list_organization_document_authority_reclassifications(
+          ${JSON.stringify(command)}::jsonb
+        ) AS result
+      `)) as unknown as Array<{ result: unknown }>;
+      const parsed = rows.map((row) =>
+        OrganizationDocumentAuthorityReclassification.parse(row.result),
+      );
+      const hasMore = parsed.length > limit;
+      const receipts = parsed.slice(0, limit);
+      const tail = hasMore ? receipts.at(-1) : null;
+      return ListOrganizationDocumentAuthorityReclassificationsResponse.parse({
+        receipts,
+        hasMore,
+        nextCursor: tail
+          ? encodeDocumentMigrationAuditCursor(
+              ["organization-reclassifications", input.accountId],
+              { timestamp: tail.createdAt, id: tail.operationId },
+            )
+          : null,
+      });
+    },
+  );
+}
+
+function validateDocumentMigrationAuditLimit(value: number | undefined): number {
+  const limit = value ?? 50;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("document migration audit limit must be between 1 and 100");
+  }
+  return limit;
+}
+
+type DocumentMigrationAuditCursor = { timestamp: string | null; id: string };
+
+function documentMigrationAuditCursorScope(parts: string[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(["document-migration-audit", 1, ...parts]), "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function encodeDocumentMigrationAuditCursor(
+  parts: string[],
+  cursor: DocumentMigrationAuditCursor,
+): string {
+  return Buffer.from(
+    JSON.stringify({
+      v: 1,
+      s: documentMigrationAuditCursorScope(parts),
+      t: cursor.timestamp,
+      i: cursor.id,
+    }),
+    "utf8",
+  ).toString("base64url");
+}
+
+function decodeDocumentMigrationAuditCursor(
+  value: string,
+  parts: string[],
+  requireTimestamp: boolean,
+): DocumentMigrationAuditCursor {
+  try {
+    if (!value || value.length > 1_024) throw new Error("cursor length");
+    const bytes = Buffer.from(value, "base64url");
+    if (bytes.toString("base64url") !== value) throw new Error("cursor encoding");
+    const parsed = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    if (
+      Object.keys(parsed).sort().join(",") !== "i,s,t,v" ||
+      parsed.v !== 1 ||
+      parsed.s !== documentMigrationAuditCursorScope(parts) ||
+      typeof parsed.i !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        parsed.i,
+      ) ||
+      (requireTimestamp
+        ? typeof parsed.t !== "string" || !Number.isFinite(new Date(parsed.t).getTime())
+        : parsed.t !== null)
+    ) {
+      throw new Error("cursor payload");
+    }
+    return { timestamp: typeof parsed.t === "string" ? parsed.t : null, id: parsed.i };
+  } catch (error) {
+    throw new Error("invalid document migration audit cursor", { cause: error });
+  }
 }
 
 export async function reclassifyDocumentAuthority(
