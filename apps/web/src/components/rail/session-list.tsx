@@ -76,7 +76,7 @@ import { useAppContext } from "@/context";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
-  authoritativeSessionContinuation,
+  authoritativeSessionContinuationChannels,
   emptySessionContinuation,
   mergeSessionContinuation,
   rebaseSessionContinuation,
@@ -361,9 +361,9 @@ export function SessionList() {
   const [continuation, setContinuation] = useState(() => emptySessionContinuation(pageGeneration));
   const activeContinuation = activeSessionContinuation(continuation, pageGeneration);
   const extraSessions = activeContinuation.sessions;
-  const authoritativeExtraSessions = useMemo(
+  const authoritativeExtraSessionEvidence = useMemo(
     () =>
-      authoritativeSessionContinuation(
+      authoritativeSessionContinuationChannels(
         activeContinuation,
         pageGeneration,
         rootReadRevision,
@@ -468,7 +468,9 @@ export function SessionList() {
         }
       }
     };
-    add(authoritativeExtraSessions, continuationSnapshotReadGeneration);
+    for (const { session, readGeneration } of authoritativeExtraSessionEvidence) {
+      add([session], readGeneration);
+    }
     add(sessions, rootReadGeneration);
     add(pinned, pinnedChannelReadGeneration);
     for (const { session, readGeneration } of loadedChildChannelEvidence) {
@@ -476,8 +478,7 @@ export function SessionList() {
     }
     return evidence;
   }, [
-    authoritativeExtraSessions,
-    continuationSnapshotReadGeneration,
+    authoritativeExtraSessionEvidence,
     loadedChildChannelEvidence,
     pinned,
     pinnedChannelReadGeneration,
@@ -544,18 +545,15 @@ export function SessionList() {
   }, [context.sessionChannelProjectionAuthority, rootChannelAuthoritySessions, rootReadGeneration]);
   useLayoutEffect(() => {
     const owner = continuationChannelProjectionOwner.current;
-    context.sessionChannelProjectionAuthority.replace(
+    context.sessionChannelProjectionAuthority.replaceEvidence(
       owner,
-      authoritativeExtraSessions,
-      0,
-      continuationSnapshotReadGeneration,
+      authoritativeExtraSessionEvidence.map(({ session, readGeneration }) => ({
+        projection: session,
+        readGeneration,
+      })),
     );
     return () => context.sessionChannelProjectionAuthority.clear(owner);
-  }, [
-    authoritativeExtraSessions,
-    context.sessionChannelProjectionAuthority,
-    continuationSnapshotReadGeneration,
-  ]);
+  }, [authoritativeExtraSessionEvidence, context.sessionChannelProjectionAuthority]);
   useLayoutEffect(() => {
     const owner = branchChannelProjectionOwner.current;
     context.sessionChannelProjectionAuthority.replaceEvidence(
@@ -1594,14 +1592,19 @@ export function SessionList() {
     const requestIsCurrent = (): boolean =>
       paginationIdentity.current.generation === requestGeneration &&
       loadMoreAttempt.current === attempt;
-    const listPage = async (cursor?: string): Promise<SessionListResponse> =>
-      await context.client.listSessionPage(rail.workspaceId, {
+    const listPage = async (
+      cursor?: string,
+    ): Promise<{ page: SessionListResponse; readGeneration: number }> => {
+      const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+      const page = await context.client.listSessionPage(rail.workspaceId, {
         limit: 50,
         ...(cursor ? { cursor } : {}),
         ...(search ? { search } : {}),
         ...(hierarchyMode ? { parentSessionId: null } : {}),
         archivedOnly: false,
       });
+      return { page, readGeneration };
+    };
     setLoadingMoreGeneration(requestGeneration);
     setContinuation((current) => ({
       ...activeSessionContinuation(current, requestGeneration),
@@ -1609,8 +1612,11 @@ export function SessionList() {
     }));
     try {
       let page: SessionListResponse;
+      let pageReadGeneration: number;
       try {
-        page = await listPage(continuationCursor);
+        const continuationRead = await listPage(continuationCursor);
+        page = continuationRead.page;
+        pageReadGeneration = continuationRead.readGeneration;
       } catch (cursorError) {
         if (!(cursorError instanceof OpenGeniSessionListCursorError)) throw cursorError;
 
@@ -1618,11 +1624,11 @@ export function SessionList() {
         // once, fence it to this query, and continue immediately from its new
         // cursor. A second expiry bubbles to the normal retryable failure path
         // instead of creating an unbounded cursor-refresh loop.
-        const rebaseReadGeneration = context.sessionChannelProjectionAuthority.beginRead();
-        const freshFirstPage = await listPage();
+        const rebaseRead = await listPage();
+        const freshFirstPage = rebaseRead.page;
         if (!requestIsCurrent()) return;
         requestSnapshotReadRevision = attempt;
-        requestSnapshotReadGeneration = rebaseReadGeneration;
+        requestSnapshotReadGeneration = rebaseRead.readGeneration;
         requestSnapshotSource = "rebase";
         setContinuation((current) =>
           rebaseSessionContinuation(
@@ -1639,7 +1645,9 @@ export function SessionList() {
           setAnnouncement("No more older sessions.");
           return;
         }
-        page = await listPage(freshFirstPage.nextCursor);
+        const continuationRead = await listPage(freshFirstPage.nextCursor);
+        page = continuationRead.page;
+        pageReadGeneration = continuationRead.readGeneration;
       }
       if (!requestIsCurrent()) return;
       setContinuation((current) =>
@@ -1651,6 +1659,7 @@ export function SessionList() {
           requestSnapshotReadRevision,
           requestSnapshotReadGeneration,
           requestSnapshotSource,
+          pageReadGeneration,
         ),
       );
       setAnnouncement(

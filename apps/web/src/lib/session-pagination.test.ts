@@ -6,6 +6,7 @@ import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
   authoritativeSessionContinuation,
+  authoritativeSessionContinuationChannels,
   emptySessionContinuation,
   mergeSessionContinuation,
   rebaseSessionContinuation,
@@ -66,6 +67,10 @@ describe("session continuation pagination", () => {
       snapshotReadGeneration: 14,
       snapshotSource: "root" as const,
       authoritativeSessionIds: new Set(["first", "replace"]),
+      channelReadGenerations: new Map([
+        ["first", 14],
+        ["replace", 14],
+      ]),
     };
     const merged = mergeSessionContinuation(
       initial,
@@ -94,6 +99,10 @@ describe("session continuation pagination", () => {
       snapshotReadGeneration: 16,
       snapshotSource: "root" as const,
       authoritativeSessionIds: new Set(["older-a", "older-b"]),
+      channelReadGenerations: new Map([
+        ["older-a", 16],
+        ["older-b", 16],
+      ]),
     };
 
     expect(rebaseSessionContinuation(retained, 7, 7, "fresh-next", 8)).toEqual({
@@ -105,6 +114,7 @@ describe("session continuation pagination", () => {
       snapshotReadGeneration: 0,
       snapshotSource: "root",
       authoritativeSessionIds: new Set(),
+      channelReadGenerations: new Map(),
     });
   });
 
@@ -146,6 +156,7 @@ describe("session continuation pagination", () => {
       snapshotReadGeneration: 19,
       snapshotSource: "root" as const,
       authoritativeSessionIds: new Set(["current"]),
+      channelReadGenerations: new Map([["current", 19]]),
     };
 
     expect(rebaseSessionContinuation(current, 9, 8, "stale-next", 10)).toBe(current);
@@ -261,5 +272,97 @@ describe("session continuation pagination", () => {
     );
     expect(authoritativeSessionContinuation(staleState, 6, 13, newerRootGeneration)).toEqual([]);
     expect(authority.owns(rootC)).toBe(true);
+  });
+
+  test("orders live continuation rows by their own request start", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const continuationOwner = {};
+    const pageOneGeneration = authority.beginRead();
+    const detailA = { ...row("retained"), channelId: "channel-a" } as Session;
+    const detailGeneration = authority.beginRead();
+    authority.recordRead(detailA, detailGeneration);
+
+    const continuationGeneration = authority.beginRead();
+    const continuationB = { ...detailA, channelId: "channel-b" } as Session;
+    const state = mergeSessionContinuation(
+      emptySessionContinuation(7),
+      7,
+      7,
+      { sessions: [continuationB], nextCursor: null },
+      101,
+      pageOneGeneration,
+      "root",
+      continuationGeneration,
+    );
+    const evidence = authoritativeSessionContinuationChannels(state, 7, 101, pageOneGeneration);
+    authority.replaceEvidence(
+      continuationOwner,
+      evidence.map(({ session, readGeneration }) => ({ projection: session, readGeneration })),
+    );
+
+    expect(evidence).toEqual([{ session: continuationB, readGeneration: continuationGeneration }]);
+    expect(authority.owns(continuationB)).toBe(true);
+    expect(authority.owns(detailA)).toBe(false);
+  });
+
+  test("keeps stale continuations fenced but accepts a later post-rebase page", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const continuationOwner = {};
+    const rootOwner = {};
+    const detailC = { ...row("retained"), channelId: "channel-c" } as Session;
+    const staleB = { ...detailC, channelId: "channel-b" } as Session;
+    const freshD = { ...detailC, channelId: "channel-d" } as Session;
+
+    const snapshotGeneration = authority.beginRead();
+    const staleContinuationGeneration = authority.beginRead();
+    const detailGeneration = authority.beginRead();
+    authority.recordRead(detailC, detailGeneration);
+    let state = mergeSessionContinuation(
+      emptySessionContinuation(8),
+      8,
+      8,
+      { sessions: [staleB], nextCursor: "expired" },
+      102,
+      snapshotGeneration,
+      "root",
+      staleContinuationGeneration,
+    );
+    let evidence = authoritativeSessionContinuationChannels(state, 8, 102, snapshotGeneration);
+    authority.replaceEvidence(
+      continuationOwner,
+      evidence.map(({ session, readGeneration }) => ({ projection: session, readGeneration })),
+    );
+    expect(authority.owns(detailC)).toBe(true);
+    expect(authority.owns(staleB)).toBe(false);
+    expect(authority.project(staleB, staleContinuationGeneration).channelId).toBe("channel-c");
+
+    const newerRootGeneration = authority.beginRead();
+    authority.replace(rootOwner, [detailC], 0, newerRootGeneration);
+    expect(authoritativeSessionContinuationChannels(state, 8, 103, newerRootGeneration)).toEqual(
+      [],
+    );
+
+    const rebaseGeneration = authority.beginRead();
+    state = rebaseSessionContinuation(state, 8, 8, "rebased-next", 103, rebaseGeneration, "rebase");
+    const postRebaseContinuationGeneration = authority.beginRead();
+    state = mergeSessionContinuation(
+      state,
+      8,
+      8,
+      { sessions: [freshD], nextCursor: null },
+      103,
+      rebaseGeneration,
+      "rebase",
+      postRebaseContinuationGeneration,
+    );
+    evidence = authoritativeSessionContinuationChannels(state, 8, 103, newerRootGeneration);
+    authority.replaceEvidence(
+      continuationOwner,
+      evidence.map(({ session, readGeneration }) => ({ projection: session, readGeneration })),
+    );
+    expect(evidence).toEqual([
+      { session: freshD, readGeneration: postRebaseContinuationGeneration },
+    ]);
+    expect(authority.owns(freshD)).toBe(true);
   });
 });

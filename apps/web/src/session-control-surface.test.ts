@@ -116,7 +116,8 @@ describe("session control surface architecture", () => {
     expect(list).toContain("pinsChannelProjectionOwner");
     expect(list).toContain("currentListChannelEvidence");
     expect(list).toContain("sessionChannelProjectionAuthority.project(");
-    expect(list).toContain("authoritativeSessionContinuation(");
+    expect(list).toContain("authoritativeSessionContinuationChannels(");
+    expect(list).toContain("pageReadGeneration");
     expect(list).not.toContain("replace(owner, channelAuthoritySessions)");
     expect(list).not.toContain("replace(owner, listedSessions)");
     expect(list).toContain("applySessionRailProjection(session, projected, { channelOwned })");
