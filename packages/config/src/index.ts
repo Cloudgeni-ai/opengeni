@@ -487,14 +487,14 @@ const SettingsSchema = z.object({
   // into @opengeni/db once at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
   childLifecycleNoticesEnabled: EnvBoolean.default(false),
-  // Per-channel and per-DM Slack workspace routing. Default ON. An installation
-  // whose organization has one workspace still resolves it as the sole
-  // candidate and never asks, so the visible change is confined to
-  // organizations that genuinely have more than one - plus one case worth
-  // knowing before an upgrade: a person who has lost live authority now
-  // receives a posted refusal where the pre-routing code failed silently. Set
-  // the env var to `false` to restore the short-circuit to the installation's
-  // own workspace.
+  // Per-channel and per-DM Slack workspace routing. Default ON. A channel does
+  // not count a personal workspace as a candidate, so an organization with one
+  // shared workspace resolves it as the sole candidate and never asks; the
+  // visible change is confined to organizations that genuinely have more than
+  // one - plus one case worth knowing before an upgrade: a person who has lost
+  // live authority now receives a posted refusal where the pre-routing code
+  // failed silently. Set the env var to `false` to restore the short-circuit
+  // to the installation's own workspace.
   // Env: OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED.
   slackWorkspaceRoutingEnabled: EnvBoolean.default(true),
   // Per-segment ceiling on agent loop turns (model calls) within a single
