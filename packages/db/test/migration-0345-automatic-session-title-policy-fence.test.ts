@@ -63,12 +63,15 @@ async function quarantineStatement(batchSize = 500): Promise<string> {
 async function runQuarantineBatch(
   database: SharedTestDatabase,
   statement: string,
+  failAfterUpdate = false,
 ): Promise<Array<{ id: string }>> {
   return await database.admin.begin(async (transaction) => {
     await transaction`select
       set_config('lock_timeout', '1s', true),
       set_config('statement_timeout', '10s', true)`;
-    return await transaction.unsafe<Array<{ id: string }>>(statement);
+    const rows = await transaction.unsafe<Array<{ id: string }>>(statement);
+    if (failAfterUpdate) throw new Error("forced title quarantine batch failure");
+    return rows;
   });
 }
 
@@ -383,11 +386,9 @@ describe("migrations 0345-0346 automatic session title policy fence", () => {
     `;
     expect(safeAfterFirst[0]?.count).toBe(1);
 
-    const failingBatch = oneRowBatch.replace(
-      "SET title = 'New conversation', title_source = 'agent'",
-      "SET title = 'New conversation', title_source = 'invalid'",
+    await expect(runQuarantineBatch(database, oneRowBatch, true)).rejects.toThrow(
+      "forced title quarantine batch failure",
     );
-    await expect(runQuarantineBatch(database, failingBatch)).rejects.toThrow();
     const safeAfterFailure = await database.admin<Array<{ count: number }>>`
       select count(*)::int as count
       from sessions
