@@ -454,8 +454,7 @@ export function SessionList() {
     return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
   }, [rail.workspaceId]);
   const archiving = useRef(new Set<string>());
-  const movingSessions = useRef(new Map<string, number>());
-  const channelMoveOperation = useRef(0);
+  const moveRequestOwner = useRef({});
   const pinOperation = useRef(0);
   const focusRestoreOperation = useRef(0);
   const pinning = useRef(new Set<string>());
@@ -753,7 +752,6 @@ export function SessionList() {
   ]);
 
   useEffect(() => {
-    movingSessions.current.clear();
     channelMoveProbes.current.clear();
     pendingSessionFocus.current = null;
     setChannelMoveOverrides(new Map());
@@ -1040,12 +1038,16 @@ export function SessionList() {
       channelId: string | null,
       restoreFocusTo: SessionFocusTarget = "row",
     ) => {
-      if (movingSessions.current.has(session.id) || session.channelId === channelId) return;
+      if (session.channelId === channelId) return;
       const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
       if (!acceptedTransition) return;
-      const operation = ++channelMoveOperation.current;
+      const moveRequest = context.sessionChannelProjectionAuthority.beginMoveRequest(
+        moveRequestOwner.current,
+        session,
+      );
+      if (!moveRequest) return;
+      const operation = moveRequest.operation;
       const focusOperation = ++focusRestoreOperation.current;
-      movingSessions.current.set(session.id, operation);
       pendingSessionFocus.current = {
         sessionId: session.id,
         operation: focusOperation,
@@ -1064,7 +1066,15 @@ export function SessionList() {
       );
       try {
         const moved = await requestMoveSession(session.id, channelId);
-        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+        if (
+          !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition) ||
+          !context.sessionChannelProjectionAuthority.ownsMoveRequest(
+            moveRequestOwner.current,
+            moveRequest,
+          )
+        ) {
+          return;
+        }
         if (moved) {
           // The successful write response is exact post-write evidence. Retain
           // it in the workspace-level authority before committing component
@@ -1088,9 +1098,10 @@ export function SessionList() {
         }
         await refreshSessionPages();
       } finally {
-        if (movingSessions.current.get(session.id) === operation) {
-          movingSessions.current.delete(session.id);
-        }
+        context.sessionChannelProjectionAuthority.finishMoveRequest(
+          moveRequestOwner.current,
+          moveRequest,
+        );
         const pending = pendingSessionFocus.current;
         if (pending?.sessionId === session.id && pending.operation === focusOperation) {
           pending.settled = true;

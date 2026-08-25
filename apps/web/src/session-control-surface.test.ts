@@ -124,6 +124,11 @@ describe("session control surface architecture", () => {
     expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
     expect(list).toContain("const moveEvidenceGeneration =");
     expect(list).toContain("recordRead(moved, moveEvidenceGeneration)");
+    expect(list).toContain("sessionChannelProjectionAuthority.beginMoveRequest(");
+    expect(list).toContain("sessionChannelProjectionAuthority.ownsMoveRequest(");
+    expect(list).toContain("sessionChannelProjectionAuthority.finishMoveRequest(");
+    expect(list).not.toContain("const movingSessions = useRef(");
+    expect(list).not.toContain("const channelMoveOperation = useRef(");
     expect(list).toContain("subscribeToAcceptedReads((accepted) =>");
     expect(list).toContain("override?.committed");
     expect(list).toContain("applySessionChannelProjection(current, accepted)");

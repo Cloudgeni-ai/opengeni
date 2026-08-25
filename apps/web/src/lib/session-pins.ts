@@ -24,6 +24,11 @@ type SessionChannelRead = {
 type SessionChannelAcceptedRead = SessionChannelProjection & {
   readGeneration: number;
 };
+export type SessionChannelMoveRequest = Readonly<{
+  workspaceId: string;
+  sessionId: string;
+  operation: number;
+}>;
 
 function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspaceId">): string {
   return `${projection.workspaceId}\u0000${projection.id}`;
@@ -42,7 +47,9 @@ export class SessionChannelProjectionAuthority {
   private readonly acceptedReadListeners = new Set<
     (accepted: SessionChannelAcceptedRead) => void
   >();
+  private readonly pendingMoveRequests = new Map<string, { owner: object; operation: number }>();
   private nextReadGeneration = 0;
+  private nextMoveOperation = 0;
 
   readonly beginRead = (): number => ++this.nextReadGeneration;
 
@@ -50,6 +57,40 @@ export class SessionChannelProjectionAuthority {
   subscribeToAcceptedReads(listener: (accepted: SessionChannelAcceptedRead) => void): () => void {
     this.acceptedReadListeners.add(listener);
     return () => this.acceptedReadListeners.delete(listener);
+  }
+
+  /**
+   * Persist one pending move across rail lifetimes. The same mounted owner
+   * cannot duplicate its request; a new mount may supersede it with a new
+   * explicit user intent, after which the older response loses authority.
+   */
+  beginMoveRequest(
+    owner: object,
+    projection: Pick<SessionChannelProjection, "id" | "workspaceId">,
+  ): SessionChannelMoveRequest | null {
+    const key = sessionChannelProjectionKey(projection);
+    if (this.pendingMoveRequests.get(key)?.owner === owner) return null;
+    const request = {
+      workspaceId: projection.workspaceId,
+      sessionId: projection.id,
+      operation: ++this.nextMoveOperation,
+    };
+    this.pendingMoveRequests.set(key, { owner, operation: request.operation });
+    return request;
+  }
+
+  ownsMoveRequest(owner: object, request: SessionChannelMoveRequest): boolean {
+    const current = this.pendingMoveRequests.get(
+      sessionChannelProjectionKey({ id: request.sessionId, workspaceId: request.workspaceId }),
+    );
+    return current?.owner === owner && current.operation === request.operation;
+  }
+
+  finishMoveRequest(owner: object, request: SessionChannelMoveRequest): void {
+    if (!this.ownsMoveRequest(owner, request)) return;
+    this.pendingMoveRequests.delete(
+      sessionChannelProjectionKey({ id: request.sessionId, workspaceId: request.workspaceId }),
+    );
   }
 
   replace(
@@ -103,6 +144,9 @@ export class SessionChannelProjectionAuthority {
       const retained = new Map([...projections].filter(([key]) => !key.startsWith(prefix)));
       if (retained.size === 0) this.projectionsByOwner.delete(owner);
       else if (retained.size !== projections.size) this.projectionsByOwner.set(owner, retained);
+    }
+    for (const key of this.pendingMoveRequests.keys()) {
+      if (key.startsWith(prefix)) this.pendingMoveRequests.delete(key);
     }
   }
 
