@@ -44,6 +44,13 @@ const SENSITIVE_ASSIGNMENT_KEY_SUFFIXES = new Set([
   "token",
 ]);
 
+const COMPACT_SENSITIVE_ASSIGNMENT_KEY_SUFFIXES = [
+  "apikey",
+  "accesstoken",
+  "authtoken",
+  "privatekey",
+] as const;
+
 function containsSensitiveAssignment(value: string): boolean {
   for (const match of value.matchAll(SECRET_ASSIGNMENT_CANDIDATE_PATTERN)) {
     const key = match[1];
@@ -56,6 +63,9 @@ function containsSensitiveAssignment(value: string): boolean {
       .filter(Boolean);
     const last = words.at(-1);
     if (last && SENSITIVE_ASSIGNMENT_KEY_SUFFIXES.has(last)) return true;
+    if (last && COMPACT_SENSITIVE_ASSIGNMENT_KEY_SUFFIXES.some((suffix) => last.endsWith(suffix))) {
+      return true;
+    }
 
     const suffix = words.slice(-2).join(" ");
     if (

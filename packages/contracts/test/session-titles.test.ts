@@ -56,6 +56,17 @@ describe("automatic session titles", () => {
     expect(normalizeAutomaticSessionTitle("Title: DATABASE_PASSWORD=swordfish")).toBeNull();
   });
 
+  test("rejects compact sensitive aliases at namespaced assignment suffixes", () => {
+    expect(normalizeAutomaticSessionTitle("DATABASE_APIKEY=swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("OAUTH_ACCESSTOKEN=sesame")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("CLIENT_PRIVATEKEY=secretword")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("service-AUTHTOKEN: sesame")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("oauthAccessToken=swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("prod.apiKey=secretword")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("DATABASEAPIKEY=swordfish")).toBeNull();
+    expect(normalizeAutomaticSessionTitle("CLIENTPRIVATEKEY=secretword")).toBeNull();
+  });
+
   test("does not reject benign discussion of secret-management concepts", () => {
     expect(normalizeAutomaticSessionTitle("Password reset flow")).toBe("Password reset flow");
     expect(normalizeAutomaticSessionTitle("API key rotation policy")).toBe(
@@ -69,6 +80,16 @@ describe("automatic session titles", () => {
     );
     expect(normalizeAutomaticSessionTitle("Secret sauce: recipe review")).toBe(
       "Secret sauce: recipe review",
+    );
+    expect(normalizeAutomaticSessionTitle("MONKEY=swordfish migration")).toBe(
+      "MONKEY=swordfish migration",
+    );
+    expect(normalizeAutomaticSessionTitle("TURNKEY=sesame deployment")).toBe(
+      "TURNKEY=sesame deployment",
+    );
+    expect(normalizeAutomaticSessionTitle("APIKEY rotation policy")).toBe("APIKEY rotation policy");
+    expect(normalizeAutomaticSessionTitle("PRIVATEKEYSTONE=secretword rollout")).toBe(
+      "PRIVATEKEYSTONE=secretword rollout",
     );
   });
 
