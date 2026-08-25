@@ -1325,7 +1325,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("camera debt from live growth cannot strand a pinned underfill prepend", async () => {
+  test("final-page availability cannot strand a pinned underfill prepend", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
       frames.push(callback);
@@ -1366,6 +1366,18 @@ describe("MessageTimeline pagination affordances", () => {
     layout.setContentHeight(1_600);
     await r.rerender(
       <MessageTimeline items={liveItems} status="running" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+
+    // Final-page availability can commit before the fetched rows. It must not
+    // release the pending owner that still identifies the delayed prepend.
+    await r.rerender(
+      <MessageTimeline
+        items={liveItems}
+        status="running"
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
     );
     expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
 
@@ -1762,6 +1774,59 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("removing onLoadOlder removes a settled Retry affordance", async () => {
+    const first = deferred<boolean>();
+    const items = [reasoningItem("collapsed-step", "collapsed step")];
+    const onJumpToStart = () => undefined;
+    let calls = 0;
+    const onLoadOlder = () => {
+      calls += 1;
+      return first.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline
+        items={items}
+        hasOlder
+        onLoadOlder={onLoadOlder}
+        onJumpToStart={onJumpToStart}
+      />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    await armOlderPrefetch(r.container);
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        status="idle"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+        onJumpToStart={onJumpToStart}
+      />,
+    );
+    expect(calls).toBe(1);
+    await actRun(() => first.reject(new Error("transient listEvents failure")));
+    await flush();
+    expect(r.container.querySelector("[data-og-retry]")).not.toBeNull();
+
+    await r.rerender(
+      <MessageTimeline
+        items={items}
+        hasOlder
+        onLoadOlder={undefined}
+        onJumpToStart={onJumpToStart}
+      />,
+    );
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
+    expect(r.container.textContent).not.toContain("Retry earlier activity");
+    expect(r.container.querySelector("[data-og-jump-to-start]")).not.toBeNull();
+    expect(r.container.textContent).toContain("Jump to start");
+    await r.unmount();
+  });
+
   test("older prefetch does not loop at the batch top", async () => {
     let callback: IntersectionObserverCallback = () => undefined;
     let instance: IntersectionObserver | null = null;
@@ -1905,6 +1970,69 @@ describe("MessageTimeline pagination affordances", () => {
     await flush();
     await notify(false);
     await notify(true);
+    expect(calls).toBe(2);
+    await r.unmount();
+  });
+
+  test("a settled prefetch yields to an underfilled progressed window", async () => {
+    let callback: IntersectionObserverCallback = () => undefined;
+    let instance: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(cb: IntersectionObserverCallback) {
+        callback = cb;
+        instance = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    let calls = 0;
+    function CachedUnderfillHost() {
+      const [events, setEvents] = useState(() => manyEvents(4));
+      return (
+        <MessageTimeline
+          events={events}
+          hasOlder
+          onLoadOlder={() => {
+            calls += 1;
+            if (calls === 1) {
+              const scroller = document.querySelector<HTMLElement>("[data-og-timeline-scroller]");
+              if (!scroller) {
+                throw new Error("expected timeline scroller");
+              }
+              Object.defineProperty(scroller, "scrollHeight", {
+                configurable: true,
+                value: 240,
+              });
+              flushSync(() => setEvents([event(0)]));
+              flushSync(() => undefined);
+            }
+          }}
+        />
+      );
+    }
+
+    const r = await renderComponent(<CachedUnderfillHost />);
+    await armOlderPrefetch(r.container);
+    const target = observed.at(-1);
+    if (!target) {
+      throw new Error("expected observed top sentinel");
+    }
+    await actRun(() =>
+      callback([{ isIntersecting: true, target } as IntersectionObserverEntry], instance!),
+    );
+    await flush();
     expect(calls).toBe(2);
     await r.unmount();
   });

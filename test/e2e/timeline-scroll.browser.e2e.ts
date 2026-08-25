@@ -405,6 +405,20 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 
+  test("backfills a synchronously progressed window that remains underfilled", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?sync-cached-underfill`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 800,
+    );
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("keeps the live tail fixed when a delayed underfill page resolves", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);
@@ -438,7 +452,7 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
   }, 30_000);
 
-  test("keeps a pinned live tail when older history lands before camera debt settles", async () => {
+  test("keeps a pinned live tail across final-page availability before prepend", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
@@ -450,7 +464,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     const immediate = await page.evaluate(() => {
       const harness = window.timelineCollapsedHistoryHarness!;
-      harness.appendLivePageAndSettleOlder();
+      harness.appendLivePageMarkNoOlderAndSettleOlder();
       return harness.metrics();
     });
     await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
@@ -572,6 +586,22 @@ describe("timeline scroll ownership browser regression", () => {
     await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
     expect(await retry.count()).toBe(0);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
+  test("removes Retry when the public older loader disappears", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("failure"));
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.removeLoader());
+    await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
+
+    expect(await retry.count()).toBe(0);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
   }, 30_000);
 
   test("keeps the newer underfill owner when the previous page settles late", async () => {

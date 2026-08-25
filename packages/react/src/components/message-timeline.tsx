@@ -482,6 +482,7 @@ export function MessageTimeline({
     underfillSettledAttempt === olderLoadAttemptRef.current &&
     underfillSettledAttempt[0] === olderBoundaryKey &&
     hasOlder &&
+    Boolean(onLoadOlder) &&
     !loadingOlder;
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
@@ -764,7 +765,7 @@ export function MessageTimeline({
 
   const requestOlderIfUnderfilled = useCallback(
     (node: HTMLElement, retry = false) => {
-      const currentAttempt = olderLoadAttemptRef.current;
+      let currentAttempt = olderLoadAttemptRef.current;
       if (
         retry &&
         (currentAttempt !== underfillSettledAttempt || currentAttempt?.[0] !== olderBoundaryKey)
@@ -773,11 +774,18 @@ export function MessageTimeline({
         // handler cannot replace a newer exact owner.
         return;
       }
+      const underfilled = maxScrollOf(node) <= 1;
+      if (!retry && underfilled && currentAttempt?.[1] === 2) {
+        // A settled ordinary prefetch owns only this visit to the top band.
+        // If its resulting window cannot scroll, yield to automatic underfill
+        // so the reader is not stranded behind a cooldown they cannot exit.
+        currentAttempt = olderLoadAttemptRef.current = null;
+      }
       // clientHeight=0 is pre-layout/headless, not evidence that the rendered
       // history underfills a real viewport.
       if (
         node.clientHeight <= 1 ||
-        (!retry && maxScrollOf(node) > 1) ||
+        (!retry && !underfilled) ||
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
@@ -810,9 +818,16 @@ export function MessageTimeline({
     if (!attempt) {
       return;
     }
-    if (!hasOlder || (attempt[0] !== olderBoundaryKey && attempt[1] === 0)) {
+    const boundaryChanged = attempt[0] !== olderBoundaryKey;
+    if (attempt[1] === 0) {
+      if (boundaryChanged || (!hasOlder && attempt === underfillSettledAttempt && !loadingOlder)) {
+        olderLoadAttemptRef.current = null;
+      }
+      return;
+    }
+    if (!hasOlder) {
       olderLoadAttemptRef.current = null;
-    } else if (attempt[0] !== olderBoundaryKey) {
+    } else if (boundaryChanged) {
       // Successful ordinary prefetch stays as this top visit's cooldown owner
       // until the reader leaves; boundary progress makes it settled even if
       // the host's promise has not resolved yet.
@@ -820,9 +835,17 @@ export function MessageTimeline({
       const node = scrollRef.current;
       if (node) {
         rearmOlderPrefetchAfterLeavingTop(node);
+        requestOlderIfUnderfilled(node);
       }
     }
-  }, [hasOlder, olderBoundaryKey, rearmOlderPrefetchAfterLeavingTop]);
+  }, [
+    hasOlder,
+    loadingOlder,
+    olderBoundaryKey,
+    rearmOlderPrefetchAfterLeavingTop,
+    requestOlderIfUnderfilled,
+    underfillSettledAttempt,
+  ]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
   const driveFollow = useCallback(
@@ -1240,13 +1263,22 @@ export function MessageTimeline({
         // synchronously returned, but this visit remains cooling until exit.
         if (!invokeOlderLoad(onLoadOlder, settle) && olderLoadAttemptRef.current === attempt) {
           attempt[1] = 2;
+          requestOlderIfUnderfilled(root);
         }
       },
       { root, rootMargin: OLDER_PREFETCH_ROOT_MARGIN },
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [firstGroupKey, hasOlder, loadingOlder, olderBoundaryKey, olderPrefetchArmed, onLoadOlder]);
+  }, [
+    firstGroupKey,
+    hasOlder,
+    loadingOlder,
+    olderBoundaryKey,
+    olderPrefetchArmed,
+    onLoadOlder,
+    requestOlderIfUnderfilled,
+  ]);
 
   // History view: page forward when the reader nears the bottom of the current
   // non-tip window. Does not pull the whole gap — one density-bounded page.

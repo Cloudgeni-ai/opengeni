@@ -8,10 +8,11 @@ import "./styles.css";
 type TimelineCollapsedHistoryHarness = {
   appendLiveItem: () => void;
   appendLivePage: () => void;
-  appendLivePageAndSettleOlder: () => void;
+  appendLivePageMarkNoOlderAndSettleOlder: () => void;
   armOlder: () => void;
   loadCalls: () => number;
   prependUnderfilledPage: () => void;
+  removeLoader: () => void;
   settleLoad: (call: number, outcome: "success" | "failure", complete?: boolean) => void;
   settleOlder: (outcome: "success" | "failure") => void;
   scroller: () => HTMLElement;
@@ -117,11 +118,13 @@ function Harness() {
   const manualLoad = search.has("manual-load");
   const overlapLoads = search.has("overlap-loads");
   const syncCachedPrefetch = search.has("sync-cached-prefetch");
+  const syncCachedUnderfill = search.has("sync-cached-underfill");
   const [items, setItems] = useState<TimelineItem[]>(
-    syncCachedPrefetch ? prefetchWindow : initialCollapsedTail,
+    syncCachedPrefetch || syncCachedUnderfill ? prefetchWindow : initialCollapsedTail,
   );
   const [hasOlder, setHasOlder] = useState(!dynamicCollapse);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [loaderAvailable, setLoaderAvailable] = useState(true);
   const [loadCalls, setLoadCalls] = useState(0);
   const loadCallsRef = useRef(0);
   const liveAppendRef = useRef(0);
@@ -186,10 +189,12 @@ function Harness() {
     ]);
   }, []);
 
-  const appendLivePageAndSettleOlder = useCallback(() => {
-    // Two synchronous commits with no animation frame between them reproduce
-    // an older response landing while tip-follow still owns large live debt.
+  const appendLivePageMarkNoOlderAndSettleOlder = useCallback(() => {
+    // Three synchronous commits with no animation frame between them reproduce
+    // final-page availability arriving before its delayed prepend while
+    // tip-follow still owns large live debt.
     flushSync(() => appendLivePage());
+    flushSync(() => setHasOlder(false));
     flushSync(() => settleOlder("success"));
   }, [appendLivePage, settleOlder]);
 
@@ -216,12 +221,14 @@ function Harness() {
   );
 
   const loadOlder = useCallback((): Promise<boolean> | void => {
-    if (syncCachedPrefetch) {
+    if (syncCachedPrefetch || syncCachedUnderfill) {
       const call = ++loadCallsRef.current;
       flushSync(() => {
         setLoadCalls(call);
         if (call === 1) {
-          setItems((current) => [userMessage(499), ...current]);
+          setItems((current) =>
+            syncCachedUnderfill ? [userMessage(499)] : [userMessage(499), ...current],
+          );
         }
       });
       flushSync(() => undefined);
@@ -256,16 +263,17 @@ function Harness() {
       window.setTimeout(() => settleOlder("success"), 250);
     }
     return load;
-  }, [manualLoad, overlapLoads, settleOlder, syncCachedPrefetch]);
+  }, [manualLoad, overlapLoads, settleOlder, syncCachedPrefetch, syncCachedUnderfill]);
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
       appendLiveItem,
       appendLivePage,
-      appendLivePageAndSettleOlder,
+      appendLivePageMarkNoOlderAndSettleOlder,
       armOlder: () => setHasOlder(true),
       loadCalls: () => loadCallsRef.current,
       prependUnderfilledPage,
+      removeLoader: () => setLoaderAvailable(false),
       settleLoad,
       settleOlder,
       scroller,
@@ -291,7 +299,7 @@ function Harness() {
   }, [
     appendLiveItem,
     appendLivePage,
-    appendLivePageAndSettleOlder,
+    appendLivePageMarkNoOlderAndSettleOlder,
     loadCalls,
     prependUnderfilledPage,
     scroller,
@@ -307,7 +315,7 @@ function Harness() {
           items={items}
           hasOlder={hasOlder}
           loadingOlder={overlapLoads ? false : loadingOlder}
-          onLoadOlder={loadOlder}
+          onLoadOlder={loaderAvailable ? loadOlder : undefined}
           renderMessageText={(text, item) => <div data-conversation-message={item.id}>{text}</div>}
         />
       </section>
