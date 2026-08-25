@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { sql } from "drizzle-orm";
 import {
   bootstrapWorkspace,
   createDb,
@@ -34,12 +35,33 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((settled) => {
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settled) => {
     resolve = settled;
   });
   return { promise, resolve };
+}
+
+async function waitForBlockedBackend(blockerPid: number, description: string): Promise<number> {
+  if (!shared) throw new Error("database unavailable");
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared.admin<Array<{ pid: number }>>`
+      select activity.pid
+      from pg_stat_activity activity
+      where activity.datname = current_database()
+        and activity.usename = 'opengeni_app'
+        and activity.state = 'active'
+        and activity.wait_event_type = 'Lock'
+        and ${blockerPid} = any(pg_blocking_pids(activity.pid))
+      order by activity.pid
+      limit 1
+    `;
+    if (row) return row.pid;
+    await Bun.sleep(10);
+  }
+  throw new Error(`${description} did not block behind backend ${blockerPid}`);
 }
 
 async function fixture(label: string) {
@@ -80,6 +102,7 @@ async function fixture(label: string) {
 async function submitPrompt(
   db: Database,
   value: Awaited<ReturnType<typeof fixture>>,
+  holdOpen?: { admitted: (backendPid: number) => void; release: Promise<void> },
 ): Promise<void> {
   await withWorkspaceSubjectSessionActivityRls(
     db,
@@ -102,6 +125,14 @@ async function submitPrompt(
         reasoningEffortFallback: "low",
         source: "user",
       });
+      if (holdOpen) {
+        const [backend] = await scoped.execute<{ backendPid: number }>(
+          sql`select pg_backend_pid()::integer as "backendPid"`,
+        );
+        if (!backend) throw new Error("prompt admission backend is unavailable");
+        holdOpen.admitted(backend.backendPid);
+        await holdOpen.release;
+      }
     },
   );
 }
@@ -128,30 +159,22 @@ describe("post-start session Variable Set quiescence races", () => {
     const value = await fixture("admission-first");
     const admissionClient = createDb(shared.appUrl, { max: 1 });
     const mutationClient = createDb(shared.appUrl, { max: 1 });
-    const admitted = deferred();
+    const admitted = deferred<number>();
     const releaseAdmission = deferred();
+    let admission: Promise<void> | null = null;
+    let mutation: ReturnType<typeof replaceSelection> | null = null;
     try {
-      const admission = admissionClient.db.transaction(async (rawTx) => {
-        await submitPrompt(rawTx as unknown as Database, value);
-        admitted.resolve();
-        await releaseAdmission.promise;
+      admission = submitPrompt(admissionClient.db, value, {
+        admitted: admitted.resolve,
+        release: releaseAdmission.promise,
       });
-      await admitted.promise;
+      const admissionPid = await admitted.promise;
 
-      let mutationSettled = false;
-      const mutation = replaceSelection(mutationClient.db, value).then(
-        (result) => {
-          mutationSettled = true;
-          return result;
-        },
-        (error) => {
-          mutationSettled = true;
-          throw error;
-        },
-      );
+      mutation = replaceSelection(mutationClient.db, value);
       try {
-        await Bun.sleep(50);
-        expect(mutationSettled).toBe(false);
+        expect(await waitForBlockedBackend(admissionPid, "Variable Set mutation")).toBeGreaterThan(
+          0,
+        );
       } finally {
         releaseAdmission.resolve();
       }
@@ -177,6 +200,10 @@ describe("post-start session Variable Set quiescence races", () => {
       expect(state).toEqual({ variableSetIds: [], eventCount: 0, auditCount: 0 });
     } finally {
       releaseAdmission.resolve();
+      await Promise.allSettled([
+        ...(admission ? [admission] : []),
+        ...(mutation ? [mutation] : []),
+      ]);
       await admissionClient.close();
       await mutationClient.close();
     }
@@ -187,32 +214,29 @@ describe("post-start session Variable Set quiescence races", () => {
     const value = await fixture("mutation-first");
     const mutationClient = createDb(shared.appUrl, { max: 1 });
     const admissionClient = createDb(shared.appUrl, { max: 1 });
-    const mutated = deferred();
-    const releaseMutation = deferred();
+    const blockerReady = deferred<number>();
+    const releaseLeaseAdmission = deferred();
+    let blocker: Promise<unknown> | null = null;
+    let mutation: ReturnType<typeof replaceSelection> | null = null;
+    let admission: Promise<void> | null = null;
     try {
-      const mutation = mutationClient.db.transaction(async (rawTx) => {
-        const result = await replaceSelection(rawTx as unknown as Database, value);
-        mutated.resolve();
-        await releaseMutation.promise;
-        return result;
+      const leaseAdmissionKey = `sandbox-lease-admission:${value.grant.workspaceId}:${value.session.sandboxGroupId}`;
+      blocker = shared.admin.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+        if (!backend) throw new Error("sandbox admission blocker backend is unavailable");
+        await tx`select pg_advisory_xact_lock(hashtextextended(${leaseAdmissionKey}, 0))`;
+        blockerReady.resolve(backend.pid);
+        await releaseLeaseAdmission.promise;
       });
-      await mutated.promise;
+      const blockerPid = await blockerReady.promise;
 
-      let admissionSettled = false;
-      const admission = submitPrompt(admissionClient.db, value).then(
-        () => {
-          admissionSettled = true;
-        },
-        (error) => {
-          admissionSettled = true;
-          throw error;
-        },
-      );
+      mutation = replaceSelection(mutationClient.db, value);
+      const mutationPid = await waitForBlockedBackend(blockerPid, "Variable Set mutation");
+      admission = submitPrompt(admissionClient.db, value);
       try {
-        await Bun.sleep(50);
-        expect(admissionSettled).toBe(false);
+        expect(await waitForBlockedBackend(mutationPid, "prompt admission")).toBeGreaterThan(0);
       } finally {
-        releaseMutation.resolve();
+        releaseLeaseAdmission.resolve();
       }
       expect(await mutation).toMatchObject({ status: "updated" });
       await admission;
@@ -249,7 +273,12 @@ describe("post-start session Variable Set quiescence races", () => {
         auditCount: 1,
       });
     } finally {
-      releaseMutation.resolve();
+      releaseLeaseAdmission.resolve();
+      await Promise.allSettled([
+        ...(blocker ? [blocker] : []),
+        ...(mutation ? [mutation] : []),
+        ...(admission ? [admission] : []),
+      ]);
       await mutationClient.close();
       await admissionClient.close();
     }
