@@ -1305,7 +1305,7 @@ describe("MessageTimeline pagination affordances", () => {
 
     await actRun(() => first.reject(new Error("transient listEvents failure")));
     await flush();
-    const retry = r.container.querySelector("[data-og-retry-older]");
+    const retry = r.container.querySelector("[data-og-retry]");
     expect(retry).not.toBeNull();
 
     // Failure never becomes an automatic retry loop, even across unrelated

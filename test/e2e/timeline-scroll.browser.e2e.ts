@@ -428,7 +428,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
     await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
-    await page.waitForFunction(() => document.querySelector("[data-og-retry-older]") === null);
+    await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
     expect(await retry.count()).toBe(0);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
