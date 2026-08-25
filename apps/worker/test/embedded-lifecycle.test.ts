@@ -652,7 +652,7 @@ describe("embedded worker lifecycle contract", () => {
     ).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
-      /missing the 0349 session Variable Set attachment runtime receipt/,
+      /missing the 0350 session Variable Set attachment runtime receipt/,
     );
   });
 

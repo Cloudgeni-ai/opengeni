@@ -319,7 +319,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     max_lifetime: 1800,
     // `connection` carries per-session Postgres STARTUP parameters. The exact
     // `application_name` is also the PgBouncer-compatible current-image receipt
-    // for migration 0349's restrictive sessions policy; arbitrary custom startup
+    // for migration 0350's restrictive sessions policy; arbitrary custom startup
     // parameters are not portable through transaction poolers. `search_path`
     // (embedded only) is the supported, query-param-free way to scope a connection
     // to a dedicated schema — postgres-js IGNORES a URL `?search_path=`. Unset

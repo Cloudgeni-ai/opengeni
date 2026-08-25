@@ -9,7 +9,7 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0349-runtime-protocol");
+  shared = await acquireSharedTestDatabase("migration-0350-runtime-protocol");
   if (!shared) {
     available = false;
     return;
@@ -22,14 +22,14 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0349 ordered session Variable Set attachments", () => {
+describe("migration 0350 ordered session Variable Set attachments", () => {
   test("declares one drained FK-backed cutover with authority and rotation fences", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0349_session_variable_set_attachments.sql", import.meta.url),
+      new URL("../drizzle/0350_session_variable_set_attachments.sql", import.meta.url),
     ).text();
 
     expect(source).toStartWith("-- deployment-mode: maintenance");
-    expect(source).toContain("no pre-0349 image may");
+    expect(source).toContain("no pre-0350 image may");
     expect(source).not.toContain("no pre-0348 image may");
     expect(source).toContain(
       "opengeni_private.session_variable_set_attachments_protocol_v1_active()",
@@ -43,7 +43,7 @@ describe("migration 0349 ordered session Variable Set attachments", () => {
     );
     expect(source).toContain("CREATE POLICY sessions_variable_set_attachments_protocol_v1");
     expect(source).toContain("AS RESTRICTIVE");
-    expect(source).toContain("0349-or-newer runtime");
+    expect(source).toContain("0350-or-newer runtime");
     expect(source).toMatch(
       /DO \$session_variable_set_protocol_grants\$[\s\S]*?JOIN pg_catalog\.pg_roles role_value[\s\S]*?role_value\.rolname = configured\.value/u,
     );
@@ -116,13 +116,13 @@ describe("migration 0349 ordered session Variable Set attachments", () => {
     expect(source).not.toContain("value_encrypted");
   });
 
-  test("rejects a pre-0349 transaction and admits the current runtime receipt", async () => {
+  test("rejects a pre-0350 transaction and admits the current runtime receipt", async () => {
     if (!available) return;
     const legacy = postgres(shared!.appUrl, { max: 1, prepare: false });
     try {
       await expect(
         legacy`select opengeni_private.session_variable_set_attachments_protocol_v1_active()`,
-      ).rejects.toThrow("0349-or-newer runtime");
+      ).rejects.toThrow("0350-or-newer runtime");
 
       await expect(
         client!.db.execute<{ active: boolean; applicationName: string }>(

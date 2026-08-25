@@ -560,6 +560,17 @@ For each subsequent activation:
    greenfield provisioning writes its complete graph before taking the same
    fence and the reversed order would deadlock.
 
+   Migration 0349 implements that greenfield side. After at least one operator
+   activation is committed, an ordinary eligible self-service signup
+   automatically appends its version-1 activation receipt, deterministic
+   greenfield evidence, and enabled private-session setting/event in the same
+   transaction as its owner + Personal-workspace graph and setup receipt. There
+   is no second operator command for that newly inserted organization. A signup
+   that wins the boundary before the first committed witness stays unactivated,
+   as do every 0348 adopted legacy account and all existing organizations; run
+   this drained operator procedure for those organizations. Never hand-insert a
+   greenfield evidence or activation row to bypass that distinction.
+
    Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
    SECURITY` and a `FOR SELECT`-only policy, so under this exact
    non-superuser-owner posture the activation's own receipt `INSERT` was denied
