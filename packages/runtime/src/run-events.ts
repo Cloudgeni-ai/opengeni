@@ -374,7 +374,14 @@ export function normalizeSdkEvent(
   } else if (item.type === "message_output_item") {
     const text = typeof item.text === "string" ? item.text : undefined;
     if (text) {
-      out.push({ type: "agent.message.completed", payload: { text } });
+      const phase = item.rawItem?.phase;
+      out.push({
+        type: "agent.message.completed",
+        payload: {
+          text,
+          ...(phase === "commentary" || phase === "final_answer" ? { phase } : {}),
+        },
+      });
     }
   }
   return out;
