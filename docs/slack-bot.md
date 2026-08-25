@@ -310,14 +310,21 @@ One live card per person per conversation. A shared channel has many people in i
 
 ### Nobody is quietly served from somewhere else
 
-A person who cannot reach the routed workspace is **never** silently given a session in another workspace they happen to belong to. No session is created in any of these cases. What differs is what they are told, and it is worth being exact, because two of these are quieter than they look.
+The invariant is one sentence: a person who cannot reach the routed workspace is **never** given a session in another workspace they happen to belong to, and no session is created. What they are *told* is not one sentence, so here it is in full. Three surfaces refuse independently, and only one of them ever mints a link.
 
-- **A route resolved, then its authority did not.** A prefix that matched, a channel route, a DM route, a personal workspace, or a sole candidate - and then `resolveSlackTargetAuthority` refused. They get a bot DM naming where this conversation works and the ordinary Slack access-request link, minted for the workspace they actually need rather than the installation's.
-- **A prefix nobody can honour.** A prefix naming a workspace they cannot reach, or an ambiguous one, is refused by the resolver itself. That DM lists the workspaces they *can* use and carries no link, because the workspace they asked for may not be one OpenGeni is willing to name to them.
-- **No candidate workspace at all.** The generic "ask an OpenGeni administrator" DM. No link, for the same reason.
-- **Silence.** A mapped thread whose workspace they lost, and - because the resolver returns the installation's workspace whenever routing is off, and the reaction path never asks - any task while the flag is off plus any unresolved reaction summon. These keep the pre-routing permanent `identity_access_revoked` failure and post nothing.
+| surface | when | what the person gets |
+|---|---|---|
+| **inbox pump** (mention, command, DM, shortcut) | a resolved route whose `resolveSlackTargetAuthority` refused | a bot DM plus the Slack access-request link, minted for the workspace they actually need |
+| | a prefix naming a workspace they cannot reach, or an ambiguous one | a DM listing the workspaces they *can* use. No link: the workspace they named may not be one OpenGeni will confirm to them |
+| | no candidate workspace at all | the generic "ask an OpenGeni administrator" DM. No link, same reason |
+| | a mapped `thread` route they have lost, or **any** route while the flag is off | nothing. The pre-routing permanent `identity_access_revoked` failure |
+| **the picker** | the workspace they clicked refuses authority or `sessions:create` | a DM naming that workspace, no link, and the card is left intact so they can pick another |
+| **reaction summon** | no candidate workspace at all | the same generic administrator DM |
+| | a route resolved, then authority or `sessions:create`/`sessions:control` refused | nothing. A summon has no conversation of its own to answer into, so every authority failure here is the silent permanent one |
 
-Note the honest consequence of that last bullet: with the flag **on**, the task pump asks rather than falling back, so it can no longer resolve `source: "installation"`. A person who has lost access in a single-workspace installation now resolves as a sole candidate and gets a posted refusal where the pre-routing code was silent. The candidate list is a plain `workspace_memberships` join, while the grant additionally re-checks live organization authority, so the two can legitimately disagree. That is a deliberate improvement - silence is a bad answer to "why did nothing happen" - but it is a behaviour change on the day the flag goes on, not the absence of one.
+Two details in the first row are easy to over-promise. The DM can only *name* the workspace when the name is already in front of it - a prefix, a personal workspace, or a sole candidate. A channel or DM route pointing somewhere the person cannot reach has no label to read, because labels are looked up in the candidate list and that workspace is by definition not in it, so the DM says "another workspace". And the link is the inbox pump's alone: the picker and the reaction path never mint one.
+
+Turning the flag on does change what a lost-access person sees, and that is worth stating rather than eliding. With routing off the resolver short-circuits to the installation's workspace, so every authority failure was the silent path. With it on, a single-workspace installation resolves a sole candidate instead - before any question is asked - and the pump posts a refusal where the old code said nothing. The candidate list is a plain `workspace_memberships` join while the grant re-checks live organization authority, so the two can legitimately disagree and this is exactly where they do. Separately and independently, an installation with two or more candidates now gets the picker rather than the installation's workspace. Silence is a bad answer to "why did nothing happen", so both are improvements - but they are changes.
 
 The identity link itself stays in the installation's workspace even when the request is for a routed one, because that is where the Slack pump reads it.
 
