@@ -6,6 +6,7 @@ import type { Session } from "@/types";
 
 const SESSION_PIN_CHANNEL_PREFIX = "opengeni.session-pins";
 const SESSION_PIN_STORAGE_PREFIX = "opengeni.session-pins.changed";
+const ACCEPTED_SESSION_CHANNEL_READ_SOFT_LIMIT = 512;
 const outboundChannels = new Map<string, BroadcastChannel>();
 
 type SessionTreeStats = NonNullable<Session["treeStats"]>;
@@ -73,10 +74,24 @@ export class SessionChannelProjectionAuthority {
         ]),
       ),
     );
+    this.compactAcceptedReads();
   }
 
   clear(owner: object): void {
     this.projectionsByOwner.delete(owner);
+  }
+
+  /** Drop browser-only evidence when its workspace principal/route fence is retired. */
+  clearWorkspace(workspaceId: string): void {
+    const prefix = `${workspaceId}\u0000`;
+    for (const key of this.acceptedReads.keys()) {
+      if (key.startsWith(prefix)) this.acceptedReads.delete(key);
+    }
+    for (const [owner, projections] of this.projectionsByOwner) {
+      const retained = new Map([...projections].filter(([key]) => !key.startsWith(prefix)));
+      if (retained.size === 0) this.projectionsByOwner.delete(owner);
+      else if (retained.size !== projections.size) this.projectionsByOwner.set(owner, retained);
+    }
   }
 
   /** Retain an accepted exact/detail read so older list requests cannot revive stale filing. */
@@ -101,15 +116,40 @@ export class SessionChannelProjectionAuthority {
     if (readGeneration <= 0) return false;
     const key = sessionChannelProjectionKey(projection);
     if (this.highestReadGeneration(key) > readGeneration) return false;
+    // Refresh iteration order when exact evidence for one session advances so
+    // compaction considers genuinely older observations first.
+    this.acceptedReads.delete(key);
     this.acceptedReads.set(key, {
       channelId: projection.channelId ?? null,
       present,
       readGeneration,
     });
-    if (this.acceptedReads.size > 512) {
-      this.acceptedReads.delete(this.acceptedReads.keys().next().value!);
-    }
+    this.compactAcceptedReads();
     return true;
+  }
+
+  /**
+   * The limit is deliberately soft: an accepted read is the only fence that
+   * can stop an older retained branch/page owner from reviving stale filing.
+   * Compact only after every current owner for that session is at least as
+   * new; otherwise retaining the winner is required for correctness. Workspace
+   * transitions provide the hard lifecycle bound for unresolved evidence.
+   */
+  private compactAcceptedReads(): void {
+    if (this.acceptedReads.size <= ACCEPTED_SESSION_CHANNEL_READ_SOFT_LIMIT) return;
+    for (const [key, accepted] of this.acceptedReads) {
+      const ownerEvidence = [...this.projectionsByOwner.values()]
+        .map((projections) => projections.get(key))
+        .filter((candidate): candidate is SessionChannelEvidence => candidate !== undefined);
+      if (
+        ownerEvidence.length === 0 ||
+        ownerEvidence.some((candidate) => candidate.readGeneration < accepted.readGeneration)
+      ) {
+        continue;
+      }
+      this.acceptedReads.delete(key);
+      if (this.acceptedReads.size <= ACCEPTED_SESSION_CHANNEL_READ_SOFT_LIMIT) return;
+    }
   }
 
   private highestReadGeneration(key: string): number {

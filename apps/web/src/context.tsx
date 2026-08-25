@@ -638,6 +638,7 @@ export function RootRouteComponent() {
 
   const resetWorkspaceState = useCallback(
     (workspaceId: string | null, force: boolean) => {
+      const previousWorkspaceId = workspaceTransitionIdentity.current.workspaceId;
       const transition =
         workspaceId === null
           ? {
@@ -649,6 +650,9 @@ export function RootRouteComponent() {
         return;
       }
       workspaceTransitionIdentity.current = transition.identity;
+      if (previousWorkspaceId && (force || previousWorkspaceId !== workspaceId)) {
+        sessionChannelProjectionAuthority.clearWorkspace(previousWorkspaceId);
+      }
       activeCreateOperation.current = null;
       activeGitHubManifestOperation.current = null;
       activeGitHubDisconnectOperation.current = null;
@@ -675,7 +679,7 @@ export function RootRouteComponent() {
       resetWorkspaceIntegrations();
       setWorkspaceStateOwnerId(workspaceId);
     },
-    [resetSessionView, resetWorkspaceIntegrations],
+    [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
   );
 
   const prepareWorkspaceTransition = useCallback(

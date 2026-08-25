@@ -103,6 +103,90 @@ describe("session pin reconciliation", () => {
     expect(current).toBe(newer);
   });
 
+  test("retains exact move evidence after the component move owner unmounts", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const moveOwner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const staleDetailGeneration = authority.beginRead();
+
+    authority.replace(moveOwner, [moved], 1);
+    const moveEvidenceGeneration = authority.beginRead();
+    expect(authority.recordRead(moved, moveEvidenceGeneration)).toBe(true);
+
+    // Collapsing the desktop rail or selecting the mobile Workspace tab used
+    // to unmount SessionList and clear this component-owned priority fence.
+    authority.clear(moveOwner);
+    expect(authority.recordRead(beforeMove, staleDetailGeneration)).toBe(false);
+    expect(mergeSessionContextProjection(moved, beforeMove, authority, "detail")).toMatchObject({
+      channelId: "channel-b",
+    });
+
+    // A failed queued probe contributes no evidence; the exact successful
+    // write response must remain sufficient to hold the committed destination.
+    expect(authority.owns(moved)).toBe(true);
+    expect(authority.owns(beforeMove)).toBe(false);
+  });
+
+  test("does not evict an accepted winner while an older branch owner can revive", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const branchOwner = {};
+    const staleBranch = { ...session, channelId: "channel-a" } as Session;
+    const acceptedDetail = { ...session, channelId: "channel-b" } as Session;
+    const branchGeneration = authority.beginRead();
+    authority.replace(branchOwner, [staleBranch], 0, branchGeneration);
+    const detailGeneration = authority.beginRead();
+    expect(authority.recordRead(acceptedDetail, detailGeneration)).toBe(true);
+
+    for (let index = 0; index < 512; index += 1) {
+      const projection = {
+        id: `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+        workspaceId: session.workspaceId,
+        channelId: `channel-${index}`,
+      };
+      expect(authority.recordRead(projection, authority.beginRead())).toBe(true);
+    }
+
+    expect(authority.project(staleBranch, branchGeneration)).toMatchObject({
+      channelId: "channel-b",
+    });
+    expect(authority.owns(acceptedDetail)).toBe(true);
+    expect(authority.owns(staleBranch)).toBe(false);
+  });
+
+  test("compacts superseded reads and clears departed workspace evidence", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const owner = {};
+    const accepted = { ...session, channelId: "channel-b" } as Session;
+    const acceptedGeneration = authority.beginRead();
+    authority.recordRead(accepted, acceptedGeneration);
+    authority.replace(owner, [accepted], 0, authority.beginRead());
+
+    for (let index = 0; index < 512; index += 1) {
+      authority.recordRead(
+        {
+          id: `30000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+          workspaceId: session.workspaceId,
+          channelId: null,
+        },
+        authority.beginRead(),
+      );
+    }
+
+    authority.clear(owner);
+    expect(authority.project({ ...session, channelId: "channel-a" }, 0)).toMatchObject({
+      channelId: "channel-a",
+    });
+
+    authority.recordRead(accepted, authority.beginRead());
+    expect(authority.owns(accepted)).toBe(true);
+    const otherWorkspace = { ...accepted, workspaceId: "workspace-other" };
+    authority.recordRead(otherWorkspace, authority.beginRead());
+    authority.clearWorkspace(session.workspaceId);
+    expect(authority.owns(accepted)).toBe(false);
+    expect(authority.owns(otherWorkspace)).toBe(true);
+  });
+
   test("merges only authoritative personal pin fields", () => {
     const updated = applySessionPinProjection(session, {
       id: session.id,

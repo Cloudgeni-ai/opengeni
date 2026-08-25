@@ -1044,6 +1044,12 @@ export function SessionList() {
         const moved = await requestMoveSession(session.id, channelId);
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         if (moved) {
+          // The successful write response is exact post-write evidence. Retain
+          // it in the workspace-level authority before committing component
+          // state so collapsing or switching away from the rail cannot drop
+          // the only fence against an already-started stale detail response.
+          const moveEvidenceGeneration = context.sessionChannelProjectionAuthority.beginRead();
+          context.sessionChannelProjectionAuthority.recordRead(moved, moveEvidenceGeneration);
           setChannelMoveOverrides((current) =>
             commitSessionChannelMove(current, session.id, moved.channelId ?? null, operation),
           );

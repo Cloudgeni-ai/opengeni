@@ -122,6 +122,8 @@ describe("session control surface architecture", () => {
     expect(list).not.toContain("replace(owner, listedSessions)");
     expect(list).toContain("applySessionRailProjection(session, projected, { channelOwned })");
     expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
+    expect(list).toContain("const moveEvidenceGeneration =");
+    expect(list).toContain("recordRead(moved, moveEvidenceGeneration)");
     expect(list).toContain("reconcileSessionChannelMovePointRead(");
     expect(list).toContain("reconcileSessionChannelMoves(current, channelAuthoritySessions)");
     expect(list).not.toContain("reconcileSessionChannelMoves(current, listedSessions)");
