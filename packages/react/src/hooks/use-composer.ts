@@ -1401,11 +1401,13 @@ export function useComposer(
         ) {
           return;
         }
+        const acceptedRouting =
+          acceptedResult?.routing ?? promptRoutingFromAcceptedEvent(acceptedEvent);
         const acceptedDestination =
-          acceptedResult?.routing === "queued_for_execution"
+          acceptedRouting === "queued_for_execution"
             ? "queue"
-            : acceptedResult?.routing === "accepted_for_execution" ||
-                acceptedResult?.routing === "accepted_for_steering"
+            : acceptedRouting === "accepted_for_execution" ||
+                acceptedRouting === "accepted_for_steering"
               ? "chat"
               : operation.destination;
         if (options.events === undefined && acceptedDestination === "chat") {
@@ -2666,6 +2668,24 @@ async function replayOutcomeUnknown<T>(command: () => Promise<T>): Promise<T> {
 
 function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function promptRoutingFromAcceptedEvent(
+  event: SessionEvent | null,
+): "accepted_for_execution" | "queued_for_execution" | "accepted_for_steering" | null {
+  if (
+    typeof event?.payload !== "object" ||
+    event.payload === null ||
+    Array.isArray(event.payload)
+  ) {
+    return null;
+  }
+  const routing = (event.payload as Record<string, unknown>).routing;
+  return routing === "accepted_for_execution" ||
+    routing === "queued_for_execution" ||
+    routing === "accepted_for_steering"
+    ? routing
+    : null;
 }
 
 function isDraftConflictError(error: Error): boolean {

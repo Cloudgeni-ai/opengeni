@@ -1977,6 +1977,44 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("moves a non-durable Send into chat when the accepted event reports promoted Steer", async () => {
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => ({
+        ...makeEvent(2, "user.message", {
+          text: typeof input === "string" ? input : input.text,
+          delivery: "steer",
+          routing: "accepted_for_steering",
+        }),
+        clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: [],
+          sendDestination: () => "queue",
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+        }),
+      undefined,
+    );
+
+    await flushing(async () =>
+      expect(await hook.result.current.send("answer without durable drafts")).toBe(true),
+    );
+    await flush();
+
+    expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+      delivery: "send",
+      destination: "chat",
+      state: "queued",
+      text: "answer without durable drafts",
+    });
+    await hook.unmount();
+  });
+
   test("keeps rapid first and second Sends on stable chat and queue surfaces", async () => {
     const resolvers: Array<(event: SessionEvent) => void> = [];
     const inputs: SendMessageInput[] = [];
