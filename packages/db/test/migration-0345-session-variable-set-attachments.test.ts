@@ -19,6 +19,10 @@ describe("migration 0345 ordered session Variable Set attachments", () => {
     expect(source.match(/variable_set_authority_capability_active\('write'\)/gu)).toHaveLength(4);
     expect(source).not.toContain("FROM opengeni_private.variable_set_authority_capabilities");
     expect(source).toContain("session_variable_set_attachments_session_set_uq");
+    expect(source).toMatch(
+      /CREATE OR REPLACE FUNCTION sync_session_variable_set_attachments\(\)[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = pg_catalog/u,
+    );
+    expect(source).toContain("DELETE FROM %I.session_variable_set_attachments");
     expect(source).toContain("resource_count BETWEEN 1 AND 52");
     expect(source).toContain("IF selected_count > 52 THEN");
     expect(source).toContain("targetSessionExecution' -> 'variableSets'");

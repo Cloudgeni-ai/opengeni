@@ -174,20 +174,28 @@ $body$;
 CREATE OR REPLACE FUNCTION sync_session_variable_set_attachments()
 RETURNS trigger
 LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
 AS $body$
 BEGIN
   IF pg_trigger_depth() > 1 THEN
     RETURN NEW;
   END IF;
-  DELETE FROM session_variable_set_attachments
-  WHERE workspace_id = NEW.workspace_id AND session_id = NEW.id;
-  INSERT INTO session_variable_set_attachments (
-    account_id, workspace_id, session_id, variable_set_id, position
-  )
-  SELECT NEW.account_id, NEW.workspace_id, NEW.id, selected.value::uuid,
-    selected.position::integer - 1
-  FROM jsonb_array_elements_text(NEW.variable_set_ids)
-    WITH ORDINALITY selected(value, position);
+  EXECUTE pg_catalog.format(
+    'DELETE FROM %I.session_variable_set_attachments
+     WHERE workspace_id = $1 AND session_id = $2',
+    TG_TABLE_SCHEMA
+  ) USING NEW.workspace_id, NEW.id;
+  EXECUTE pg_catalog.format(
+    'INSERT INTO %I.session_variable_set_attachments (
+       account_id, workspace_id, session_id, variable_set_id, position
+     )
+     SELECT $1, $2, $3, selected.value::uuid,
+       selected.position::integer - 1
+     FROM pg_catalog.jsonb_array_elements_text($4)
+       WITH ORDINALITY selected(value, position)',
+    TG_TABLE_SCHEMA
+  ) USING NEW.account_id, NEW.workspace_id, NEW.id, NEW.variable_set_ids;
   RETURN NEW;
 END
 $body$;
