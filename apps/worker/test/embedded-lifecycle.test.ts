@@ -359,6 +359,7 @@ describe("embedded worker lifecycle contract", () => {
         },
       ],
       [{ activated: false }],
+      [{ present: true }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -587,7 +588,7 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_operations",
       ],
     })();
-    expect((catalogResults[8] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -599,7 +600,7 @@ describe("embedded worker lifecycle contract", () => {
   });
 
   test("embedded readiness enforces durable session-tenancy activation for both switch states", async () => {
-    const embeddedDb = (activated: boolean) => {
+    const embeddedDb = (activated: boolean, variableSetCutoverPresent = true) => {
       const results: unknown[] = [
         [
           {
@@ -619,6 +620,7 @@ describe("embedded worker lifecycle contract", () => {
           },
         ],
         [{ activated }],
+        [{ present: variableSetCutoverPresent }],
       ];
       let index = 0;
       return {
@@ -647,6 +649,9 @@ describe("embedded worker lifecycle contract", () => {
       })(),
     ).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
+    await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
+      /missing the 0348 session Variable Set attachment runtime receipt/,
+    );
   });
 
   test("database readiness coalesces overlapping probe attempts", async () => {
