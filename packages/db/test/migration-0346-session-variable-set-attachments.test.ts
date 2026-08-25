@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-describe("migration 0345 ordered session Variable Set attachments", () => {
+describe("migration 0346 ordered session Variable Set attachments", () => {
   test("declares one drained FK-backed cutover with authority and rotation fences", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0345_session_variable_set_attachments.sql", import.meta.url),
+      new URL("../drizzle/0346_session_variable_set_attachments.sql", import.meta.url),
     ).text();
 
     expect(source).toStartWith("-- deployment-mode: maintenance");

@@ -757,7 +757,7 @@ flowchart LR
    fresh singleton group, frozen active Rig version, ordered selections, and
    both durable events in one transaction. Failure leaves no destination or
    applied receipt, and the source remains unchanged. Canonical:
-   `packages/db/drizzle/0345_session_variable_set_attachments.sql`,
+   `packages/db/drizzle/0346_session_variable_set_attachments.sql`,
    `packages/db/src/session-tenancy.ts`, [`variable-sets.md`](variable-sets.md),
    and [`rigs.md`](rigs.md).
 

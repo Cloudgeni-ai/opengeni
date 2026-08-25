@@ -178,7 +178,7 @@ describe("release schema contract", () => {
       "0342_slack_route_prompt_single_pending.sql",
       "0343_personal_document_force_rls_lock_repair.sql",
       "0344_private_session_visibility_transition_gate.sql",
-      "0345_session_variable_set_attachments.sql",
+      "0346_session_variable_set_attachments.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -212,7 +212,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0344_private_session_visibility_transition_gate.sql",
     );
     const sessionVariableSetAttachments = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0345_session_variable_set_attachments.sql",
+      (migration) => migration.path === "0346_session_variable_set_attachments.sql",
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
@@ -225,7 +225,7 @@ describe("release schema contract", () => {
         (privateSessionVisibilityTransitionGate ? 1 : 0) +
         (sessionVariableSetAttachments ? 1 : 0),
       latestMigration: sessionVariableSetAttachments
-        ? "0345_session_variable_set_attachments.sql"
+        ? "0346_session_variable_set_attachments.sql"
         : privateSessionVisibilityTransitionGate
           ? "0344_private_session_visibility_transition_gate.sql"
           : personalDocumentForceRlsRepair
