@@ -239,55 +239,6 @@ BEGIN
 END
 $body$;
 
-CREATE OR REPLACE FUNCTION refresh_session_variable_set_selection()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog
-AS $body$
-DECLARE
-  target_account_id uuid := coalesce(NEW.account_id, OLD.account_id);
-  target_workspace_id uuid := coalesce(NEW.workspace_id, OLD.workspace_id);
-  target_session_id uuid := coalesce(NEW.session_id, OLD.session_id);
-  previous_account text := current_setting('opengeni.account_id', true);
-  previous_workspace text := current_setting('opengeni.workspace_id', true);
-  previous_subject text := current_setting('opengeni.subject_id', true);
-  selected_ids jsonb;
-  selected_last uuid;
-BEGIN
-  PERFORM set_config('opengeni.account_id', target_account_id::text, true);
-  PERFORM set_config('opengeni.workspace_id', target_workspace_id::text, true);
-  PERFORM set_config('opengeni.subject_id', '', true);
-  EXECUTE format(
-    'SELECT coalesce(jsonb_agg(variable_set_id::text ORDER BY position), ''[]''::jsonb),
-       (array_agg(variable_set_id ORDER BY position DESC))[1]
-     FROM %I.session_variable_set_attachments
-     WHERE workspace_id = $1 AND session_id = $2',
-    TG_TABLE_SCHEMA
-  ) INTO selected_ids, selected_last USING target_workspace_id, target_session_id;
-  EXECUTE format(
-    'UPDATE %I.sessions
-     SET variable_set_ids = $1, variable_set_id = $2
-     WHERE workspace_id = $3 AND id = $4
-       AND (variable_set_ids IS DISTINCT FROM $1
-         OR variable_set_id IS DISTINCT FROM $2)',
-    TG_TABLE_SCHEMA
-  ) USING selected_ids, selected_last, target_workspace_id, target_session_id;
-  PERFORM set_config('opengeni.account_id', coalesce(previous_account, ''), true);
-  PERFORM set_config('opengeni.workspace_id', coalesce(previous_workspace, ''), true);
-  PERFORM set_config('opengeni.subject_id', coalesce(previous_subject, ''), true);
-  IF TG_OP = 'DELETE' THEN
-    RETURN OLD;
-  END IF;
-  RETURN NEW;
-EXCEPTION WHEN OTHERS THEN
-  PERFORM set_config('opengeni.account_id', coalesce(previous_account, ''), true);
-  PERFORM set_config('opengeni.workspace_id', coalesce(previous_workspace, ''), true);
-  PERFORM set_config('opengeni.subject_id', coalesce(previous_subject, ''), true);
-  RAISE;
-END
-$body$;
-
 CREATE OR REPLACE FUNCTION guard_variable_set_session_attachments()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -304,19 +255,13 @@ BEGIN
   PERFORM set_config('opengeni.workspace_id', '', true);
   PERFORM set_config('opengeni.subject_id', '', true);
   EXECUTE format(
-    'DELETE FROM %I.session_variable_set_attachments
-     WHERE variable_set_id = $1
-       AND session_status IN (''idle'', ''failed'', ''cancelled'')',
-    TG_TABLE_SCHEMA
-  ) USING OLD.id;
-  EXECUTE format(
     'SELECT count(*)::integer
      FROM %I.session_variable_set_attachments
      WHERE variable_set_id = $1',
     TG_TABLE_SCHEMA
   ) INTO attachment_count USING OLD.id;
   IF attachment_count > 0 THEN
-    RAISE EXCEPTION 'variable set remains attached to % active sessions', attachment_count
+    RAISE EXCEPTION 'variable set remains attached to % sessions', attachment_count
       USING ERRCODE = '23503';
   END IF;
   PERFORM set_config('opengeni.account_id', coalesce(previous_account, ''), true);
@@ -343,10 +288,6 @@ CREATE TRIGGER sessions_variable_set_attachment_status_sync
 AFTER UPDATE OF status ON sessions
 FOR EACH ROW EXECUTE FUNCTION sync_session_variable_set_attachment_status();
 
-CREATE TRIGGER session_variable_set_attachments_refresh
-AFTER INSERT OR UPDATE OR DELETE ON session_variable_set_attachments
-FOR EACH ROW EXECUTE FUNCTION refresh_session_variable_set_selection();
-
 CREATE TRIGGER workspace_variable_sets_session_attachment_guard
 BEFORE DELETE ON workspace_variable_sets
 FOR EACH ROW EXECUTE FUNCTION guard_variable_set_session_attachments();
@@ -354,7 +295,6 @@ FOR EACH ROW EXECUTE FUNCTION guard_variable_set_session_attachments();
 REVOKE ALL ON FUNCTION normalize_session_variable_set_selection() FROM PUBLIC;
 REVOKE ALL ON FUNCTION sync_session_variable_set_attachments() FROM PUBLIC;
 REVOKE ALL ON FUNCTION sync_session_variable_set_attachment_status() FROM PUBLIC;
-REVOKE ALL ON FUNCTION refresh_session_variable_set_selection() FROM PUBLIC;
 REVOKE ALL ON FUNCTION guard_variable_set_session_attachments() FROM PUBLIC;
 
 ALTER TABLE session_variable_set_attachments ENABLE ROW LEVEL SECURITY;
@@ -1065,7 +1005,7 @@ BEGIN
     JOIN pg_catalog.pg_roles role_value ON role_value.rolname = roles.role_name
   LOOP
     EXECUTE pg_catalog.format(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.session_variable_set_attachments TO %I',
+      'REVOKE ALL ON TABLE %I.session_variable_set_attachments FROM %I',
       data_schema,
       application_role
     );
@@ -1076,4 +1016,4 @@ $grants$;
 COMMENT ON COLUMN sessions.variable_set_ids IS
   'Ordered low-to-high precedence Variable Set ids; the final entry is mirrored in legacy variable_set_id.';
 COMMENT ON TABLE session_variable_set_attachments IS
-  'FK-backed ordered source of truth for session Variable Set selection; values never appear here.';
+  'FK-backed lifecycle-only projection of ordered session Variable Set selection; values never appear here.';

@@ -436,6 +436,81 @@ describe("embedding host session authorization routes", () => {
     });
   });
 
+  test("rejects Variable Set replacement after a prompt has been accepted but not claimed", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const variableSet = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-queued-${crypto.randomUUID()}`,
+    });
+    await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      value.grant.workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        submitHumanPromptInTransaction(db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId,
+          sessionId: value.child.id,
+          subjectId: value.grant.subjectId,
+          actor: { type: "human", subjectId: value.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "accepted before Variable Set replacement",
+          resources: [],
+          model: "test-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+    );
+    const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      subjectId: value.grant.subjectId,
+      permissions: [
+        "sessions:read",
+        "sessions:control",
+        "variable-sets:attach",
+        "variable-sets:use",
+      ],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 3_600,
+    })}`;
+    const app = appWith({
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const response = await app.request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/variable-sets`,
+      {
+        method: "PUT",
+        headers: { authorization, "content-type": "application/json" },
+        body: JSON.stringify({ variableSetIds: [variableSet.id] }),
+      },
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      message: expect.stringContaining("no accepted, queued, claimed, or pending work"),
+    });
+    const [session] = await shared!.admin<
+      Array<{ variableSetIds: string[]; variableSetId: string | null }>
+    >`
+      select variable_set_ids as "variableSetIds", variable_set_id as "variableSetId"
+      from sessions
+      where workspace_id = ${value.grant.workspaceId}
+        and id = ${value.child.id}
+    `;
+    expect(session).toEqual({ variableSetIds: [], variableSetId: null });
+    const events = (
+      await listSessionEvents(client.db, value.grant.workspaceId, value.child.id)
+    ).filter((event) => event.type === "session.variable_sets.updated");
+    expect(events).toHaveLength(0);
+  });
+
   test("updates the durable session tool policy and returns a version conflict", async () => {
     if (!available) return;
     const value = await fixture();

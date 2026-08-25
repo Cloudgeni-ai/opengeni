@@ -459,13 +459,13 @@ describe("runtime database posture evaluator", () => {
         ? ([
             [FORCE_RLS_TABLES, 291],
             [NON_RLS_RUNTIME_TABLES, 12],
-            [RUNTIME_FULL_DML_TABLES, 150],
+            [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 55],
-            [RUNTIME_DML_TABLES, 248],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 56],
+            [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 201],
@@ -847,15 +847,11 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
-  test("classifies ordered session Variable Set attachments as FORCE-RLS full-DML state", () => {
+  test("classifies ordered session Variable Set attachments as lifecycle-only FORCE-RLS state", () => {
     expect(FORCE_RLS_TABLES).toContain("session_variable_set_attachments");
-    expect(RUNTIME_FULL_DML_TABLES).toContain("session_variable_set_attachments");
-    expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toEqual([
-      "SELECT",
-      "INSERT",
-      "UPDATE",
-      "DELETE",
-    ]);
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("session_variable_set_attachments");
+    expect(RUNTIME_FULL_DML_TABLES).not.toContain("session_variable_set_attachments");
+    expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toBeUndefined();
   });
 
   test("keeps tenancy backfill activation evidence owner-only", () => {

@@ -16355,7 +16355,7 @@ export class VariableSetAttachedError extends Error {
 
   constructor(cause?: unknown) {
     super(
-      "variable set remains attached to a scheduled task or active session",
+      "variable set remains attached to a scheduled task or session",
       cause === undefined ? undefined : { cause },
     );
   }
@@ -16434,18 +16434,11 @@ export async function countActiveSessionsUsingVariableSet(
       .select({
         count: sql<number>`count(*)::int`,
       })
-      .from(schema.sessionVariableSetAttachments)
-      .innerJoin(
-        schema.sessions,
-        and(
-          eq(schema.sessions.workspaceId, schema.sessionVariableSetAttachments.workspaceId),
-          eq(schema.sessions.id, schema.sessionVariableSetAttachments.sessionId),
-        ),
-      )
+      .from(schema.sessions)
       .where(
         and(
-          eq(schema.sessionVariableSetAttachments.workspaceId, workspaceId),
-          eq(schema.sessionVariableSetAttachments.variableSetId, variableSetId),
+          eq(schema.sessions.workspaceId, workspaceId),
+          sql`${schema.sessions.variableSetIds} ? ${variableSetId}`,
           inArray(schema.sessions.status, [
             "queued",
             "running",
@@ -17494,7 +17487,92 @@ export async function updateSessionVariableSets(
         });
         const session = locks.sessions[0];
         if (!session || session.accountId !== input.accountId) return { status: "not_found" };
-        if (session.activeTurnId !== null) {
+        // Prompt admission and turn claim both take the same session-row lock
+        // before creating or claiming work. Inspect the complete tenancy
+        // quiescence set while that lock is held so an accepted queued turn can
+        // neither slip through this mutation nor be admitted against the old
+        // Variable Set selection after this transaction commits.
+        const [pendingWork] = await rawRows<{ blocker: string | null }>(
+          tx,
+          sql`select case
+            when ${session.activeTurnId}::uuid is not null
+              or exists (select 1 from ${schema.sessionTurns} turn_row
+                where turn_row.workspace_id = ${input.workspaceId}
+                  and turn_row.session_id = ${input.sessionId}
+                  and turn_row.status in (
+                    'queued', 'running', 'requires_action', 'recovering', 'waiting_capacity'
+                  ))
+              then 'nonterminal_turn'
+            when exists (select 1 from ${schema.sessionTurnAttempts} attempt_row
+                where attempt_row.workspace_id = ${input.workspaceId}
+                  and attempt_row.session_id = ${input.sessionId}
+                  and attempt_row.state <> 'closed')
+              then 'nonterminal_attempt'
+            when exists (select 1 from ${schema.sessionAttemptInterruptions} interruption_row
+                where interruption_row.workspace_id = ${input.workspaceId}
+                  and interruption_row.session_id = ${input.sessionId}
+                  and interruption_row.state in ('pending', 'delivered', 'acknowledged'))
+              then 'unsettled_interruption'
+            when exists (select 1 from ${schema.sessionSystemUpdates} update_row
+                where update_row.workspace_id = ${input.workspaceId}
+                  and update_row.session_id = ${input.sessionId}
+                  and update_row.state = 'pending')
+              then 'pending_system_update'
+            when exists (select 1 from ${schema.sessionHumanInputRequests} request_row
+                where request_row.workspace_id = ${input.workspaceId}
+                  and request_row.session_id = ${input.sessionId}
+                  and request_row.status = 'pending')
+              then 'pending_human_input'
+            when exists (select 1 from ${schema.sessionPendingToolCalls} tool_row
+                where tool_row.workspace_id = ${input.workspaceId}
+                  and tool_row.session_id = ${input.sessionId})
+              then 'pending_tool_receipt'
+            when exists (select 1 from ${schema.agentRunStates} run_state
+                where run_state.workspace_id = ${input.workspaceId}
+                  and run_state.session_id = ${input.sessionId})
+              then 'run_state'
+            when exists (select 1 from ${schema.sessionGoals} goal_row
+                where goal_row.workspace_id = ${input.workspaceId}
+                  and goal_row.session_id = ${input.sessionId}
+                  and goal_row.status = 'active')
+              then 'active_goal'
+            when exists (select 1 from ${schema.codexCapacityWaiters} codex_waiter
+                where codex_waiter.workspace_id = ${input.workspaceId}
+                  and codex_waiter.session_id = ${input.sessionId}
+                  and codex_waiter.status = 'waiting')
+              or exists (select 1 from ${schema.xaiCapacityWaiters} xai_waiter
+                where xai_waiter.workspace_id = ${input.workspaceId}
+                  and xai_waiter.session_id = ${input.sessionId}
+                  and xai_waiter.status = 'waiting')
+              then 'capacity_waiter'
+            when exists (select 1 from ${schema.sessionRealtimeModes} realtime_mode
+                where realtime_mode.workspace_id = ${input.workspaceId}
+                  and realtime_mode.session_id = ${input.sessionId}
+                  and realtime_mode.state = 'active')
+              or exists (select 1 from ${schema.sessionRealtimeConnections} realtime_connection
+                where realtime_connection.workspace_id = ${input.workspaceId}
+                  and realtime_connection.session_id = ${input.sessionId}
+                  and realtime_connection.state in ('negotiating', 'ready', 'active'))
+              then 'active_realtime'
+            when exists (select 1 from ${schema.scheduledTasks} scheduled_task
+                where scheduled_task.workspace_id = ${input.workspaceId}
+                  and scheduled_task.reusable_session_id = ${input.sessionId}
+                  and scheduled_task.status = 'active')
+              then 'active_scheduled_task'
+            when exists (select 1 from ${schema.sandboxWorkspaceMutationAdmissions} admission_row
+                where admission_row.workspace_id = ${input.workspaceId}
+                  and admission_row.session_id = ${input.sessionId}
+                  and admission_row.settled_at is null)
+              then 'workspace_mutation_admission'
+            when exists (select 1 from ${schema.sandboxRetainedProcesses} process_row
+                where process_row.workspace_id = ${input.workspaceId}
+                  and process_row.session_id = ${input.sessionId}
+                  and process_row.state = 'active')
+              then 'retained_process'
+            else null
+          end as blocker`,
+        );
+        if (pendingWork?.blocker !== null && pendingWork?.blocker !== undefined) {
           return { status: "blocked", reason: "turn_in_flight" };
         }
         const [groupCount] = await rawRows<{ count: number }>(

@@ -3786,9 +3786,9 @@ export const sessions = pgTable(
     // write the result through the epoch-fenced setActiveSandbox CAS. Legacy
     // rows may still be null/relative and are resolved at establishment.
     workingDir: text("working_dir"),
-    // Ordered low-to-high precedence cache for public/session/runtime reads.
-    // session_variable_set_attachments is the FK-backed source of truth; its
-    // trigger maintains this value and the legacy singular alias atomically.
+    // Ordered low-to-high precedence source for public/session/runtime reads.
+    // session_variable_set_attachments is the FK-backed lifecycle projection;
+    // the session trigger maintains it and the legacy singular alias atomically.
     variableSetIds: jsonb("variable_set_ids").$type<string[]>().notNull().default([]),
     variableSetId: uuid("variable_set_id").references(() => workspaceVariableSets.id, {
       onDelete: "set null",

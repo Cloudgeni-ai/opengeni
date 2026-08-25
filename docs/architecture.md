@@ -756,11 +756,14 @@ flowchart LR
    applied visibility receipt therefore still replays after disable, Personal
    workspaces stay exempt, and transition to Workspace remains unaffected.
    **Runtime reconfiguration boundary.** Ordered explicit Variable Sets may be
-   replaced only between turns through the dedicated session-control route.
-   The database locks the session, rejects shared groups and live holders,
-   updates the FK-backed ordered attachment rows, emits metadata-only event and
-   audit evidence, and expires the current lease for cold rotation. A Rig is
-   never hot-swapped. “Restart with setup” uses the tenancy fork boundary with
+   replaced only while the session has no accepted, queued, claimed, or other
+   credential-consuming pending work through the dedicated session-control
+   route. The database locks the session against admission and claim, rejects
+   shared groups and live holders, updates the ordered session selection and its
+   lifecycle-only FK projection, emits metadata-only event and audit evidence,
+   and expires the current lease for cold rotation. Runtime roles have no direct
+   attachment-table privileges and no reverse projection trigger. A Rig is never
+   hot-swapped. “Restart with setup” uses the tenancy fork boundary with
    optional `rigId` and `variableSetIds`; PostgreSQL creates the history fork,
    fresh singleton group, frozen active Rig version, ordered selections, and
    both durable events in one transaction. Failure leaves no destination or

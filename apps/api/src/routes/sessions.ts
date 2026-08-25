@@ -1825,7 +1825,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (result.status === "blocked") {
       const messages = {
         turn_in_flight:
-          "Variable Sets can be changed only between turns; wait for the active turn to finish.",
+          "Variable Sets can be changed only when the session has no accepted, queued, claimed, or pending work.",
         shared_sandbox_group:
           "Variable Sets cannot be changed while this session shares a sandbox; fork it into a separate session first.",
         live_sandbox_holders:

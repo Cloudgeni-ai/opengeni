@@ -41,8 +41,14 @@ describe("migration 0347 ordered session Variable Set attachments", () => {
       "CREATE OR REPLACE FUNCTION sync_session_variable_set_attachment_status",
     );
     expect(source).toContain("AFTER UPDATE OF status ON sessions");
-    expect(source).toContain("session_status IN (''idle'', ''failed'', ''cancelled'')");
-    expect(source).toContain("variable set remains attached to % active sessions");
+    expect(source).toContain("variable set remains attached to % sessions");
+    expect(source).not.toContain(
+      "CREATE OR REPLACE FUNCTION refresh_session_variable_set_selection",
+    );
+    expect(source).not.toContain("CREATE TRIGGER session_variable_set_attachments_refresh");
+    expect(source).not.toContain(
+      "DELETE FROM %I.session_variable_set_attachments\n     WHERE variable_set_id",
+    );
     expect(source).toContain("CREATE FUNCTION fork_session_content_with_runtime");
     expect(source).toContain("CREATE FUNCTION replay_applied_session_fork_with_runtime");
     expect(source).toContain("opengeni_private.configure_fork_session_runtime");
@@ -61,9 +67,12 @@ describe("migration 0347 ordered session Variable Set attachments", () => {
     expect(source).toContain("SET search_path TO pg_catalog, %I, pg_temp AS %L");
     expect(source).toContain("FOR application_role IN");
     expect(source).toContain("JOIN pg_catalog.pg_roles role_value");
-    expect(source).toContain("session_variable_set_attachments TO %I");
+    expect(source).toContain("REVOKE ALL ON TABLE %I.session_variable_set_attachments FROM %I");
+    expect(source).not.toContain(
+      "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.session_variable_set_attachments",
+    );
     expect(source).not.toContain("session_variable_set_attachments TO opengeni_app");
-    expect(source).toContain("REVOKE ALL ON FUNCTION refresh_session_variable_set_selection()");
+    expect(source).toContain("FK-backed lifecycle-only projection");
     expect(source).not.toContain("value_encrypted");
   });
 });
