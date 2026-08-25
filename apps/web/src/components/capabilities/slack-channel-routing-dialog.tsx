@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 
 /** The null option: the channel asks the person once and remembers the answer. */
@@ -84,12 +85,37 @@ function SlackChannelRoutingDialogBody({
   // Only workspaces in this installation's own organization, and only ones this
   // admin could start work in themselves. The API refuses anything else, so
   // offering it here would be a promise it cannot keep.
+  // A personal workspace is excluded even though this admin can start work in
+  // it: a channel routed there would put every message in that channel
+  // somewhere nobody else in it can see. The API refuses it with a 422, and the
+  // routing resolver does not treat one as a candidate in a channel either.
   const account = context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId;
   const choices = context.workspaces.filter(
     (candidate) =>
       candidate.accountId === account &&
-      hasWorkspacePermission(context.accessContext, candidate.id, "sessions:create"),
+      hasWorkspacePermission(context.accessContext, candidate.id, "sessions:create") &&
+      !isPersonalWorkspace(candidate, context.managedSelfContext),
   );
+
+  /**
+   * A stored route already pointing at this admin's own personal workspace.
+   *
+   * Excluding personal workspaces from `choices` would otherwise make such a
+   * route unreachable, which renders it as "set by someone else" - false, since
+   * only this admin could have set it - and removes the control needed to
+   * change it. It stays selectable so it can be cleared, which is the whole
+   * point of surfacing it.
+   */
+  function personalRouteTarget(channelId: string) {
+    const stored = loadedRoutes?.[channelId];
+    if (!stored?.targetWorkspaceId) return null;
+    if (choices.some((candidate) => candidate.id === stored.targetWorkspaceId)) return null;
+    const workspace = context.workspaces.find(
+      (candidate) => candidate.id === stored.targetWorkspaceId,
+    );
+    if (!workspace || !isPersonalWorkspace(workspace, context.managedSelfContext)) return null;
+    return workspace;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -167,6 +193,7 @@ function SlackChannelRoutingDialogBody({
   function reachable(channelId: string) {
     const stored = loadedRoutes?.[channelId];
     if (!stored) return true;
+    if (personalRouteTarget(channelId)) return true;
     return choices.some((candidate) => candidate.id === stored.targetWorkspaceId);
   }
 
@@ -239,6 +266,16 @@ function SlackChannelRoutingDialogBody({
                         {candidate.name}
                       </option>
                     ))}
+                    {(() => {
+                      // Only ever the current value of a route set before a
+                      // channel could no longer point at a personal workspace.
+                      // Listed so the control shows what it is set to, and
+                      // named so it is obvious why it should change.
+                      const personal = personalRouteTarget(channel.id);
+                      return personal ? (
+                        <option value={personal.id}>{personal.name} · only you can see this</option>
+                      ) : null;
+                    })()}
                   </Select>
                 ) : (
                   // Somebody with access this admin does not have pointed this

@@ -400,6 +400,8 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_object_deletion_receipts",
           "organization_user_retention_object_obligations",
           "organization_user_retention_policies",
+          "organization_user_setup_intents",
+          "self_service_organization_setup_receipts",
           "session_human_input_requests",
           "session_tenancy_activations",
           "session_turn_attempts",

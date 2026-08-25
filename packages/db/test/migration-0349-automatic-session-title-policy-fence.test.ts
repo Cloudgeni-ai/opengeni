@@ -33,15 +33,15 @@ import {
 } from "../src/index";
 
 const fenceMigrationUrl = new URL(
-  "../drizzle/0348_automatic_session_title_policy_fence.sql",
+  "../drizzle/0349_automatic_session_title_policy_fence.sql",
   import.meta.url,
 );
 const quarantineIndexMigrationUrl = new URL(
-  "../drizzle/0349_automatic_session_title_quarantine_index.sql",
+  "../drizzle/0350_automatic_session_title_quarantine_index.sql",
   import.meta.url,
 );
 const quarantineMigrationUrl = new URL(
-  "../drizzle/0350_automatic_session_title_quarantine.sql",
+  "../drizzle/0351_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -244,7 +244,7 @@ async function addAcceptedScheduledOccurrence(input: {
   );
 }
 
-describe("migrations 0348-0350 automatic session title policy fence", () => {
+describe("migrations 0349-0351 automatic session title policy fence", () => {
   test("use a short rolling fence, concurrent candidate index, and bounded resumable quarantine", async () => {
     const fence = await readFile(fenceMigrationUrl, "utf8");
     const quarantineIndex = await readFile(quarantineIndexMigrationUrl, "utf8");
@@ -304,7 +304,7 @@ describe("migrations 0348-0350 automatic session title policy fence", () => {
     expect(quarantineIndex).toContain("title_source IS DISTINCT FROM 'user'");
     expect(
       parseConcurrentIndexMigration(
-        "0349_automatic_session_title_quarantine_index.sql",
+        "0350_automatic_session_title_quarantine_index.sql",
         quarantineIndex,
       ),
     ).toMatchObject({

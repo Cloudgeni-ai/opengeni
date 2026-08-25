@@ -427,6 +427,7 @@ export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./managed-human-provisioning";
+export * from "./managed-user-setup";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -1504,6 +1505,7 @@ export async function ensureManagedAccessForUser(
     email: string;
     name: string;
     emailVerified?: boolean;
+    provisionFallbackOrganization?: boolean;
   },
 ): Promise<AccessContext> {
   return (await ensureManagedAccessForUserWithOrganizationMemberships(db, input)).accessContext;
@@ -1648,6 +1650,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     email: string;
     name: string;
     emailVerified?: boolean;
+    provisionFallbackOrganization?: boolean;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
@@ -1712,18 +1715,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         (membership) => membership.status === "suspended" || membership.status === "revoked",
       )
     ) {
-      if (
-        fallbackAccount &&
-        existingOrganizationMemberships.some(
-          (membership) => membership.organizationId === fallbackAccount.id,
-        )
-      ) {
-        return await projectManagedOrganizationAccess(txDb, {
-          subjectId,
-          subjectLabel,
-          organizationMemberships: existingOrganizationMemberships,
-        });
-      }
       return {
         accessContext: {
           mode: "managed",
@@ -1744,6 +1735,20 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       ) as result`,
     );
     if (pendingInvitationResult?.result === true) {
+      return {
+        accessContext: {
+          mode: "managed",
+          subjectId,
+          subjectLabel,
+          accountGrants: [],
+          workspaceGrants: [],
+          defaultAccountId: null,
+          defaultWorkspaceId: null,
+        },
+        organizationMemberships: [],
+      };
+    }
+    if (input.provisionFallbackOrganization === false) {
       return {
         accessContext: {
           mode: "managed",
@@ -1778,7 +1783,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         })
         .onConflictDoUpdate({
           target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
-          set: { name: accountName, updatedAt: new Date() },
+          // The insert race may converge here, but later access refreshes must
+          // never turn one-shot signup intent into an organization rename.
+          set: { updatedAt: new Date() },
         })
         .returning();
     }
@@ -1812,7 +1819,8 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         })
         .onConflictDoUpdate({
           target: [schema.workspaces.externalSource, schema.workspaces.externalId],
-          set: { name: "Default workspace", updatedAt: new Date() },
+          // Preserve a later administrator rename on legacy fallback workspaces.
+          set: { updatedAt: new Date() },
         })
         .returning();
     }

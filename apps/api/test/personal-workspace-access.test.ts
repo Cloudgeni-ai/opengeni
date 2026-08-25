@@ -4,6 +4,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   createApiKey,
   createDb,
+  ensureManagedAccessForUserWithOrganizationMemberships,
   managedPersonalWorkspacePermissions,
   type DbClient,
 } from "@opengeni/db";
@@ -63,6 +64,16 @@ beforeAll(async () => {
   await shared.admin`
     insert into auth_identities (id, user_id, provider_id, account_id)
     values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId})`;
+  // Before 0348 the managed-cookie access resolver materialised this
+  // organization implicitly on the first `/v1/access/me`. That implicit
+  // provisioning is exactly what the post-sign-in onboarding gate replaces, so
+  // this fixture now states the premise it always relied on.
+  await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+    userId,
+    email,
+    name: "Personal workspace owner",
+    emailVerified: true,
+  });
   const identity = await synchronizeCanonicalHumanLoginBindings(client.db, userId);
   await shared.admin`
     insert into auth_sessions (
