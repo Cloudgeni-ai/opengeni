@@ -186,9 +186,9 @@ export type MessageTimelineProps = {
   /** An older window is being fetched; shows the quiet top shimmer. */
   loadingOlder?: boolean | undefined;
   /**
-   * Called when older history should backfill. Return the exact causal receipt
-   * from useSessionEvents.loadOlder (including through wrappers) so bounded
-   * zero-overlap replacement direction and retry settlement cannot be lost.
+   * Called when older history should backfill. Existing void, synchronous-value,
+   * and arbitrary-promise callbacks remain supported. Receipt-aware loaders
+   * preserve committed-page direction through wrappers and bounded windows.
    */
   onLoadOlder?: OlderHistoryLoader | undefined;
   /** Jump to the durable session start (bounded oldest window, no middle). */
@@ -270,26 +270,31 @@ function invokeOlderLoad(
   attempt: OlderLoadAttempt,
 ): 1 | undefined {
   try {
-    // Runtime compatibility for hosts compiled against the prior callback
-    // shape. The exported type requires a receipt, so newly compiled wrappers
-    // cannot silently discard it; old JS/plain-promise callbacks retain their
-    // prior one-shot/no-progress behavior while they migrate.
+    // Receipt creation is captured synchronously through legacy wrappers such
+    // as `() => void loadOlder()`, even when the wrapper discards the return.
     const result = invokeOlderHistoryLoaderWithReceiptCapture(load, (receipt) => {
       attempt[2] = receipt;
     }) as OlderHistoryLoadReceipt | PromiseLike<unknown> | unknown;
-    if (typeof (result as PromiseLike<unknown> | undefined)?.then != "function") {
-      return;
-    }
-    if (typeof (result as { committed?: unknown }).committed !== "boolean") {
-      void (result as PromiseLike<unknown>).then(
-        (value) => value === false && noProgress(),
+    const receipt =
+      attempt[2] ??
+      (typeof (result as { committed?: unknown } | undefined)?.committed === "boolean"
+        ? (result as OlderHistoryLoadReceipt)
+        : undefined);
+    if (receipt) {
+      attempt[2] = receipt;
+      void receipt.then(
+        (value) => value === false && !receipt.committed && noProgress(),
         noProgress,
       );
       return 1;
     }
-    const receipt = result as OlderHistoryLoadReceipt;
-    attempt[2] = receipt;
-    void receipt.then((value) => value === false && !receipt.committed && noProgress(), noProgress);
+    if (typeof (result as PromiseLike<unknown> | undefined)?.then != "function") {
+      return;
+    }
+    void (result as PromiseLike<unknown>).then(
+      (value) => value === false && noProgress(),
+      noProgress,
+    );
   } catch {
     noProgress();
   }
@@ -1156,15 +1161,15 @@ export function MessageTimeline({
           : null;
     }
 
-    // Promise settlement is not itself permission to retry. An accepted older
-    // page marks its exact owner even when an oversized page replaces the whole
-    // bounded window. Without that mark, retain the compatibility fallback: a
-    // retained prior boundary proves prepend, while a missing prior boundary is
-    // forward eviction and merely rebases.
+    // Promise settlement is not itself permission to retry. A receipt-marked
+    // accepted page retires its exact owner on this commit even when projection
+    // is empty or merges into the same first item. Without that mark, retain
+    // the compatibility fallback: a retained prior boundary proves prepend,
+    // while a missing prior boundary is forward eviction and merely rebases.
     if (!attempt) {
       return;
     }
-    if (attempt[0] === olderBoundaryKey) {
+    if (!attempt[2]?.committed && attempt[0] === olderBoundaryKey) {
       return;
     }
     if (

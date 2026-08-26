@@ -18,6 +18,8 @@ type TimelineCollapsedHistoryHarness = {
   appendLivePageMarkNoOlderAndSettleOlder: () => Promise<void>;
   armOlder: () => void;
   clickRetainedRetryAfterRemovingLoader: () => boolean;
+  commitProjectionEmptyOlderPage: () => void;
+  commitSameFirstOlderPage: () => void;
   finishNewer: () => void;
   loadCalls: () => number;
   prependFilteredOlderPage: () => void;
@@ -247,6 +249,18 @@ function Harness() {
     setItems((current) => [authNeeded(50 + call), ...current]);
   }, []);
 
+  const commitProjectionEmptyOlderPage = useCallback(() => {
+    settledCommitRef.current?.();
+    settledCommitRef.current = null;
+    setItems((current) => [...current]);
+  }, []);
+
+  const commitSameFirstOlderPage = useCallback(() => {
+    settledCommitRef.current?.();
+    settledCommitRef.current = null;
+    setItems((current) => current.map((item, index) => (index === 0 ? { ...item } : item)));
+  }, []);
+
   const clickRetainedRetryAfterRemovingLoader = useCallback(() => {
     const retry = document.querySelector<HTMLElement>("[data-og-retry]");
     if (!retry) {
@@ -412,6 +426,8 @@ function Harness() {
       appendLivePageMarkNoOlderAndSettleOlder,
       armOlder: () => setHasOlder(true),
       clickRetainedRetryAfterRemovingLoader,
+      commitProjectionEmptyOlderPage,
+      commitSameFirstOlderPage,
       finishNewer: () => setLoadingNewer(false),
       loadCalls: () => loadCallsRef.current,
       prependFilteredOlderPage,
@@ -447,6 +463,8 @@ function Harness() {
     appendLivePage,
     appendLivePageMarkNoOlderAndSettleOlder,
     clickRetainedRetryAfterRemovingLoader,
+    commitProjectionEmptyOlderPage,
+    commitSameFirstOlderPage,
     loadCalls,
     prependFilteredOlderPage,
     replaceWithFullOlderPage,

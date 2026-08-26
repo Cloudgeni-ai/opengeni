@@ -22,18 +22,28 @@ type LegacyTestMessageTimelineProps = Omit<MessageTimelineProps, "onLoadOlder"> 
 
 // Most cases below retain explicit runtime coverage for hosts compiled against
 // the previous callback shape. Public contract checks use PublicMessageTimeline
-// and OlderHistoryLoader directly so unsafe wrappers cannot regress silently.
+// and OlderHistoryLoader directly so source compatibility cannot regress.
 const MessageTimeline = PublicMessageTimeline as ComponentType<LegacyTestMessageTimelineProps>;
 
 const receiptedLoader: OlderHistoryLoader = () =>
   createOlderHistoryLoadReceipt(() => Promise.resolve(true));
 const forwardingWrapper: NonNullable<MessageTimelineProps["onLoadOlder"]> = () => receiptedLoader();
 void forwardingWrapper;
-// @ts-expect-error The public callback must return the causal receipt.
 const droppingWrapper: NonNullable<MessageTimelineProps["onLoadOlder"]> = () => {
   void receiptedLoader();
 };
 void droppingWrapper;
+const legacyVoidLoader: () => void = () => undefined;
+const legacyVoidProp: NonNullable<MessageTimelineProps["onLoadOlder"]> = legacyVoidLoader;
+const nonBooleanPromiseLoader: NonNullable<MessageTimelineProps["onLoadOlder"]> = async () => [
+  "older-event",
+];
+const synchronousValueLoader: NonNullable<MessageTimelineProps["onLoadOlder"]> = () => ({
+  accepted: true,
+});
+void nonBooleanPromiseLoader;
+void synchronousValueLoader;
+void legacyVoidProp;
 
 function controlledOlderReceipt(promise: Promise<boolean>): {
   receipt: OlderHistoryLoadReceipt;
@@ -107,23 +117,6 @@ function reasoningItem(id: string, text: string): TimelineItem {
     turnId: "turn-1",
     text,
     streaming: false,
-    occurredAt: "2026-01-01T00:00:00.000Z",
-  };
-}
-
-function authNeededItem(id: string): TimelineItem {
-  return {
-    kind: "auth-needed",
-    id,
-    turnId: null,
-    serverId: null,
-    providerDomain: "example.com",
-    connectionId: null,
-    reason: null,
-    scopes: [],
-    resource: null,
-    toolName: null,
-    authorizationUrl: null,
     occurredAt: "2026-01-01T00:00:00.000Z",
   };
 }
@@ -2217,7 +2210,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("a fulfilled fully filtered page advances pagination ownership", async () => {
+  test("a committed same-first-id page releases a legacy void-wrapper owner", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
       frames.push(callback);
@@ -2228,17 +2221,18 @@ describe("MessageTimeline pagination affordances", () => {
     const first = deferred<boolean>();
     const second = deferred<boolean>();
     const loads = [first, second];
+    const commit: Array<() => void> = [];
     let calls = 0;
-    const onLoadOlder = () => loads[calls++]!.promise;
+    const onLoadOlder: NonNullable<MessageTimelineProps["onLoadOlder"]> = () => {
+      const load = loads[calls++]!;
+      void createOlderHistoryLoadReceipt((markCommitted) => {
+        commit.push(markCommitted);
+        return load.promise;
+      });
+    };
     const items = [reasoningItem("collapsed-step", "collapsed step")];
-    const shouldRenderAuthNeeded = () => false;
     const r = await renderComponent(
-      <MessageTimeline
-        items={items}
-        hasOlder
-        onLoadOlder={onLoadOlder}
-        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
-      />,
+      <PublicMessageTimeline items={items} hasOlder onLoadOlder={onLoadOlder} />,
     );
     const scroller = r.container.querySelector("[data-og-timeline-scroller]");
     if (!(scroller instanceof HTMLElement)) {
@@ -2248,13 +2242,81 @@ describe("MessageTimeline pagination affordances", () => {
     Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
 
     await r.rerender(
-      <MessageTimeline
-        items={items}
+      <PublicMessageTimeline items={items} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // Fulfillment alone cannot release A before its accepted page commits.
+    await actRun(() => first.resolve(true));
+    await flush();
+    expect(calls).toBe(1);
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
+
+    // The raw page commits but projection merges into the existing first item.
+    // Receipt capture must survive the void wrapper and release A even though
+    // the first projected id remains unchanged.
+    commit[0]!();
+    const sameFirstPage = [{ ...items[0]!, text: "collapsed step with older detail" }];
+    await r.rerender(
+      <PublicMessageTimeline
+        items={sameFirstPage}
         status="idle"
         hasOlder
         onLoadOlder={onLoadOlder}
-        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
       />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+    expect(r.container.textContent).toContain("collapsed step with older detail");
+
+    commit[1]!();
+    await r.rerender(
+      <PublicMessageTimeline
+        items={[reasoningItem("visible-older-step", "visible older step"), ...sameFirstPage]}
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await actRun(() => second.resolve(true));
+    await flush();
+    expect(r.container.textContent).toContain("visible older step");
+    expect(calls).toBe(2);
+    await r.unmount();
+  });
+
+  test("a committed projection-empty page releases ownership for later visible history", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const loads = [first, second];
+    const commit: Array<() => void> = [];
+    let calls = 0;
+    const onLoadOlder: NonNullable<MessageTimelineProps["onLoadOlder"]> = () => {
+      const load = loads[calls++]!;
+      void createOlderHistoryLoadReceipt((markCommitted) => {
+        commit.push(markCommitted);
+        return load.promise;
+      });
+    };
+    const r = await renderComponent(
+      <PublicMessageTimeline items={[]} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <PublicMessageTimeline items={[]} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
     );
     await drainFrames(frames);
     expect(calls).toBe(1);
@@ -2262,31 +2324,24 @@ describe("MessageTimeline pagination affordances", () => {
     await actRun(() => first.resolve(true));
     await flush();
     expect(calls).toBe(1);
-    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
 
-    // The durable page commits, but its only row is host-filtered. The visible
-    // first item stays identical; the pre-filter progress receipt must release
-    // A and request the next still-underfilled page exactly once.
-    const filteredPage = [authNeededItem("hidden-auth-page"), ...items];
+    // A durable page consisting only of projection-omitted events publishes a
+    // new raw window but leaves the projected items empty. Its exact commit
+    // receipt must retire A so the still-underfilled page B can start.
+    commit[0]!();
     await r.rerender(
-      <MessageTimeline
-        items={filteredPage}
-        status="idle"
-        hasOlder
-        onLoadOlder={onLoadOlder}
-        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
-      />,
+      <PublicMessageTimeline items={[]} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
     );
     await drainFrames(frames);
-    expect(r.container.textContent).not.toContain("example.com");
     expect(calls).toBe(2);
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
 
+    commit[1]!();
     await r.rerender(
-      <MessageTimeline
-        items={[reasoningItem("visible-older-step", "visible older step"), ...filteredPage]}
+      <PublicMessageTimeline
+        items={[reasoningItem("visible-older-step", "visible older step")]}
         hasOlder={false}
         onLoadOlder={onLoadOlder}
-        shouldRenderAuthNeeded={shouldRenderAuthNeeded}
       />,
     );
     await actRun(() => second.resolve(true));

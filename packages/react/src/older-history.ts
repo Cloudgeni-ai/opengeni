@@ -2,15 +2,23 @@
  * Await-compatible older-history result with a causal commit receipt.
  *
  * `committed` flips synchronously before the accepted older window is exposed
- * to React. Forward this exact object through component wrappers; replacing it
- * with `void` or a plain promise drops the pagination direction receipt.
+ * to React. Returning this exact object preserves the receipt directly;
+ * synchronous wrappers that discard it remain supported through receipt
+ * capture, while replacing it asynchronously with a plain promise does not.
  */
 export type OlderHistoryLoadReceipt = Promise<boolean> & {
   readonly committed: boolean;
 };
 
-/** Public callback contract shared by useSessionEvents and MessageTimeline. */
-export type OlderHistoryLoader = () => OlderHistoryLoadReceipt;
+/**
+ * Source-compatible public callback accepted by MessageTimeline.
+ *
+ * The callback historically returned `void`, which permits consumers to
+ * return any synchronous value or promise. Receipt-aware loaders opt into the
+ * stronger runtime contract by returning (or synchronously creating through a
+ * wrapper) an {@link OlderHistoryLoadReceipt}.
+ */
+export type OlderHistoryLoader = () => unknown;
 
 type MutableOlderHistoryLoadReceipt = Promise<boolean> & {
   committed: boolean;
@@ -25,11 +33,12 @@ export function invokeOlderHistoryLoaderWithReceiptCapture(
   load: OlderHistoryLoader,
   capture: OlderHistoryReceiptCapture,
 ): unknown {
+  const previousCapture = activeReceiptCapture;
   activeReceiptCapture = capture;
   try {
     return load();
   } finally {
-    activeReceiptCapture = undefined;
+    activeReceiptCapture = previousCapture;
   }
 }
 

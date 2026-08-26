@@ -866,6 +866,60 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 
+  test("continues pagination after a committed projection-empty older page", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&empty-window&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("success"),
+    );
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    // A raw durable page committed, but every event was omitted by projection.
+    // The exact receipt must release A even though the projected source remains
+    // empty, allowing the next page with visible history to start.
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.commitProjectionEmptyOlderPage(),
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    expect(await page.getByRole("button", { name: "Retry earlier activity" }).count()).toBe(0);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
+  test("continues pagination after a committed same-first-id older page", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("success"),
+    );
+    await page.waitForTimeout(100);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    // Projection merged the accepted raw page into the existing first row.
+    // The row id is unchanged, but the commit receipt must still retire A and
+    // admit exactly one follow-on older request.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.commitSameFirstOlderPage());
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    expect(await page.getByRole("button", { name: "Retry earlier activity" }).count()).toBe(0);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("keeps an empty rejected page behind one explicit retry", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(

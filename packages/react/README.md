@@ -512,11 +512,12 @@ state remains application-owned; durable draft and session state remain in
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
   `replay: "full"` to opt back into full replay; a nonzero `after` keeps the
   previous resume semantics. `loadOlder()` remains await-compatible and resolves
-  to the existing `boolean`, but the returned promise also carries the causal
-  `committed` receipt used by `MessageTimeline`. Pass it directly, or return the
-  exact value from wrappers (`onLoadOlder={() => loadOlder()}`); do not discard
-  it with `void`. Custom loaders can use `createOlderHistoryLoadReceipt` and
-  call `markCommitted` immediately before publishing their accepted older
+  to the existing `boolean`, while its promise also carries the causal
+  `committed` receipt used by `MessageTimeline`. Pass it directly or through an
+  existing wrapper, including `onLoadOlder={() => void loadOlder()}`; synchronous
+  receipt capture preserves the commit signal without narrowing the historical
+  callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
+  and call `markCommitted` immediately before publishing their accepted older
   window.
 - `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
