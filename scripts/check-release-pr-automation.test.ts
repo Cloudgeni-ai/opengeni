@@ -3750,6 +3750,7 @@ describe("workflow contracts", () => {
         "Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
         "Long user-message disclosure browser acceptance",
+        "Timeline pagination browser regressions",
         "Public realtime SDK demo browser acceptance",
         "Session pin browser acceptance",
         "Responsive knowledge surfaces browser acceptance",
@@ -3811,6 +3812,13 @@ describe("workflow contracts", () => {
         {
           lane: "interaction",
           run: "bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts",
+        },
+      ],
+      [
+        "Timeline pagination browser regressions",
+        {
+          lane: "interaction",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/timeline-scroll.browser.e2e.ts",
         },
       ],
       [

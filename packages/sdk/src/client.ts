@@ -607,10 +607,32 @@ export type GetSessionLineageOptions = SharedSessionReadOptions;
 type SingleFlightReadEntry = {
   generation: number;
   promise: Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
   started: boolean;
   stamp?: number | undefined;
   listeners: Set<(readGeneration?: number) => void>;
 };
+
+function createSingleFlightReadEntry(
+  generation: number,
+  onRequestStart?: (readGeneration?: number) => void,
+): SingleFlightReadEntry {
+  let resolve!: (value: unknown) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<unknown>((entryResolve, entryReject) => {
+    resolve = entryResolve;
+    reject = entryReject;
+  });
+  return {
+    generation,
+    promise,
+    resolve,
+    reject,
+    started: false,
+    listeners: new Set(onRequestStart ? [onRequestStart] : []),
+  };
+}
 
 /** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
 export type SendMessageInput = UserMessageEventInput["payload"] & {
@@ -1275,13 +1297,8 @@ export class OpenGeniClient {
       );
     }
     const generation = (this.generations.get(key) ?? 0) + 1;
-    const entry: SingleFlightReadEntry = {
-      generation,
-      promise: Promise.resolve(undefined),
-      started: false,
-      listeners: new Set(options.onRequestStart ? [options.onRequestStart] : []),
-    };
-    entry.promise = this.launchRead(key, entry, read);
+    const entry = createSingleFlightReadEntry(generation, options.onRequestStart);
+    this.launchRead(key, entry, read);
     return entry.promise as Promise<T>;
   }
 
@@ -1292,17 +1309,10 @@ export class OpenGeniClient {
     read: () => Promise<T>,
     onRequestStart?: (readGeneration?: number) => void,
   ): Promise<T> {
-    const entry: SingleFlightReadEntry = {
-      generation,
-      promise: Promise.resolve(undefined),
-      started: false,
-      listeners: new Set(onRequestStart ? [onRequestStart] : []),
-    };
-    entry.promise = predecessor.then(
-      () => this.launchRead(key, entry, read),
-      () => this.launchRead(key, entry, read),
-    );
+    const entry = createSingleFlightReadEntry(generation, onRequestStart);
     this.queued.set(key, entry);
+    const launch = () => this.launchRead(key, entry, read);
+    void predecessor.then(launch, launch);
     const clear = () => {
       if (this.queued.get(key) !== entry) return;
       this.queued.delete(key);
@@ -1312,11 +1322,7 @@ export class OpenGeniClient {
     return entry.promise as Promise<T>;
   }
 
-  private launchRead<T>(
-    key: string,
-    entry: SingleFlightReadEntry,
-    read: () => Promise<T>,
-  ): Promise<T> {
+  private launchRead<T>(key: string, entry: SingleFlightReadEntry, read: () => Promise<T>): void {
     entry.started = true;
     this.generations.set(key, entry.generation);
     this.active.set(key, entry);
@@ -1333,11 +1339,29 @@ export class OpenGeniClient {
       }
     }
     entry.listeners.clear();
-    return read().finally(() => {
+    const settle = () => {
       if (this.active.get(key) !== entry) return;
       this.active.delete(key);
       if (!this.queued.has(key)) this.generations.delete(key);
-    });
+    };
+    let request: Promise<T>;
+    try {
+      request = read();
+    } catch (error) {
+      settle();
+      entry.reject(error);
+      return;
+    }
+    void request.then(
+      (value) => {
+        settle();
+        entry.resolve(value);
+      },
+      (error: unknown) => {
+        settle();
+        entry.reject(error);
+      },
+    );
   }
 
   private observeRead(

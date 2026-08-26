@@ -10,6 +10,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   type RemoveEnrollmentResponse,
   type Session,
+  type SessionLineageResponse,
   OPENGENI_CORRELATION_HEADER,
   type ComposerDraft,
   type SaveComposerDraftRequest,
@@ -621,6 +622,95 @@ describe("OpenGeniClient", () => {
     releaseInitial();
     expect((await active).ancestors[0]?.id).toBe("ancestor-channel-c");
     expect((await joined).ancestors[0]?.id).toBe("ancestor-channel-c");
+  });
+
+  test("shares the selected lineage read during request-start re-entry", async () => {
+    let requests = 0;
+    let causalGeneration = 0;
+    const observedGenerations: number[] = [];
+    let reentered!: Promise<SessionLineageResponse>;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
+      fetch: async () => {
+        requests += 1;
+        return jsonResponse({
+          ancestors: [{ id: "ancestor-shared" }],
+          children: [],
+          truncated: false,
+        });
+      },
+    });
+
+    const selected = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: (generation) => {
+        observedGenerations.push(generation ?? 0);
+        reentered = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+          onRequestStart: (joinedGeneration) => observedGenerations.push(joinedGeneration ?? 0),
+        });
+      },
+    });
+
+    expect((await selected).ancestors[0]?.id).toBe("ancestor-shared");
+    expect((await reentered).ancestors[0]?.id).toBe("ancestor-shared");
+    expect(requests).toBe(1);
+    expect(causalGeneration).toBe(1);
+    expect(observedGenerations).toEqual([1, 1]);
+  });
+
+  test("queues a re-entrant fresh read behind failure and cleans up for retry", async () => {
+    let requests = 0;
+    let causalGeneration = 0;
+    let rejectInitial!: (reason?: unknown) => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<Response>((_resolve, reject) => {
+      rejectInitial = reject;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    const observedGenerations: number[] = [];
+    let reenteredFresh!: Promise<Session>;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) {
+          markInitialStarted();
+          return await initialGate;
+        }
+        return jsonResponse({ id: SESSION_ID, workspaceId: WORKSPACE_ID, request });
+      },
+    });
+
+    const selected = client.getSession(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: (generation) => {
+        observedGenerations.push(generation ?? 0);
+        reenteredFresh = client.getSession(WORKSPACE_ID, SESSION_ID, {
+          fresh: true,
+          onRequestStart: (freshGeneration) => observedGenerations.push(freshGeneration ?? 0),
+        });
+      },
+    });
+    await initialStarted;
+    await Bun.sleep(1);
+    expect(requests).toBe(1);
+    expect(observedGenerations).toEqual([1]);
+
+    rejectInitial(new Error("initial read failed"));
+    await expect(selected).rejects.toThrow("initial read failed");
+    expect((reenteredFresh as Promise<Session & { request: number }>).then).toBeFunction();
+    expect(((await reenteredFresh) as Session & { request: number }).request).toBe(2);
+    expect(observedGenerations).toEqual([1, 2]);
+
+    expect(
+      ((await client.getSession(WORKSPACE_ID, SESSION_ID)) as Session & { request: number })
+        .request,
+    ).toBe(3);
+    expect(requests).toBe(3);
+    expect(causalGeneration).toBe(3);
   });
 
   test("queues one fresh session read behind an existing projection read", async () => {

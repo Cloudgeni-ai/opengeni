@@ -10,9 +10,9 @@ import {
 
 describe("web bundle budget policy", () => {
   test("retains at least one KiB above the exact current-main merged graph", () => {
-    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_190_109);
-    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2140 * KIB);
-    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_251);
+    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_190_732);
+    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2141 * KIB);
+    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_652);
     expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBeGreaterThanOrEqual(
       MINIMUM_RAW_HEADROOM_BYTES,
     );
