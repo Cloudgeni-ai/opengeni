@@ -57,6 +57,7 @@ import type {
   SandboxRuntimeState,
   WorkspaceRefState,
 } from "./turn-context";
+import { shouldRequestMissingSessionTitle, withEagerSessionTitleTool } from "./session-title";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -165,7 +166,19 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
   });
   const effectivePolicyTools = resolvedToolPolicy.toolRefs;
-  const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
+  const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+    runSettings,
+    session.firstPartyMcpTools,
+  );
+  const turnTools = withEagerSessionTitleTool(
+    withFirstPartyTools(runSettings, effectivePolicyTools),
+    shouldRequestMissingSessionTitle({
+      title: session.title,
+      titleSource: session.titleSource,
+      firstPartyMcpTools: selectedFirstPartyMcpTools,
+      firstPartyMcpPermissions: session.firstPartyMcpPermissions,
+    }),
+  );
   // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
   // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
   // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform

@@ -1410,6 +1410,35 @@ describe("OpenAI/Azure native client tool search", () => {
     }
   });
 
+  test("keeps an eager MCP session-title tool callable on the first request for every transport", async () => {
+    for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+      const title = firstPartyTool(
+        "opengeni__set_session_title",
+        "Set the durable semantic session title",
+      );
+      const agent = agentWith(title);
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set(["opengeni"]),
+        undefined,
+        new Set(),
+      );
+      const visible = await agent.getAllTools(undefined as never);
+      const inner = new CapturingModel();
+      const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+
+      await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+
+      expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
+        transport === "generic_dispatch"
+          ? ["opengeni__set_session_title", "tool_search", "tool_invoke"]
+          : ["opengeni__set_session_title", "tool_search"],
+      );
+      expect(runtime.search({ query: "set the session title" })).toEqual([]);
+    }
+  });
+
   test("survives the real SandboxAgent clone path", async () => {
     const agent = new SandboxAgent({
       name: "sandbox-lazy-test",

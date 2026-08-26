@@ -4,7 +4,6 @@ import {
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   getXaiSessionAccountPin,
   setXaiSessionAccountPin,
-  countSessionHistoryItems,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
   beginConnectorActionExecution,
@@ -20,6 +19,7 @@ import {
 } from "@opengeni/runtime";
 import {
   serviceTierForLatencyMode,
+  allowedFirstPartyMcpToolsForSession,
   environmentsEncryptionKeyBytes,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   resolveModelProvider,
@@ -74,6 +74,7 @@ import type {
   RecordingState,
   SandboxRuntimeState,
 } from "./turn-context";
+import { shouldRequestMissingSessionTitle } from "./session-title";
 
 export type BuildTurnAgentDeps = {
   input: RunAgentTurnInput;
@@ -154,7 +155,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     cancellationSignal,
     runtimeCancellationSignal,
     eventing,
-    attempt,
     sandboxState,
     recordingState,
     maybeStartOnTurnRecording,
@@ -205,9 +205,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   } = deps;
   const preparedTools = eventing.preparedTools!;
 
-  const isGenesisTurn =
-    attempt.triggerType === "user.message" &&
-    (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
+  const missingSessionTitleHint = shouldRequestMissingSessionTitle({
+    title: session.title,
+    titleSource: session.titleSource,
+    firstPartyMcpTools: allowedFirstPartyMcpToolsForSession(
+      runSettings,
+      session.firstPartyMcpTools,
+    ),
+    firstPartyMcpPermissions: session.firstPartyMcpPermissions,
+  });
   // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
   // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
   // may have been swapped to a connected machine (active_sandbox_id → a
@@ -612,7 +618,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
-        genesisTitleHint: isGenesisTurn,
+        missingSessionTitleHint,
         sandboxEnvironment,
         ...(preparedTools.attemptToolCatalog
           ? { attemptToolCatalog: preparedTools.attemptToolCatalog }

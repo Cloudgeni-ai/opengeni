@@ -174,6 +174,16 @@ function pricingSourceOf(
   return value === "configured_list_price" || value === "gateway_reported" ? value : null;
 }
 
+export function insightsSessionLabel(input: {
+  id: string;
+  title: string | null;
+  depth?: number | null;
+}): string {
+  const title = input.title?.trim();
+  if (title) return title;
+  return `${(input.depth ?? 0) > 0 ? "Agent" : "Session"} ${input.id.slice(0, 8)}`;
+}
+
 export async function getWorkspaceInsights(
   db: Database,
   settings: Settings,
@@ -453,7 +463,7 @@ export async function getWorkspaceInsights(
     return {
       id: `root:${row.rootSessionId}`,
       groupBy: "root_session" as const,
-      label: row.title?.trim() || row.rootSessionId.slice(0, 8),
+      label: insightsSessionLabel({ id: row.rootSessionId, title: row.title, depth: 0 }),
       creditUsd,
       estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
@@ -494,7 +504,11 @@ export async function getWorkspaceInsights(
     })
     .map((row) => ({
       id: row.id,
-      title: row.title?.trim() || "Untitled session",
+      title: insightsSessionLabel({
+        id: row.id,
+        title: row.title,
+        depth: row.nestedAgentDepth,
+      }),
       state: floorState(row),
       depth: row.nestedAgentDepth,
       model: row.model,
@@ -528,7 +542,11 @@ export async function getWorkspaceInsights(
       occurredAt: row.occurredAt.toISOString(),
       recordedAt: row.recordedAt.toISOString(),
       sessionId: row.sessionId,
-      sessionTitle: row.sessionTitle?.trim() || "Untitled session",
+      sessionTitle: insightsSessionLabel({
+        id: row.sessionId,
+        title: row.sessionTitle,
+        depth: row.sessionDepth,
+      }),
       turnId: row.turnId,
       provider: row.provider,
       providerApi: row.providerApi,
@@ -588,7 +606,13 @@ export async function getWorkspaceInsights(
     sessionsTouched: depth.sessionsTouched,
     rootSessions: depth.rootSessions,
     deepestDepth: depth.deepestDepth,
-    deepestSessionTitle: depth.deepestSessionTitle || "",
+    deepestSessionTitle: depth.deepestSessionId
+      ? insightsSessionLabel({
+          id: depth.deepestSessionId,
+          title: depth.deepestSessionTitle,
+          depth: depth.deepestDepth,
+        })
+      : "",
     avgDepth: Math.round(depth.avgDepth * 10) / 10,
     warmIdleNow: liveWarm.filter((lease) => lease.turnHolders === 0).length,
     billableTokensUsed,

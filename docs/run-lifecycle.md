@@ -22,6 +22,25 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Session display titles are durable session metadata, not a truncation of model
+history. Creation and migration use the prompt-free `New conversation` fallback.
+While a session still has that fallback (or a legacy null title), and its exact
+selected first-party tool and permission policy permits `set_session_title`, the
+worker upgrades the already-selected first-party MCP server to eager for that
+turn, then injects a request-local one-shot instruction into the next model call.
+This keeps `set_session_title` callable on the first request even when
+progressive tool disclosure is enabled, without granting or attaching any new
+tool authority. The agent writes a concise semantic title through the canonical
+title mutation, which updates the session row and appends `session.title_set`; a
+human title remains protected from later agent writes. The hint is based on
+durable title state rather than history length: turn claim persists the accepted
+user item before agent construction, so history count cannot identify a first
+turn.
+Historical fallback sessions therefore self-heal on their next eligible model
+turn. Read projections encountering malformed legacy nulls use an explicit
+factual session or agent identifier and never copy prompt text into title
+metadata.
+
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
 `clientEventId`, clears the visible draft immediately, and renders that snapshot

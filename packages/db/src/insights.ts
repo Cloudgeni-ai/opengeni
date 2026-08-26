@@ -119,6 +119,7 @@ export type RecentModelCallRow = {
   recordedAt: Date;
   sessionId: string;
   sessionTitle: string | null;
+  sessionDepth: number | null;
   turnId: string;
   provider: string;
   providerApi: string;
@@ -629,6 +630,7 @@ export async function listRecentModelCalls(
         recordedAt: schema.modelCallFacts.recordedAt,
         sessionId: schema.modelCallFacts.sessionId,
         sessionTitle: factSessions.title,
+        sessionDepth: factSessions.nestedAgentDepth,
         turnId: schema.modelCallFacts.turnId,
         provider: schema.modelCallFacts.provider,
         providerApi: schema.modelCallFacts.providerApi,
@@ -839,6 +841,7 @@ export async function aggregateSessionDepth(
   sessionsTouched: number;
   rootSessions: number;
   deepestDepth: number;
+  deepestSessionId: string | null;
   deepestSessionTitle: string;
   avgDepth: number;
   goalsActive: number;
@@ -866,6 +869,7 @@ export async function aggregateSessionDepth(
       .where(eq(schema.sessions.workspaceId, workspaceId));
     const [deepest] = await scopedDb
       .select({
+        id: schema.sessions.id,
         title: schema.sessions.title,
         depth: schema.sessions.nestedAgentDepth,
       })
@@ -888,6 +892,7 @@ export async function aggregateSessionDepth(
       sessionsTouched: Number(stats?.sessionsTouched ?? 0),
       rootSessions: Number(stats?.rootSessions ?? 0),
       deepestDepth: Number(stats?.deepestDepth ?? 0),
+      deepestSessionId: deepest?.id ?? null,
       deepestSessionTitle: deepest?.title?.trim() || "",
       avgDepth: Number(stats?.avgDepth ?? 0),
       goalsActive: Number(goals?.active ?? 0),

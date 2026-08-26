@@ -3412,10 +3412,10 @@ describe("runtime event normalization", () => {
     );
   });
 
-  test("the genesis title directive is not persisted across model calls", async () => {
+  test("the missing-title directive is not persisted across model calls", async () => {
     const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
       sessionInstructions: "Session-scoped rule.",
-      genesisTitleHint: true,
+      missingSessionTitleHint: true,
     });
     expect(agent.instructions).toContain("Session-scoped rule.");
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
@@ -3447,7 +3447,7 @@ describe("runtime event normalization", () => {
       persistentSessionSettings: {
         titleIsSet: true,
       },
-      genesisTitleHint: true,
+      missingSessionTitleHint: true,
     });
 
     expect(agent.instructions).toContain("Session-scoped rule.");
@@ -3591,10 +3591,10 @@ describe("runtime event normalization", () => {
     );
   });
 
-  test("the codemode directive and session slice stay persistent while genesis stays one-shot", () => {
+  test("the codemode directive and session slice stay persistent while titling stays one-shot", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), [], {
       sessionInstructions: "Session-scoped rule.",
-      genesisTitleHint: true,
+      missingSessionTitleHint: true,
       codemodeTokenSeed: "ogd_seed",
       codemodeTokenSessionId: "session-instructions",
     });
