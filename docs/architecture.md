@@ -430,7 +430,7 @@ workspace graph. The public setup route rate-limits before work and proves the
 non-consuming token authority before password hashing; its final lifecycle
 still revalidates and consumes atomically. Product-owned onboarding mutations
 are API-contract fenced and the web sends the exact release revision.
-Migration 0356 adds a provider-neutral browser installation/session-set authority
+Migration 0360 adds a provider-neutral browser installation/session-set authority
 with up to eight independently revocable login slots and exactly one explicit
 selected actor. Raw installation and transaction authority is hash-only at rest;
 every table is FORCE-RLS and runtime lifecycle access is restricted to
