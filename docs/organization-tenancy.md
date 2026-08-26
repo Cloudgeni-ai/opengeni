@@ -1342,16 +1342,16 @@ activity-write fence described in the Legacy behavior section, and migration
 reads. The later bounded API/core/SDK activation described above does not widen
 the personal-workspace exception or add another durable membership row.
 
-### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 + 0348 current)
+### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 + 0348 + 0351 current)
 
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
 described above are active. The bounded managed web administration surface
 described above is also active. Verified-email invitation binding,
 self-service managed organization creation, organization-scoped shared
-workspace administration, and the invited-user setup email attempt are active.
-Durable email delivery outcome/retry reconciliation and automatic scheduling of
-the operator command remain deferred.
+workspace administration, the invited-user setup email, and durable email
+delivery outcome/retry reconciliation are active. Automatic scheduling of the
+operator command remains deferred.
 
 ### D. Backfill
 
