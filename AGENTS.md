@@ -250,9 +250,7 @@ then keep the exact head frozen while CI and review run. Ordinary PRs into
   because `main` advanced. Candidate/version numbers count substantive source
   changes only.
 - Run independent review as soon as the candidate is ready; CI and review may
-  proceed concurrently, while merge still waits for both. After two substantive
-  repair revisions, pause for an explicit incident/scope review before creating
-  another source revision.
+  proceed concurrently, while merge still waits for both.
 
 Promote `main` → `production` with a merge-commit PR (never squash / never
 GitHub rebase-and-merge). Hotfix PRs into `production` keep freeze-head
