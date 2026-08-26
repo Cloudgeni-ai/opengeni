@@ -115,6 +115,7 @@ describe("0257 governed goal revision authority migration", () => {
       expect(applied).toEqual({ goalColumn: true, revisionColumn: true });
     } finally {
       await liveRuntime?.end();
+      await sql.unsafe(`DROP OWNED BY "${role}"`);
       await sql.unsafe(`DROP ROLE IF EXISTS "${role}"`);
       await sql.end();
       await blank.release();
