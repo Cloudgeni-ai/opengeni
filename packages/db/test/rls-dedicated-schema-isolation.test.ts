@@ -9,25 +9,31 @@ import {
   claimSessionWorkForAttempt,
   createApiKey,
   createDb,
+  createOrganizationInvitation,
   createSession,
   ensureManagedAccessForUser,
   FORCE_RLS_TABLES,
+  getOrganizationPrivateSessionSettings,
+  getOrganizationInvitationForAdministration,
   getOrCreateCompanyProfileSnapshot,
   getOrCreatePreferenceRegistrySnapshot,
   getOrCreateWorkspaceInstructionPolicySnapshot,
   initializeSessionStartAtomically,
   inspectCompanyBrainContextReceipts,
   listApiKeys,
+  listSelfOrganizationMemberships,
   prepareRetainedScreenshotArtifact,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   rlsStrategyFor,
   resolveCompanyBrainContextSelection,
   setSubjectRlsContext,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
   upsertKnowledgeSourceObject,
@@ -586,7 +592,9 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
           name,
           owner: "postgres",
           execute: true,
-          publicExecute: false,
+          publicExecute: (
+            RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
+          ).includes(name),
           securityDefiner: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
             name,
           ),
@@ -1725,6 +1733,17 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
         createdByContext: {},
       }),
     );
+    const privateSessionSettings = await getOrganizationPrivateSessionSettings(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+    });
+    await updateOrganizationPrivateSessionSettings(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: subjectId,
+      enabled: true,
+      expectedVersion: privateSessionSettings.version,
+      operationId: crypto.randomUUID(),
+    });
     await transitionSessionVisibility(db, {
       workspaceId: grant.workspaceId,
       sessionId: session.id,
@@ -1945,5 +1964,34 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     } finally {
       await reconnected.close();
     }
+  });
+
+  test("0351 invitation administration getter executes as app role in the dedicated schema", async () => {
+    if (!available) return;
+    const userId = `delivery-getter-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Delivery getter owner",
+    });
+    const [membership] = await listSelfOrganizationMemberships(db, subjectId);
+    expect(membership).toBeDefined();
+    const invitation = await createOrganizationInvitation(db, {
+      organizationId: membership!.organizationId,
+      actorSubjectId: subjectId,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: null,
+      targetEmail: `dedicated-getter-${crypto.randomUUID()}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    expect(
+      await getOrganizationInvitationForAdministration(db, {
+        organizationId: membership!.organizationId,
+        actorSubjectId: subjectId,
+        invitationId: invitation.id,
+      }),
+    ).toMatchObject({ id: invitation.id, status: "pending", delivery: null });
   });
 });

@@ -22,6 +22,7 @@ function workspace(id: string, accountId: string, name: string): Workspace {
   return {
     id,
     accountId,
+    kind: "shared",
     name,
     slug: null,
     externalSource: null,
@@ -67,7 +68,7 @@ function ActiveOrganizationSwitcherFixture() {
         <WorkspaceSwitcherTrigger
           activeWorkspace={activeWorkspace}
           activeOrganizationLabel={activeOrganization.label}
-          personal={false}
+          personal={activeWorkspace.kind === "personal"}
           collapsed
         />
       </section>

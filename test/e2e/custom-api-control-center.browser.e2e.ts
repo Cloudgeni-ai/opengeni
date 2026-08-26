@@ -632,6 +632,7 @@ function workspace() {
   return {
     id: workspaceId,
     accountId,
+    kind: "shared",
     name: "API Acceptance Workspace",
     slug: "api-acceptance",
     externalSource: null,

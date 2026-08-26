@@ -224,7 +224,9 @@ describe("OpenGeniClient Channel-A batches", () => {
       method: "POST",
       url: `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/publish`,
     });
-    expect(JSON.parse(requests[0]!.body!)).toEqual({ path: "reports/summary.pdf" });
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      path: "reports/summary.pdf",
+    });
   });
 });
 
@@ -1337,6 +1339,19 @@ describe("OpenGeniClient documents", () => {
       operationId: FILE_ID,
       batchSize: 10,
     });
+    await client.listDocumentDefaultCollectionBackfillRuns(WORKSPACE_ID, {
+      limit: 2,
+      cursor: "backfill-run-cursor",
+    });
+    await client.getDocumentDefaultCollectionBackfillAudit(WORKSPACE_ID, BASE_ID, {
+      limit: 3,
+      operationCursor: "operation-cursor",
+      receiptCursor: "receipt-cursor",
+    });
+    await client.listOrganizationDocumentAuthorityReclassifications(WORKSPACE_ID, {
+      limit: 4,
+      cursor: "organization-reclassification-cursor",
+    });
     expect(search.results).toEqual([]);
     expect(knowledgeSearch.results).toEqual([]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -1361,6 +1376,9 @@ describe("OpenGeniClient documents", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/authority-reclassifications`,
         `GET /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/authority-reclassifications`,
         `POST /v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills/${BASE_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/document-authority-reclassifications`,
       ],
     );
     expect(JSON.parse(requests[9]!.body!)).toEqual({
@@ -1400,6 +1418,19 @@ describe("OpenGeniClient documents", () => {
       runId: BASE_ID,
       operationId: FILE_ID,
       batchSize: 10,
+    });
+    expect(Object.fromEntries(new URL(requests[20]!.url).searchParams)).toEqual({
+      limit: "2",
+      cursor: "backfill-run-cursor",
+    });
+    expect(Object.fromEntries(new URL(requests[21]!.url).searchParams)).toEqual({
+      limit: "3",
+      operationCursor: "operation-cursor",
+      receiptCursor: "receipt-cursor",
+    });
+    expect(Object.fromEntries(new URL(requests[22]!.url).searchParams)).toEqual({
+      limit: "4",
+      cursor: "organization-reclassification-cursor",
     });
   });
 
@@ -1907,7 +1938,11 @@ describe("OpenGeniClient connections", () => {
     };
     const { client, requests } = makeClient((request) => {
       if (request.method === "GET") {
-        return jsonResponse({ enabled: true, connection, reviewUrl: "https://github.com/review" });
+        return jsonResponse({
+          enabled: true,
+          connection,
+          reviewUrl: "https://github.com/review",
+        });
       }
       if (request.method === "DELETE") return jsonResponse({ connection });
       return jsonResponse(oauth);
@@ -1950,7 +1985,13 @@ describe("OpenGeniClient connections", () => {
       private: true,
       archived: false,
       disabled: false,
-      permissions: { pull: true, push: true, admin: false, maintain: true, triage: true },
+      permissions: {
+        pull: true,
+        push: true,
+        admin: false,
+        maintain: true,
+        triage: true,
+      },
     };
     const selection = {
       connectionAuthorityGeneration: 4,
@@ -1991,7 +2032,11 @@ describe("OpenGeniClient connections", () => {
         expectedSelectionGeneration: 1,
         idempotencyKey: "github-repositories-1",
         repositories: [
-          { repositoryId: repository.repositoryId, fullName: repository.fullName, access: "write" },
+          {
+            repositoryId: repository.repositoryId,
+            fullName: repository.fullName,
+            access: "write",
+          },
         ],
       }),
     ).toEqual(selection);

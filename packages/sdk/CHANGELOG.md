@@ -1,5 +1,55 @@
 # @opengeni/sdk
 
+## 2.4.0
+
+### Minor Changes
+
+- 47b88d3: Add explicit managed onboarding: ordinary verified signup completes an organization-name-only setup that creates only the owner membership and canonical Personal workspace, while unregistered invitees can use a digest-only one-time account setup link before signing in normally.
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- 977fa0f: Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.
+- 9d251cb: Add server-owned viewer, member, and administrator roles for shared organization workspaces, an explicit Personal/shared workspace kind, a privacy-safe administration projection, and audited idempotent grant and revocation commands.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+  - @opengeni/contracts@2.4.0
+
+## 2.3.0
+
+### Minor Changes
+
+- f30555c: Add atomic same-workspace session forks with an explicit private or workspace destination. Private-to-workspace copies require a durable acknowledgement, workspace members may fork a shared source into fresh authority of their own, and private sources remain owner-only. Exact applied receipts remain recoverable by the same live workspace actor after mutable source authority changes, while changed requests conflict and fresh keys still require current source authority. Every fork receives fresh authority, provenance, root, and sandbox-group identity without inheriting live grants, credentials, Connections, turns, goals, MCP, resource attachments, processes, or pins. The managed web control now exposes the generic Fork dialog to authorized shared-session members and verifies the returned owned destination before navigation.
+- 47ccfab: Workspaces can persist exact default MCP servers and first-party OpenGeni tools for new sessions. Session creation, workspace-default policy updates, and scheduled session creation apply that policy while preserving the previous deployment defaults for workspaces without an override.
+- b74e557: Add an explicit, replay-safe Document authority-reclassification lifecycle and
+  a resumable organization Default-collection backfill. Reclassification requires
+  the exact expected authority tuple, updates the Document and every chunk in one
+  transaction, and retains immutable before/after receipts. The SDK and API expose
+  the account-admin and actor-fenced operations, bounded cursor-paginated receipt
+  history, and same-organization portable-personal behavior without making
+  collections an authority boundary.
+- 6fd5aee: Codex reset-credit overview responses now explain whether redemption belongs to the current managed human, an unowned legacy connection, another human, or an unavailable managed identity. Eligible admins can follow an explicit same-account reconnect path that claims only a null owner; existing ownership remains non-transferable without disconnect.
+- b2cd0f0: Slack can notify the human when work they started stops making progress, **off by default and switched on per workspace**. The new `slackOrchestrationNotices` workspace setting carries one boolean per notice (`childRequiresAction`, `goalPaused`), two checkboxes sit beside the reaction shortcut in the Slack integration settings, and `resolveWorkspaceSlackOrchestrationNoticeSettings` fails closed: absent, malformed, or partially invalid settings resolve to both disabled, so only an explicit opt-in ever posts. An unsolicited Slack post is worse than a missed one, and the in-app rail and priority feed already surface this work.
+
+  When a workspace opts in, a Slack-originated session's `child_requires_action` notice becomes one bounded pointer card ("A worker you started needs input", a single-line first-question or waiting-approval preview, and an **Open in OpenGeni** link to the child session), and a goal that pauses for `limits` or `max_auto_continuations` becomes one bounded line. Deferred child lifecycle notices, `user_pause` / `api` / `agent` / `no_progress` pauses, and `goal.resumed` stay silent, and so does a blocked-worker notice whose exact `(child, turn, generation)` boundary already carries a resolution or whose own row is `superseded` or `cancelled` - Slack delivery runs behind the session, and a card announcing a worker that is no longer blocked is worse than no card. Both notices draw on the same durable per-interaction slot budget as assistant progress, so an orchestration that fans out to many blocked children cannot turn one thread into a feed; a slot is claimed only when a card is actually going to be posted.
+
+  A disabled notice takes the same "nothing to post for this event" path as an undeliverable one - no post, no ledger row, and the delivery cursor advances identically - and every pre-existing Slack card type is unaffected. Both reuse the durable per-event post-operation ledger, so reaper retries and replica claims cannot double-post. Rolling migration `0329_slack_orchestration_delivery_events.sql` adds `system.update.pending` and `goal.paused` to the Slack delivery claim's event types, and `@opengeni/db` exports the read-only `getSessionSystemUpdateById` and `childRequiresActionResolutionExists` used to resolve the exact typed notice and prove it is still current.
+
+### Patch Changes
+
+- 1b21135: Attach a selected user-owned Connected Machine atomically when creating a session from the managed web console, including recovery-stable `once` authority.
+- 0fbf6b0: Align queued and steered message inputs with the API contract, expose the accepted control and connection-authority fields, and reject the retired per-message tools field before transport.
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [47ccfab]
+- Updated dependencies [b74e557]
+- Updated dependencies [b2cd0f0]
+  - @opengeni/contracts@2.3.0
+
 ## 2.2.0
 
 ### Minor Changes

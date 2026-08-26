@@ -1,5 +1,114 @@
 # @opengeni/db
 
+## 3.3.1
+
+### Patch Changes
+
+- 8fabf12: Document the one-way deployment boundary for named signup and invited-user
+  setup. Migration 0348 requires every API, control worker, and turn worker to be
+  stopped and drained before it runs, with the exact old/new application database
+  roles supplied to the migration runner. Start only binaries built for schema
+  ordinal 0348 or newer after it commits; never restart a pre-0348 image, and
+  remain in maintenance to fix forward if the new runtime cannot start.
+- 8fabf12: Repair realtime human-authority routing and metrics, personal Document reads
+  under FORCE RLS, private-session visibility transition checks, and
+  tenant-scoped session-tenancy fencing through migrations 0343-0345.
+
+  Migration 0345 is a one-way maintenance cutover. Stop and drain every API,
+  control worker, and turn worker before applying it, then start only binaries
+  built for schema ordinal 0345 or newer. Never restart a pre-0345 image after
+  the migration commits: its session-tenancy writes do not enter the required
+  workspace fence and will fail closed.
+
+## 3.3.0
+
+### Minor Changes
+
+- 47b88d3: Add explicit managed onboarding: ordinary verified signup completes an organization-name-only setup that creates only the owner membership and canonical Personal workspace, while unregistered invitees can use a digest-only one-time account setup link before signing in normally.
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+
+### Patch Changes
+
+- d47da57: Add bounded connection-authority convergence evidence with global residual totals, fixed operator actions, deterministic membership remediation, and fail-closed command completion.
+- 977fa0f: Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.
+- ba29352: Automatically activate session tenancy for an exact newly inserted Personal-only organization after the canonical deployment boundary, with atomic setup, private-setting, and greenfield evidence receipts.
+- 9d251cb: Add server-owned viewer, member, and administrator roles for shared organization workspaces, an explicit Personal/shared workspace kind, a privacy-safe administration projection, and audited idempotent grant and revocation commands.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/config@0.20.0
+  - @opengeni/codemode@0.4.14
+
+## 3.2.0
+
+### Minor Changes
+
+- f30555c: Add atomic same-workspace session forks with an explicit private or workspace destination. Private-to-workspace copies require a durable acknowledgement, workspace members may fork a shared source into fresh authority of their own, and private sources remain owner-only. Exact applied receipts remain recoverable by the same live workspace actor after mutable source authority changes, while changed requests conflict and fresh keys still require current source authority. Every fork receives fresh authority, provenance, root, and sandbox-group identity without inheriting live grants, credentials, Connections, turns, goals, MCP, resource attachments, processes, or pins. The managed web control now exposes the generic Fork dialog to authorized shared-session members and verifies the returned owned destination before navigation.
+- cb116e0: A parent turn that consumes a child's lifecycle update now acknowledges that child for the turn's initiating human, exactly as if they had opened and viewed it. An orchestrator that fans out to dozens of children used to leave a blue unread dot on every one of them forever, even though the parent agent had already consumed and acted on each result; the claim transaction that turns a batch of `session_system_updates` into durable model input now also advances that human's `session_pins.acknowledged_sequence` on every child the batch reports on, to the child's `last_sequence` at that instant.
+
+  The rule is keyed only on "a claimed turn consumed a child lifecycle update, and that turn has a frozen initiating human", so it covers all six child lifecycle kinds, behaves identically at every level of a nested chain, and has no orchestrator-, goal-, or depth-specific special case. Several notices for one child in a single batch produce one acknowledgment, and a turn whose frozen principal is purely a service acknowledges nothing.
+
+  It never hides a problem. Read state is per viewer, so another member still sees the child unread; `unread` remains nothing but `sessions.last_sequence > acknowledged_sequence`, so a child that emits one more event goes unread again on its own; and the `failed` and `requires_action` indicators come from `sessions.status`, rank above unread in the rail, and are untouched. The fence is monotone, so a human who already read further is never regressed.
+
+  The one thing it does change is that an explicit mark-unread is **not** sticky against it. Because the fence is monotone and OpenGeni stores no durable "leave this unread" intent, marking a child unread, letting that child do more work and report again, and then letting the parent consume that notice acknowledges it once more. That follows from the premise that consumption is the read signal, and the mark still holds until the parent consumes a newer notice, but it is a real behaviour change for anyone using mark-unread as a personal to-do flag on a child of an active orchestrator. Making that intent sticky needs a durable explicit-unread marker, which this change deliberately does not add.
+
+  The acknowledgment does not touch `attention_version`. That revision exists only to order explicit human attention mutations against each other, and this writer publishes no event, NATS invalidation, or sequence advance a browser could learn from, so bumping it would silently stale the version the rail holds and turn the human's next mark-read click into a 409.
+
+  The write is one `parent_session_id`-fenced `INSERT ... SELECT ... ORDER BY id ... ON CONFLICT` per claim, so a payload field can never decide whose personal state is mutated, and rows lock in the same UUID order the other session writers use. It honours the `session-personal-state` advisory fence with `pg_try_advisory_xact_lock_shared` and skips the acknowledgment rather than blocking, because workspace membership removal takes that fence exclusively and _before_ the workspace/session lock prefix a claim already holds; the probe is shared because the rail list holds the shared counterpart for its whole transaction, and an exclusive probe would drop acknowledgments precisely while the human is watching the rail. It takes no child turn/attempt lock; `session_pins`'s two foreign keys to `sessions` do take `FOR KEY SHARE` on the child's row, which is compatible with the `FOR NO KEY UPDATE` every canonical session writer takes.
+
+  Because a row can now appear between another `session_pins` writer's read and its write, `setSessionPin`, `setSessionAttention`, and `setSessionArchive` upsert instead of insert; the acknowledgment row is pin-neutral and archive-neutral, so their conflict path is the same transition as their insert.
+
+- b74e557: Add an explicit, replay-safe Document authority-reclassification lifecycle and
+  a resumable organization Default-collection backfill. Reclassification requires
+  the exact expected authority tuple, updates the Document and every chunk in one
+  transaction, and retains immutable before/after receipts. The SDK and API expose
+  the account-admin and actor-fenced operations, bounded cursor-paginated receipt
+  history, and same-organization portable-personal behavior without making
+  collections an authority boundary.
+- b2cd0f0: Slack can notify the human when work they started stops making progress, **off by default and switched on per workspace**. The new `slackOrchestrationNotices` workspace setting carries one boolean per notice (`childRequiresAction`, `goalPaused`), two checkboxes sit beside the reaction shortcut in the Slack integration settings, and `resolveWorkspaceSlackOrchestrationNoticeSettings` fails closed: absent, malformed, or partially invalid settings resolve to both disabled, so only an explicit opt-in ever posts. An unsolicited Slack post is worse than a missed one, and the in-app rail and priority feed already surface this work.
+
+  When a workspace opts in, a Slack-originated session's `child_requires_action` notice becomes one bounded pointer card ("A worker you started needs input", a single-line first-question or waiting-approval preview, and an **Open in OpenGeni** link to the child session), and a goal that pauses for `limits` or `max_auto_continuations` becomes one bounded line. Deferred child lifecycle notices, `user_pause` / `api` / `agent` / `no_progress` pauses, and `goal.resumed` stay silent, and so does a blocked-worker notice whose exact `(child, turn, generation)` boundary already carries a resolution or whose own row is `superseded` or `cancelled` - Slack delivery runs behind the session, and a card announcing a worker that is no longer blocked is worse than no card. Both notices draw on the same durable per-interaction slot budget as assistant progress, so an orchestration that fans out to many blocked children cannot turn one thread into a feed; a slot is claimed only when a card is actually going to be posted.
+
+  A disabled notice takes the same "nothing to post for this event" path as an undeliverable one - no post, no ledger row, and the delivery cursor advances identically - and every pre-existing Slack card type is unaffected. Both reuse the durable per-event post-operation ledger, so reaper retries and replica claims cannot double-post. Rolling migration `0329_slack_orchestration_delivery_events.sql` adds `system.update.pending` and `goal.paused` to the Slack delivery claim's event types, and `@opengeni/db` exports the read-only `getSessionSystemUpdateById` and `childRequiresActionResolutionExists` used to resolve the exact typed notice and prove it is still current.
+
+- 1789977: Ask once where an unconfigured Slack conversation should work, remember the answer, and re-queue the request that was interrupted by the question. One live card per person per conversation is enforced by a partial unique index, an aged-out card is settled by the writer rather than holding the slot, and the answer commits the choice, the remembered route and the re-queued request together.
+- 64d8d2c: Schema and resolvers for per-channel and per-DM Slack workspace routing. **Nothing reads any of this yet**: no route table is consulted, no new column is written, and single-workspace Slack behaviour is byte-identical.
+
+  Rolling migration `0335_slack_workspace_routing.sql` adds four FORCE-RLS tables (`slack_channel_routes`, `slack_user_dm_routes`, `slack_route_prompts`, `slack_route_prompt_options`), five additive nullable routing columns plus a `route_state` CHECK on `slack_interaction_inbox`, a frozen `routed_workspace_label` on `slack_interactions`, and one narrow content-free `SECURITY DEFINER` probe, `opengeni_private.resolve_slack_interaction_tenancy`. The Slack installation binding is deliberately untouched: `resolve_slack_installation`, the active-team unique index, and the second-binding trigger are unchanged, so one team still installs into exactly one home workspace and one credential. Routing is a separate additive fact within the same organization, fenced by a `target_account_id = account_id` CHECK.
+
+  Routing splits **home** tenancy (the installation's credential, identity link, inbox, App Home, reaction-summon settings, task policy, and every new table) from **target** tenancy (the interaction, its action handles, its progress deliveries, the grant, the session, and its events). There is no backfill: `route_state IS NULL` means "legacy / never routed" and is exactly today's behaviour, so an old API or worker image ignores the new tables and columns entirely.
+
+  `@opengeni/db` gains the pure resolver library behind it: `probeSlackInteractionTenancy` (ids only, so thread continuation can cross workspaces on the connection-global route key), `getSlackChannelRoute` / `getSlackUserDmRoute` and their `upsert*` / `delete*` siblings (the ask-once memory), `listSlackRoutableWorkspacesForSubject` (the single implementation of "workspaces this subject may start work in", which unions permission-filtered memberships with the subject's own personal workspace), and `resolveSlackTargetAuthority` - the only place a Slack request may reach a managed human's personal workspace. `getWorkspaceGrant` is **not** widened, so no API-key or delegated-bearer principal gains personal-workspace access; the pointer path accepts only the subject's own `personalWorkspaceId` from an active same-organization membership and then re-checks live authority.
+
+- ad6acbe: Add the bounded organization connection-authority convergence seam to the `@opengeni/db` public surface: `classifyOrganizationConnectionAuthority` and `backfillOrganizationConnectionAuthority`, plus their `ConnectionAuthorityClassificationReport` / `ConnectionAuthorityBackfillReport` types, and the durable `runKey` receipt option on the organization membership backfill drain.
+
+  Connection owner authority now binds through one owner-only seam that works under the production database posture. `organization_memberships` and `organization_user_resource_authorities` are `FORCE ROW LEVEL SECURITY` and OpenGeni runs its SECURITY DEFINER routines as a non-superuser owner without `BYPASSRLS`, so the previous inline `SELECT ... FOR SHARE` plus authority insert matched nothing: a new personal connection whose subject held a live organization membership silently degraded to the `legacy_user` lane, and the bounded `legacy_user` upgrader refused every deterministic candidate.
+
+### Patch Changes
+
+- 1b21135: Attach a selected user-owned Connected Machine atomically when creating a session from the managed web console, including recovery-stable `once` authority.
+- 4d83368: Separate worker-claim queue state from prompts genuinely waiting behind work, keep rapid sends on stable chat and queue surfaces, and make local development fail fast when schema or aggregate runtime readiness is lost.
+- fc80fdf: Split the Slack integration's single workspace identifier into two explicit scopes: home (the installation binding that owns the bot credential, the inbox row, the identity link, and the post ledgers) and target (the workspace that owns the interaction, its action handles, the grant, and the session). The two are equal today, so behaviour is unchanged. Thread continuation is now connection-scoped through the content-free tenancy probe, interaction creation adopts an existing thread's tenancy instead of failing an idempotency conflict, delivery builds its bot client from the installation route, and the first-task hint resolves its identity claim and its frozen answer in the scope that owns each.
+- 4e48785: Fence both Slack routing tenancy probes on the organization the caller is acting for, and apply the canonical live-authority rule to the membership arm of `resolveSlackTargetAuthority`, so a suspended organization member holding a stale `workspace_memberships` row is no longer granted. The two arbitrary-subject Slack resolvers are renamed to the repository's `namedSubject*` convention and carry the oracle banner.
+- e720d3e: Add a quiet "-> Workspace" line to Slack acknowledgements and deliveries when routing actually chose a workspace, and bump all five Slack post operation-id seeds to v2 in the same change so no interaction with a claimed-but-unposted delivery row can wedge on a digest that will never match again.
+- 3e3b09a: Add per-channel and per-DM Slack workspace routing behind `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED` (default off). Migration 0337 adds a private ids-only action-handle tenancy mapping so a routed button click can find its handle, and gives a shared-task origin its own tenancy pair for the frozen Slack task policy revision, which stays a home fact while the origin follows the routed task.
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [47ccfab]
+- Updated dependencies [b74e557]
+- Updated dependencies [16387c3]
+- Updated dependencies [b2cd0f0]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/network@0.2.3
+  - @opengeni/codemode@0.4.13
+  - @opengeni/config@0.19.1
+  - @opengeni/codex@0.2.19
+
 ## 3.1.0
 
 ### Minor Changes

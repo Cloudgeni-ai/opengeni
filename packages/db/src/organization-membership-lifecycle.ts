@@ -1,11 +1,13 @@
 import {
   CreateOrganizationResponse,
+  ListOrganizationAdministrationMembersResponse,
   ListOrganizationInvitationsResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationMembersResponse,
   ListSelfOrganizationMembershipsResponse,
   OrganizationInvitation,
   OrganizationAdministrationOverview,
+  OrganizationWorkspaceAccess,
   OrganizationPrivateSessionSettings,
   OrganizationMember,
   OrganizationRetentionDeletionClaim,
@@ -15,7 +17,9 @@ import {
   OrganizationRetentionDeletionResult,
   OrganizationRetentionPolicy,
   OrganizationSummary,
+  RevokeOrganizationWorkspaceMemberResponse,
   type CreateOrganizationResponse as CreateOrganizationResponseType,
+  type OrganizationAdministrationMember as OrganizationAdministrationMemberType,
   type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
   type OrganizationInvitation as OrganizationInvitationType,
   type OrganizationMember as OrganizationMemberType,
@@ -28,6 +32,9 @@ import {
   type OrganizationRetentionDeletionResult as OrganizationRetentionDeletionResultType,
   type OrganizationRetentionPolicy as OrganizationRetentionPolicyType,
   type OrganizationSummary as OrganizationSummaryType,
+  type OrganizationWorkspaceAccess as OrganizationWorkspaceAccessType,
+  type PutOrganizationWorkspaceMemberRequest,
+  type RevokeOrganizationWorkspaceMemberResponse as RevokeOrganizationWorkspaceMemberResponseType,
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
@@ -317,6 +324,7 @@ export async function removeWorkspaceMember(
     actorSubjectId: string;
     targetSubjectId: string;
     requireOrganizationSharedWorkspaceAdministration?: boolean;
+    operationId?: string;
   },
 ): Promise<boolean> {
   const command = {
@@ -325,7 +333,7 @@ export async function removeWorkspaceMember(
     workspaceId: input.workspaceId,
     actorSubjectId: input.actorSubjectId,
     targetSubjectId: input.targetSubjectId,
-    operationId: crypto.randomUUID(),
+    operationId: input.operationId ?? crypto.randomUUID(),
   };
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
@@ -349,11 +357,21 @@ export async function removeWorkspaceMember(
         },
       );
     }
-    // The personal-state fence first, exactly as the pre-0278 delete path took
-    // it: session listing takes the shared counterpart and pin mutation the
-    // same exclusive one. The removal command re-acquires it (reentrant within
-    // this transaction), but taking it here keeps the wait observable and the
-    // fence ordered before every other lock this transaction takes.
+    // Enter the canonical organization -> session-tenancy prefix before the
+    // SECURITY-DEFINER command can lock or mutate session rows. Both locks are
+    // reentrant with the command's narrower lifecycle work. The shared tenancy
+    // fence lets ordinary writers continue while excluding a concurrent
+    // visibility transition/fork for this exact workspace.
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${input.accountId}`}, 0))`,
+    );
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(
+        ${`session-tenancy:${input.workspaceId}`}, 0))`,
+    );
+    // The personal-state fence follows that common prefix. Session listing
+    // takes its shared counterpart and pin mutation the same exclusive one.
     await txDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(
         ${`session-personal-state:${input.workspaceId}:${input.targetSubjectId}`}, 0))`,
@@ -396,6 +414,201 @@ export async function removeWorkspaceMember(
       );
     }
     return removed;
+  });
+}
+
+type OrganizationWorkspaceCommandResult = {
+  workspaceId: string;
+  organizationMembershipId?: string;
+  workspaceMembershipId?: string;
+  updatedAt: string;
+  replay: boolean;
+};
+
+async function runOrganizationWorkspaceCommand(
+  db: Database,
+  command: Record<string, unknown> & {
+    organizationId: string;
+    actorSubjectId: string;
+  },
+): Promise<OrganizationWorkspaceCommandResult> {
+  return await withRlsContext(
+    db,
+    { accountId: command.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, command.actorSubjectId);
+      const [row] = await rawRows<{ result: OrganizationWorkspaceCommandResult }>(
+        scopedDb,
+        sql`select organization_workspace_command(${JSON.stringify(command)}::jsonb) as result`,
+      );
+      if (!row) throw new Error("Organization workspace command returned no result");
+      return row.result;
+    },
+  );
+}
+
+export async function createOrganizationWorkspace(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    name: string;
+    operationId: string;
+  },
+): Promise<OrganizationWorkspaceAccessType> {
+  const command = await runOrganizationWorkspaceCommand(db, { action: "create", ...input });
+  const overview = await getOrganizationAdministrationOverview(db, input);
+  const workspace = overview.workspaces.find((candidate) => candidate.id === command.workspaceId);
+  if (!workspace) throw new Error("Created organization workspace is missing from its overview");
+  return OrganizationWorkspaceAccess.parse(workspace);
+}
+
+export async function updateOrganizationWorkspace(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    workspaceId: string;
+    name: string;
+    expectedUpdatedAt: string;
+    operationId: string;
+  },
+): Promise<OrganizationWorkspaceAccessType> {
+  await runOrganizationWorkspaceCommand(db, { action: "rename", ...input });
+  const overview = await getOrganizationAdministrationOverview(db, input);
+  const workspace = overview.workspaces.find((candidate) => candidate.id === input.workspaceId);
+  if (!workspace) throw new Error("Renamed organization workspace is missing from its overview");
+  return OrganizationWorkspaceAccess.parse(workspace);
+}
+
+export async function putOrganizationWorkspaceMember(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    workspaceId: string;
+    targetOrganizationMembershipId: string;
+    access: PutOrganizationWorkspaceMemberRequest;
+  },
+) {
+  const result = await runOrganizationWorkspaceCommand(db, {
+    action: "grant",
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+    workspaceId: input.workspaceId,
+    targetOrganizationMembershipId: input.targetOrganizationMembershipId,
+    ...input.access,
+  });
+  const overview = await getOrganizationAdministrationOverview(db, input);
+  const member = overview.workspaces
+    .find((candidate) => candidate.id === input.workspaceId)
+    ?.members.find((candidate) => candidate.membershipId === result.workspaceMembershipId);
+  if (!member) throw new Error("Organization workspace member is missing from its overview");
+  return member;
+}
+
+/**
+ * Revoke one managed human's shared-workspace access. The existing fenced
+ * prepare/settle/removal protocol remains the teardown authority. This outer
+ * transaction enters the canonical organization -> session-tenancy ->
+ * personal-state prefix before any row lock, then adds caller-owned
+ * idempotency, CAS, and immutable organization audit evidence.
+ */
+export async function revokeOrganizationWorkspaceMember(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    workspaceId: string;
+    targetOrganizationMembershipId: string;
+    expectedUpdatedAt: string;
+    operationId: string;
+  },
+): Promise<RevokeOrganizationWorkspaceMemberResponseType> {
+  return await db.transaction(async (tx) => {
+    const txDb = tx as unknown as Database;
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`organization-membership:${input.organizationId}`}, 0
+      ))`,
+    );
+    const targetSubjectId = await withRlsContext(
+      txDb,
+      { accountId: input.organizationId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+        const [row] = await rawRows<{ subject_id: string }>(
+          scopedDb,
+          sql`select resolve_organization_workspace_removal_subject(
+            ${input.organizationId}::uuid,
+            ${input.actorSubjectId},
+            ${input.targetOrganizationMembershipId}::uuid
+          ) as subject_id`,
+        );
+        if (!row?.subject_id) throw new Error("Organization member subject resolution failed");
+        return row.subject_id;
+      },
+    );
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(
+        ${`session-tenancy:${input.workspaceId}`}, 0
+      ))`,
+    );
+    await txDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(
+        ${`session-personal-state:${input.workspaceId}:${targetSubjectId}`}, 0
+      ))`,
+    );
+    const command = { action: "revoke", ...input, targetSubjectId };
+    const prepared = await withRlsContext(
+      txDb,
+      { accountId: input.organizationId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+        const [row] = await rawRows<{ result: Record<string, unknown> }>(
+          scopedDb,
+          sql`select prepare_organization_workspace_member_removal(
+            ${JSON.stringify(command)}::jsonb
+          ) as result`,
+        );
+        if (!row) throw new Error("Organization workspace removal preparation returned no result");
+        return row.result;
+      },
+    );
+    if (prepared.replay === true) {
+      return RevokeOrganizationWorkspaceMemberResponse.parse(prepared);
+    }
+    const workspaceMembershipId = String(prepared.workspaceMembershipId ?? "");
+    const actorMembershipId = String(prepared.actorMembershipId ?? "");
+    if (!uuidPattern.test(workspaceMembershipId) || !uuidPattern.test(actorMembershipId)) {
+      throw new Error("Organization workspace removal preparation returned invalid evidence");
+    }
+    const removed = await removeWorkspaceMember(txDb, {
+      accountId: input.organizationId,
+      workspaceId: input.workspaceId,
+      actorSubjectId: input.actorSubjectId,
+      targetSubjectId,
+      requireOrganizationSharedWorkspaceAdministration: true,
+      operationId: input.operationId,
+    });
+    if (!removed) throw new Error("Organization workspace removal lost its locked membership");
+    return await withRlsContext(
+      txDb,
+      { accountId: input.organizationId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+        const [row] = await rawRows<{ result: unknown }>(
+          scopedDb,
+          sql`select record_organization_workspace_member_removal(
+            ${JSON.stringify(command)}::jsonb,
+            ${workspaceMembershipId}::uuid,
+            ${actorMembershipId}::uuid
+          ) as result`,
+        );
+        if (!row) throw new Error("Organization workspace removal audit returned no result");
+        return RevokeOrganizationWorkspaceMemberResponse.parse(row.result);
+      },
+    );
   });
 }
 
@@ -514,6 +727,29 @@ export async function listOrganizationMembers(
         ) as result`,
       );
       return ListOrganizationMembersResponse.parse({
+        members: row?.result ?? [],
+      }).members;
+    },
+  );
+}
+
+export async function listOrganizationAdministrationMembers(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<OrganizationAdministrationMemberType[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select list_organization_administration_members(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId}
+        ) as result`,
+      );
+      return ListOrganizationAdministrationMembersResponse.parse({
         members: row?.result ?? [],
       }).members;
     },
@@ -657,6 +893,32 @@ export async function listOrganizationInvitations(
         invitations,
         nextCursor: hasMore ? (invitations.at(-1)?.id ?? null) : null,
       });
+    },
+  );
+}
+
+export async function getOrganizationInvitationForAdministration(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    invitationId: string;
+  },
+): Promise<OrganizationInvitationType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select get_organization_invitation_for_administration(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId},
+          ${input.invitationId}::uuid
+        ) as result`,
+      );
+      return OrganizationInvitation.parse(row?.result);
     },
   );
 }

@@ -12,10 +12,12 @@ import {
   createOrganizationInvitation,
   createSession,
   ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
   grantWorkspaceAccess,
   listSelfOrganizationMemberships,
   removeWorkspaceMember,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   type Database,
   type DbClient,
 } from "../src";
@@ -37,7 +39,7 @@ beforeAll(async () => {
   admin = shared.admin;
   client = createDb(shared.appUrl, { max: 4 });
   db = client.db;
-});
+}, 180_000);
 
 afterAll(async () => {
   await client?.close();
@@ -273,6 +275,18 @@ describe("workspace membership removal fencing", () => {
           '["sessions:read"]'::jsonb),
         (${organizationId}, ${otherWorkspaceRow!.id}, ${targetSubject}, 'member',
           '["sessions:read"]'::jsonb)`;
+
+    const privateSessionSettings = await getOrganizationPrivateSessionSettings(db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+    });
+    await updateOrganizationPrivateSessionSettings(db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      enabled: true,
+      expectedVersion: privateSessionSettings.version,
+      operationId: crypto.randomUUID(),
+    });
 
     const privateSession = await createSession(db, {
       accountId: organizationId,

@@ -293,10 +293,8 @@ export async function flushSessionRealtimeTranscriptTailInTransaction(
     subjectId: input.ownerSubjectId,
     subjectLabel: "Realtime",
     actor: {
-      type: "service",
+      type: "human",
       subjectId: input.ownerSubjectId,
-      subjectLabel: "Realtime",
-      context: { source: SESSION_REALTIME_TAIL_SOURCE, realtimeId: mode.id },
     },
     operationKey: deterministicUuid(`opengeni:session-realtime-tail-flush:${mode.id}`),
     delivery: "steer",

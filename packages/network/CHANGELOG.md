@@ -1,5 +1,11 @@
 # @opengeni/network
 
+## 0.2.3
+
+### Patch Changes
+
+- 16387c3: Keep ordinary MCP connections pinned to the complete vetted DNS answer under Bun and prefer IPv4 when a public dual-stack destination is available.
+
 ## 0.2.2
 
 ### Patch Changes

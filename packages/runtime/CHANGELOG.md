@@ -1,5 +1,45 @@
 # @opengeni/runtime
 
+## 1.3.2
+
+### Patch Changes
+
+- c10f396: Keep one completed commentary reply visible when a tool-bearing turn settles without a final answer, including goal-wait holds, while preserving ordinary finals and avoiding disclosure duplicates.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/sdk@2.4.0
+  - @opengeni/config@0.20.0
+  - @opengeni/codemode@0.4.14
+
+## 1.3.1
+
+### Patch Changes
+
+- a78124f: Adopt the canonical Bun 1.4 toolchain, build the standalone ogtool CLI with Bun, and use Bun 1.4's corrected UTF-8 byte-length behavior in runtime context compaction.
+- 16387c3: Keep ordinary MCP connections pinned to the complete vetted DNS answer under Bun and prefer IPv4 when a public dual-stack destination is available.
+- 92324b5: Preserve lazy tool preparation while fencing every actual local tool call on the shared attempt preparation promise. Codemode now distinguishes a catalog that is still preparing from invalid or stale attempt authority, and repeated same-turn provider or MCP recovery stops after five automatic replacements with explicit terminal exhaustion evidence.
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [47ccfab]
+- Updated dependencies [b74e557]
+- Updated dependencies [16387c3]
+- Updated dependencies [6fd5aee]
+- Updated dependencies [0fbf6b0]
+- Updated dependencies [b2cd0f0]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/sdk@2.3.0
+  - @opengeni/network@0.2.3
+  - @opengeni/codemode@0.4.13
+  - @opengeni/config@0.19.1
+  - @opengeni/capabilities@0.3.1
+  - @opengeni/codex@0.2.19
+  - @opengeni/xai-subscription@0.1.2
+
 ## 1.3.0
 
 ### Minor Changes

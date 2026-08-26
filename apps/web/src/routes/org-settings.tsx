@@ -3,7 +3,6 @@
 // /v1/billing/entitlements), and members. The workspace-scoped API keys section
 // moved to Workspace settings; this surface is the tenant-level console.
 import { useBillingUsage } from "@opengeni/react";
-import { useNavigate } from "@tanstack/react-router";
 import { ActivityIcon, GaugeIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -54,7 +53,6 @@ export function OrgSettingsRoute({
   section?: OrganizationAdminSection;
 }) {
   const context = useAppContext();
-  const navigate = useNavigate();
   const client = context.client;
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -276,18 +274,6 @@ export function OrgSettingsRoute({
                 await client.createOrganizationWorkspace(accountId, {
                   name,
                   operationId,
-                });
-              }}
-              onCreateOrganization={async (name, operationId) => {
-                const created = await client.createOrganization({
-                  name,
-                  operationId,
-                });
-                context.revalidatePrincipalAccess();
-                toast.success(`${created.organization.name} created`);
-                await navigate({
-                  to: "/workspaces/$workspaceId/sessions",
-                  params: { workspaceId: created.workspaceId },
                 });
               }}
             />

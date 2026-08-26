@@ -238,6 +238,63 @@ describe("the routing decision order", () => {
     });
   });
 
+  test("a personal workspace is not a candidate in a channel, so one shared workspace still never asks", () => {
+    // Managed tenancy provisions a personal workspace for every member, so if
+    // it counted here nobody would ever have exactly one candidate and an
+    // organization with a single shared workspace would be asked to choose in
+    // every channel. It is also simply the wrong destination: a channel thread
+    // routed into one member's private space is invisible to everyone else in
+    // that channel.
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({ candidates: [ACME, PERSONAL], personalWorkspaceId: PERSONAL.workspaceId }),
+      ),
+    ).toMatchObject({ kind: "resolved", workspaceId: ACME.workspaceId, source: "sole_candidate" });
+  });
+
+  test("the picker in a channel never offers a personal workspace", () => {
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          candidates: [ACME, LABS, PERSONAL],
+          personalWorkspaceId: PERSONAL.workspaceId,
+        }),
+      ),
+    ).toEqual({ kind: "ask", candidates: [ACME, LABS] });
+  });
+
+  test("a channel prefix naming a personal workspace is refused, not honoured", () => {
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          entry: { ...inputs().entry, text: `<@U0BOT> in ${PERSONAL.label}: ship it` },
+          candidates: [ACME, PERSONAL],
+          personalWorkspaceId: PERSONAL.workspaceId,
+        }),
+      ),
+    ).toMatchObject({ kind: "denied", reason: "no_access_to_named", requested: PERSONAL.label });
+  });
+
+  test("a direct message still reaches the sender's own personal workspace", () => {
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({
+          entry: { ...inputs().entry, triggerKind: "dm", slackChannelId: "D-SAM" },
+          candidates: [ACME, PERSONAL],
+          personalWorkspaceId: PERSONAL.workspaceId,
+        }),
+      ),
+    ).toMatchObject({ kind: "resolved", workspaceId: PERSONAL.workspaceId, source: "dm_personal" });
+  });
+
+  test("someone whose only workspace is their own is refused in a channel", () => {
+    expect(
+      resolveSlackWorkspaceRoute(
+        inputs({ candidates: [PERSONAL], personalWorkspaceId: PERSONAL.workspaceId }),
+      ),
+    ).toMatchObject({ kind: "denied", reason: "no_candidates" });
+  });
+
   test("no workspace at all is a refusal, not the installation's", () => {
     expect(resolveSlackWorkspaceRoute(inputs({ candidates: [] }))).toMatchObject({
       kind: "denied",

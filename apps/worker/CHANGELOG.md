@@ -1,5 +1,84 @@
 # @opengeni/worker-bundle
 
+## 0.22.3
+
+### Patch Changes
+
+- 8fabf12: Send first-party function tools through the Chat Completions tool transport for
+  Chat-based providers, including OpenCode, instead of encoding them as
+  Responses-only hosted tools.
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+  - @opengeni/core@2.3.1
+  - @opengeni/documents@0.8.1
+  - @opengeni/events@0.3.126
+
+## 0.22.2
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+- Updated dependencies [c10f396]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/core@2.3.0
+  - @opengeni/db@3.3.0
+  - @opengeni/documents@0.8.0
+  - @opengeni/config@0.20.0
+  - @opengeni/runtime@1.3.2
+  - @opengeni/codemode@0.4.14
+  - @opengeni/events@0.3.125
+  - @opengeni/github@0.5.4
+  - @opengeni/observability@0.8.5
+  - @opengeni/storage@0.2.107
+
+## 0.22.1
+
+### Patch Changes
+
+- 65bc1bc: Apply the documented connectivity backoff sequence to retryable MCP request timeouts, including the workflow checkpoint fallback, while preserving the exact durable count and finite same-turn recovery boundary.
+- 92324b5: Preserve lazy tool preparation while fencing every actual local tool call on the shared attempt preparation promise. Codemode now distinguishes a catalog that is still preparing from invalid or stale attempt authority, and repeated same-turn provider or MCP recovery stops after five automatic replacements with explicit terminal exhaustion evidence.
+- 56c2384: Handle deferred tool-preparation rejection immediately so an early MCP lifecycle failure cannot surface as a process-level unhandled rejection before the lazy runtime reports the exact error at the tool boundary.
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [a78124f]
+- Updated dependencies [4d83368]
+- Updated dependencies [47ccfab]
+- Updated dependencies [cb116e0]
+- Updated dependencies [b74e557]
+- Updated dependencies [16387c3]
+- Updated dependencies [b2cd0f0]
+- Updated dependencies [fc80fdf]
+- Updated dependencies [1789977]
+- Updated dependencies [4e48785]
+- Updated dependencies [e720d3e]
+- Updated dependencies [3e3b09a]
+- Updated dependencies [64d8d2c]
+- Updated dependencies [ad6acbe]
+- Updated dependencies [92324b5]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/db@3.2.0
+  - @opengeni/core@2.2.0
+  - @opengeni/runtime@1.3.1
+  - @opengeni/observability@0.8.4
+  - @opengeni/documents@0.7.0
+  - @opengeni/network@0.2.3
+  - @opengeni/codemode@0.4.13
+  - @opengeni/config@0.19.1
+  - @opengeni/events@0.3.124
+  - @opengeni/github@0.5.3
+  - @opengeni/storage@0.2.106
+  - @opengeni/capabilities@0.3.1
+  - @opengeni/codex@0.2.19
+  - @opengeni/xai-subscription@0.1.2
+
 ## 0.22.0
 
 ### Minor Changes

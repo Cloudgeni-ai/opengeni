@@ -15,13 +15,15 @@ import {
 } from "@/lib/managed-auth-form";
 
 export function ManagedAuthPanel(props: {
-  emailVerificationRequired: boolean;
+  initialMode?: ManagedAuthMode;
+  emailVerificationRequired?: boolean;
   onSubmit: (
     mode: "signin" | "signup",
     input: { name: string; email: string; password: string },
   ) => Promise<void>;
 }) {
-  const [mode, setMode] = useState<ManagedAuthMode>("signin");
+  const [mode, setMode] = useState<ManagedAuthMode>(props.initialMode ?? "signin");
+  const emailVerificationRequired = props.emailVerificationRequired ?? true;
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -66,7 +68,7 @@ export function ManagedAuthPanel(props: {
     setBusy(true);
     try {
       await props.onSubmit(mode, { ...input, name: input.name || input.email });
-      if (mode === "signup" && props.emailVerificationRequired) {
+      if (mode === "signup" && emailVerificationRequired) {
         setSuccessMessage(`We sent a verification link to ${input.email}.`);
       }
     } catch (error) {
@@ -253,12 +255,12 @@ export function ManagedAuthPanel(props: {
         </Button>
         {mode === "signup" ? (
           <p className="mt-2 text-center text-xs text-fg-subtle">
-            {props.emailVerificationRequired
+            {emailVerificationRequired
               ? "We'll email you a link before you can sign in."
               : "This local stack signs you in immediately; no verification email is sent."}
           </p>
         ) : null}
-        {props.emailVerificationRequired ? (
+        {emailVerificationRequired ? (
           <Button
             type="button"
             variant="ghost"

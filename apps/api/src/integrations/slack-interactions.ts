@@ -9,7 +9,9 @@ import {
   evaluateSlackTaskPolicy,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
   resolveWorkspaceSlackReactionSummonSettings,
+  SlackChannelRouteListResponse,
   SlackReactionChannelListResponse,
+  UpdateSlackChannelRoutesRequest,
   SlackUserLinkAccessMutationRequest,
   SlackUserLinkAccessRequest,
   type AccessGrant,
@@ -67,6 +69,9 @@ import {
   answerSlackRoutePrompt,
   type SlackRoutableWorkspace,
   getSlackChannelRoute,
+  listSlackChannelRoutes,
+  upsertSlackChannelRoute,
+  deleteSlackChannelRoute,
   getSlackUserDmRoute,
   listNamedSubjectSlackRoutableWorkspaces,
   getActiveSlackTaskPolicy,
@@ -74,11 +79,13 @@ import {
   getSessionEventByClientEventId,
   getWorkspace,
   getWorkspaceGrant,
+  namedSubjectPersonalWorkspaceId,
   resolveSlackTargetAuthority,
   listSlackInteractionProgressDeliveryEvidence,
   listSessionEventPage,
   listSessionHumanInputRequests,
   listPendingSlackUserLinkAccessRequests,
+  listSlackInstallationBindings,
   slackUserLinkAccessRequestTeam,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
@@ -884,6 +891,135 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     },
   );
 
+  app.get("/v1/workspaces/:workspaceId/integrations/slack/channel-routes", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    // Same gate as the reaction-channel allowlist beside it. The response names
+    // workspaces across the organization, including ones the reader may hold no
+    // grant in, so it is not an ordinary connections read.
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const connectionId = boundedString(c.req.query("connectionId"), 64);
+    if (!connectionId) throw new HTTPException(400, { message: "connectionId is required" });
+    const routes = await listSlackChannelRoutes(
+      deps.db,
+      { accountId: grant.accountId, workspaceId },
+      { connectionId },
+    );
+    // Names are resolved once per distinct target rather than per route.
+    const names = new Map<string, string | null>();
+    for (const route of routes) {
+      if (names.has(route.targetWorkspaceId)) continue;
+      names.set(
+        route.targetWorkspaceId,
+        (await getWorkspace(deps.db, route.targetWorkspaceId))?.name ?? null,
+      );
+    }
+    return c.json(
+      SlackChannelRouteListResponse.parse({
+        routingEnabled: deps.settings.slackWorkspaceRoutingEnabled,
+        routes: routes.map((route) => ({
+          slackChannelId: route.slackChannelId,
+          targetWorkspaceId: route.targetWorkspaceId,
+          targetWorkspaceName: names.get(route.targetWorkspaceId) ?? null,
+          source: route.source,
+          updatedAt: route.updatedAt.toISOString(),
+        })),
+      }),
+    );
+  });
+
+  app.put("/v1/workspaces/:workspaceId/integrations/slack/channel-routes", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    // Same gate as the reaction-channel allowlist this sits beside: pointing a
+    // channel somewhere is an installation-administration act.
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const payload = UpdateSlackChannelRoutesRequest.parse(await c.req.json());
+    const home = { accountId: grant.accountId, workspaceId };
+    const installation = await listSlackInstallationBindings(deps.db, home);
+    const binding = installation.find(
+      (candidate) => candidate.connectionId === payload.connectionId,
+    );
+    // The connection must be this workspace's own installation, and the route
+    // rows carry its team id, so a missing binding is a refusal rather than a
+    // row written with an empty team the column's own bound would reject.
+    if (!binding) {
+      throw new HTTPException(404, { message: "Slack installation not found" });
+    }
+    // Authorize EVERY target before writing anything. Applying routes one at a
+    // time means a refusal partway through would otherwise leave some channels
+    // moved and the rest not, behind an error that says the save failed.
+    //
+    // An admin may only point a channel at a workspace they could start work in
+    // themselves, and only inside this organization. The table's own CHECK
+    // enforces the second half; this refuses before writing rather than
+    // surfacing a constraint error.
+    // A channel may never be pointed at a personal workspace. The routing
+    // resolver already refuses to treat one as a candidate in a channel, and
+    // this is the same rule at the write boundary, where a durable route would
+    // otherwise smuggle it back in: every message in that channel would land
+    // somewhere nobody else in the channel can see.
+    //
+    // Only the caller's OWN personal workspace has to be excluded, and that is
+    // the whole rule rather than a partial one, because no other person's can
+    // reach this loop. `resolveSlackTargetAuthority` admits exactly two shapes:
+    // a `workspace_memberships` row this subject holds, or this subject's own
+    // personal-workspace pointer. There is no account-admin union, so an
+    // administrator does not thereby reach anyone else's personal workspace.
+    //
+    // Deliberately NOT justified by "the schema forbids a membership row on a
+    // personal workspace". It does not. Migration 0219's `42501` is a
+    // precondition inside the provisioning function, checked at provisioning
+    // time only, and `personal_workspace_has_no_membership_row` is recorded as
+    // `basis: "runtime"` - the parity report's own term for a property nothing
+    // in the schema prevents. It holds because every membership writer either
+    // requires `members:manage` on the target (which a personal-workspace grant
+    // deliberately omits) or excludes personal workspaces outright.
+    const callerPersonalWorkspaceId = await namedSubjectPersonalWorkspaceId(deps.db, {
+      accountId: grant.accountId,
+      subjectId: grant.subjectId,
+    });
+    for (const route of payload.routes) {
+      if (route.targetWorkspaceId === null) continue;
+      const authorized = await resolveSlackTargetAuthority(deps.db, {
+        subjectId: grant.subjectId,
+        targetAccountId: grant.accountId,
+        targetWorkspaceId: route.targetWorkspaceId,
+      });
+      if (!authorized || !hasPermission(authorized.permissions, "sessions:create")) {
+        throw new HTTPException(403, {
+          message: `you cannot start work in the workspace chosen for ${route.slackChannelId}`,
+        });
+      }
+      if (
+        callerPersonalWorkspaceId !== null &&
+        route.targetWorkspaceId === callerPersonalWorkspaceId
+      ) {
+        throw new HTTPException(422, {
+          message: `a channel cannot be routed to a personal workspace: work started in ${route.slackChannelId} would be invisible to everyone else in it`,
+        });
+      }
+    }
+    for (const route of payload.routes) {
+      if (route.targetWorkspaceId === null) {
+        await deleteSlackChannelRoute(deps.db, home, {
+          connectionId: payload.connectionId,
+          slackChannelId: route.slackChannelId,
+        });
+        continue;
+      }
+      await upsertSlackChannelRoute(deps.db, home, {
+        connectionId: payload.connectionId,
+        slackTeamId: binding.slackTeamId,
+        slackChannelId: route.slackChannelId,
+        targetAccountId: grant.accountId,
+        targetWorkspaceId: route.targetWorkspaceId,
+        decidedBySubjectId: grant.subjectId,
+        decidedBySlackUserId: "admin",
+        source: "admin",
+      });
+    }
+    return c.json({ ok: true });
+  });
+
   app.get("/v1/workspaces/:workspaceId/integrations/slack/reaction-channels", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
@@ -1397,11 +1533,12 @@ async function resolveSlackRouteForEntry(
  * Every branch ends with "No session was created." because the one thing a
  * refusal must never do is leave someone believing work is under way.
  *
- * No access-request link is minted here. The existing link flow signs a token
- * for the installation's own workspace, and offering one for a workspace it
- * cannot yet resolve would send people to a page that refuses them. Until that
- * flow accepts a routed workspace, the refusal names the workspace and points
- * at an administrator.
+ * Only `no_access_to_route` mints an access-request link, and it mints one for
+ * the workspace they actually need rather than the installation's. The other
+ * two branches deliberately do not: a prefix naming something they cannot
+ * reach, and an empty candidate list, both describe a workspace OpenGeni has
+ * not established it will confirm to this person, so they point at an
+ * administrator instead.
  */
 async function postSlackRouteRefusal(
   deps: ApiRouteDeps,
@@ -1412,7 +1549,7 @@ async function postSlackRouteRefusal(
   const available = refusal.candidates.map((candidate) => candidate.label);
   const text =
     refusal.reason === "no_access_to_named"
-      ? `OpenGeni does not see a workspace named ${JSON.stringify(refusal.requested ?? "")} that you can start work in.${
+      ? `OpenGeni does not see a workspace named ${JSON.stringify(refusal.requested ?? "")} that you can start work in from here.${
           available.length > 0 ? ` You can use: ${available.join(", ")}.` : ""
         } No session was created.`
       : refusal.reason === "no_access_to_route"
@@ -1431,7 +1568,11 @@ async function postSlackRouteRefusal(
             },
             entry.createdAt.getTime(),
           )}. No session was created.`
-        : "OpenGeni has no workspace it can start this task in for you. Ask an OpenGeni administrator to give you access to one. No session was created.";
+        : // Deliberately "from this conversation" rather than "for you": in a
+          // channel this also fires for someone whose only workspace is their
+          // own personal one, and telling that person they have no workspace
+          // at all would be false. Their bot DM still works.
+          "OpenGeni has no workspace it can start this task in from this conversation. Ask an OpenGeni administrator to give you access to one, or message OpenGeni directly to work in your own workspace. No session was created.";
   await client.postMessage({
     operationId: deterministicUuid(`slack-route-denied:${entry.id}:${refusal.reason}`),
     userId: entry.slackUserId,

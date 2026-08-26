@@ -165,6 +165,10 @@ import type {
   CreateKnowledgeDropRequest,
   DocumentAuthorityReclassification,
   DocumentDefaultCollectionBackfill,
+  DocumentDefaultCollectionBackfillAudit,
+  GetDocumentDefaultCollectionBackfillAuditOptions,
+  ListDocumentDefaultCollectionBackfillRunsResponse,
+  ListOrganizationDocumentAuthorityReclassificationsResponse,
   ListDocumentAuthorityReclassificationsOptions,
   ListDocumentAuthorityReclassificationsResponse,
   MoveDocumentRequest,
@@ -201,7 +205,9 @@ import type {
   CreateCheckoutResponse,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
+  SlackChannelRouteListResponse,
   SlackReactionChannelListResponse,
+  UpdateSlackChannelRoutesRequest,
   FikenInstallRequest,
   FikenOAuthStartRequest,
   FikenOAuthStartResponse,
@@ -252,10 +258,9 @@ import type {
   UserResourceGrantMutationResponse,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
-  ListOrganizationMembersResponse,
+  ListOrganizationAdministrationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
-  AddOrganizationWorkspaceMemberRequest,
   CreateOrganizationInvitationRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
@@ -263,11 +268,17 @@ import type {
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
+  OrganizationWorkspaceAccess,
+  OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationInvitationRequest,
+  RevokeOrganizationWorkspaceMemberRequest,
+  RevokeOrganizationWorkspaceMemberResponse,
+  PutOrganizationWorkspaceMemberRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  UpdateOrganizationWorkspaceRequest,
   UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
@@ -3824,11 +3835,20 @@ export class OpenGeniClient {
     );
   }
 
-  async listOrganizationMembers(organizationId: string): Promise<ListOrganizationMembersResponse> {
-    return await this.requestJson<ListOrganizationMembersResponse>(
+  async listOrganizationAdministrationMembers(
+    organizationId: string,
+  ): Promise<ListOrganizationAdministrationMembersResponse> {
+    return await this.requestJson<ListOrganizationAdministrationMembersResponse>(
       "GET",
       `/v1/organizations/${organizationId}/members`,
     );
+  }
+
+  /** @deprecated Use listOrganizationAdministrationMembers for its privacy-safe projection. */
+  async listOrganizationMembers(
+    organizationId: string,
+  ): Promise<ListOrganizationAdministrationMembersResponse> {
+    return await this.listOrganizationAdministrationMembers(organizationId);
   }
 
   /** Canonical organization identity and every non-personal workspace access roster. */
@@ -3841,42 +3861,27 @@ export class OpenGeniClient {
     );
   }
 
-  /** Rename the organization under an exact optimistic-concurrency fence. */
-  async updateOrganizationName(
-    organizationId: string,
-    request: UpdateOrganizationNameRequest,
-  ): Promise<OrganizationSummary> {
-    return await this.requestJson<OrganizationSummary>(
-      "PATCH",
-      `/v1/organizations/${organizationId}`,
-      request,
-    );
-  }
-
-  /**
-   * Organization control-plane update for a shared workspace. This does not
-   * require or create operational workspace access for the organization admin.
-   */
-  async updateOrganizationWorkspace(
-    organizationId: string,
-    workspaceId: string,
-    request: UpdateWorkspaceRequest,
-  ): Promise<Workspace> {
-    return await this.requestJson<Workspace>(
-      "PATCH",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
-      request,
-    );
-  }
-
   /** Create a shared workspace without implicitly granting the actor access. */
   async createOrganizationWorkspace(
     organizationId: string,
     request: CreateOrganizationWorkspaceRequest,
-  ): Promise<Workspace> {
-    return await this.requestJson<Workspace>(
+  ): Promise<OrganizationWorkspaceAccess> {
+    return await this.requestJson<OrganizationWorkspaceAccess>(
       "POST",
       `/v1/organizations/${organizationId}/workspaces`,
+      request,
+    );
+  }
+
+  /** Rename one shared workspace under an exact optimistic-concurrency fence. */
+  async updateOrganizationWorkspace(
+    organizationId: string,
+    workspaceId: string,
+    request: UpdateOrganizationWorkspaceRequest,
+  ): Promise<OrganizationWorkspaceAccess> {
+    return await this.requestJson<OrganizationWorkspaceAccess>(
+      "PATCH",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
       request,
     );
   }
@@ -3893,43 +3898,41 @@ export class OpenGeniClient {
     );
   }
 
-  async addOrganizationWorkspaceMember(
+  async putOrganizationWorkspaceMember(
     organizationId: string,
     workspaceId: string,
-    request: AddOrganizationWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
-    return await this.requestJson<WorkspaceMember>(
+    membershipId: string,
+    request: PutOrganizationWorkspaceMemberRequest,
+  ): Promise<OrganizationWorkspaceAccessMember> {
+    return await this.requestJson<OrganizationWorkspaceAccessMember>(
+      "PUT",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${membershipId}`,
+      request,
+    );
+  }
+
+  async revokeOrganizationWorkspaceMember(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    request: RevokeOrganizationWorkspaceMemberRequest,
+  ): Promise<RevokeOrganizationWorkspaceMemberResponse> {
+    return await this.requestJson<RevokeOrganizationWorkspaceMemberResponse>(
       "POST",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members`,
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${membershipId}/revoke`,
       request,
     );
   }
 
-  async updateOrganizationWorkspaceMember(
+  /** Rename the organization under an exact optimistic-concurrency fence. */
+  async updateOrganizationName(
     organizationId: string,
-    workspaceId: string,
-    subjectId: string,
-    request: UpdateWorkspaceMemberRequest,
-  ): Promise<WorkspaceMember> {
-    return await this.requestJson<WorkspaceMember>(
+    request: UpdateOrganizationNameRequest,
+  ): Promise<OrganizationSummary> {
+    return await this.requestJson<OrganizationSummary>(
       "PATCH",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
-        subjectId,
-      )}`,
+      `/v1/organizations/${organizationId}`,
       request,
-    );
-  }
-
-  async removeOrganizationWorkspaceMember(
-    organizationId: string,
-    workspaceId: string,
-    subjectId: string,
-  ): Promise<void> {
-    await this.requestVoid(
-      "DELETE",
-      `/v1/organizations/${organizationId}/workspaces/${workspaceId}/members/${encodeURIComponent(
-        subjectId,
-      )}`,
     );
   }
 
@@ -5497,6 +5500,53 @@ export class OpenGeniClient {
     );
   }
 
+  /** List organization-scoped Default collection backfill runs (organization admin only). */
+  async listDocumentDefaultCollectionBackfillRuns(
+    workspaceId: string,
+    options: ListDocumentAuthorityReclassificationsOptions = {},
+  ): Promise<ListDocumentDefaultCollectionBackfillRunsResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor) params.set("cursor", options.cursor);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<ListDocumentDefaultCollectionBackfillRunsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/document-default-collection-backfills${query}`,
+    );
+  }
+
+  /** Read bounded operation and workspace receipts for one Default-collection backfill run. */
+  async getDocumentDefaultCollectionBackfillAudit(
+    workspaceId: string,
+    runId: string,
+    options: GetDocumentDefaultCollectionBackfillAuditOptions = {},
+  ): Promise<DocumentDefaultCollectionBackfillAudit> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.operationCursor) params.set("operationCursor", options.operationCursor);
+    if (options.receiptCursor) params.set("receiptCursor", options.receiptCursor);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<DocumentDefaultCollectionBackfillAudit>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/document-default-collection-backfills/${runId}${query}`,
+    );
+  }
+
+  /** List organization-wide Document authority changes (organization admin only). */
+  async listOrganizationDocumentAuthorityReclassifications(
+    workspaceId: string,
+    options: ListDocumentAuthorityReclassificationsOptions = {},
+  ): Promise<ListOrganizationDocumentAuthorityReclassificationsResponse> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.cursor) params.set("cursor", options.cursor);
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.requestJson<ListOrganizationDocumentAuthorityReclassificationsResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/document-authority-reclassifications${query}`,
+    );
+  }
+
   /** Retry indexing for a failed document. */
   async reindexDocument(
     workspaceId: string,
@@ -6273,6 +6323,28 @@ export class OpenGeniClient {
     return await this.requestJson<SlackReactionChannelListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/integrations/slack/reaction-channels?${query}`,
+    );
+  }
+
+  async listOpenGeniSlackChannelRoutes(
+    workspaceId: string,
+    connectionId: string,
+  ): Promise<SlackChannelRouteListResponse> {
+    const query = new URLSearchParams({ connectionId });
+    return await this.requestJson<SlackChannelRouteListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/integrations/slack/channel-routes?${query}`,
+    );
+  }
+
+  async updateOpenGeniSlackChannelRoutes(
+    workspaceId: string,
+    request: UpdateSlackChannelRoutesRequest,
+  ): Promise<void> {
+    await this.requestJson<{ ok: boolean }>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/integrations/slack/channel-routes`,
+      request,
     );
   }
 

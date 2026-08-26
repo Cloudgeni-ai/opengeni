@@ -425,6 +425,7 @@ export * from "./company-brain-context-selection";
 export * from "./knowledge-source-sync";
 export * from "./task-notes";
 export * from "./managed-human-provisioning";
+export * from "./managed-user-setup";
 export * from "./organization-membership-backfill";
 export * from "./connection-tenancy-backfill";
 export * from "./generated-images";
@@ -1502,6 +1503,7 @@ export async function ensureManagedAccessForUser(
     email: string;
     name: string;
     emailVerified?: boolean;
+    provisionFallbackOrganization?: boolean;
   },
 ): Promise<AccessContext> {
   return (await ensureManagedAccessForUserWithOrganizationMemberships(db, input)).accessContext;
@@ -1646,6 +1648,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     email: string;
     name: string;
     emailVerified?: boolean;
+    provisionFallbackOrganization?: boolean;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
@@ -1710,18 +1713,6 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         (membership) => membership.status === "suspended" || membership.status === "revoked",
       )
     ) {
-      if (
-        fallbackAccount &&
-        existingOrganizationMemberships.some(
-          (membership) => membership.organizationId === fallbackAccount.id,
-        )
-      ) {
-        return await projectManagedOrganizationAccess(txDb, {
-          subjectId,
-          subjectLabel,
-          organizationMemberships: existingOrganizationMemberships,
-        });
-      }
       return {
         accessContext: {
           mode: "managed",
@@ -1742,6 +1733,20 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       ) as result`,
     );
     if (pendingInvitationResult?.result === true) {
+      return {
+        accessContext: {
+          mode: "managed",
+          subjectId,
+          subjectLabel,
+          accountGrants: [],
+          workspaceGrants: [],
+          defaultAccountId: null,
+          defaultWorkspaceId: null,
+        },
+        organizationMemberships: [],
+      };
+    }
+    if (input.provisionFallbackOrganization === false) {
       return {
         accessContext: {
           mode: "managed",
@@ -1776,7 +1781,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         })
         .onConflictDoUpdate({
           target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
-          set: { name: accountName, updatedAt: new Date() },
+          // The insert race may converge here, but later access refreshes must
+          // never turn one-shot signup intent into an organization rename.
+          set: { updatedAt: new Date() },
         })
         .returning();
     }
@@ -1810,7 +1817,8 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         })
         .onConflictDoUpdate({
           target: [schema.workspaces.externalSource, schema.workspaces.externalId],
-          set: { name: "Default workspace", updatedAt: new Date() },
+          // Preserve a later administrator rename on legacy fallback workspaces.
+          set: { updatedAt: new Date() },
         })
         .returning();
     }
@@ -2050,7 +2058,13 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
-  return row ? mapWorkspace(row, await workspaceControlProjection(db, row.id)) : null;
+  return row
+    ? mapWorkspace(
+        row,
+        await workspaceControlProjection(db, row.id),
+        await workspaceKindProjection(db, row),
+      )
+    : null;
 }
 
 export async function getManagedAccount(
@@ -2087,7 +2101,11 @@ export async function listWorkspacesForSubject(
     .limit(limit);
   return await Promise.all(
     rows.map(async (row) =>
-      mapWorkspace(row.workspace, await workspaceControlProjection(db, row.workspace.id)),
+      mapWorkspace(
+        row.workspace,
+        await workspaceControlProjection(db, row.workspace.id),
+        await workspaceKindProjection(db, row.workspace),
+      ),
     ),
   );
 }
@@ -2136,13 +2154,17 @@ export async function createWorkspace(
       workspaceId: row.id,
       accountId: row.accountId,
     });
-    return mapWorkspace(row, {
-      state: "active",
-      revision: 0,
-      reason: null,
-      changedBy: null,
-      changedAt: null,
-    });
+    return mapWorkspace(
+      row,
+      {
+        state: "active",
+        revision: 0,
+        reason: null,
+        changedBy: null,
+        changedAt: null,
+      },
+      "shared",
+    );
   });
 }
 
@@ -2356,7 +2378,11 @@ export async function updateWorkspace(
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
-  return mapWorkspace(row, await workspaceControlProjection(db, workspaceId));
+  return mapWorkspace(
+    row,
+    await workspaceControlProjection(db, workspaceId),
+    await workspaceKindProjection(db, row),
+  );
 }
 
 // Deep-merge (top-level) a settings patch into workspaces.settings, atomically.
@@ -2417,6 +2443,7 @@ export async function updateWorkspaceSettings(
           return mapWorkspace(
             row,
             await workspaceControlProjection(tx as unknown as Database, workspaceId),
+            await workspaceKindProjection(tx as unknown as Database, row),
           );
         }),
     );
@@ -2432,7 +2459,11 @@ export async function updateWorkspaceSettings(
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
-  return mapWorkspace(row, await workspaceControlProjection(db, workspaceId));
+  return mapWorkspace(
+    row,
+    await workspaceControlProjection(db, workspaceId),
+    await workspaceKindProjection(db, row),
+  );
 }
 
 export async function setWorkspaceDefaultRig(
@@ -2451,7 +2482,11 @@ export async function setWorkspaceDefaultRig(
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
-  return mapWorkspace(row, await workspaceControlProjection(db, workspaceId));
+  return mapWorkspace(
+    row,
+    await workspaceControlProjection(db, workspaceId),
+    await workspaceKindProjection(db, row),
+  );
 }
 
 export async function getWorkspaceGrant(
@@ -2556,7 +2591,13 @@ export async function getManagedUserProfilesByIds(
 }
 
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
-  await db.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
+  await db.transaction(async (txRaw) => {
+    const tx = txRaw as unknown as Database;
+    await tx.execute(
+      sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
+    );
+    await tx.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
+  });
 }
 
 export type TemporalScheduleCleanupClaim = {
@@ -66414,13 +66455,35 @@ async function workspaceControlProjection(
   });
 }
 
+async function workspaceKindProjection(
+  db: Database,
+  row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
+): Promise<Workspace["kind"]> {
+  return await withRlsContext(
+    db,
+    { accountId: row.accountId, workspaceId: row.id },
+    async (scopedDb) => {
+      const [kind] = await rawRows<{ kind: string }>(
+        scopedDb,
+        sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
+      );
+      if (kind?.kind !== "personal" && kind?.kind !== "shared") {
+        throw new Error(`Workspace ${row.id} has no canonical kind`);
+      }
+      return kind.kind;
+    },
+  );
+}
+
 function mapWorkspace(
   row: typeof schema.workspaces.$inferSelect,
   inferenceControl: Workspace["inferenceControl"],
+  kind: Workspace["kind"],
 ): Workspace {
   return {
     id: row.id,
     accountId: row.accountId,
+    kind,
     name: row.name,
     slug: row.slug,
     externalSource: row.externalSource,

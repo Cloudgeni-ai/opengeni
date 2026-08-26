@@ -6,10 +6,10 @@ if [[ "${OPENGENI_RELEASE:-}" == "1" ]]; then
 fi
 
 cat >&2 <<'EOF'
-OpenGeni npm packages must be published through scripts/release-publish.sh.
+OpenGeni npm packages must be published through the repository release workflows.
 
-Direct npm publish is blocked because the blessed release path builds the
-publishable closure, rewrites workspace dependencies and entry points, and
-sets OPENGENI_RELEASE=1 before changesets publishes.
+Direct npm publish is blocked because the stable and canary release paths build
+the publishable closure, rewrite workspace dependencies and entry points, and
+set OPENGENI_RELEASE=1 before npm publishes.
 EOF
 exit 1

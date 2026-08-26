@@ -488,8 +488,14 @@ async function grantAppRoleIfSchemaExists(
     "list_self_organization_invitations(text,uuid,integer)",
     "get_self_organization_invitation(text,uuid)",
     "list_organization_members(uuid,text)",
+    "list_organization_administration_members(uuid,text)",
     "list_organization_invitations(uuid,text,uuid,integer)",
     "get_organization_administration_overview(uuid,text)",
+    "get_workspace_kind(uuid,uuid)",
+    "organization_workspace_command(jsonb)",
+    "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
+    "prepare_organization_workspace_member_removal(jsonb)",
+    "record_organization_workspace_member_removal(jsonb,uuid,uuid)",
     "create_managed_organization(text,text,text,uuid)",
     "assert_organization_shared_workspace_administrator(uuid,uuid,text)",
     "open_organization_shared_workspace_administration_capability(uuid,uuid,text)",
@@ -501,6 +507,15 @@ async function grantAppRoleIfSchemaExists(
     "bind_pending_organization_invitations_for_verified_email(text,text)",
     "has_pending_organization_invitation_for_subject(text)",
     "accept_organization_invitation_v2(jsonb)",
+    "complete_self_service_organization_setup(jsonb)",
+    "ensure_organization_user_setup_intent(jsonb)",
+    "claim_organization_user_setup_delivery(jsonb)",
+    "prepare_organization_user_setup_delivery(jsonb)",
+    "settle_organization_user_setup_delivery(jsonb)",
+    "preview_organization_user_setup(text)",
+    "get_organization_invitation_for_administration(uuid,text,uuid)",
+    "preflight_organization_user_setup(text)",
+    "complete_organization_user_setup(jsonb)",
     "organization_membership_command(jsonb)",
     "prepare_organization_membership_protocol_settlements(jsonb)",
     "assert_active_managed_human_organization_membership(uuid,text)",
@@ -676,6 +691,7 @@ BEGIN
     FOREACH routine_signature IN ARRAY ARRAY[
       'classify_organization_connection_authority(uuid,text)',
       'backfill_organization_connection_authority(uuid,integer,boolean)',
+      'inspect_organization_connection_authority_convergence(uuid,integer,uuid)',
       'check_organization_tenancy_parity(uuid,integer,integer)'
     ] LOOP
       IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature))
@@ -689,6 +705,18 @@ BEGIN
         );
       END IF;
     END LOOP;
+    IF to_regclass(
+      format(
+        '%I.connection_authority_convergence_audit_capabilities',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE %I.connection_authority_convergence_audit_capabilities FROM %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     -- Migration 0110 creates this target-schema-local SECURITY DEFINER
     -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
     -- grant here so the supported migrate-then-provision order is equivalent to
@@ -1597,6 +1625,21 @@ BEGIN
       EXECUTE format('GRANT SELECT ON TABLE %I.document_authority_reclassifications TO %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON TABLE %I.document_authority_reclassifications FROM %I', ${literal(schema)}, ${literal(role)});
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.document_default_collection_backfill_runs, %I.document_default_collection_backfill_operations, %I.document_default_collection_backfill_receipts FROM %I', ${literal(schema)}, ${literal(schema)}, ${literal(schema)}, ${literal(role)});
+      IF to_regprocedure(
+        format('%I.list_document_default_collection_backfill_runs(jsonb)', ${literal(schema)})
+      ) IS NOT NULL THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.list_document_default_collection_backfill_runs(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_document_default_collection_backfill_runs(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.get_document_default_collection_backfill_audit(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.get_document_default_collection_backfill_audit(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.list_organization_document_authority_reclassifications(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('GRANT EXECUTE ON FUNCTION %I.list_organization_document_authority_reclassifications(jsonb) TO %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.document_migration_audit_capability_active(text) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.document_migration_audit_capability_active(text) FROM %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.assert_document_migration_audit_authority(jsonb) FROM PUBLIC', ${literal(schema)});
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.assert_document_migration_audit_authority(jsonb) FROM %I', ${literal(schema)}, ${literal(role)});
+        EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.document_migration_audit_capabilities FROM %I', ${literal(schema)}, ${literal(role)});
+      END IF;
     END IF;
     IF to_regprocedure(
       format('%I.create_scoped_variable_set(uuid,uuid,text,text,text,jsonb,boolean)', ${literal(schema)})

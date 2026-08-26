@@ -1549,6 +1549,8 @@ export async function submitHumanPromptInTransaction(
       text: string;
       context: string;
     };
+    /** False when the human input originated inside the active realtime provider session. */
+    mirrorToRealtime?: boolean;
     source: "user" | "api";
     /** Record the admitted run's durable usage fact in this transaction. */
     recordAgentRunUsage?: boolean;
@@ -1605,6 +1607,7 @@ export async function submitHumanPromptInTransaction(
     source: input.source,
     turnMetadata: input.turnMetadata ?? {},
     messagePresentation: input.messagePresentation ?? null,
+    mirrorToRealtime: input.mirrorToRealtime ?? true,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
     personalConnectionDelegations: input.personalConnectionDelegations ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
@@ -2201,7 +2204,7 @@ export async function submitHumanPromptInTransaction(
     .insert(schema.sessionEvents)
     .values(withLosslessContentWriteVersion(eventValues, "payload", "payloadCodecVersion"))
     .returning();
-  if (input.actor.type === "human") {
+  if (input.actor.type === "human" && input.mirrorToRealtime !== false) {
     await mirrorSessionRealtimeContextInTransaction(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,

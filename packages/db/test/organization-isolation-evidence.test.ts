@@ -5,8 +5,10 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  getOrganizationPrivateSessionSettings,
   nestedPostgresSqlState,
   transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   type DbClient,
 } from "../src";
 
@@ -261,10 +263,23 @@ async function seedOrganization(
     values (${personalWorkspaceId}, ${grant.accountId})
   `;
   const [membership] = await db.admin<{ id: string }[]>`
-    insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
-    values (${grant.accountId}, ${subjectId}, 'active', ${personalWorkspaceId})
+    insert into organization_memberships (
+      account_id, subject_id, status, role, personal_workspace_id
+    )
+    values (${grant.accountId}, ${subjectId}, 'active', 'owner', ${personalWorkspaceId})
     returning id
   `;
+  const privateSessionSettings = await getOrganizationPrivateSessionSettings(runtime.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: subjectId,
+  });
+  await updateOrganizationPrivateSessionSettings(runtime.db, {
+    organizationId: grant.accountId,
+    actorSubjectId: subjectId,
+    enabled: true,
+    expectedVersion: privateSessionSettings.version,
+    operationId: crypto.randomUUID(),
+  });
   return {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,

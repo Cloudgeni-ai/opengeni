@@ -16,6 +16,7 @@ export default defineConfig({
     "src/automations.ts",
     "src/pr-review.ts",
     "src/organization-private-session-settings.ts",
+    "src/organization-user-setup.ts",
     "src/realtime.ts",
     "src/editable-artifacts.ts",
     "src/editable-artifacts-worker.ts",

@@ -12,8 +12,10 @@ const connectionAuthorityMigrationName = "0256_connection_authority_delegation.s
 const connectionAuthorityActivationMigrationName =
   "0264_connection_authority_runtime_activation.sql";
 const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
+const organizationMembershipLockOrderMigrationName = "0299_organization_membership_lock_order.sql";
 const personalGitHubRepositorySelectionMigrationName =
   "0315_personal_github_repository_selection.sql";
+const sessionTenancyFenceMigrationName = "0345_tenant_scoped_session_tenancy_fence.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -169,7 +171,9 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${connectionAuthorityMigrationName}),
           (${connectionAuthorityActivationMigrationName}),
           (${scheduledConnectionAuthorityMigrationName}),
-          (${personalGitHubRepositorySelectionMigrationName})
+          (${organizationMembershipLockOrderMigrationName}),
+          (${personalGitHubRepositorySelectionMigrationName}),
+          (${sessionTenancyFenceMigrationName})
       `;
       await migrate(databaseUrl);
       await sql`
@@ -180,7 +184,9 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${connectionAuthorityMigrationName},
           ${connectionAuthorityActivationMigrationName},
           ${scheduledConnectionAuthorityMigrationName},
-          ${personalGitHubRepositorySelectionMigrationName}
+          ${organizationMembershipLockOrderMigrationName},
+          ${personalGitHubRepositorySelectionMigrationName},
+          ${sessionTenancyFenceMigrationName}
         )
       `;
 
@@ -218,7 +224,9 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${connectionAuthorityMigrationName},
           ${connectionAuthorityActivationMigrationName},
           ${scheduledConnectionAuthorityMigrationName},
-          ${personalGitHubRepositorySelectionMigrationName}
+          ${organizationMembershipLockOrderMigrationName},
+          ${personalGitHubRepositorySelectionMigrationName},
+          ${sessionTenancyFenceMigrationName}
         )
         order by name
       `;
@@ -228,7 +236,9 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         connectionAuthorityMigrationName,
         connectionAuthorityActivationMigrationName,
         scheduledConnectionAuthorityMigrationName,
+        organizationMembershipLockOrderMigrationName,
         personalGitHubRepositorySelectionMigrationName,
+        sessionTenancyFenceMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

@@ -1,5 +1,48 @@
 # @opengeni/events
 
+## 0.3.126
+
+### Patch Changes
+
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+
+## 0.3.125
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/db@3.3.0
+
+## 0.3.124
+
+### Patch Changes
+
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [4d83368]
+- Updated dependencies [47ccfab]
+- Updated dependencies [cb116e0]
+- Updated dependencies [b74e557]
+- Updated dependencies [b2cd0f0]
+- Updated dependencies [fc80fdf]
+- Updated dependencies [1789977]
+- Updated dependencies [4e48785]
+- Updated dependencies [e720d3e]
+- Updated dependencies [3e3b09a]
+- Updated dependencies [64d8d2c]
+- Updated dependencies [ad6acbe]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/db@3.2.0
+
 ## 0.3.123
 
 ### Patch Changes

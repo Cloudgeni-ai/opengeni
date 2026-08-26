@@ -1,5 +1,31 @@
 # @opengeni/react
 
+## 2.4.0
+
+### Patch Changes
+
+- c10f396: Keep one completed commentary reply visible when a tool-bearing turn settles without a final answer, including goal-wait holds, while preserving ordinary finals and avoiding disclosure duplicates.
+- Updated dependencies [47b88d3]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+  - @opengeni/sdk@2.4.0
+
+## 2.3.0
+
+### Patch Changes
+
+- 4d83368: Separate worker-claim queue state from prompts genuinely waiting behind work, keep rapid sends on stable chat and queue surfaces, and make local development fail fast when schema or aggregate runtime readiness is lost.
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [47ccfab]
+- Updated dependencies [b74e557]
+- Updated dependencies [6fd5aee]
+- Updated dependencies [0fbf6b0]
+- Updated dependencies [b2cd0f0]
+  - @opengeni/sdk@2.3.0
+
 ## 2.2.0
 
 ### Minor Changes

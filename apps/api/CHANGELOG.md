@@ -1,5 +1,130 @@
 # @opengeni/api-router
 
+## 2.3.1
+
+### Patch Changes
+
+- 8fabf12: Document the one-way deployment boundary for named signup and invited-user
+  setup. Migration 0348 requires every API, control worker, and turn worker to be
+  stopped and drained before it runs, with the exact old/new application database
+  roles supplied to the migration runner. Start only binaries built for schema
+  ordinal 0348 or newer after it commits; never restart a pre-0348 image, and
+  remain in maintenance to fix forward if the new runtime cannot start.
+- 8fabf12: Repair realtime human-authority routing and metrics, personal Document reads
+  under FORCE RLS, private-session visibility transition checks, and
+  tenant-scoped session-tenancy fencing through migrations 0343-0345.
+
+  Migration 0345 is a one-way maintenance cutover. Stop and drain every API,
+  control worker, and turn worker before applying it, then start only binaries
+  built for schema ordinal 0345 or newer. Never restart a pre-0345 image after
+  the migration commits: its session-tenancy writes do not enter the required
+  workspace fence and will fail closed.
+
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+  - @opengeni/core@2.3.1
+  - @opengeni/documents@0.8.1
+  - @opengeni/events@0.3.126
+
+## 2.3.0
+
+### Minor Changes
+
+- 47b88d3: Add explicit managed onboarding: ordinary verified signup completes an organization-name-only setup that creates only the owner membership and canonical Personal workspace, while unregistered invitees can use a digest-only one-time account setup link before signing in normally.
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+- dc6cfff: Turn per-channel and per-DM Slack workspace routing on by default, and stop counting a personal workspace as a routing choice in a channel.
+
+  A personal workspace is now a candidate only in that person's own bot DM. It is the wrong destination for a channel - a shared thread routed into one member's private space is invisible to everyone else in the channel - and because managed tenancy provisions a personal workspace for every member, counting it meant nobody ever had exactly one candidate. That defeated the sole-candidate rule, so an organization with a single shared workspace would have been asked to choose in every channel despite having no choice to make.
+
+  With that fixed, an organization with one shared workspace sees no change. For an organization with several, an unrouted channel asks the first person who uses it and remembers the answer, and a bot DM goes to that person's own personal workspace. Two things are worth knowing before upgrading: someone who has lost live organization authority in the routed workspace now receives a refusal in their bot DM where the previous code failed silently, and someone whose only workspace is their own personal one is now refused in a channel rather than having channel work land somewhere nobody else can see. Apply migrations through 0342 before running the new image. Set `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=false` to restore the short-circuit to the installation's own workspace.
+
+### Patch Changes
+
+- 977fa0f: Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+- Updated dependencies [c10f396]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/core@2.3.0
+  - @opengeni/db@3.3.0
+  - @opengeni/documents@0.8.0
+  - @opengeni/config@0.20.0
+  - @opengeni/runtime@1.3.2
+  - @opengeni/artifact-tool@0.3.6
+  - @opengeni/codemode@0.4.14
+  - @opengeni/events@0.3.125
+  - @opengeni/github@0.5.4
+  - @opengeni/observability@0.8.5
+  - @opengeni/storage@0.2.107
+
+## 2.2.0
+
+### Minor Changes
+
+- f30555c: Add atomic same-workspace session forks with an explicit private or workspace destination. Private-to-workspace copies require a durable acknowledgement, workspace members may fork a shared source into fresh authority of their own, and private sources remain owner-only. Exact applied receipts remain recoverable by the same live workspace actor after mutable source authority changes, while changed requests conflict and fresh keys still require current source authority. Every fork receives fresh authority, provenance, root, and sandbox-group identity without inheriting live grants, credentials, Connections, turns, goals, MCP, resource attachments, processes, or pins. The managed web control now exposes the generic Fork dialog to authorized shared-session members and verifies the returned owned destination before navigation.
+- b74e557: Add an explicit, replay-safe Document authority-reclassification lifecycle and
+  a resumable organization Default-collection backfill. Reclassification requires
+  the exact expected authority tuple, updates the Document and every chunk in one
+  transaction, and retains immutable before/after receipts. The SDK and API expose
+  the account-admin and actor-fenced operations, bounded cursor-paginated receipt
+  history, and same-organization portable-personal behavior without making
+  collections an authority boundary.
+- 6fd5aee: Codex reset-credit overview responses now explain whether redemption belongs to the current managed human, an unowned legacy connection, another human, or an unavailable managed identity. Eligible admins can follow an explicit same-account reconnect path that claims only a null owner; existing ownership remains non-transferable without disconnect.
+- b2cd0f0: Slack can notify the human when work they started stops making progress, **off by default and switched on per workspace**. The new `slackOrchestrationNotices` workspace setting carries one boolean per notice (`childRequiresAction`, `goalPaused`), two checkboxes sit beside the reaction shortcut in the Slack integration settings, and `resolveWorkspaceSlackOrchestrationNoticeSettings` fails closed: absent, malformed, or partially invalid settings resolve to both disabled, so only an explicit opt-in ever posts. An unsolicited Slack post is worse than a missed one, and the in-app rail and priority feed already surface this work.
+
+  When a workspace opts in, a Slack-originated session's `child_requires_action` notice becomes one bounded pointer card ("A worker you started needs input", a single-line first-question or waiting-approval preview, and an **Open in OpenGeni** link to the child session), and a goal that pauses for `limits` or `max_auto_continuations` becomes one bounded line. Deferred child lifecycle notices, `user_pause` / `api` / `agent` / `no_progress` pauses, and `goal.resumed` stay silent, and so does a blocked-worker notice whose exact `(child, turn, generation)` boundary already carries a resolution or whose own row is `superseded` or `cancelled` - Slack delivery runs behind the session, and a card announcing a worker that is no longer blocked is worse than no card. Both notices draw on the same durable per-interaction slot budget as assistant progress, so an orchestration that fans out to many blocked children cannot turn one thread into a feed; a slot is claimed only when a card is actually going to be posted.
+
+  A disabled notice takes the same "nothing to post for this event" path as an undeliverable one - no post, no ledger row, and the delivery cursor advances identically - and every pre-existing Slack card type is unaffected. Both reuse the durable per-event post-operation ledger, so reaper retries and replica claims cannot double-post. Rolling migration `0329_slack_orchestration_delivery_events.sql` adds `system.update.pending` and `goal.paused` to the Slack delivery claim's event types, and `@opengeni/db` exports the read-only `getSessionSystemUpdateById` and `childRequiresActionResolutionExists` used to resolve the exact typed notice and prove it is still current.
+
+- 1789977: Ask once where an unconfigured Slack conversation should work, remember the answer, and re-queue the request that was interrupted by the question. One live card per person per conversation is enforced by a partial unique index, an aged-out card is settled by the writer rather than holding the slot, and the answer commits the choice, the remembered route and the re-queued request together.
+
+### Patch Changes
+
+- ff56d96: Let a Slack access-request link name the workspace a routed conversation actually works in, instead of only the installation's own. Both intent routes now assert that the installation binding resolves for the token's team, that it is the same connection the token was minted against, and that the named workspace belongs to that installation's organization.
+- e720d3e: Add a quiet "-> Workspace" line to Slack acknowledgements and deliveries when routing actually chose a workspace, and bump all five Slack post operation-id seeds to v2 in the same change so no interaction with a claimed-but-unposted delivery row can wedge on a digest that will never match again.
+- 92324b5: Preserve lazy tool preparation while fencing every actual local tool call on the shared attempt preparation promise. Codemode now distinguishes a catalog that is still preparing from invalid or stale attempt authority, and repeated same-turn provider or MCP recovery stops after five automatic replacements with explicit terminal exhaustion evidence.
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [a78124f]
+- Updated dependencies [4d83368]
+- Updated dependencies [47ccfab]
+- Updated dependencies [cb116e0]
+- Updated dependencies [b74e557]
+- Updated dependencies [16387c3]
+- Updated dependencies [b2cd0f0]
+- Updated dependencies [fc80fdf]
+- Updated dependencies [1789977]
+- Updated dependencies [4e48785]
+- Updated dependencies [e720d3e]
+- Updated dependencies [3e3b09a]
+- Updated dependencies [64d8d2c]
+- Updated dependencies [ad6acbe]
+- Updated dependencies [92324b5]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/db@3.2.0
+  - @opengeni/core@2.2.0
+  - @opengeni/runtime@1.3.1
+  - @opengeni/observability@0.8.4
+  - @opengeni/documents@0.7.0
+  - @opengeni/network@0.2.3
+  - @opengeni/artifact-tool@0.3.5
+  - @opengeni/codemode@0.4.13
+  - @opengeni/config@0.19.1
+  - @opengeni/events@0.3.124
+  - @opengeni/github@0.5.3
+  - @opengeni/storage@0.2.106
+  - @opengeni/capabilities@0.3.1
+  - @opengeni/codex@0.2.19
+  - @opengeni/xai-subscription@0.1.2
+
 ## 2.1.0
 
 ### Minor Changes

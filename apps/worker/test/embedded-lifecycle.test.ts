@@ -9,6 +9,7 @@ import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   type Database,
 } from "@opengeni/db";
 import {
@@ -392,6 +393,7 @@ describe("embedded worker lifecycle contract", () => {
           "organization_private_session_settings",
           "organization_profile_events",
           "organization_shared_workspace_administration_capabilities",
+          "organization_user_setup_intents",
           "organization_user_resource_authorities",
           "organization_user_resource_grants",
           "organization_user_retention_deletion_events",
@@ -399,6 +401,9 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_object_deletion_receipts",
           "organization_user_retention_object_obligations",
           "organization_user_retention_policies",
+          "organization_workspace_lifecycle_events",
+          "organization_workspace_operation_receipts",
+          "self_service_organization_setup_receipts",
           "session_human_input_requests",
           "session_tenancy_activations",
           "session_turn_attempts",
@@ -428,6 +433,8 @@ describe("embedded worker lifecycle contract", () => {
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
           "canonical_human_identity_operations",
+          "organization_user_setup_deliveries",
+          "organization_user_setup_delivery_attempts",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -493,7 +500,9 @@ describe("embedded worker lifecycle contract", () => {
           name,
           owner: "opengeni_migrator",
           can_execute: true,
-          public_execute: false,
+          public_execute: (
+            RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES as readonly string[]
+          ).includes(name),
           security_definer: !(RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES as readonly string[]).includes(
             name,
           ),
@@ -575,6 +584,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
       tablePrivileges: {},
       protectedNoDirectDmlTables: [
@@ -582,6 +593,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
     })();
     expect((catalogResults[8] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
