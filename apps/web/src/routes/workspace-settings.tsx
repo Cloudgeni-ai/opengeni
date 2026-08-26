@@ -63,6 +63,7 @@ import {
   hasWorkspacePermission,
 } from "@/lib/permissions";
 import type { ApiKey, SlackUserLinkAccessRequest } from "@/types";
+import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 
 export function WorkspaceSettingsRoute({
   workspaceId,
@@ -408,6 +409,8 @@ export function WorkspaceSettingsRoute({
                 <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
               </div>
             </section>
+
+            <WorkspaceLearningAdministration workspaceId={workspaceId} />
           </>
         ) : null}
 
@@ -951,7 +954,7 @@ function MemoryPreferenceRow({
     <PreferenceToggleRow
       icon={<BrainCircuitIcon className="size-3.5 text-brand" />}
       label="Workspace memory"
-      description="Durable facts agents carry across sessions — editable on Documents."
+      description="Durable facts agents carry across sessions — manage them in Memory."
       checked={enabled}
       disabled={saving || !canManage}
       saving={saving}

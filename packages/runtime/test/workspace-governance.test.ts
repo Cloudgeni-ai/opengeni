@@ -175,6 +175,8 @@ describe("exact-attempt workspace governance prompt", () => {
     const instructions = agent.instructions;
     const ordered = [
       "COMPANY_IDENTITY_SENTINEL",
+      "COMPANY_PRODUCT_SENTINEL",
+      "COMPANY_GOAL_SENTINEL",
       "ORG_PREF_SENTINEL descriptor sentinel",
       "CHARTER_SENTINEL",
       "GLOBAL_POLICY_SENTINEL",
@@ -222,6 +224,24 @@ describe("exact-attempt workspace governance prompt", () => {
     );
     expect(withEmptyCompanySnapshot).not.toContain("Company-profile snapshot evidence");
     expect(withEmptyCompanySnapshot).not.toContain("Active organization and workspace governance");
+  });
+
+  test("retains a legacy list-only profile until an owner explicitly replaces it", () => {
+    const companyProfile = companyProfileSnapshot();
+    if (!companyProfile.profile) throw new Error("expected a company profile fixture");
+    companyProfile.profile.profile.identity = null;
+    companyProfile.profile.profile.mission = null;
+    const instructionPolicy = policySnapshot([
+      policyEntry({ kind: "charter", scope: "global", content: "CHARTER_SENTINEL" }),
+    ]);
+
+    const governance = renderWorkspaceGovernanceContext({ companyProfile, instructionPolicy });
+
+    expect(governance).toContain("CHARTER_SENTINEL");
+    expect(governance).toContain("COMPANY_PRODUCT_SENTINEL");
+    expect(governance).toContain("COMPANY_GOAL_SENTINEL");
+    expect(governance).toContain("retained compatibility context");
+    expect(governance).toContain("Company-profile snapshot evidence");
   });
 
   test("can omit the company profile for a contained child without weakening rules or descriptors", () => {

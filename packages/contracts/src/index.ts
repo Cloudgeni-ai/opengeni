@@ -3156,7 +3156,7 @@ export const ModelContextContributionSource = z.enum([
 ]);
 export type ModelContextContributionSource = z.infer<typeof ModelContextContributionSource>;
 
-/** Content-free per-call summary of model-visible Company Brain material. */
+/** Content-free per-call summary of model-visible Agent Knowledge material. */
 export const ModelContextContributionSummary = z
   .object({
     source: ModelContextContributionSource,
@@ -5074,6 +5074,7 @@ export const DocumentSearchRequest = z.object({
   baseIds: z.array(z.string().uuid()).optional(),
   mode: DocumentSearchMode.optional(),
   sourceKinds: z.array(KnowledgeSourceKind).optional(),
+  authorityKinds: z.array(DocumentAuthorityKind).max(3).optional(),
   aclTags: z.array(z.string().min(1)).optional(),
   limit: z.number().int().positive().max(50).default(5),
 });

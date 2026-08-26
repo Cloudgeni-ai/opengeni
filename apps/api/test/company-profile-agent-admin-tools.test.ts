@@ -74,7 +74,7 @@ function harness() {
               {
                 id: "company-profile:00000000-0000-4000-8000-000000000113",
                 kind: "single_select",
-                prompt: "Activate this organization company profile and strategic goals?",
+                prompt: "Activate this organization identity and mission?",
                 options: [
                   { id: "activate", label: "Activate" },
                   { id: "skip", label: "Do not activate" },
@@ -107,7 +107,7 @@ function profile() {
     mission: "Make supply chains predictable.",
     products: [],
     customers: [],
-    goals: [{ key: "north-star", content: "Reach 99.99% decision availability." }],
+    goals: [],
     constraints: [],
   };
 }
@@ -120,10 +120,6 @@ describe("company-profile agent administration MCP tools", () => {
       operationId: PROPOSE_OPERATION_ID,
       identity: profile().identity,
       mission: profile().mission,
-      products: [],
-      customers: [],
-      goals: [{ content: "Reach 99.99% decision availability." }],
-      constraints: [],
       reason: "The owner explicitly requested this organization profile.",
     });
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({
@@ -136,15 +132,7 @@ describe("company-profile agent administration MCP tools", () => {
         attempt: ATTEMPT,
         request: {
           operationId: PROPOSE_OPERATION_ID,
-          profile: {
-            ...profile(),
-            goals: [
-              {
-                key: "reach-99.99-decision-availability",
-                content: "Reach 99.99% decision availability.",
-              },
-            ],
-          },
+          profile: profile(),
           reason: "The owner explicitly requested this organization profile.",
         },
       },

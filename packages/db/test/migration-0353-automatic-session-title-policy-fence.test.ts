@@ -945,7 +945,20 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     const post0353RuntimeTables = new Set([
       "pr_review_managed_github_authority_nonces",
       "pr_review_managed_github_routes",
+      "remember_knowledge_memory_materializations",
     ]);
+    // The current runtime evaluator intentionally requires every capability in
+    // today's schema. A database frozen immediately after 0353 predates the
+    // 0361 Memory materialization table/function, so preserve those exact,
+    // expected boundary gaps while continuing to reject every other posture
+    // violation in this rolling-compatibility test.
+    const expectedPost0353EvaluatorGaps = [
+      "target-schema runtime capability activate_governed_learning_decision(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability materialize_remember_knowledge_memory(uuid, uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+    ];
     const postureOptions = (expectedRole: string) => ({
       rlsStrategy: "force" as const,
       expectedRole,
@@ -1032,7 +1045,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         update: false,
         delete: false,
       });
-      expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual(
+        expectedPost0353EvaluatorGaps,
+      );
 
       // Model the complete pre-policy posture with its original target-table
       // contract and private-routine generic loop. The current evaluator covers
@@ -1048,7 +1063,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
           (routine) => !titleRoutineNames.has(routine.name),
         ),
       };
-      expect(evaluateRuntimeDatabasePosture(legacyPosture, postureOptions(customRole))).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(legacyPosture, postureOptions(customRole))).toEqual(
+        expectedPost0353EvaluatorGaps,
+      );
       expect(
         customPosture.privateRoutines
           .filter((routine) => titleRoutineNames.has(routine.name))
@@ -1076,7 +1093,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         postureOptions(deferredRole),
       );
       expect(evaluateRuntimeDatabasePosture(deferredPosture, postureOptions(deferredRole))).toEqual(
-        [],
+        expectedPost0353EvaluatorGaps,
       );
       expect(
         deferredPosture.privateTables.find(

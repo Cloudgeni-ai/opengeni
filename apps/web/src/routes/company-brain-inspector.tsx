@@ -287,7 +287,7 @@ export function CompanyBrainInspector({ workspaceId }: { workspaceId: string }) 
   if (error && !brain) {
     return (
       <LoadErrorState
-        title="Couldn't load the Company Brain inspector"
+        title="Couldn't load the Agent Knowledge inspector"
         error={error}
         onRetry={() => void load()}
       />
@@ -302,7 +302,7 @@ export function CompanyBrainInspector({ workspaceId }: { workspaceId: string }) 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 id="company-brain-inspector-title" className="text-sm font-semibold text-fg">
-            Explore Company Brain
+            Explore Agent Knowledge
           </h2>
           <p className="mt-1 text-xs leading-5 text-fg-muted">
             Search authorized knowledge, inspect your guidance history, and see content-free context

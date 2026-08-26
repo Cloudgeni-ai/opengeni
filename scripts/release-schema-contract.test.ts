@@ -140,6 +140,12 @@ describe("release schema contract", () => {
     const insightsForceRlsReadCapability = completeSourceContract.migrations.some(
       (migration) => migration.path === "0359_insights_force_rls_read_capability.sql",
     );
+    const organizationIdentityConfirmationPrompt = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0360_organization_identity_confirmation_prompt.sql",
+    );
+    const rememberKnowledgeMemoryMaterialization = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0361_remember_knowledge_memory_materialization.sql",
+    );
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -148,6 +154,8 @@ describe("release schema contract", () => {
       "0357_rig_platform_base_only.sql",
       "0358_pr_review_managed_github_app.sql",
       "0359_insights_force_rls_read_capability.sql",
+      "0360_organization_identity_confirmation_prompt.sql",
+      "0361_remember_knowledge_memory_materialization.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -162,24 +170,30 @@ describe("release schema contract", () => {
         (setBasedInsightsSessionVisibility ? 1 : 0) +
         (rigPlatformBaseOnly ? 1 : 0) +
         (prReviewManagedGithubApp ? 1 : 0) +
-        (insightsForceRlsReadCapability ? 1 : 0),
-      latestMigration: insightsForceRlsReadCapability
-        ? "0359_insights_force_rls_read_capability.sql"
-        : prReviewManagedGithubApp
-          ? "0358_pr_review_managed_github_app.sql"
-          : rigPlatformBaseOnly
-            ? "0357_rig_platform_base_only.sql"
-            : setBasedInsightsSessionVisibility
-              ? "0356_set_based_insights_session_visibility.sql"
-              : automaticSessionTitleQuarantine
-                ? "0355_automatic_session_title_quarantine.sql"
-                : automaticSessionTitleQuarantineIndex
-                  ? "0354_automatic_session_title_quarantine_index.sql"
-                  : automaticSessionTitlePolicyFence
-                    ? "0353_automatic_session_title_policy_fence.sql"
-                    : sessionVariableSetAttachments
-                      ? "0352_session_variable_set_attachments.sql"
-                      : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
+        (insightsForceRlsReadCapability ? 1 : 0) +
+        (organizationIdentityConfirmationPrompt ? 1 : 0) +
+        (rememberKnowledgeMemoryMaterialization ? 1 : 0),
+      latestMigration: rememberKnowledgeMemoryMaterialization
+        ? "0361_remember_knowledge_memory_materialization.sql"
+        : organizationIdentityConfirmationPrompt
+          ? "0360_organization_identity_confirmation_prompt.sql"
+          : insightsForceRlsReadCapability
+            ? "0359_insights_force_rls_read_capability.sql"
+            : prReviewManagedGithubApp
+              ? "0358_pr_review_managed_github_app.sql"
+              : rigPlatformBaseOnly
+                ? "0357_rig_platform_base_only.sql"
+                : setBasedInsightsSessionVisibility
+                  ? "0356_set_based_insights_session_visibility.sql"
+                  : automaticSessionTitleQuarantine
+                    ? "0355_automatic_session_title_quarantine.sql"
+                    : automaticSessionTitleQuarantineIndex
+                      ? "0354_automatic_session_title_quarantine_index.sql"
+                      : automaticSessionTitlePolicyFence
+                        ? "0353_automatic_session_title_policy_fence.sql"
+                        : sessionVariableSetAttachments
+                          ? "0352_session_variable_set_attachments.sql"
+                          : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
     });
   });
 
@@ -192,6 +206,8 @@ describe("release schema contract", () => {
       "0357_rig_platform_base_only.sql",
       "0358_pr_review_managed_github_app.sql",
       "0359_insights_force_rls_read_capability.sql",
+      "0360_organization_identity_confirmation_prompt.sql",
+      "0361_remember_knowledge_memory_materialization.sql",
     ]);
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
@@ -275,6 +291,8 @@ describe("release schema contract", () => {
       "0357_rig_platform_base_only.sql",
       "0358_pr_review_managed_github_app.sql",
       "0359_insights_force_rls_read_capability.sql",
+      "0360_organization_identity_confirmation_prompt.sql",
+      "0361_remember_knowledge_memory_materialization.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -288,6 +306,8 @@ describe("release schema contract", () => {
       "0357_rig_platform_base_only.sql",
       "0358_pr_review_managed_github_app.sql",
       "0359_insights_force_rls_read_capability.sql",
+      "0360_organization_identity_confirmation_prompt.sql",
+      "0361_remember_knowledge_memory_materialization.sql",
     );
     // Each appended migration moves both of these, and two candidates can be in
     // flight at once, so derive them from what is actually on disk rather than

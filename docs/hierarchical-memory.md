@@ -7,6 +7,32 @@ deterministic apply/revert operations, and FORCE-RLS enforcement. A later
 reversible containment slice changes only how the legacy V1 surface contributes
 to model context; it does not adopt the final scoped selector or write router.
 
+## Agent Knowledge routing contract
+
+Agent Knowledge is not one generic storage destination. Agents and user-facing
+creation flows apply these boundaries:
+
+- a specific fact, decision, incident, bug fix, or confirmed outcome that a user
+  asks to remember uses `remember lane=knowledge`. It enters the governed
+  scoped-Knowledge review lifecycle; after the initiating human confirms the
+  exact text, that text is materialized as an active `knowledge_memories` record
+  and can be found later through `memory_search` and the Memory UI;
+- reusable conditional how-to guidance belongs in a Skill backed by the
+  structured preference authority;
+- an unconditional rule that every agent must follow belongs in Workspace
+  instructions and should use the minimum wording that fully states the rule.
+
+The same material should not be copied across these authorities. A Workspace
+instruction may tell agents to search for related incidents, while the incident
+itself remains Memory and the reusable investigation method remains a Skill.
+Generic model-facing Memory write tools remain retired. `remember lane=knowledge`
+is the narrow exception: its claim review and exact human confirmation authorize
+one exact idempotent write through the confirmation-to-Memory materialization
+receipt. Its dedicated namespace prevents generic normalized deduplication from
+substituting other text, and replay retains the same Memory id after archival,
+with claim, evidence,
+Task-note, and confirmation receipt ids retained as metadata.
+
 ## Data model
 
 `knowledge_memories` remains the canonical memory row. Migration
@@ -36,14 +62,14 @@ users, roles, sessions, or namespaces without colliding.
 Every row remains fenced first by exact `account_id` and `workspace_id`.
 Additional selectors are composable relevance/visibility boundaries:
 
-| Scope | Required runtime context |
-| --- | --- |
-| `workspace` | Exact account and workspace only. |
-| `user` | Exact authenticated subject id. |
-| `role` | Exact normalized role key derived from persisted session metadata. |
-| `session` | Exact session id. |
-| `ephemeral` | Exact session id and an unexpired validity window. |
-| `legacy` | Never visible to the ordinary runtime role; database-owner audit only. |
+| Scope       | Required runtime context                                               |
+| ----------- | ---------------------------------------------------------------------- |
+| `workspace` | Exact account and workspace only.                                      |
+| `user`      | Exact authenticated subject id.                                        |
+| `role`      | Exact normalized role key derived from persisted session metadata.     |
+| `session`   | Exact session id.                                                      |
+| `ephemeral` | Exact session id and an unexpired validity window.                     |
+| `legacy`    | Never visible to the ordinary runtime role; database-owner audit only. |
 
 Missing or malformed subject, role, session, or expiry context evaluates to
 false, not unknown/allow. The ordinary runtime role cannot self-assert an admin

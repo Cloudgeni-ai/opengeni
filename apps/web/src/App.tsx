@@ -39,8 +39,9 @@ import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
-type OrganizationAdminSection = "overview" | "people" | "retention" | "billing";
+type OrganizationAdminSection = "overview" | "knowledge" | "people" | "retention" | "billing";
 type WorkspaceSettingsSection =
   | "general"
   | "members"
@@ -318,9 +319,16 @@ const workspaceDocumentsRoute = createRoute({
   // Memory used to live inside Documents, so existing timeline links and
   // bookmarks can still carry `?memory=<id>`. Preserve that public URL as a
   // compatibility redirect to the first-class Memory surface.
-  validateSearch: (search: Record<string, unknown>): { memory?: string; from?: "brain" } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { memory?: string; from?: "brain"; authority?: DocumentAuthorityKind } => ({
     ...(typeof search.memory === "string" ? { memory: search.memory } : {}),
     ...(search.from === "brain" ? { from: "brain" as const } : {}),
+    ...(search.authority === "organization" ||
+    search.authority === "workspace" ||
+    search.authority === "personal"
+      ? { authority: search.authority }
+      : {}),
   }),
   component: Documents,
 });
@@ -359,15 +367,8 @@ const workspaceSettingsRoute = createRoute({
 const workspaceStateRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "state",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { view?: "company" | "instructions" | "preferences" | "learning" } =>
-    search.view === "company" ||
-    search.view === "instructions" ||
-    search.view === "preferences" ||
-    search.view === "learning"
-      ? { view: search.view }
-      : {},
+  validateSearch: (search: Record<string, unknown>): { view?: "instructions" | "skills" } =>
+    search.view === "instructions" || search.view === "skills" ? { view: search.view } : {},
   component: WorkspaceState,
 });
 const workspaceArtifactsRoute = createRoute({
@@ -396,6 +397,7 @@ const workspaceOrganizationRoute = createRoute({
     const checkout = parseCheckoutOutcome(search);
     const section =
       search.section === "overview" ||
+      search.section === "knowledge" ||
       search.section === "people" ||
       search.section === "retention" ||
       search.section === "billing"
@@ -606,7 +608,7 @@ function Schedules() {
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
-  const { memory, from } = workspaceDocumentsRoute.useSearch();
+  const { memory, from, authority } = workspaceDocumentsRoute.useSearch();
   if (memory) {
     return (
       <Navigate
@@ -617,7 +619,14 @@ function Documents() {
       />
     );
   }
-  return <LazyDocumentsRoute workspaceId={workspaceId} returnToBrain={from === "brain"} />;
+  return (
+    <LazyDocumentsRoute
+      key={`${workspaceId}:${authority ?? "all"}`}
+      workspaceId={workspaceId}
+      returnToBrain={from === "brain"}
+      authorityKind={authority}
+    />
+  );
 }
 
 function Memory() {

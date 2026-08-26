@@ -5,7 +5,7 @@ import { LoadErrorState } from "@/components/common";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 
-import { useWorkspaceLearningHistory } from "./workspace-state-loader";
+import { useWorkspaceLearningHistory } from "./workspace-learning-loader";
 
 const MODE_COPY: Record<WorkspaceLearningMode, { label: string; description: string }> = {
   off: {
@@ -91,7 +91,7 @@ export function WorkspaceLearningAdministration({ workspaceId }: { workspaceId: 
 
   return (
     <section className="rounded-lg border border-border bg-surface p-4">
-      <h2 className="text-sm font-semibold text-fg">Learning mode</h2>
+      <h2 className="text-sm font-semibold text-fg">Learning & autonomy</h2>
       <p className="mt-1 text-xs leading-5 text-fg-muted">
         Controls derived durable changes. Knowledge ingestion and retrieval stay separate.
       </p>

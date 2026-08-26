@@ -340,7 +340,7 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
     }
   }, 120_000);
 
-  test("keeps Company Brain attention and OKF export truthful across responsive breakpoints", async () => {
+  test("keeps the Agent Knowledge overview truthful across responsive breakpoints", async () => {
     const bootstrap = await configuredContext(
       browser,
       {
@@ -372,7 +372,6 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
           viewport: matrixCase.viewport,
           isMobile: matrixCase.label === "desktop" ? undefined : true,
           hasTouch: matrixCase.label === "desktop" ? undefined : true,
-          acceptDownloads: true,
           extraHTTPHeaders: ownerHeaders,
         },
         browserTestSettings.sandboxSelfhostedEnabled,
@@ -380,55 +379,28 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
       try {
         const page = await context.newPage();
         await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/state`);
-        await page.getByRole("heading", { level: 1, name: "Company Brain", exact: true }).waitFor();
-        await page.getByRole("heading", { level: 2, name: "Needs attention" }).waitFor();
-        await page.getByText("Company profile is not set", { exact: true }).waitFor();
-        await page.getByText("Workspace instructions are not set", { exact: true }).waitFor();
-        expect(await page.getByText("No visible review signals", { exact: true }).count()).toBe(0);
-        await page.getByRole("heading", { level: 2, name: "Explore Company Brain" }).waitFor();
-        await page.getByRole("heading", { level: 3, name: "Guidance & history" }).waitFor();
-        await page.getByRole("heading", { level: 3, name: "Knowledge explorer" }).waitFor();
-        await page.getByRole("heading", { level: 3, name: "Why agents used context" }).waitFor();
-        await page.getByRole("heading", { level: 3, name: "Knowledge-backed proposals" }).waitFor();
-        await page.getByRole("textbox", { name: "Search company knowledge" }).waitFor();
-        await page.getByRole("button", { name: "Export OKF", exact: true }).waitFor();
+        await page
+          .getByRole("heading", { level: 1, name: "Agent Knowledge", exact: true })
+          .waitFor();
+        await page.getByRole("heading", { level: 2, name: "How agents work" }).waitFor();
+        await page.getByRole("heading", { level: 2, name: "What agents can find" }).waitFor();
+        for (const destination of ["Workspace instructions", "Skills", "Documents", "Memory"]) {
+          await page.getByRole("heading", { level: 3, name: destination, exact: true }).waitFor();
+        }
+        expect(await page.getByRole("heading", { name: "Needs attention" }).count()).toBe(0);
+        expect(await page.getByRole("button", { name: "Export OKF", exact: true }).count()).toBe(0);
         await setTheme(page, matrixCase.theme);
         await expectNoPageOverflow(page);
         await expectNoAxeViolations(
           page,
           "[data-slot='content-page']",
-          `company-brain/${matrixCase.label}/${matrixCase.theme}`,
+          `agent-knowledge/${matrixCase.label}/${matrixCase.theme}`,
         );
-
-        if (matrixCase.label === "desktop") {
-          await page
-            .getByRole("textbox", { name: "Search company knowledge" })
-            .fill("architecture handbook");
-          await page.getByRole("button", { name: "Search", exact: true }).click();
-          await page.getByText("No authorized knowledge records found.", { exact: true }).waitFor();
-          const downloadPromise = page.waitForEvent("download");
-          await page.getByRole("button", { name: "Export OKF", exact: true }).click();
-          const download = await downloadPromise;
-          expect(download.suggestedFilename()).toMatch(/^company-brain(?:-.+)?\.okf\.md$/u);
-          const downloadPath = await download.path();
-          expect(downloadPath).not.toBeNull();
-          const content = await Bun.file(downloadPath!).text();
-          expect(content).toContain("# OpenGeni Company Brain");
-          await page
-            .getByText("Permission-filtered Company Brain package downloaded.", { exact: true })
-            .waitFor();
-        }
 
         await resetSurfaceCaptureViewport(page);
         await page.screenshot({
-          path: `/tmp/company-brain-${matrixCase.label}-${matrixCase.theme}-overview.png`,
+          path: `/tmp/agent-knowledge-${matrixCase.label}-${matrixCase.theme}-overview.png`,
           fullPage: true,
-        });
-        await page
-          .getByRole("heading", { level: 2, name: "Needs attention" })
-          .scrollIntoViewIfNeeded();
-        await page.screenshot({
-          path: `/tmp/company-brain-${matrixCase.label}-${matrixCase.theme}-attention.png`,
         });
         expect(unexpectedDiagnostics(context)).toEqual([]);
       } finally {

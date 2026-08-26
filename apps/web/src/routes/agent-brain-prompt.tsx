@@ -6,9 +6,12 @@ import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react
 import { useAppContext } from "@/context";
 import { resolveAgentBrainPromptModel } from "@/lib/agent-brain-prompt-model";
 
-type AgentBrainPromptKind = "company_profile" | "preference" | "workspace_instructions";
+type AgentKnowledgePromptKind = "company_profile" | "skill" | "workspace_instructions";
 
-function promptCopy(kind: AgentBrainPromptKind): {
+function promptCopy(
+  kind: AgentKnowledgePromptKind,
+  personalWorkspace: boolean,
+): {
   label: string;
   placeholder: string;
   button: string;
@@ -17,14 +20,14 @@ function promptCopy(kind: AgentBrainPromptKind): {
 } {
   if (kind === "company_profile") {
     return {
-      label: "Tell OpenGeni about your company and goals",
+      label: "Describe your organization",
       placeholder:
-        "For example: We build OpenGeni for teams that want dependable autonomous agents. Our current goal is to make the agent brain simple and useful.",
+        "For example: OpenGeni builds infrastructure for teams running dependable autonomous agents. We exist to make capable agents safe and practical to operate.",
       button: "Create with OpenGeni",
       openingMessage: (request) =>
-        `Help me create or update our organization-wide company profile and goals.\n\nWhat I want agents to know:\n${request}`,
+        `Help me create or update our organization identity.\n\nWho we are and why we exist:\n${request}`,
       instructions:
-        "Help the user create concise organization-wide company context covering only useful identity, mission, products, customers, goals, and critical constraints. Ask only essential follow-up questions. Show the complete proposed profile before applying it. Use company_profile_propose, pass its humanInput payload verbatim to request_human_input, and only after the organization owner confirms Activate call company_profile_confirm. This explicit administration path is independent of workspace learning policy. Do not save this as ordinary Memory, Documents, workspace policy, or a preference. If either company-profile tool is unavailable, say so briefly and leave the final proposal ready for the manual editor.",
+        "Help the user create a concise organization identity containing only identity (who the organization is) and mission (why it exists). Ask only essential follow-up questions. Products, customers, goals, constraints, strategy, and changing facts belong in organization-scoped Documents and are retrieved when relevant. Show the complete identity and mission before applying it. Use company_profile_propose, pass its humanInput payload verbatim to request_human_input, and only after the organization owner confirms Activate call company_profile_confirm. This explicit administration path is independent of workspace learning policy. Do not save identity or mission as ordinary Memory, Documents, workspace policy, or a Skill. If either company-profile tool is unavailable, say so briefly and leave the final proposal ready for an authorized governance client.",
     };
   }
   if (kind === "workspace_instructions") {
@@ -36,18 +39,30 @@ function promptCopy(kind: AgentBrainPromptKind): {
       openingMessage: (request) =>
         `Help me create or update the instructions for agents working in this workspace.\n\nWhat I want:\n${request}`,
       instructions:
-        "Help the user turn a natural-language request into concise global workspace instructions. Ask only essential follow-up questions. Show the proposed instructions before applying them. After explicit confirmation, use the canonical durable-learning or workspace instruction-policy tool if one is available. Never use ordinary Memory as a substitute. If the write tool is unavailable, say so briefly and leave the final proposed text ready for the manual editor.",
+        "Help the user turn a natural-language request into the shortest useful global workspace instruction: normally 1–5 sentences and no more than 120 words. Include only behavior that should apply to nearly every agent task in this workspace. Route a conditional procedure or reusable how-to to a Skill instead; route a fact, decision, incident, bug fix, or outcome to retrievable Memory rather than instructions. Ask only essential follow-up questions and show the proposed instruction before applying it. When the user agrees, call remember with lane=instruction_policy and scope=workspace. If it returns confirmation_required, pass its humanInput payload verbatim to request_human_input and then call remember_confirm with the returned request id. Do not duplicate the content in Memory or Skills. If the remember tools are unavailable, say so briefly and leave the final proposed text ready for the manual editor.",
+    };
+  }
+  if (personalWorkspace) {
+    return {
+      label: "Describe a personal skill",
+      placeholder:
+        "For example: When preparing a release update, lead with the outcome, then list decisions, blockers, and the next action.",
+      button: "Draft with OpenGeni",
+      openingMessage: (request) =>
+        `Help me draft a personal Skill for OpenGeni agents.\n\nWhat I want:\n${request}`,
+      instructions:
+        "Help the user draft one personal Skill: a conditional procedure or how-to that should follow this user across workspaces in the organization. Do not turn a fact, decision, incident, bug fix, or outcome into a Skill; those belong in retrievable Memory. Do not turn a universal always-on rule into a Skill; that belongs in a concise workspace instruction. Propose a clear name, a stable key, a one-sentence always-visible summary, and focused full instructions. The current agent write path is workspace-scoped and cannot safely activate a user-scoped Skill, so do not call remember or claim that you saved it. Leave the complete structured proposal ready for the user to paste into the personal manual editor on the page.",
     };
   }
   return {
-    label: "Tell OpenGeni what you want it to remember",
+    label: "Describe a reusable skill",
     placeholder:
-      "For example: When giving me progress updates, lead with the outcome and keep the explanation short.",
+      "For example: When preparing a release update, lead with the outcome, then list decisions, blockers, and the next action.",
     button: "Create with OpenGeni",
     openingMessage: (request) =>
-      `Help me turn this into a reusable preference for OpenGeni agents.\n\nWhat I want:\n${request}`,
+      `Help me turn this into a reusable Skill for OpenGeni agents.\n\nWhat I want:\n${request}`,
     instructions:
-      "Help the user create one reusable preference. Determine whether it should be personal, workspace-wide, or organization-wide; ask only when scope is genuinely ambiguous. Propose a clear name, a short always-visible summary, and focused full instructions. Show the proposal before applying it. After explicit confirmation, use the canonical durable-learning preference tool if one is available. Never save the preference as ordinary Memory. If the write tool is unavailable, say so briefly and leave the structured proposal ready for the manual editor.",
+      "Help the user create one reusable Skill for this workspace: a conditional procedure or how-to that agents should fetch when relevant. Do not turn a fact, decision, incident, bug fix, or outcome into a Skill; those belong in retrievable Memory. Do not turn a universal always-on rule into a Skill; that belongs in the shortest possible workspace instruction. Propose a clear name, stable key, one-sentence always-visible summary, and focused full instructions. Ask only essential follow-up questions and show the proposal before applying it. When the user agrees, call remember with lane=preference and scope=workspace. If it returns confirmation_required, pass its humanInput payload verbatim to request_human_input and then call remember_confirm with the returned request id. The current agent path cannot activate personal or organization Skills; direct those scopes to the manual editor instead of claiming they were saved. Do not duplicate the content in Memory or workspace instructions.",
   };
 }
 
@@ -111,16 +126,18 @@ function useAgentBrainPromptCatalog(workspaceId: string): CatalogState & {
     : { workspaceId, models: [], loading: true, error: null, refresh };
 }
 
-export function AgentBrainPrompt({
+export function AgentKnowledgePrompt({
   kind,
   workspaceId,
+  personalWorkspace = false,
 }: {
-  kind: AgentBrainPromptKind;
+  kind: AgentKnowledgePromptKind;
   workspaceId: string;
+  personalWorkspace?: boolean;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const copy = promptCopy(kind);
+  const copy = promptCopy(kind, personalWorkspace);
   const [request, setRequest] = useState("");
   const [starting, setStarting] = useState(false);
   const modelCatalog = useAgentBrainPromptCatalog(workspaceId);
@@ -196,7 +213,9 @@ export function AgentBrainPrompt({
         />
       </label>
       <p className="text-xs leading-5 text-fg-subtle">
-        OpenGeni will ask questions if needed and show you the result before saving it.
+        {kind === "skill" && personalWorkspace
+          ? "OpenGeni will prepare the Skill; use the personal manual editor below to save it."
+          : "OpenGeni will ask questions if needed and show you the result before saving it."}
       </p>
       {modelSelection ? (
         <p className="text-xs leading-5 text-fg-subtle" role="status">

@@ -3803,7 +3803,10 @@ export type OrganizationPrivateSessionSettings = {
   updatedAt: string;
   changed?: boolean;
 };
-export type CreateOrganizationWorkspaceRequest = { name: string; operationId: string };
+export type CreateOrganizationWorkspaceRequest = {
+  name: string;
+  operationId: string;
+};
 export type UpdateOrganizationWorkspaceRequest = {
   name: string;
   expectedUpdatedAt: string;
@@ -3825,7 +3828,10 @@ export type RevokeOrganizationWorkspaceMemberRequest = {
   expectedUpdatedAt: string;
   operationId: string;
 };
-export type RevokeOrganizationWorkspaceMemberResponse = { removed: boolean; replay: boolean };
+export type RevokeOrganizationWorkspaceMemberResponse = {
+  removed: boolean;
+  replay: boolean;
+};
 export type CreateOrganizationRequest = {
   name: string;
   operationId: string;
@@ -3899,7 +3905,9 @@ export type ListOrganizationInvitationsPageResponse = {
   invitations: OrganizationInvitation[];
   nextCursor: string | null;
 };
-export type ListOrganizationMembersResponse = { members: OrganizationAdministrationMember[] };
+export type ListOrganizationMembersResponse = {
+  members: OrganizationAdministrationMember[];
+};
 export type ListOrganizationAdministrationMembersResponse = {
   members: OrganizationAdministrationMember[];
 };
@@ -5526,6 +5534,7 @@ export type DocumentSearchRequest = {
   baseIds?: string[] | undefined;
   mode?: DocumentSearchMode | undefined;
   sourceKinds?: KnowledgeSourceKind[] | undefined;
+  authorityKinds?: DocumentAuthorityKind[] | undefined;
   aclTags?: string[] | undefined;
   limit?: number | undefined;
 };

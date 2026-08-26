@@ -2110,12 +2110,14 @@ describe("contracts", () => {
         limit: 50,
         mode: "hybrid",
         sourceKinds: ["repository"],
+        authorityKinds: ["organization"],
       }),
     ).toEqual({
       query: "network policy",
       limit: 50,
       mode: "hybrid",
       sourceKinds: ["repository"],
+      authorityKinds: ["organization"],
     });
     expect(
       DocumentSearchResponse.parse({

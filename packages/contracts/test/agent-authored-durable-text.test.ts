@@ -194,7 +194,7 @@ describe("agent-authored durable-text budgets", () => {
     const rejected = AgentAuthoredCompanyProfileContent.safeParse(profile(essay));
     expect(rejected.success).toBe(false);
     expect(rejected.success ? "" : rejected.error.issues[0]!.message).toContain(
-      "mandatory prompt context in every session across the organization",
+      "mandatory prompt context in every root session across the organization",
     );
     // The same profile still passes the human `account:admin` contract.
     expect(CompanyProfileContent.safeParse(profile(essay)).success).toBe(true);

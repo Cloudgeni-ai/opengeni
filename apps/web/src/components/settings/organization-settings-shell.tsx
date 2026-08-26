@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
+  BrainCircuitIcon,
   CreditCardIcon,
   DatabaseIcon,
   LayoutDashboardIcon,
@@ -20,6 +21,7 @@ type OrganizationSettingsItem = {
 
 const ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboardIcon },
+  { id: "knowledge", label: "Knowledge", icon: BrainCircuitIcon },
   { id: "people", label: "People & invitations", icon: UsersIcon },
   { id: "retention", label: "Retention", icon: DatabaseIcon },
   { id: "billing", label: "Billing", icon: CreditCardIcon },
@@ -29,6 +31,11 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
   overview: {
     title: "Organization overview",
     description: "Organization identity, access, and private-session policy.",
+  },
+  knowledge: {
+    title: "Organization knowledge",
+    description:
+      "Set the small identity agents always know and explore company knowledge they retrieve when relevant.",
   },
   people: {
     title: "People & invitations",
@@ -90,7 +97,7 @@ export function OrganizationSettingsShell({
 
           <nav
             aria-label="Organization settings"
-            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-4 lg:flex lg:flex-col"
+            className="mt-3 grid grid-cols-2 gap-1 sm:grid-cols-5 lg:flex lg:flex-col"
           >
             {ITEMS.map((item) => {
               const Icon = item.icon;

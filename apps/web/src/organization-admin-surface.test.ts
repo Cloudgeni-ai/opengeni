@@ -10,13 +10,18 @@ const tenancyDocs = await Bun.file(
 ).text();
 
 describe("organization administration surface", () => {
-  test("routes accessible overview, people, retention, and billing sections", () => {
+  test("routes accessible overview, knowledge, people, retention, and billing sections", () => {
     expect(routeSource).toContain("<OrganizationSettingsShell");
     expect(shellSource).toContain('aria-label="Organization settings"');
     expect(shellSource).toContain('aria-current={selected ? "page" : undefined}');
-    for (const section of ["overview", "people", "retention", "billing"]) {
+    for (const section of ["overview", "knowledge", "people", "retention", "billing"]) {
       expect(shellSource).toContain(`id: "${section}"`);
     }
+    expect(routeSource).toContain('section === "knowledge"');
+    expect(routeSource).toContain("OrganizationKnowledgePrompt");
+    expect(routeSource).toContain("canManageOrganizationKnowledge");
+    expect(routeSource).toContain('"account:admin"');
+    expect(routeSource).toContain("Organization identity is read-only for you");
   });
 
   test("uses only lifecycle APIs and never links a member personal workspace", () => {
