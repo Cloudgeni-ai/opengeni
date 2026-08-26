@@ -71,7 +71,11 @@ function sourceProvisionsRolesOnSharedDatabase(source: string): boolean {
     /\b([A-Za-z_$][\w$]*)\s*=\s*await\s+acquireSharedTestDatabase\s*\(/g,
   )) {
     const sharedDatabase = match[1]!;
-    if (new RegExp(`\\bprovisionRoles\\s*\\(\\s*${sharedDatabase}\\.adminUrl\\b`).test(source)) {
+    if (
+      new RegExp(`\\bprovisionRoles\\s*\\(\\s*${sharedDatabase}(?:\\s*!\\s*)?\\.adminUrl\\b`).test(
+        source,
+      )
+    ) {
       return true;
     }
   }

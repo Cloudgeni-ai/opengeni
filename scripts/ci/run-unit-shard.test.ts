@@ -106,6 +106,11 @@ describe("unit process planning", () => {
     ).toBe(true);
     expect(
       sourceMutatesSharedPostgresRole(
+        "let shared = null; shared = await acquireSharedTestDatabase('x'); await provisionRoles(shared!.adminUrl, {});",
+      ),
+    ).toBe(true);
+    expect(
+      sourceMutatesSharedPostgresRole(
         "await shared.admin.unsafe(`create role ${quotedRole} nologin`);",
       ),
     ).toBe(true);
@@ -137,6 +142,7 @@ describe("unit process planning", () => {
       "packages/db/test/session-activity-commit-gate.test.ts",
       "packages/db/test/migration-0120-durable-goal-wake.test.ts",
       "packages/db/test/migration-0138-sandbox-checkpoints.test.ts",
+      "packages/db/test/migration-0351-session-variable-set-attachments.test.ts",
     ]) {
       expect(sourceMutatesSharedPostgresRole(readFileSync(join(root, path), "utf8"))).toBe(true);
     }
