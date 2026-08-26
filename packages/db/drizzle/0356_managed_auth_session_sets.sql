@@ -8,6 +8,11 @@ SET LOCAL statement_timeout = '10min';
 ALTER TABLE "auth_sessions"
   ADD COLUMN "login_binding_id" uuid,
   ADD COLUMN "login_binding_revision" bigint;
+
+-- The migration principal is a non-superuser table owner. Open an owner-only
+-- visibility window so the exact-binding preflight cannot pass vacuously under
+-- FORCE RLS; ordinary runtime roles remain policy-bound throughout.
+ALTER TABLE "canonical_human_login_bindings" NO FORCE ROW LEVEL SECURITY;
 DO $managed_auth_session_binding_backfill$
 DECLARE
   previous_canonical_marker text := pg_catalog.current_setting(
@@ -74,6 +79,7 @@ EXCEPTION WHEN OTHERS THEN
   RAISE;
 END
 $managed_auth_session_binding_backfill$;
+ALTER TABLE "canonical_human_login_bindings" FORCE ROW LEVEL SECURITY;
 
 DO $managed_auth_session_exact_binding_stamp_install$
 DECLARE
