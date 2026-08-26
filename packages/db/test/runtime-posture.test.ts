@@ -176,6 +176,8 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_memberships",
     "organization_profile_events",
     "organization_shared_workspace_administration_capabilities",
+    "organization_workspace_lifecycle_events",
+    "organization_workspace_operation_receipts",
     "organization_user_resource_authorities",
     "organization_user_resource_grants",
     "organization_user_retention_deletion_events",
@@ -422,12 +424,12 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
-  test("requires the 0350 session Variable Set runtime receipt", () => {
+  test("requires the 0351 session Variable Set runtime receipt", () => {
     const posture = safePosture();
     posture.sessionVariableSetAttachmentsCutoverPresent = false;
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the 0350 session Variable Set attachment runtime receipt",
+      "database is missing the 0351 session Variable Set attachment runtime receipt",
     );
   });
 
@@ -472,14 +474,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 294],
+            [FORCE_RLS_TABLES, 296],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 59],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 61],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
@@ -504,7 +506,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 306 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 308 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );

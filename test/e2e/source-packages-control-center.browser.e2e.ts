@@ -553,6 +553,7 @@ function workspace() {
   return {
     id: workspaceId,
     accountId,
+    kind: "shared",
     name: "Source Package Acceptance",
     slug: "source-package-acceptance",
     externalSource: null,

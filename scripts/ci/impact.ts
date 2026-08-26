@@ -183,6 +183,10 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/organization-workspace-administration.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/testing",
+  ],
   "test/e2e/custom-api-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/editable-artifacts.browser.e2e.ts": [
     "@opengeni/api-router",
@@ -346,7 +350,9 @@ function focusedArtifactRuntimeRequired(
 
 function importedWorkspaceDependencies(graph: WorkspaceGraph, path: string): Set<string> {
   const source = readFileSync(path, "utf8");
-  const imports = new Bun.Transpiler({ loader: path.endsWith(".tsx") ? "tsx" : "ts" })
+  const imports = new Bun.Transpiler({
+    loader: path.endsWith(".tsx") ? "tsx" : "ts",
+  })
     .scanImports(source)
     .map(({ path: specifier }) => specifier);
   const workspaceNames = new Set(graph.packages.map((pkg) => pkg.name));
@@ -480,7 +486,11 @@ function fullPlan(
 
 export function createImpactPlan(
   changedInput: readonly string[],
-  options: { forceFull?: boolean; base?: string | null; head?: string | null } = {},
+  options: {
+    forceFull?: boolean;
+    base?: string | null;
+    head?: string | null;
+  } = {},
 ): ImpactPlan {
   assertTestTierMapComplete();
   const graph = createWorkspaceGraph();
@@ -490,17 +500,26 @@ export function createImpactPlan(
   const changedFiles = [...new Set(changedInput.map((path) => path.trim()).filter(Boolean))].sort();
   const reasons: ImpactReason[] = [];
   if (options.forceFull) {
-    reasons.push({ path: "*", reason: "full mode requested (main/scheduled safety net)" });
+    reasons.push({
+      path: "*",
+      reason: "full mode requested (main/scheduled safety net)",
+    });
     return fullPlan(graph, changedFiles, reasons, base, head);
   }
   if (changedFiles.length === 0) {
-    reasons.push({ path: "*", reason: "no trustworthy changed-file set; failing closed" });
+    reasons.push({
+      path: "*",
+      reason: "no trustworthy changed-file set; failing closed",
+    });
     return fullPlan(graph, changedFiles, reasons, base, head);
   }
 
   for (const path of changedFiles) {
     if (path.startsWith("/") || path.includes("\\") || path.split("/").includes("..")) {
-      reasons.push({ path, reason: "invalid or non-repository path; failing closed" });
+      reasons.push({
+        path,
+        reason: "invalid or non-repository path; failing closed",
+      });
       return fullPlan(graph, changedFiles, reasons, base, head);
     }
     if (matchesAny(path, GLOBAL_FENCES)) {
@@ -534,7 +553,10 @@ export function createImpactPlan(
       buildPackages: [],
       exampleBuildProjects: [],
       guards: ["format", "docs-refs", "generated-fonts", "public-hygiene"],
-      reasons: changedFiles.map((path) => ({ path, reason: "documentation-only change" })),
+      reasons: changedFiles.map((path) => ({
+        path,
+        reason: "documentation-only change",
+      })),
     };
   }
 
@@ -595,7 +617,10 @@ export function createImpactPlan(
     if (dependencies) {
       changedTests.add(path);
       for (const name of dependencies) direct.add(name);
-      reasons.push({ path, reason: "explicit root integration/e2e dependency rule" });
+      reasons.push({
+        path,
+        reason: "explicit root integration/e2e dependency rule",
+      });
       continue;
     }
     reasons.push({ path, reason: "unmapped repository path; failing closed" });

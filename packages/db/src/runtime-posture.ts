@@ -73,7 +73,13 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_self_organization_invitation(text, uuid)",
   "list_organization_invitations(uuid, text, uuid, integer)",
   "list_organization_members(uuid, text)",
+  "list_organization_administration_members(uuid, text)",
   "get_organization_administration_overview(uuid, text)",
+  "get_workspace_kind(uuid, uuid)",
+  "organization_workspace_command(jsonb)",
+  "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
+  "prepare_organization_workspace_member_removal(jsonb)",
+  "record_organization_workspace_member_removal(jsonb, uuid, uuid)",
   "create_managed_organization(text, text, text, uuid)",
   "assert_organization_shared_workspace_administrator(uuid, uuid, text)",
   "open_organization_shared_workspace_administration_capability(uuid, uuid, text)",
@@ -120,6 +126,8 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_user_retention_object_deletion_receipts",
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "organization_workspace_lifecycle_events",
+  "organization_workspace_operation_receipts",
   "self_service_organization_setup_receipts",
 ] as const;
 const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
@@ -692,6 +700,8 @@ export const FORCE_RLS_TABLES = [
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "organization_user_setup_intents",
+  "organization_workspace_lifecycle_events",
+  "organization_workspace_operation_receipts",
   "pack_installation_components",
   "pack_installations",
   "personal_document_once_consumption_receipts",
@@ -1177,6 +1187,8 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
   "organization_user_setup_intents",
+  "organization_workspace_lifecycle_events",
+  "organization_workspace_operation_receipts",
   "personal_document_once_consumption_receipts",
   "personal_github_repository_selection_heads",
   "personal_github_repository_selection_operations",
@@ -1725,7 +1737,7 @@ export function evaluateRuntimeDatabasePosture(
   const identity = posture.identity;
 
   if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
-    violations.push("database is missing the 0350 session Variable Set attachment runtime receipt");
+    violations.push("database is missing the 0351 session Variable Set attachment runtime receipt");
   }
 
   if (

@@ -18,15 +18,8 @@ export type PendingSessionRestartAttempt = SessionRestartOperationScope & {
   idempotencyKey: string;
 };
 
-function sameScope(
-  left: SessionRestartOperationScope | null,
-  right: SessionRestartOperationScope,
-): boolean {
-  return (
-    left?.principalId === right.principalId &&
-    left.workspaceId === right.workspaceId &&
-    left.sessionId === right.sessionId
-  );
+function scopeKey(scope: SessionRestartOperationScope): string {
+  return JSON.stringify([scope.principalId, scope.workspaceId, scope.sessionId]);
 }
 
 /**
@@ -35,12 +28,10 @@ function sameScope(
  * before the original idempotency key is reconciled.
  */
 export class SessionRestartOperationController {
-  private scope: SessionRestartOperationScope | null = null;
-  private attempt: PendingSessionRestartAttempt | null = null;
+  private readonly attempts = new Map<string, PendingSessionRestartAttempt>();
 
   snapshot(scope: SessionRestartOperationScope): PendingSessionRestartAttempt | null {
-    this.bind(scope);
-    return this.attempt;
+    return this.attempts.get(scopeKey(scope)) ?? null;
   }
 
   prepare(
@@ -52,32 +43,29 @@ export class SessionRestartOperationController {
     },
     createIdempotencyKey: () => string,
   ): PendingSessionRestartAttempt {
-    this.bind(scope);
-    if (this.attempt) return this.attempt;
-    this.attempt = {
+    const key = scopeKey(scope);
+    const retained = this.attempts.get(key);
+    if (retained) return retained;
+    const attempt = {
       ...scope,
       visibility: input.visibility,
       rigId: input.rigId,
       variableSetIds: [...input.variableSetIds],
       idempotencyKey: createIdempotencyKey(),
     };
-    return this.attempt;
+    this.attempts.set(key, attempt);
+    return attempt;
   }
 
   settle(scope: SessionRestartOperationScope, attempt: PendingSessionRestartAttempt): void {
-    if (!sameScope(this.scope, scope)) return;
-    if (this.attempt?.idempotencyKey === attempt.idempotencyKey) this.attempt = null;
+    const key = scopeKey(scope);
+    if (this.attempts.get(key)?.idempotencyKey === attempt.idempotencyKey) {
+      this.attempts.delete(key);
+    }
   }
 
   invalidate(): void {
-    this.scope = null;
-    this.attempt = null;
-  }
-
-  private bind(scope: SessionRestartOperationScope): void {
-    if (sameScope(this.scope, scope)) return;
-    this.scope = { ...scope };
-    this.attempt = null;
+    this.attempts.clear();
   }
 }
 

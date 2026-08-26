@@ -1561,6 +1561,7 @@ export type ManagedAccount = z.infer<typeof ManagedAccount>;
 export const Workspace = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
+  kind: z.enum(["personal", "shared"]),
   name: z.string(),
   slug: z.string().nullable(),
   externalSource: z.string().nullable(),

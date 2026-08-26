@@ -2058,7 +2058,13 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, workspaceId))
     .limit(1);
-  return row ? mapWorkspace(row, await workspaceControlProjection(db, row.id)) : null;
+  return row
+    ? mapWorkspace(
+        row,
+        await workspaceControlProjection(db, row.id),
+        await workspaceKindProjection(db, row),
+      )
+    : null;
 }
 
 export async function getManagedAccount(
@@ -2095,7 +2101,11 @@ export async function listWorkspacesForSubject(
     .limit(limit);
   return await Promise.all(
     rows.map(async (row) =>
-      mapWorkspace(row.workspace, await workspaceControlProjection(db, row.workspace.id)),
+      mapWorkspace(
+        row.workspace,
+        await workspaceControlProjection(db, row.workspace.id),
+        await workspaceKindProjection(db, row.workspace),
+      ),
     ),
   );
 }
@@ -2144,13 +2154,17 @@ export async function createWorkspace(
       workspaceId: row.id,
       accountId: row.accountId,
     });
-    return mapWorkspace(row, {
-      state: "active",
-      revision: 0,
-      reason: null,
-      changedBy: null,
-      changedAt: null,
-    });
+    return mapWorkspace(
+      row,
+      {
+        state: "active",
+        revision: 0,
+        reason: null,
+        changedBy: null,
+        changedAt: null,
+      },
+      "shared",
+    );
   });
 }
 
@@ -2364,7 +2378,11 @@ export async function updateWorkspace(
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
-  return mapWorkspace(row, await workspaceControlProjection(db, workspaceId));
+  return mapWorkspace(
+    row,
+    await workspaceControlProjection(db, workspaceId),
+    await workspaceKindProjection(db, row),
+  );
 }
 
 // Deep-merge (top-level) a settings patch into workspaces.settings, atomically.
@@ -2425,6 +2443,7 @@ export async function updateWorkspaceSettings(
           return mapWorkspace(
             row,
             await workspaceControlProjection(tx as unknown as Database, workspaceId),
+            await workspaceKindProjection(tx as unknown as Database, row),
           );
         }),
     );
@@ -2440,7 +2459,11 @@ export async function updateWorkspaceSettings(
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
-  return mapWorkspace(row, await workspaceControlProjection(db, workspaceId));
+  return mapWorkspace(
+    row,
+    await workspaceControlProjection(db, workspaceId),
+    await workspaceKindProjection(db, row),
+  );
 }
 
 export async function setWorkspaceDefaultRig(
@@ -2459,7 +2482,11 @@ export async function setWorkspaceDefaultRig(
   if (!row) {
     throw new Error(`Workspace not found: ${workspaceId}`);
   }
-  return mapWorkspace(row, await workspaceControlProjection(db, workspaceId));
+  return mapWorkspace(
+    row,
+    await workspaceControlProjection(db, workspaceId),
+    await workspaceKindProjection(db, row),
+  );
 }
 
 export async function getWorkspaceGrant(
@@ -66803,13 +66830,35 @@ async function workspaceControlProjection(
   });
 }
 
+async function workspaceKindProjection(
+  db: Database,
+  row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
+): Promise<Workspace["kind"]> {
+  return await withRlsContext(
+    db,
+    { accountId: row.accountId, workspaceId: row.id },
+    async (scopedDb) => {
+      const [kind] = await rawRows<{ kind: string }>(
+        scopedDb,
+        sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
+      );
+      if (kind?.kind !== "personal" && kind?.kind !== "shared") {
+        throw new Error(`Workspace ${row.id} has no canonical kind`);
+      }
+      return kind.kind;
+    },
+  );
+}
+
 function mapWorkspace(
   row: typeof schema.workspaces.$inferSelect,
   inferenceControl: Workspace["inferenceControl"],
+  kind: Workspace["kind"],
 ): Workspace {
   return {
     id: row.id,
     accountId: row.accountId,
+    kind,
     name: row.name,
     slug: row.slug,
     externalSource: row.externalSource,

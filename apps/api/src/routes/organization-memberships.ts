@@ -1,5 +1,4 @@
 import {
-  AddOrganizationWorkspaceMemberRequest,
   AcceptOrganizationInvitationRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
@@ -8,24 +7,26 @@ import {
   ListManagedOrganizationMembershipsResponse,
   ListOrganizationInvitationsPageQuery,
   ListOrganizationInvitationsPageResponse,
-  ListOrganizationMembersResponse,
+  ListOrganizationAdministrationMembersResponse,
   OrganizationAdministrationOverview,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
   OrganizationSummary,
-  Permission,
+  OrganizationWorkspaceAccess,
+  OrganizationWorkspaceAccessMember,
+  PutOrganizationWorkspaceMemberRequest,
   RevokeOrganizationInvitationRequest,
+  RevokeOrganizationWorkspaceMemberRequest,
+  RevokeOrganizationWorkspaceMemberResponse,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
   UpdateOrganizationPrivateSessionSettingsRequest,
   UpdateOrganizationRetentionPolicyRequest,
-  UpdateWorkspaceMemberRequest,
-  UpdateWorkspaceRequest,
+  UpdateOrganizationWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   Workspace,
-  WorkspaceMember,
 } from "@opengeni/contracts";
 import {
   getManagedSession,
@@ -36,28 +37,27 @@ import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
   createManagedOrganization,
-  createOrganizationSharedWorkspace,
+  createOrganizationWorkspace,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
-  getManagedUserProfilesByIds,
   ensureOrganizationUserSetupIntent,
   getOrganizationAdministrationOverview,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
-  listOrganizationMembers,
+  listOrganizationAdministrationMembers,
   listOrganizationInvitations,
   listSelfOrganizationInvitations,
   nestedPostgresSqlState,
   revokeOrganizationInvitation,
-  removeWorkspaceMember,
-  updateOrganizationSharedWorkspace,
+  putOrganizationWorkspaceMember,
+  revokeOrganizationWorkspaceMember,
+  updateOrganizationWorkspace,
   updateOrganizationSharedWorkspaceSettings,
   updateOrganizationMember,
   updateOrganizationName,
   updateOrganizationPrivateSessionSettings,
   updateOrganizationRetentionPolicy,
-  upsertOrganizationSharedWorkspaceMember,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -123,19 +123,6 @@ function rethrowMembershipError(error: unknown): never {
     });
   }
   throw error;
-}
-
-function parseWorkspacePermissions(permissions: string[]) {
-  const parsed = z.array(Permission).max(128).safeParse(permissions);
-  if (!parsed.success) {
-    throw new HTTPException(422, { message: "invalid workspace permissions" });
-  }
-  return parsed.data;
-}
-
-function normalizeAgentInstructions(value: string | null): string | null {
-  if (value === null) return null;
-  return value.trim() || null;
 }
 
 export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -269,21 +256,17 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-    const payload = await parseBody(context, UpdateWorkspaceRequest);
+    const payload = await parseBody(context, UpdateOrganizationWorkspaceRequest);
     try {
       return context.json(
-        Workspace.parse(
-          await updateOrganizationSharedWorkspace(deps.db, {
+        OrganizationWorkspaceAccess.parse(
+          await updateOrganizationWorkspace(deps.db, {
             organizationId,
             workspaceId,
             actorSubjectId: subjectId,
-            ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
-            ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
-            ...(payload.agentInstructions !== undefined
-              ? {
-                  agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
-                }
-              : {}),
+            name: payload.name.trim(),
+            expectedUpdatedAt: payload.expectedUpdatedAt,
+            operationId: payload.operationId,
           }),
         ),
       );
@@ -302,15 +285,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     const payload = await parseBody(context, CreateOrganizationWorkspaceRequest);
     try {
       return context.json(
-        Workspace.parse(
-          await createOrganizationSharedWorkspace(deps.db, {
+        OrganizationWorkspaceAccess.parse(
+          await createOrganizationWorkspace(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
             name: payload.name.trim(),
-            ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
-            ...(payload.agentInstructions !== undefined
-              ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
-              : {}),
             operationId: payload.operationId,
           }),
         ),
@@ -349,121 +328,69 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     },
   );
 
-  app.post("/v1/organizations/:organizationId/workspaces/:workspaceId/members", async (context) => {
-    const { subjectId } = await requireManagedHuman(context, deps);
-    const organizationId = parseId(
-      OrganizationId,
-      context.req.param("organizationId"),
-      "organization id",
-    );
-    const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-    const payload = await parseBody(context, AddOrganizationWorkspaceMemberRequest);
-    try {
-      const members = await listOrganizationMembers(deps.db, {
-        organizationId,
-        actorSubjectId: subjectId,
-      });
-      const target = members.find(
-        (member) => member.id === payload.organizationMembershipId && member.status === "active",
-      );
-      if (!target) {
-        throw new HTTPException(404, {
-          message: "active organization member not found",
-        });
-      }
-      const [profile] = await getManagedUserProfilesByIds(deps.db, [
-        target.subjectId.slice("user:".length),
-      ]);
-      return context.json(
-        WorkspaceMember.parse(
-          await upsertOrganizationSharedWorkspaceMember(deps.db, {
-            organizationId,
-            workspaceId,
-            actorSubjectId: subjectId,
-            targetOrganizationMembershipId: target.id,
-            subjectLabel: profile?.email ?? profile?.name ?? null,
-            role: payload.role ?? "member",
-            permissions: parseWorkspacePermissions(payload.permissions),
-            requireExisting: false,
-          }),
-        ),
-        201,
-      );
-    } catch (error) {
-      if (error instanceof HTTPException) throw error;
-      rethrowMembershipError(error);
-    }
-  });
-
-  app.patch(
-    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:subjectId",
+  app.put(
+    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId",
     async (context) => {
-      const { subjectId: actorSubjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireManagedHuman(context, deps);
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
         "organization id",
       );
       const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-      const targetSubjectId = decodeURIComponent(context.req.param("subjectId"));
-      const payload = await parseBody(context, UpdateWorkspaceMemberRequest);
+      const membershipId = parseId(
+        MembershipId,
+        context.req.param("membershipId"),
+        "membership id",
+      );
+      const payload = await parseBody(context, PutOrganizationWorkspaceMemberRequest);
       try {
-        const members = await listOrganizationMembers(deps.db, {
-          organizationId,
-          actorSubjectId,
-        });
-        const target = members.find(
-          (member) => member.subjectId === targetSubjectId && member.status === "active",
-        );
-        if (!target) {
-          throw new HTTPException(404, {
-            message: "active organization member not found",
-          });
-        }
-        const [profile] = await getManagedUserProfilesByIds(deps.db, [
-          target.subjectId.slice("user:".length),
-        ]);
         return context.json(
-          WorkspaceMember.parse(
-            await upsertOrganizationSharedWorkspaceMember(deps.db, {
+          OrganizationWorkspaceAccessMember.parse(
+            await putOrganizationWorkspaceMember(deps.db, {
               organizationId,
               workspaceId,
-              actorSubjectId,
-              targetOrganizationMembershipId: target.id,
-              subjectLabel: profile?.email ?? profile?.name ?? null,
-              ...(payload.role === undefined ? {} : { role: payload.role }),
-              permissions: payload.permissions,
-              requireExisting: true,
+              actorSubjectId: subjectId,
+              targetOrganizationMembershipId: membershipId,
+              access: payload,
             }),
           ),
         );
       } catch (error) {
-        if (error instanceof HTTPException) throw error;
         rethrowMembershipError(error);
       }
     },
   );
 
-  app.delete(
-    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:subjectId",
+  app.post(
+    "/v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId/revoke",
     async (context) => {
-      const { subjectId: actorSubjectId } = await requireManagedHuman(context, deps);
+      const { subjectId } = await requireManagedHuman(context, deps);
       const organizationId = parseId(
         OrganizationId,
         context.req.param("organizationId"),
         "organization id",
       );
       const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
-      const targetSubjectId = decodeURIComponent(context.req.param("subjectId"));
+      const membershipId = parseId(
+        MembershipId,
+        context.req.param("membershipId"),
+        "membership id",
+      );
+      const payload = await parseBody(context, RevokeOrganizationWorkspaceMemberRequest);
       try {
-        await removeWorkspaceMember(deps.db, {
-          accountId: organizationId,
-          workspaceId,
-          actorSubjectId,
-          targetSubjectId,
-          requireOrganizationSharedWorkspaceAdministration: true,
-        });
-        return context.body(null, 204);
+        return context.json(
+          RevokeOrganizationWorkspaceMemberResponse.parse(
+            await revokeOrganizationWorkspaceMember(deps.db, {
+              organizationId,
+              workspaceId,
+              actorSubjectId: subjectId,
+              targetOrganizationMembershipId: membershipId,
+              expectedUpdatedAt: payload.expectedUpdatedAt,
+              operationId: payload.operationId,
+            }),
+          ),
+        );
       } catch (error) {
         rethrowMembershipError(error);
       }
@@ -677,26 +604,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     try {
-      const members = await listOrganizationMembers(deps.db, {
-        organizationId,
-        actorSubjectId: subjectId,
-      });
-      const profiles = await getManagedUserProfilesByIds(
-        deps.db,
-        members.flatMap((member) =>
-          member.subjectId.startsWith("user:") ? [member.subjectId.slice("user:".length)] : [],
-        ),
-      );
-      const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
       return context.json(
-        ListOrganizationMembersResponse.parse({
-          members: members.map((member) => {
-            const profile = profileById.get(member.subjectId.slice("user:".length));
-            return {
-              ...member,
-              name: profile?.name?.trim() || null,
-              email: profile?.email ?? null,
-            };
+        ListOrganizationAdministrationMembersResponse.parse({
+          members: await listOrganizationAdministrationMembers(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
           }),
         }),
       );

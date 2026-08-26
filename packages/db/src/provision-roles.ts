@@ -488,8 +488,14 @@ async function grantAppRoleIfSchemaExists(
     "list_self_organization_invitations(text,uuid,integer)",
     "get_self_organization_invitation(text,uuid)",
     "list_organization_members(uuid,text)",
+    "list_organization_administration_members(uuid,text)",
     "list_organization_invitations(uuid,text,uuid,integer)",
     "get_organization_administration_overview(uuid,text)",
+    "get_workspace_kind(uuid,uuid)",
+    "organization_workspace_command(jsonb)",
+    "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
+    "prepare_organization_workspace_member_removal(jsonb)",
+    "record_organization_workspace_member_removal(jsonb,uuid,uuid)",
     "create_managed_organization(text,text,text,uuid)",
     "assert_organization_shared_workspace_administrator(uuid,uuid,text)",
     "open_organization_shared_workspace_administration_capability(uuid,uuid,text)",
@@ -1303,6 +1309,38 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format(
+        '%I.fork_session_content_with_runtime(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,jsonb,uuid,uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, jsonb, uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, jsonb, uuid, uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.replay_applied_session_fork_with_runtime(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.replay_applied_session_fork_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.replay_applied_session_fork_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format('%I.session_tenancy_product_activated(uuid,integer)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format(
@@ -1922,6 +1960,15 @@ BEGIN
       );
       EXECUTE format(
         'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.variable_set_authority_capabilities FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.session_variable_set_attachments_protocol_v1_active()') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.session_variable_set_attachments_protocol_v1_active()
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active() TO %I',
         ${literal(role)}
       );
     END IF;

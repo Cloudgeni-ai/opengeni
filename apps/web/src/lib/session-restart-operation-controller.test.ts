@@ -53,22 +53,36 @@ describe("SessionRestartOperationController", () => {
     expect(controller.snapshot(scope)).toBeNull();
   });
 
-  test("retires an attempt when principal, workspace, or session scope changes", () => {
+  test("retains outcome-unknown attempts per source session across navigation away and back", () => {
     const controller = new SessionRestartOperationController();
-    controller.prepare(
+    const first = controller.prepare(
       scope,
       { visibility: "private", rigId: null, variableSetIds: [] },
       () => "old-key",
     );
+    const otherScope = { ...scope, sessionId: "session-b" };
 
-    expect(controller.snapshot({ ...scope, sessionId: "session-b" })).toBeNull();
-    expect(
-      controller.prepare(
-        { ...scope, sessionId: "session-b" },
-        { visibility: "private", rigId: null, variableSetIds: [] },
-        () => "new-key",
-      ).idempotencyKey,
-    ).toBe("new-key");
+    expect(controller.snapshot(otherScope)).toBeNull();
+    const other = controller.prepare(
+      otherScope,
+      { visibility: "workspace", rigId: "rig-b", variableSetIds: ["set-b"] },
+      () => "new-key",
+    );
+    expect(other.idempotencyKey).toBe("new-key");
+    expect(controller.snapshot(scope)).toBe(first);
+
+    const retry = controller.prepare(
+      { ...scope },
+      { visibility: "workspace", rigId: "edited-rig", variableSetIds: ["edited-set"] },
+      () => "duplicate-key",
+    );
+    expect(retry).toBe(first);
+    expect(retry.idempotencyKey).toBe("old-key");
+
+    controller.settle(otherScope, other);
+    expect(controller.snapshot(scope)).toBe(first);
+    controller.settle(scope, first);
+    expect(controller.snapshot(scope)).toBeNull();
   });
 
   test("clears definitive failures but retains retryable destination reconciliation", () => {

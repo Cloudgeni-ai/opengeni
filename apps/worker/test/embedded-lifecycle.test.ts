@@ -394,6 +394,7 @@ describe("embedded worker lifecycle contract", () => {
           "organization_private_session_settings",
           "organization_profile_events",
           "organization_shared_workspace_administration_capabilities",
+          "organization_user_setup_intents",
           "organization_user_resource_authorities",
           "organization_user_resource_grants",
           "organization_user_retention_deletion_events",
@@ -401,7 +402,8 @@ describe("embedded worker lifecycle contract", () => {
           "organization_user_retention_object_deletion_receipts",
           "organization_user_retention_object_obligations",
           "organization_user_retention_policies",
-          "organization_user_setup_intents",
+          "organization_workspace_lifecycle_events",
+          "organization_workspace_operation_receipts",
           "self_service_organization_setup_receipts",
           "session_human_input_requests",
           "session_tenancy_activations",
@@ -652,7 +654,7 @@ describe("embedded worker lifecycle contract", () => {
     ).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
-      /missing the 0350 session Variable Set attachment runtime receipt/,
+      /missing the 0351 session Variable Set attachment runtime receipt/,
     );
   });
 

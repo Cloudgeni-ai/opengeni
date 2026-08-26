@@ -87,9 +87,8 @@ function member(
     role,
     status: "active",
     authorizationRevision: 1,
-    personalWorkspaceId: null,
+    sharedWorkspaceAccess: [],
     revokedAt: null,
-    personalRetentionUntil: null,
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -131,6 +130,26 @@ function overview(identity: OrganizationAdminIdentity): OrganizationAdministrati
       createdAt: timestamp,
       updatedAt: timestamp,
     },
+    roles: [
+      {
+        role: "viewer",
+        label: "Viewer",
+        description: "Can read workspace content",
+        permissions: ["workspace:read"],
+      },
+      {
+        role: "member",
+        label: "Member",
+        description: "Can work in this workspace",
+        permissions: ["workspace:read", "sessions:create"],
+      },
+      {
+        role: "admin",
+        label: "Workspace administrator",
+        description: "Can manage workspace content and access",
+        permissions: ["workspace:read", "workspace:admin", "members:manage"],
+      },
+    ],
     workspaces: [
       {
         id: "workspace-company",
@@ -141,21 +160,31 @@ function overview(identity: OrganizationAdminIdentity): OrganizationAdministrati
         members: [
           {
             membershipId: "workspace-member-a",
+            organizationMembershipId: "organization-member-a",
             subjectId: "user:alice",
+            name: "Alice Example",
+            email: "alice@example.com",
             subjectLabel: "Alice Example",
             principalKind: "human",
+            organizationRole: "member",
             role: "admin",
             permissions: ["workspace:read", "sessions:read"],
             createdAt: timestamp,
+            updatedAt: timestamp,
           },
           {
             membershipId: "workspace-service-a",
+            organizationMembershipId: null,
             subjectId: "service:deploy",
+            name: null,
+            email: null,
             subjectLabel: "Deployment automation",
             principalKind: "service",
-            role: "service",
+            organizationRole: null,
+            role: "custom",
             permissions: ["workspace:read"],
             createdAt: timestamp,
+            updatedAt: timestamp,
           },
         ],
       },
@@ -409,7 +438,7 @@ describe("organization administration component fences", () => {
       accountId: identityA.organizationId,
       name: "Company systems",
     }));
-    const updateOrganizationWorkspaceMember = mock(async () => ({
+    const putOrganizationWorkspaceMember = mock(async () => ({
       subjectId: "user:alice",
       subjectLabel: "Alice Example",
       role: "admin",
@@ -422,7 +451,7 @@ describe("organization administration component fences", () => {
         members: [member(identityA, "overview")],
       })),
       updateOrganizationWorkspace,
-      updateOrganizationWorkspaceMember,
+      putOrganizationWorkspaceMember,
     } as unknown as OpenGeniCoreClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -453,7 +482,11 @@ describe("organization administration component fences", () => {
     expect(updateOrganizationWorkspace).toHaveBeenCalledWith(
       identityA.organizationId,
       "workspace-company",
-      { name: "Company systems" },
+      {
+        name: "Company systems",
+        expectedUpdatedAt: timestamp,
+        operationId: expect.any(String),
+      },
     );
 
     const access = container.querySelector<HTMLSelectElement>(
@@ -469,11 +502,15 @@ describe("organization administration component fences", () => {
       await Promise.resolve();
     });
     await flush();
-    expect(updateOrganizationWorkspaceMember).toHaveBeenCalledWith(
+    expect(putOrganizationWorkspaceMember).toHaveBeenCalledWith(
       identityA.organizationId,
       "workspace-company",
-      "user:alice",
-      { role: "admin", permissions: ["workspace:admin"] },
+      "organization-member-a",
+      {
+        role: "admin",
+        expectedUpdatedAt: timestamp,
+        operationId: expect.any(String),
+      },
     );
 
     await act(async () => root.unmount());
@@ -795,7 +832,9 @@ describe("organization administration component fences", () => {
     });
     await flush();
     expect(container.textContent).toContain("new-member@example.test");
-    expect(container.textContent).toContain("Invitation emailed to new-member@example.test.");
+    expect(container.textContent).toContain(
+      "Invitation created for new-member@example.test. It is available in OpenGeni.",
+    );
     expect(toastSuccess).toHaveBeenCalledWith("Organization invitation created");
     expect(button(container, "Load more invitations").disabled).toBe(false);
 

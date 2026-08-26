@@ -13,6 +13,7 @@ const subjectId = "user:ada";
 const workspace: Workspace = {
   id: workspaceId,
   accountId,
+  kind: "shared",
   name: "Operations",
   slug: null,
   externalSource: null,
