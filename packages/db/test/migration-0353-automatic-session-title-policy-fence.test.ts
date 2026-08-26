@@ -38,6 +38,7 @@ import {
   markAutomaticSessionTitleFanoutDelivered,
   settleScheduledTaskRunInTransaction,
   updateSessionTitle,
+  updateSessionTitleWithEvent,
   type DbClient,
 } from "../src/index";
 
@@ -320,8 +321,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     expect(fence).toContain("candidate IS DISTINCT FROM NEW.title");
     expect(fence).toContain("NEW.title IS DISTINCT FROM 'New conversation'");
     expect(fence).toContain("TG_OP = 'INSERT'");
-    expect(fence).toContain("NEW.title := OLD.title");
-    expect(fence).toContain("NEW.title_source := OLD.title_source");
+    expect(fence).toContain("RETURN NULL");
+    expect(fence).not.toContain("NEW.title := OLD.title");
+    expect(fence).not.toContain("NEW.title_source := OLD.title_source");
     expect(fence).toContain("BEFORE INSERT OR UPDATE OF title, title_source");
     expect(fence).toContain("ON sessions");
     expect(fence).not.toContain("public.sessions");
@@ -1080,7 +1082,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     }
   }, 900_000);
 
-  test("keeps the pre-policy scheduler writer safe and non-throwing during rollout", async () => {
+  test("suppresses a losing legacy title event while preserving rollout-compatible winners", async () => {
     const database = shared;
     if (!database) return;
 
@@ -1120,24 +1122,62 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       sandboxBackend: "none",
     });
 
-    const [legacyResult] = await database.admin<Array<{ title: string; titleSource: string }>>`
+    // Reproduce the pre-policy protocol exactly. Its row helper commits first;
+    // only a returned row causes the old binary to append session.title_set in
+    // a second transaction. The newer atomic writer deliberately commits in
+    // that gap. Before the trigger returned NULL, this UPDATE returned OLD and
+    // the final conditional append produced a higher-sequence stale fallback.
+    const legacyRows = await database.admin<Array<{ title: string; titleSource: string }>>`
       update sessions
       set title = ${"Password：hunter2 investigate the callback"},
           title_source = 'agent'
       where id = ${session.id}
       returning title, title_source as "titleSource"
     `;
-    expect(legacyResult).toEqual({ title: "New conversation", titleSource: "agent" });
-    const legacyTitleEvents = await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
-      {
-        type: "session.title_set",
-        payload: { title: legacyResult!.title, source: "agent" },
-      },
-    ]);
-    expect(legacyTitleEvents[0]?.payload).toEqual({
-      title: "New conversation",
+    expect([...legacyRows]).toEqual([]);
+
+    const modern = await updateSessionTitleWithEvent(client.db, {
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      title: "OAuth callback failures",
       source: "agent",
     });
+    expect(modern).toMatchObject({ updated: true, title: "OAuth callback failures" });
+    expect(modern.events).toHaveLength(1);
+
+    const legacyTitleEvents = legacyRows[0]
+      ? await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
+          {
+            type: "session.title_set",
+            payload: { title: legacyRows[0].title, source: "agent" },
+          },
+        ])
+      : [];
+    expect(legacyTitleEvents).toEqual([]);
+
+    const titleEventsAfterRace = await database.admin<
+      Array<{ sequence: number; payload: { title?: unknown; source?: unknown } }>
+    >`
+      select sequence, payload
+      from session_events
+      where session_id = ${session.id}
+        and type = 'session.title_set'
+      order by sequence
+    `;
+    expect([...titleEventsAfterRace]).toEqual([
+      {
+        sequence: modern.events[0]!.sequence,
+        payload: { title: "OAuth callback failures", source: "agent" },
+      },
+    ]);
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      title: "OAuth callback failures",
+      titleSource: "agent",
+      lastSequence: modern.events[0]!.sequence,
+    });
+
+    // Losing the legacy title stamp must not abort the surrounding old
+    // scheduler activity; occurrence persistence and dispatch still continue.
     const delivered = await addAcceptedScheduledOccurrence({
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -1149,18 +1189,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       update: { kind: "scheduled_occurrence" },
     });
     expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
-      title: "New conversation",
+      title: "OAuth callback failures",
       titleSource: "agent",
     });
-
-    expect(
-      await updateSessionTitle(client.db, {
-        workspaceId: grant.workspaceId!,
-        sessionId: session.id,
-        title: "OAuth callback failures",
-        source: "agent",
-      }),
-    ).toEqual({ updated: true, title: "OAuth callback failures" });
 
     expect(
       await updateSessionTitle(client.db, {
@@ -1181,11 +1212,33 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       }),
     ).toEqual({ updated: false, title: "OAuth callback failures" });
 
-    await database.admin`
+    // A legacy human rename is not an unfenced automatic write. It still wins,
+    // returns its row to the old helper, and can emit the compatible user event.
+    const [legacyHumanResult] = await database.admin<Array<{ title: string; titleSource: string }>>`
       update sessions
       set title = 'Human incident review', title_source = 'user'
       where id = ${session.id}
+      returning title, title_source as "titleSource"
     `;
+    expect(legacyHumanResult).toEqual({
+      title: "Human incident review",
+      titleSource: "user",
+    });
+    const [legacyHumanEvent] = await appendSessionEvents(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      [
+        {
+          type: "session.title_set",
+          payload: { title: legacyHumanResult!.title, source: "user" },
+        },
+      ],
+    );
+    expect(legacyHumanEvent?.payload).toEqual({
+      title: "Human incident review",
+      source: "user",
+    });
     expect(
       await updateSessionTitle(client.db, {
         workspaceId: grant.workspaceId!,

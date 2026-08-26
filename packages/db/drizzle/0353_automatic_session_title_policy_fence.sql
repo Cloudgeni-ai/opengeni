@@ -375,10 +375,12 @@ BEGIN
      AND (NEW.title IS DISTINCT FROM 'New conversation' OR OLD.title_source = 'user')
      AND (candidate IS NULL OR candidate IS DISTINCT FROM NEW.title)
   THEN
-    -- Returning OLD title fields makes the pre-policy helper's RETURNING row
-    -- and subsequent title event safe while allowing the dispatch to continue.
-    NEW.title := OLD.title;
-    NEW.title_source := OLD.title_source;
+    -- Cancel the row operation instead of returning a rewritten success. The
+    -- pre-policy helper therefore receives no UPDATE ... RETURNING row, reports
+    -- updated=false, and skips its separate title-event transaction. Its caller
+    -- still continues scheduled dispatch, while a newer title can no longer be
+    -- followed by a higher-sequence stale legacy event.
+    RETURN NULL;
   END IF;
 
   RETURN NEW;
