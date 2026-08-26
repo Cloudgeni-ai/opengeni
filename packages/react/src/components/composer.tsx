@@ -367,6 +367,20 @@ export function useChatComposerController({
   const submittingRef = useRef(false);
   const controlOperationRef = useRef(false);
   const mountedRef = useRef(true);
+  const deliveredValueRef = useRef(delivery.value);
+  const liveValueRef = useRef(delivery.value);
+  if (delivery.value !== deliveredValueRef.current) {
+    deliveredValueRef.current = delivery.value;
+    liveValueRef.current = delivery.value;
+  }
+  const setComposerValue = useCallback(
+    (next: string) => {
+      liveValueRef.current = next;
+      delivery.setValue(next);
+    },
+    [delivery.setValue],
+  );
+  const visibleValue = liveValueRef.current;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -468,7 +482,7 @@ export function useChatComposerController({
       applyComposerTextareaHeight(textarea, 220);
     });
   }, []);
-  useEffect(() => resizeInput(), [delivery.value, resizeInput]);
+  useEffect(() => resizeInput(), [resizeInput, visibleValue]);
   useEffect(
     () => () => {
       if (resizeInputRafRef.current !== null) {
@@ -505,8 +519,8 @@ export function useChatComposerController({
     commands,
     context: commandContext,
     handlers,
-    value: delivery.value,
-    setValue: delivery.setValue,
+    value: visibleValue,
+    setValue: setComposerValue,
   });
   const paletteEnabled = commandContext !== undefined;
   const commandDraftBlocked = paletteEnabled && palette.isCommandDraft;
@@ -696,8 +710,8 @@ export function useChatComposerController({
     handlePaste,
     handleFileChange,
     focusInput: () => textareaRef.current?.focus(),
-    setValue: delivery.setValue,
-    value: delivery.value,
+    setValue: setComposerValue,
+    value: visibleValue,
   };
 }
 
