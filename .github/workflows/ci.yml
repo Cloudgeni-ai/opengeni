@@ -35,8 +35,9 @@ on:
 
 concurrency:
   # A Version PR has one authoritative latest head. When a newer main push
-  # regenerates that head, continuing to build the superseded head can only
-  # waste capacity and produce a predictably stale terminal-main failure.
+  # actually regenerates that head, continuing to build the superseded head can
+  # only waste capacity. Movement on main alone does not invalidate an admitted
+  # Version PR head or cancel its CI.
   # Pull-request heads are mutable in the same way: only the newest head can be
   # merged. Main pushes remain independent because an ancestor can still be an
   # admitted release source after a newer merge lands.
@@ -315,7 +316,7 @@ jobs:
           set -euo pipefail
           plan="$RUNNER_TEMP/changeset-status.json"
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          git update-ref refs/heads/main refs/remotes/origin/main
+          version_base_ref=refs/remotes/origin/main
 
           # `changeset status` deliberately exits non-zero on the generated
           # Version PR: its package files changed and the consumed changeset is
@@ -326,13 +327,15 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "${GITHUB_HEAD_REF:-}" = "changeset-release/main" ]; then
             is_version_pr=true
           elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            [ "$(git rev-parse refs/remotes/origin/main)" = "$AUTOMATION_BASE_SHA" ]
             [ "$(git rev-parse HEAD)" = "$AUTOMATION_HEAD_SHA" ]
+            git cat-file -e "$AUTOMATION_BASE_SHA^{commit}"
+            version_base_ref="$AUTOMATION_BASE_SHA"
             is_version_pr=true
           fi
+          git update-ref refs/heads/main "$version_base_ref"
           if [ "$is_version_pr" = "true" ]; then
             expected="$RUNNER_TEMP/changeset-version-expected"
-            git worktree add --detach "$expected" refs/remotes/origin/main
+            git worktree add --detach "$expected" "$version_base_ref"
             trap 'git worktree remove --force "$expected"' EXIT
 
             (
@@ -346,7 +349,7 @@ jobs:
             expected_tree="$(git -C "$expected" write-tree)"
             actual_tree="$(git rev-parse 'HEAD^{tree}')"
             if [ "$actual_tree" != "$expected_tree" ]; then
-              echo "::error::Version PR tree does not exactly reproduce 'changeset version' from origin/main"
+              echo "::error::Version PR tree does not exactly reproduce 'changeset version' from its admitted base"
               git -C "$expected" diff --cached --stat
               exit 1
             fi

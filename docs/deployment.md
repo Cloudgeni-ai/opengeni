@@ -932,6 +932,12 @@ live `main` stay mergeable). Drop `Current-base source admission` from the
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
+Once trusted CI admits the exact Version PR head and its generating `main` base,
+later commits on `main` do not invalidate that run. The immutable head, its
+single parent, deterministic version tree, automation identity, and retained
+controller remain fenced; ordinary protected-branch movement is not a release
+freeze. A regenerated Version PR head still supersedes and cancels CI for the
+older head.
 
 Ordinary candidate and operator admission bind the **merged associated PR**, not
 a later GitHub `APPROVE` or structured PASS body on the exact head:
