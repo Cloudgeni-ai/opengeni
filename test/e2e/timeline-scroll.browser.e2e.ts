@@ -571,6 +571,80 @@ describe("timeline scroll ownership browser regression", () => {
     ).toBeGreaterThan(48);
   }, 30_000);
 
+  test("keeps a pending older owner across bounded live-tail eviction", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load&overlap-loads`);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    // Append at the live edge while enforcing a bounded newest-suffix window:
+    // the pending request's oldest row disappears, but newer retained rows
+    // prove this is forward eviction rather than a committed older page.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.appendBoundedLivePage());
+    await page.locator('[data-conversation-message="user-1200"]').waitFor({ timeout: 5_000 });
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 800,
+    );
+    await page.waitForTimeout(500);
+
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop < 100,
+    );
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    // Rejection still settles A's rebased owner. Resize callbacks cannot turn
+    // it into an automatic duplicate, and one explicit retry owns B.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleLoad(1, "failure"));
+    const retry = page.getByRole("button", { name: "Retry earlier activity" });
+    await retry.waitFor({ timeout: 5_000 });
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    await retry.click();
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    // B's successful prepend preserves the retained row/pixel anchor and
+    // retires the retry without permitting any stale callback to reopen it.
+    const anchorEvidence = await page.evaluate(() => {
+      const harness = window.timelineCollapsedHistoryHarness!;
+      const root = harness.scroller();
+      const rootTop = root.getBoundingClientRect().top;
+      const before = root.querySelector<HTMLElement>("[data-og-timeline-group-anchor]");
+      const key = before?.dataset.ogGroupKey ?? null;
+      const top = before ? before.getBoundingClientRect().top - rootTop : null;
+      harness.settleLoad(2, "success", true);
+      const after = key
+        ? Array.from(root.querySelectorAll<HTMLElement>("[data-og-timeline-group-anchor]")).find(
+            (node) => node.dataset.ogGroupKey === key,
+          )
+        : null;
+      return {
+        key,
+        top,
+        afterKey: after?.dataset.ogGroupKey ?? null,
+        afterTop: after ? after.getBoundingClientRect().top - rootTop : null,
+      };
+    });
+    expect(anchorEvidence.key).not.toBeNull();
+    expect(anchorEvidence.afterKey).toBe(anchorEvidence.key);
+    expect(anchorEvidence.afterTop).toBeCloseTo(anchorEvidence.top ?? 0, 0);
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("retries one transient underfill failure without resize loops or duplicate requests", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);

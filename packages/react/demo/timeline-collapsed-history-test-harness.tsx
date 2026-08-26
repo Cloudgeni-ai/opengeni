@@ -7,6 +7,7 @@ import "./styles.css";
 
 type TimelineCollapsedHistoryHarness = {
   appendLiveItem: () => void;
+  appendBoundedLivePage: () => void;
   appendLivePage: () => void;
   appendLivePageMarkNoOlderAndSettleOlder: () => Promise<void>;
   armOlder: () => void;
@@ -242,6 +243,15 @@ function Harness() {
     setItems((current) => [...current, userMessage(1_000 + append)]);
   }, []);
 
+  const appendBoundedLivePage = useCallback(() => {
+    const append = ++livePageRef.current;
+    const sequence = 1_100 + append * 100;
+    setItems((current) => [
+      ...current.slice(1),
+      ...Array.from({ length: 30 }, (_, index) => userMessage(sequence + index)),
+    ]);
+  }, []);
+
   const appendLivePage = useCallback(() => {
     const append = ++livePageRef.current;
     const sequence = 1_100 + append * 100;
@@ -346,6 +356,7 @@ function Harness() {
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
+      appendBoundedLivePage,
       appendLiveItem,
       appendLivePage,
       appendLivePageMarkNoOlderAndSettleOlder,
@@ -380,6 +391,7 @@ function Harness() {
       delete window.timelineCollapsedHistoryHarness;
     };
   }, [
+    appendBoundedLivePage,
     appendLiveItem,
     appendLivePage,
     appendLivePageMarkNoOlderAndSettleOlder,

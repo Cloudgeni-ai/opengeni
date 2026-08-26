@@ -1518,6 +1518,168 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("forward oldest eviction retains the pending owner through retry, resize, and prepend", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    const first = deferred<boolean>();
+    const retryLoad = deferred<boolean>();
+    const loads = [first, retryLoad];
+    let calls = 0;
+    const onLoadOlder = () => loads[calls++]!.promise;
+    const initialItems = [
+      reasoningItem("evicted-oldest", "oldest pending boundary"),
+      userItem("retained-tail", "retained tail"),
+    ];
+    const r = await renderComponent(
+      <MessageTimeline items={initialItems} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 240,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <MessageTimeline items={initialItems} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // A bounded tail append evicts A's oldest row while retaining newer rows.
+    // That forward boundary movement must rebase A, not release it.
+    const firstEvictedWindow = [
+      initialItems[1]!,
+      userItem("live-tail-1", "live tail after first eviction"),
+    ];
+    layout.setContentHeight(1_600);
+    await r.rerender(
+      <MessageTimeline
+        items={firstEvictedWindow}
+        status="running"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await readerScrollUp(scroller, 0);
+    expect(observed).toHaveLength(1);
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target: observed[0]! } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // A's rejection still belongs to the rebased window and authorizes one
+    // explicit retry. Observer and resize churn cannot overlap that retry.
+    await actRun(() => first.reject(new Error("transient evicted-window failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    // Return to the live tip, then let another bounded append evict the retry's
+    // oldest row and create camera debt. Its delayed prepend must still use the
+    // rebased owner to hard-park the live tail in the commit that lands it.
+    await actRun(() => {
+      scroller.scrollTop = scroller.scrollHeight;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    const secondEvictedWindow = [
+      firstEvictedWindow[1]!,
+      userItem("live-tail-2", "live tail after second eviction"),
+    ];
+    layout.setContentHeight(1_900);
+    await r.rerender(
+      <MessageTimeline
+        items={secondEvictedWindow}
+        status="running"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+
+    layout.setContentHeight(2_300);
+    await r.rerender(
+      <MessageTimeline
+        items={[userItem("older-page", "successful older retry"), ...secondEvictedWindow]}
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(layout.tipBottomGap()).toBeLessThan(2);
+
+    await actRun(() => retryLoad.resolve(true));
+    await flush();
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+    layout.restore();
+    await r.unmount();
+  });
+
   test("a declined older load during newer navigation exposes one bounded retry", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {

@@ -240,8 +240,22 @@ const OLDER_PREFETCH_MARGIN_PX = 400;
 const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 
 // State: 0 underfill, 1 prefetch pending, 2 prefetch settled.
-// The tuple identity is the exact ownership fence.
-type OlderLoadAttempt = [boundary: string | undefined, state: number];
+// The token is the exact request ownership fence. The boundary may rebase
+// forward while that request is pending when a bounded live-tail append evicts
+// its former oldest row; only a retained boundary behind a new first row proves
+// that older history actually prepended.
+type OlderLoadAttempt = {
+  boundary: string | undefined;
+  state: number;
+  token: object;
+};
+
+function sameOlderLoadOwner(
+  left: OlderLoadAttempt | null,
+  right: OlderLoadAttempt | null,
+): boolean {
+  return !!left && !!right && left.token === right.token;
+}
 
 function invokeOlderLoad(load: () => unknown, noProgress: () => void): 1 | undefined {
   try {
@@ -494,7 +508,7 @@ export function MessageTimeline({
   const underfillRetryReady = (underfillRetryReadyRef.current = !!(
     underfillSettledAttempt &&
     underfillSettledAttempt === olderLoadAttemptRef.current &&
-    underfillSettledAttempt[0] === olderBoundaryKey &&
+    underfillSettledAttempt.boundary === olderBoundaryKey &&
     hasOlder &&
     onLoadOlder &&
     !loadingOlder
@@ -517,7 +531,7 @@ export function MessageTimeline({
   }, []);
 
   const rearmOlderPrefetchAfterLeavingTop = useCallback((node: HTMLElement) => {
-    if (node.scrollTop > OLDER_PREFETCH_MARGIN_PX && olderLoadAttemptRef.current?.[1] === 2) {
+    if (node.scrollTop > OLDER_PREFETCH_MARGIN_PX && olderLoadAttemptRef.current?.state === 2) {
       olderLoadAttemptRef.current = null;
     }
   }, []);
@@ -783,14 +797,15 @@ export function MessageTimeline({
       let currentAttempt = olderLoadAttemptRef.current;
       if (
         retry &&
-        (currentAttempt !== underfillSettledAttempt || currentAttempt?.[0] !== olderBoundaryKey)
+        (currentAttempt !== underfillSettledAttempt ||
+          currentAttempt?.boundary !== olderBoundaryKey)
       ) {
         // AnimatePresence may retain the exiting button briefly. Its stale
         // handler cannot replace a newer exact owner.
         return;
       }
       const underfilled = maxScrollOf(node) <= 1;
-      if (!retry && underfilled && currentAttempt?.[1] === 2) {
+      if (!retry && underfilled && currentAttempt?.state === 2) {
         // A settled ordinary prefetch owns only this visit to the top band.
         // If its resulting window cannot scroll, yield to automatic underfill
         // so the reader is not stranded behind a cooldown they cannot exit.
@@ -808,14 +823,19 @@ export function MessageTimeline({
       ) {
         return;
       }
-      const attempt: OlderLoadAttempt = [olderBoundaryKey, 0];
+      const attempt: OlderLoadAttempt = {
+        boundary: olderBoundaryKey,
+        state: 0,
+        token: {},
+      };
       olderLoadAttemptRef.current = attempt;
       setUnderfillSettledAttempt(null);
       // Every underfill request owns the ordinary sentinel too, even if reader
       // intent had not armed it yet when this short-window request began.
       const noProgress = () => {
-        if (scrollRef.current && olderLoadAttemptRef.current === attempt) {
-          setUnderfillSettledAttempt(attempt);
+        const currentOwner = olderLoadAttemptRef.current;
+        if (scrollRef.current && sameOlderLoadOwner(currentOwner, attempt)) {
+          setUnderfillSettledAttempt(currentOwner);
         }
       };
       // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
@@ -832,23 +852,57 @@ export function MessageTimeline({
   // one explicit retry only if this exact window still has older history.
   useEffect(() => {
     const attempt = olderLoadAttemptRef.current;
-    if (!attempt || attempt[0] === olderBoundaryKey) {
+    if (!attempt || attempt.boundary === olderBoundaryKey) {
       return;
     }
-    if (attempt[1] === 0 || !hasOlder) {
+    const source = items ?? events;
+    const retainedBoundaryIndex =
+      attempt.boundary == null
+        ? -1
+        : (source?.findIndex((entry) => entry.id === attempt.boundary) ?? -1);
+    if (retainedBoundaryIndex <= 0) {
+      // The prior oldest row disappeared instead of moving behind new rows.
+      // This is forward eviction/window churn, not an older-page commit. Keep
+      // the exact request owner but rebase it so a later prepend can be proved
+      // against the oldest row that survived that churn.
+      const rebasedAttempt: OlderLoadAttempt = {
+        ...attempt,
+        boundary: olderBoundaryKey,
+      };
+      olderLoadAttemptRef.current = rebasedAttempt;
+      if (sameOlderLoadOwner(underfillSettledAttempt, attempt)) {
+        setUnderfillSettledAttempt(rebasedAttempt);
+      }
+      return;
+    }
+    if (attempt.state === 0 || !hasOlder) {
       olderLoadAttemptRef.current = null;
       return;
     }
     // Successful ordinary prefetch stays as this top visit's cooldown owner
     // until the reader leaves; boundary progress makes it settled even if
     // the host's promise has not resolved yet.
-    attempt[1] = 2;
+    olderLoadAttemptRef.current = {
+      boundary: olderBoundaryKey,
+      state: 2,
+      // Boundary progress retires the request token. A late settlement from
+      // that completed page cannot mutate the new window's cooldown owner.
+      token: {},
+    };
     const node = scrollRef.current;
     if (node) {
       rearmOlderPrefetchAfterLeavingTop(node);
       requestOlderIfUnderfilled(node);
     }
-  }, [hasOlder, olderBoundaryKey, rearmOlderPrefetchAfterLeavingTop, requestOlderIfUnderfilled]);
+  }, [
+    events,
+    hasOlder,
+    items,
+    olderBoundaryKey,
+    rearmOlderPrefetchAfterLeavingTop,
+    requestOlderIfUnderfilled,
+    underfillSettledAttempt,
+  ]);
 
   const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
     requestOlderIfUnderfilled as (node: HTMLElement, now?: number) => void,
@@ -1239,7 +1293,7 @@ export function MessageTimeline({
           // owner here; a still-pending request remains cooling so a quick
           // leave/re-enter cannot overlap it.
           const attempt = olderLoadAttemptRef.current;
-          if (attempt?.[1] === 2) {
+          if (attempt?.state === 2) {
             olderLoadAttemptRef.current = null;
           }
           return;
@@ -1250,18 +1304,23 @@ export function MessageTimeline({
         if (olderLoadAttemptRef.current) {
           return;
         }
-        const attempt: OlderLoadAttempt = [olderBoundaryKey, 1];
+        const attempt: OlderLoadAttempt = {
+          boundary: olderBoundaryKey,
+          state: 1,
+          token: {},
+        };
         olderLoadAttemptRef.current = attempt;
         const noProgress = () => {
-          if (!scrollRef.current || olderLoadAttemptRef.current !== attempt) {
+          const currentAttempt = olderLoadAttemptRef.current;
+          if (!scrollRef.current || !currentAttempt || currentAttempt.token !== attempt.token) {
             return;
           }
-          attempt[1] = 2;
+          currentAttempt.state = 2;
           if (root.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
             olderLoadAttemptRef.current = null;
           } else if (maxScrollOf(root) <= 1) {
-            attempt[1] = 0;
-            setUnderfillSettledAttempt(attempt);
+            currentAttempt.state = 0;
+            setUnderfillSettledAttempt(currentAttempt);
           }
         };
         // Preserve legacy fire-and-forget top-band retries: the callback has
@@ -1269,8 +1328,11 @@ export function MessageTimeline({
         // Only rejection/throw/exact `false` is a no-progress receipt. Other
         // fulfillment retains the pending owner until boundary commit;
         // otherwise a delayed prepend could overlap a same-boundary request.
-        if (!invokeOlderLoad(onLoadOlder, noProgress) && olderLoadAttemptRef.current === attempt) {
-          attempt[1] = 2;
+        if (
+          !invokeOlderLoad(onLoadOlder, noProgress) &&
+          sameOlderLoadOwner(olderLoadAttemptRef.current, attempt)
+        ) {
+          olderLoadAttemptRef.current!.state = 2;
           requestOlderIfUnderfilled(root);
         }
       },
