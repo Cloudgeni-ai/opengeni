@@ -242,6 +242,7 @@ describe("release schema contract", () => {
       "0350_organization_shared_workspace_administration.sql",
       "0351_organization_user_setup_delivery.sql",
       "0352_session_variable_set_attachments.sql",
+      "0356_set_based_insights_session_visibility.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
