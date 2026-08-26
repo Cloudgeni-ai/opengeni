@@ -34,6 +34,7 @@ const ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E =
   "test/e2e/organization-workspace-administration.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -222,6 +223,19 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("timeline pagination changes select protected interaction browser coverage", () => {
+    for (const path of [
+      "packages/react/src/components/message-timeline.tsx",
+      "packages/react/demo/timeline-collapsed-history-test-harness.tsx",
+      TIMELINE_SCROLL_BROWSER_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.browserAcceptanceLanes).toContain("interaction");
+      expect(plan.e2eTests).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
+    }
+  });
+
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
     const plan = createImpactPlan(["packages/ogtool/src/index.ts"]);
     expect(plan.mode).toBe("focused");
@@ -283,6 +297,8 @@ describe("fail-closed change impact", () => {
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
+    expect(OPT_IN_TESTS[TIMELINE_SCROLL_BROWSER_E2E]).toContain("browser-acceptance");
     expect(tests.e2e).not.toContain("test/e2e/organization-onboarding-acceptance.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/organization-onboarding-acceptance.e2e.ts"]).toContain(
       "onboarding",

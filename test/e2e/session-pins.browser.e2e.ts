@@ -55,6 +55,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   let webBaseUrl: string;
 
   beforeAll(async () => {
+    // Build before acquiring/migrating the real database and starting the API.
+    // The production bundle is the memory-heavy part of this acceptance gate;
+    // keeping the database fixture and server out of that peak prevents the
+    // CI knowledge lane from killing the nested build before browser launch.
+    const apiPort = await freePort();
+    apiBaseUrl = `http://127.0.0.1:${apiPort}`;
+    const webPort = await freePort();
+    webBaseUrl = `http://127.0.0.1:${webPort}`;
+    const webEnv = {
+      NODE_ENV: "production",
+      VITE_API_BASE_URL: apiBaseUrl,
+    };
+    const build = await runCommand(["bun", "run", "build"], {
+      cwd: `${repoRoot}/apps/web`,
+      env: webEnv,
+      timeoutMs: 120_000,
+    });
+    if (build.exitCode !== 0) {
+      throw new Error(
+        `Production web build failed (exit ${build.exitCode}, timedOut=${String(build.timedOut)}):\n${build.stderr}\n${build.stdout}`,
+      );
+    }
+
     const acquired = await acquireSharedTestDatabase("session-pins-browser");
     if (!acquired) {
       throw new Error("session pin browser E2E requires real PostgreSQL; no skip is allowed");
@@ -78,26 +101,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     api = Bun.serve({
       hostname: "127.0.0.1",
-      port: 0,
+      port: apiPort,
       idleTimeout: 120,
       fetch: app.fetch,
     });
-    apiBaseUrl = `http://127.0.0.1:${api.port}`;
-
-    const webPort = await freePort();
-    webBaseUrl = `http://127.0.0.1:${webPort}`;
-    const webEnv = {
-      NODE_ENV: "production",
-      VITE_API_BASE_URL: apiBaseUrl,
-    };
-    const build = await runCommand(["bun", "run", "build"], {
-      cwd: `${repoRoot}/apps/web`,
-      env: webEnv,
-      timeoutMs: 120_000,
-    });
-    if (build.exitCode !== 0) {
-      throw new Error(`Production web build failed:\n${build.stdout}\n${build.stderr}`);
-    }
     web = await startProcess(
       [
         "bun",
