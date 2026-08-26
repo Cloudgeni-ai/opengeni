@@ -1,5 +1,25 @@
 # @opengeni/db
 
+## 3.3.1
+
+### Patch Changes
+
+- 8fabf12: Document the one-way deployment boundary for named signup and invited-user
+  setup. Migration 0348 requires every API, control worker, and turn worker to be
+  stopped and drained before it runs, with the exact old/new application database
+  roles supplied to the migration runner. Start only binaries built for schema
+  ordinal 0348 or newer after it commits; never restart a pre-0348 image, and
+  remain in maintenance to fix forward if the new runtime cannot start.
+- 8fabf12: Repair realtime human-authority routing and metrics, personal Document reads
+  under FORCE RLS, private-session visibility transition checks, and
+  tenant-scoped session-tenancy fencing through migrations 0343-0345.
+
+  Migration 0345 is a one-way maintenance cutover. Stop and drain every API,
+  control worker, and turn worker before applying it, then start only binaries
+  built for schema ordinal 0345 or newer. Never restart a pre-0345 image after
+  the migration commits: its session-tenancy writes do not enter the required
+  workspace fence and will fail closed.
+
 ## 3.3.0
 
 ### Minor Changes

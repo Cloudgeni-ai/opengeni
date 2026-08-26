@@ -1,5 +1,19 @@
 # @opengeni/worker-bundle
 
+## 0.22.3
+
+### Patch Changes
+
+- 8fabf12: Send first-party function tools through the Chat Completions tool transport for
+  Chat-based providers, including OpenCode, instead of encoding them as
+  Responses-only hosted tools.
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+  - @opengeni/core@2.3.1
+  - @opengeni/documents@0.8.1
+  - @opengeni/events@0.3.126
+
 ## 0.22.2
 
 ### Patch Changes
