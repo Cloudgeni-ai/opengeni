@@ -3,8 +3,11 @@ import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import {
   AuthApiError,
   authHeadersForAccessKey,
+  configureManagedActorEpoch,
   configureClientAuth,
   createOpenGeniClient,
+  managedActorMutationBusySnapshot,
+  managedActorFetch,
   redeemCodexResetCredit,
   resolveApiBaseUrl,
   signInEmail,
@@ -14,9 +17,139 @@ import {
   completeSelfServiceOrganizationSetup,
   shouldReloadForDeploymentRevision,
   shouldReloadForApiContractRevision,
+  subscribeManagedActorInvalidation,
+  subscribeManagedActorMutationBusy,
 } from "./api";
 
 describe("web API auth helpers", () => {
+  test("attaches the accepted actor epoch and rejects a late prior-actor response", async () => {
+    const originalFetch = globalThis.fetch;
+    let release!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    let requestHeaders: Headers | null = null;
+    let requestSignal: AbortSignal | null = null;
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requestHeaders = new Headers(init?.headers);
+      requestSignal = init?.signal ?? null;
+      return await pending;
+    }) as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("7");
+      const result = managedActorFetch("https://api.example.test/v1/workspaces");
+      await Promise.resolve();
+      expect(requestHeaders?.get("x-opengeni-actor-epoch")).toBe("7");
+      configureManagedActorEpoch("8");
+      expect(requestSignal?.aborted).toBe(true);
+      release(
+        Response.json([], {
+          headers: { "x-opengeni-actor-epoch": "7" },
+        }),
+      );
+      await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("rejects mismatched server provenance even before a local rotation hint", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({ ok: true }, { headers: { "x-opengeni-actor-epoch": "10" } })) as typeof fetch;
+    try {
+      configureManagedActorEpoch("9");
+      await expect(managedActorFetch("https://api.example.test/v1/access")).rejects.toMatchObject({
+        name: "AbortError",
+      });
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("keeps an established response body actor-bound until the stream closes", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestSignal: AbortSignal | null = null;
+    let bodyController!: ReadableStreamDefaultController<Uint8Array>;
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      requestSignal = init?.signal ?? null;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            bodyController = controller;
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("12");
+      const response = await managedActorFetch("https://api.example.test/v1/sessions/live");
+      const reader = response.body!.getReader();
+      const read = reader.read();
+      bodyController.enqueue(new TextEncoder().encode("event: ready\n\n"));
+      await expect(read).resolves.toMatchObject({ done: false });
+      const lateRead = reader.read();
+      configureManagedActorEpoch("13");
+      expect(requestSignal?.aborted).toBe(true);
+      await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("tracks actor-bound mutations through response-body settlement", async () => {
+    const originalFetch = globalThis.fetch;
+    const snapshots: boolean[] = [];
+    const unsubscribe = subscribeManagedActorMutationBusy(() => {
+      snapshots.push(managedActorMutationBusySnapshot());
+    });
+    globalThis.fetch = (async () => Response.json({ ok: true })) as typeof fetch;
+    try {
+      configureManagedActorEpoch("14");
+      const response = await managedActorFetch("https://api.example.test/v1/workspaces", {
+        method: "POST",
+      });
+      expect(managedActorMutationBusySnapshot()).toBe(true);
+      await response.json();
+      expect(managedActorMutationBusySnapshot()).toBe(false);
+      expect(snapshots).toEqual([true, false]);
+    } finally {
+      unsubscribe();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("publishes server-signaled actor loss for neutral reconciliation", async () => {
+    const originalFetch = globalThis.fetch;
+    let invalidations = 0;
+    const unsubscribe = subscribeManagedActorInvalidation(() => {
+      invalidations += 1;
+    });
+    globalThis.fetch = (async () =>
+      Response.json(
+        { error: { details: { managedAuthCode: "actor_change_required" } } },
+        { status: 409, headers: { "x-opengeni-actor-state": "changed" } },
+      )) as typeof fetch;
+    try {
+      configureManagedActorEpoch("15");
+      const response = await managedActorFetch("https://api.example.test/v1/access");
+      expect(response.status).toBe(409);
+      expect(invalidations).toBe(1);
+      await response.json();
+    } finally {
+      unsubscribe();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("builds access key headers only for configured key modes", () => {
     expect(authHeadersForAccessKey(null)).toEqual({});
     expect(authHeadersForAccessKey("secret")).toEqual({});
@@ -355,6 +488,7 @@ describe("createOpenGeniClient", () => {
     }) as unknown as typeof fetch;
 
     try {
+      configureManagedActorEpoch("11");
       const client = createOpenGeniClient();
       await client.uploadFile("workspace-id", {
         filename: "file.txt",
@@ -362,6 +496,7 @@ describe("createOpenGeniClient", () => {
         data: "hello",
       });
     } finally {
+      configureManagedActorEpoch(null);
       globalThis.fetch = originalFetch;
       restoreLocalStorage();
     }
@@ -370,5 +505,8 @@ describe("createOpenGeniClient", () => {
     expect(requests[0]!.init?.credentials).toBe("include");
     expect(requests[1]!.init?.credentials).toBe("omit");
     expect(requests[2]!.init?.credentials).toBe("include");
+    expect(new Headers(requests[0]!.init?.headers).get("x-opengeni-actor-epoch")).toBe("11");
+    expect(new Headers(requests[1]!.init?.headers).has("x-opengeni-actor-epoch")).toBe(false);
+    expect(new Headers(requests[2]!.init?.headers).get("x-opengeni-actor-epoch")).toBe("11");
   });
 });

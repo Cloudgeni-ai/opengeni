@@ -25,6 +25,7 @@ import {
   type UseRigsResult,
   type UseVariableSetsResult,
 } from "@opengeni/react";
+import { useOptionalBrowserAccountTransitionBlocker } from "@opengeni/react/accounts";
 import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
@@ -792,6 +793,29 @@ function SessionsIndexRouteContent({
       return await createComposer.send();
     },
   };
+  useOptionalBrowserAccountTransitionBlocker(`new-session-composer:${workspaceId}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (busy || submitting || newSessionDraft.saving) {
+      return {
+        id: "ignored",
+        label: "A new-session mutation is still running",
+        detail: "Wait for the current save or session creation to finish.",
+      };
+    }
+    return createComposer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "The new-session composer has an unsent draft",
+          detail: "Continuing clears the account-bound draft.",
+        }
+      : null;
+  });
 
   return (
     // The canvas parent is overflow-hidden, so this route owns its scrolling —

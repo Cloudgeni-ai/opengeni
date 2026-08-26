@@ -2,6 +2,7 @@
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
+import { useOptionalBrowserAccountTransitionBlocker } from "@opengeni/react/accounts";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -1444,6 +1445,29 @@ function SessionChatPane(props: {
     },
     onSent: (_text, input) => personalAttachment.onAccepted(input),
     onDeliveryError: personalAttachment.onDeliveryError,
+  });
+  useOptionalBrowserAccountTransitionBlocker(`session-composer:${props.session.id}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (composer.sending || composer.draftSaving || durableToolsSaving) {
+      return {
+        id: "ignored",
+        label: "A session mutation is still running",
+        detail: "Wait for the current save or send to finish.",
+      };
+    }
+    return composer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "This session has an unsent draft",
+          detail: "Continuing clears the account-bound composer state.",
+        }
+      : null;
   });
   const composerPolicy = composer.policy;
   const composerDraftLoading = composer.draftLoading;

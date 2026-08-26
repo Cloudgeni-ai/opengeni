@@ -9,6 +9,7 @@ import {
 import type { CreateSessionRequest, SessionEvent } from "@opengeni/sdk";
 import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
+import type { BrowserAccountTransition } from "@opengeni/react/accounts";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { CheckIcon, LockIcon } from "lucide-react";
@@ -30,6 +31,7 @@ import { Toaster, toast } from "sonner";
 
 import {
   clearStoredAccessKey,
+  configureManagedActorEpoch,
   createOpenGeniClient,
   fetchAuthSession,
   fetchClientConfig,
@@ -130,6 +132,24 @@ const AnalyticsManager = lazy(() =>
 const ManagedAuthPanel = lazy(() =>
   import("@/components/managed-auth-panel").then((module) => ({
     default: module.ManagedAuthPanel,
+  })),
+);
+
+const BrowserAccountsRuntime = lazy(() =>
+  import("@/components/browser-accounts-runtime").then((module) => ({
+    default: module.BrowserAccountsRuntime,
+  })),
+);
+
+const BrowserAccountsSignedOutPanel = lazy(() =>
+  import("@/components/browser-accounts-runtime").then((module) => ({
+    default: module.BrowserAccountsSignedOutPanel,
+  })),
+);
+
+const BrowserAccountsLoadingGate = lazy(() =>
+  import("@/components/browser-accounts-runtime").then((module) => ({
+    default: module.BrowserAccountsLoadingGate,
   })),
 );
 
@@ -477,6 +497,7 @@ export function RootRouteComponent() {
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
+  const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [managedSelfContext, setManagedSelfContext] = useState<ManagedSelfContext | null>(null);
@@ -557,6 +578,9 @@ export function RootRouteComponent() {
   const keyAuthRequired =
     clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
+  const browserAccountsConfigured =
+    managedAuthRequired && clientConfig?.managedAuthSessionSetMode !== "legacy";
+  const browserAccountsEnabled = browserAccountsConfigured && managedAuthBootstrapComplete;
   const managedEmailVerificationRequired =
     clientConfig?.auth.mode === "managedSession"
       ? (clientConfig.auth.emailVerificationRequired ?? true)
@@ -588,7 +612,14 @@ export function RootRouteComponent() {
       pathname === "/dev/agent-topology" ||
       pathname === "/dev/onboarding");
   const isPublicAuthRoute =
-    pathname === "/reset-password" || pathname === "/setup-account" || isPublicDevHarness;
+    pathname === "/reset-password" ||
+    pathname === "/setup-account" ||
+    pathname === "/account-auth" ||
+    isPublicDevHarness;
+  useEffect(() => {
+    if (!browserAccountsConfigured) configureManagedActorEpoch(null);
+    return () => configureManagedActorEpoch(null);
+  }, [browserAccountsConfigured]);
   useEffect(() => {
     if (
       invalidSlackLinkQueryWorkspaceId &&
@@ -750,6 +781,7 @@ export function RootRouteComponent() {
 
   useEffect(() => {
     if (!clientConfig) {
+      setManagedAuthBootstrapComplete(false);
       return;
     }
     if (clientConfig.auth.mode !== "managedSession") {
@@ -757,10 +789,12 @@ export function RootRouteComponent() {
         invalidatePrincipalWorkspaceState();
       }
       setAuthSession(null);
+      setManagedAuthBootstrapComplete(true);
       return;
     }
     let cancelled = false;
     const acceptedPrincipal = principalTransitionIdentity.current;
+    setManagedAuthBootstrapComplete(false);
     setAuthSession(undefined);
     void fetchAuthSession()
       .then((nextSession) => {
@@ -776,6 +810,7 @@ export function RootRouteComponent() {
         }
         authPrincipalIdRef.current = nextPrincipalId;
         setAuthSession(nextSession);
+        setManagedAuthBootstrapComplete(true);
       })
       .catch(() => {
         if (
@@ -785,6 +820,7 @@ export function RootRouteComponent() {
           return;
         }
         setAuthSession(null);
+        setManagedAuthBootstrapComplete(true);
       });
     return () => {
       cancelled = true;
@@ -1820,6 +1856,37 @@ export function RootRouteComponent() {
     await navigate({ to: "/", replace: true });
   }
 
+  async function handleBrowserActorTransition(transition: BrowserAccountTransition) {
+    // Rotate transport provenance first: this aborts every old finite request
+    // before any new principal can be projected into the application tree.
+    configureManagedActorEpoch(transition.to?.actorEpoch ?? null);
+    invalidatePrincipalWorkspaceState();
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    const ownsInvocation = () =>
+      !transition.signal.aborted &&
+      ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
+    setAuthSession(undefined);
+    setAccessContext(null);
+    setWorkspaces([]);
+    setAccessError(null);
+    // Recreate SDK clients and reconnect streams even for two login bindings
+    // that resolve to the same canonical human.
+    setAccessKeyVersion((version) => version + 1);
+    try {
+      const sessionRead = await runCurrentTransitionInvocation({
+        isCurrent: ownsInvocation,
+        request: fetchAuthSession,
+      });
+      if (sessionRead.status === "stale") return;
+      const nextSession = sessionRead.value;
+      authPrincipalIdRef.current = nextSession?.user.id ?? null;
+      setAuthSession(nextSession);
+    } catch (error) {
+      if (ownsInvocation()) setAuthSession(null);
+      throw error;
+    }
+  }
+
   // Context actions keep one identity while reading the newest committed state
   // through the callback ref. This prevents unrelated provider renders
   // (for example, an access-key draft keystroke) from invalidating the entire
@@ -1827,6 +1894,7 @@ export function RootRouteComponent() {
   const contextAddManualRepository = useLatestCallback(addManualRepository);
   const contextForgetAccessKey = useLatestCallback(forgetAccessKey);
   const contextHandleManagedSignOut = useLatestCallback(handleManagedSignOut);
+  const contextHandleBrowserActorTransition = useLatestCallback(handleBrowserActorTransition);
   const revalidatePrincipalAccess = useCallback(
     () => setAccessKeyVersion((version) => version + 1),
     [],
@@ -2015,6 +2083,96 @@ export function RootRouteComponent() {
     workspaces,
   ]);
 
+  const applicationSurface = isPublicAuthRoute ? (
+    // Self-contained public pages render before config/auth gates and outside
+    // AppContext. The isolated account-auth popup is intentionally included.
+    <Outlet />
+  ) : !clientConfig && !configError ? (
+    <LoadingPanel label="Loading OpenGeni" />
+  ) : configError ? (
+    <ProblemPanel title="Client configuration unavailable" description={configError} />
+  ) : keyAuthRequired && !hasAccessKey ? (
+    <AccessKeyPanel
+      authMode={clientConfig?.auth.mode}
+      accessKeyDraft={accessKeyDraft}
+      setAccessKeyDraft={setAccessKeyDraft}
+      onSubmit={saveAccessKey}
+    />
+  ) : managedAuthRequired && authSession === undefined ? (
+    <LoadingPanel label="Checking session" />
+  ) : managedAuthRequired && !authSession ? (
+    <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
+      {browserAccountsEnabled ? (
+        <BrowserAccountsSignedOutPanel
+          dualEmptySetFallback={
+            clientConfig?.managedAuthSessionSetMode === "dual" ? (
+              <ManagedAuthPanel
+                onSubmit={handleManagedAuth}
+                emailVerificationRequired={managedEmailVerificationRequired}
+              />
+            ) : undefined
+          }
+        />
+      ) : (
+        <ManagedAuthPanel
+          onSubmit={handleManagedAuth}
+          emailVerificationRequired={managedEmailVerificationRequired}
+        />
+      )}
+    </Suspense>
+  ) : accessError && !accessLoading ? (
+    <ProblemPanel
+      title="Workspace access unavailable"
+      description={accessError}
+      action={
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => setAccessKeyVersion((version) => version + 1)}
+        >
+          Retry
+        </Button>
+      }
+    />
+  ) : managedAuthRequired &&
+    !accessLoading &&
+    accessContext &&
+    !defaultWorkspaceId &&
+    !slackLinkContinuationWorkspaceId ? (
+    <OrganizationOnboardingPanel client={client} onComplete={revalidatePrincipalAccess} />
+  ) : accessLoading || !appContext ? (
+    <LoadingPanel label="Loading workspace access" />
+  ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
+    <ProblemPanel
+      title="No workspace access"
+      description="You don't have access to any workspace yet."
+    />
+  ) : (
+    <AppContext.Provider value={appContext}>
+      <Outlet />
+      {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+        <TanStackRouterDevtools position="bottom-right" />
+      ) : null}
+    </AppContext.Provider>
+  );
+
+  const actorFencedSurface =
+    browserAccountsEnabled && !isPublicAuthRoute ? (
+      <Suspense fallback={<LoadingPanel label="Loading browser accounts" />}>
+        <BrowserAccountsRuntime
+          bootstrapLegacySession={
+            clientConfig?.managedAuthSessionSetMode === "dual" && Boolean(authSession)
+          }
+          mutationBusy={busy || repoBusy || githubAppBusy || pendingCreateAttempt.current !== null}
+          onActorTransition={contextHandleBrowserActorTransition}
+        >
+          <BrowserAccountsLoadingGate>{applicationSurface}</BrowserAccountsLoadingGate>
+        </BrowserAccountsRuntime>
+      </Suspense>
+    ) : (
+      applicationSurface
+    );
+
   return (
     // Fixed app canvas: never let the document scroll. Page surfaces own
     // overflow via ContentPage / session panes. `min-h-screen` used to let
@@ -2033,66 +2191,7 @@ export function RootRouteComponent() {
           />
         </Suspense>
       ) : null}
-      {isPublicAuthRoute ? (
-        // Self-contained public page (e.g. /reset-password): rendered before the
-        // config/auth gates and outside AppContext, so it works for a signed-out
-        // visitor even while client config is still loading.
-        <Outlet />
-      ) : !clientConfig && !configError ? (
-        <LoadingPanel label="Loading OpenGeni" />
-      ) : configError ? (
-        <ProblemPanel title="Client configuration unavailable" description={configError} />
-      ) : keyAuthRequired && !hasAccessKey ? (
-        <AccessKeyPanel
-          authMode={clientConfig?.auth.mode}
-          accessKeyDraft={accessKeyDraft}
-          setAccessKeyDraft={setAccessKeyDraft}
-          onSubmit={saveAccessKey}
-        />
-      ) : managedAuthRequired && authSession === undefined ? (
-        <LoadingPanel label="Checking session" />
-      ) : managedAuthRequired && !authSession ? (
-        <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
-          <ManagedAuthPanel
-            onSubmit={handleManagedAuth}
-            emailVerificationRequired={managedEmailVerificationRequired}
-          />
-        </Suspense>
-      ) : accessError && !accessLoading ? (
-        <ProblemPanel
-          title="Workspace access unavailable"
-          description={accessError}
-          action={
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => setAccessKeyVersion((version) => version + 1)}
-            >
-              Retry
-            </Button>
-          }
-        />
-      ) : managedAuthRequired &&
-        !accessLoading &&
-        accessContext &&
-        !defaultWorkspaceId &&
-        !slackLinkContinuationWorkspaceId ? (
-        <OrganizationOnboardingPanel client={client} onComplete={revalidatePrincipalAccess} />
-      ) : accessLoading || !appContext ? (
-        <LoadingPanel label="Loading workspace access" />
-      ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
-        <ProblemPanel
-          title="No workspace access"
-          description="You don't have access to any workspace yet."
-        />
-      ) : (
-        <AppContext.Provider value={appContext}>
-          <Outlet />
-          {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
-            <TanStackRouterDevtools position="bottom-right" />
-          ) : null}
-        </AppContext.Provider>
-      )}
+      {actorFencedSurface}
     </main>
   );
 }

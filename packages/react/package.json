@@ -37,6 +37,10 @@
       "types": "./src/session-ui.ts",
       "default": "./src/session-ui.ts"
     },
+    "./accounts": {
+      "types": "./src/accounts.tsx",
+      "default": "./src/accounts.tsx"
+    },
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"

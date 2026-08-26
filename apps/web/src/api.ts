@@ -23,6 +23,14 @@ const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
+let managedActorEpoch: string | null = null;
+let managedActorRevision = 0;
+const managedActorRequests = new Set<AbortController>();
+const managedActorMutationListeners = new Set<() => void>();
+const managedActorInvalidationListeners = new Set<() => void>();
+let managedActorMutationCount = 0;
+const MANAGED_ACTOR_EPOCH_HEADER = "x-opengeni-actor-epoch";
+const MANAGED_ACTOR_STATE_HEADER = "x-opengeni-actor-state";
 
 export class ApiError extends Error {
   constructor(
@@ -64,7 +72,7 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniCo
     beginSharedRead,
     headers: () => authHeaders(),
     fetch: async (input, init) => {
-      const response = await fetch(input, {
+      const response = await managedActorFetch(input, {
         ...init,
         // API requests need managed-session cookies. The SDK explicitly marks
         // signed object-storage requests as credential-free; preserve that
@@ -74,6 +82,169 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniCo
       handleApiContractResponse(response);
       return response;
     },
+  });
+}
+
+/**
+ * Rotate the browser's accepted actor epoch before exposing any new tenant
+ * state. Every older finite request is aborted and its eventual response is
+ * rejected even when the underlying transport cannot be cancelled.
+ */
+export function configureManagedActorEpoch(epoch: string | null): void {
+  if (managedActorEpoch === epoch) return;
+  managedActorEpoch = epoch;
+  managedActorRevision += 1;
+  for (const controller of managedActorRequests) {
+    controller.abort(new DOMException("The browser account changed", "AbortError"));
+  }
+}
+
+export function currentManagedActorEpoch(): string | null {
+  return managedActorEpoch;
+}
+
+export function managedActorMutationBusySnapshot(): boolean {
+  return managedActorMutationCount > 0;
+}
+
+export function subscribeManagedActorMutationBusy(listener: () => void): () => void {
+  managedActorMutationListeners.add(listener);
+  return () => managedActorMutationListeners.delete(listener);
+}
+
+export function subscribeManagedActorInvalidation(listener: () => void): () => void {
+  managedActorInvalidationListeners.add(listener);
+  return () => managedActorInvalidationListeners.delete(listener);
+}
+
+function updateManagedActorMutationCount(delta: 1 | -1): void {
+  const before = managedActorMutationCount > 0;
+  managedActorMutationCount = Math.max(0, managedActorMutationCount + delta);
+  if (before !== managedActorMutationCount > 0) {
+    for (const listener of managedActorMutationListeners) listener();
+  }
+}
+
+function notifyManagedActorInvalidation(): void {
+  for (const listener of managedActorInvalidationListeners) listener();
+}
+
+function requestMethod(input: string | URL | Request, init: RequestInit): string {
+  const inherited =
+    typeof Request !== "undefined" && input instanceof Request ? input.method : null;
+  return String(init.method ?? inherited ?? "GET").toUpperCase();
+}
+
+export async function managedActorFetch(
+  input: string | URL | Request,
+  init: RequestInit = {},
+): Promise<Response> {
+  const acceptedEpoch = managedActorEpoch;
+  const acceptedRevision = managedActorRevision;
+  const controller = new AbortController();
+  const inputSignal =
+    init.signal ??
+    (typeof Request !== "undefined" && input instanceof Request ? input.signal : null);
+  const abortFromCaller = () => controller.abort(inputSignal?.reason);
+  if (inputSignal?.aborted) abortFromCaller();
+  else inputSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  managedActorRequests.add(controller);
+  const tracksMutation =
+    acceptedEpoch !== null && !new Set(["GET", "HEAD", "OPTIONS"]).has(requestMethod(input, init));
+  if (tracksMutation) updateManagedActorMutationCount(1);
+  let responseOwnsCleanup = false;
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    managedActorRequests.delete(controller);
+    inputSignal?.removeEventListener("abort", abortFromCaller);
+    if (tracksMutation) updateManagedActorMutationCount(-1);
+  };
+  const headers = new Headers(
+    typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined,
+  );
+  new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+  if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
+    headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
+  }
+  try {
+    const response = await fetch(input, { ...init, headers, signal: controller.signal });
+    if (
+      acceptedEpoch !== null &&
+      response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
+    ) {
+      notifyManagedActorInvalidation();
+    }
+    const responseEpoch = response.headers.get(MANAGED_ACTOR_EPOCH_HEADER);
+    if (
+      acceptedRevision !== managedActorRevision ||
+      acceptedEpoch !== managedActorEpoch ||
+      (acceptedEpoch !== null && responseEpoch !== null && responseEpoch !== acceptedEpoch)
+    ) {
+      void response.body?.cancel();
+      throw new DOMException("Ignored a response from the previous browser account", "AbortError");
+    }
+    if (!response.body) return response;
+    responseOwnsCleanup = true;
+    return managedActorTrackedResponse(response, controller.signal, cleanup);
+  } finally {
+    if (!responseOwnsCleanup) cleanup();
+  }
+}
+
+function managedActorTrackedResponse(
+  response: Response,
+  signal: AbortSignal,
+  cleanup: () => void,
+): Response {
+  const reader = response.body!.getReader();
+  let settled = false;
+  let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+  const settle = () => {
+    if (settled) return false;
+    settled = true;
+    signal.removeEventListener("abort", abortBody);
+    cleanup();
+    return true;
+  };
+  const abortBody = () => {
+    if (!settle()) return;
+    const reason = signal.reason ?? new DOMException("The browser account changed", "AbortError");
+    void reader.cancel(reason).catch(() => undefined);
+    streamController?.error(reason);
+  };
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      streamController = controller;
+      signal.addEventListener("abort", abortBody, { once: true });
+      if (signal.aborted) abortBody();
+    },
+    async pull(controller) {
+      if (settled) return;
+      try {
+        const next = await reader.read();
+        if (next.done) {
+          if (settle()) controller.close();
+          return;
+        }
+        controller.enqueue(next.value);
+      } catch (error) {
+        if (settle()) controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason);
+      } finally {
+        settle();
+      }
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
   });
 }
 
@@ -124,7 +295,7 @@ function authHeaders(): Record<string, string> {
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     ...init,
     credentials: "include",
     headers: {
@@ -143,7 +314,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}/v1/auth${path}`, {
+  const response = await managedActorFetch(`${apiBaseUrl}/v1/auth${path}`, {
     ...init,
     credentials: "include",
     headers: {
@@ -323,7 +494,7 @@ export async function redeemCodexResetCredit(
 }
 
 async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     method: "POST",
     credentials: "include",
     // Managed-session mutations intentionally authenticate only with the
