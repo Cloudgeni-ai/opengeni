@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
-import { testSettings } from "@opengeni/testing";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import {
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
   RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
@@ -14,12 +14,14 @@ import {
 } from "@opengeni/db";
 import {
   createOpenGeniWorker,
+  createOpenGeniWorkerService,
   resolveOpenGeniWorkflowDefinition,
   workerOwnsInternalSchedules,
 } from "../src";
 import {
   createWorkerHttpHandler,
   dbReadyCheck,
+  natsReadyCheck,
   type ReadinessChecks,
   type WorkerLifecycleState,
 } from "../src/http";
@@ -107,6 +109,25 @@ describe("embedded worker lifecycle contract", () => {
     expect(workerOwnsInternalSchedules("control", "none")).toBe(false);
     expect(workerOwnsInternalSchedules("turn")).toBe(false);
     expect(workerOwnsInternalSchedules("turn", "none")).toBe(false);
+  });
+
+  test("embedded worker construction rejects a bus without durable subscriber recovery", async () => {
+    await expect(
+      createOpenGeniWorkerService({
+        role: "control",
+        activityDependencies: {
+          db: {} as Database,
+          bus: { publish: async () => undefined },
+        },
+      } as never),
+    ).rejects.toThrow("sessionEventDurableFanout v1");
+  });
+
+  test("worker readiness requires the durable subscriber-recovery capability", () => {
+    expect(() => natsReadyCheck(new MemoryEventBus())()).not.toThrow();
+    expect(() => natsReadyCheck({ isConnected: () => true } as never)()).toThrow(
+      "sessionEventDurableFanout v1",
+    );
   });
 
   test("turn workers reject the control-only workflow artifact override", async () => {

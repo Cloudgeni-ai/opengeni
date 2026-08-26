@@ -28,6 +28,7 @@ import {
   SessionTenancyInvalidRequestError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
+  updateSessionTitle,
   withSessionRlsActorContext,
   withWorkspaceRls,
   type DbClient,
@@ -505,6 +506,14 @@ describe("migration 0303 session tenancy product activation", () => {
   test("replays a same-workspace private fork before mutable source quiescence", async () => {
     if (!shared || !client) return;
     const value = await sessionVisibilityFixture();
+    expect(
+      await updateSessionTitle(client.db, {
+        workspaceId: value.ownerGrant.workspaceId,
+        sessionId: value.session.id,
+        title: "Policy-versioned automatic title",
+        source: "agent",
+      }),
+    ).toMatchObject({ updated: true, title: "Policy-versioned automatic title" });
     const operationKey = `fork:${crypto.randomUUID()}`;
     const forked = await forkSessionContent(client.db, {
       sourceWorkspaceId: value.ownerGrant.workspaceId,
@@ -537,6 +546,8 @@ describe("migration 0303 session tenancy product activation", () => {
         mcpServerCount: number;
         reasoningEffort: string;
         latencyMode: string;
+        title: string | null;
+        titleSource: string | null;
       }>
     >`
       select
@@ -555,7 +566,9 @@ describe("migration 0303 session tenancy product activation", () => {
         (select count(*)::int from session_mcp_servers server
           where server.session_id = destination.id) as "mcpServerCount",
         destination.reasoning_effort as "reasoningEffort",
-        destination.latency_mode as "latencyMode"
+        destination.latency_mode as "latencyMode",
+        destination.title,
+        destination.title_source as "titleSource"
       from sessions destination
       where destination.id = ${forked.sessionId}
     `;
@@ -572,6 +585,36 @@ describe("migration 0303 session tenancy product activation", () => {
       mcpServerCount: 0,
       reasoningEffort: "medium",
       latencyMode: "standard",
+      title: "New conversation",
+      titleSource: "agent",
+    });
+
+    expect(
+      await updateSessionTitle(client.db, {
+        workspaceId: value.ownerGrant.workspaceId,
+        sessionId: value.session.id,
+        title: "Human-maintained fork title",
+        source: "user",
+      }),
+    ).toMatchObject({ updated: true, title: "Human-maintained fork title" });
+    const humanTitleFork = await forkSessionContent(client.db, {
+      sourceWorkspaceId: value.ownerGrant.workspaceId,
+      sourceSessionId: value.session.id,
+      actorSubjectId: value.ownerSubjectId,
+      destinationWorkspaceId: value.ownerGrant.workspaceId,
+      destinationVisibility: "user_private",
+      workspaceSharedAcknowledged: false,
+      operationKey: `human-title-fork:${crypto.randomUUID()}`,
+    });
+    const [humanTitleDestination] = await shared.admin<
+      Array<{ title: string | null; titleSource: string | null }>
+    >`
+      select title, title_source as "titleSource"
+      from sessions where id = ${humanTitleFork.sessionId}
+    `;
+    expect(humanTitleDestination).toEqual({
+      title: "Human-maintained fork title",
+      titleSource: "user",
     });
 
     // New work may legitimately begin after the committed fork. The exact

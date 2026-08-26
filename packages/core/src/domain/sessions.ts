@@ -87,7 +87,7 @@ import {
   requireSession,
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
-  updateSessionTitle as updateSessionTitleRow,
+  updateSessionTitleWithEvent,
   withWorkspaceSubjectSessionActivityRls,
   type CreateSessionMcpServerInput,
   type Database,
@@ -107,7 +107,6 @@ import {
   type NewSessionDraftSnapshot,
 } from "@opengeni/db";
 import {
-  appendAndPublishEvents,
   publishDurableSessionEvents,
   publishDurableWorkspaceControlEvent,
   type EventBus,
@@ -2663,25 +2662,18 @@ export async function updateSessionTitle(
     surface: "core",
   });
   const workspaceId = grant.workspaceId;
-  const result = await updateSessionTitleRow(db, {
+  const result = await updateSessionTitleWithEvent(db, {
     workspaceId,
     sessionId,
     title,
     source,
   });
-  if (result.updated) {
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "session.title_set",
-        payload: {
-          title: result.title ?? title,
-          source,
-        },
-      },
-    ]);
+  if (result.events.length > 0) {
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
   }
   return {
-    ...result,
+    updated: result.updated,
+    title: result.title,
     relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
   };
 }

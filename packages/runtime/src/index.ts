@@ -6254,7 +6254,7 @@ export type RunAgentStreamOptions = {
 // authoritative instructions channel so the model reliably obeys; references
 // the prefixed tool name the agent actually sees (opengeni__set_session_title).
 export const GENESIS_TITLE_DIRECTIVE =
-  "This is the first turn of a new session. Before responding to the user, call the opengeni__set_session_title tool with a concise 3-7 word title that summarizes what this session is about, then address the user's request normally.";
+  "This is the first turn of a new session. Before responding to the user, call opengeni__set_session_title once with a concise 3-7 word topic label for the actual task or subject, then address the request normally. Write a stable noun phrase, not a quote or prefix of the user's message. Omit greetings, request boilerplate such as ‘I want you to’ or ‘please’, URLs, identifiers, credentials, tokens, and other sensitive values.";
 
 /**
  * Inject the genesis-title directive into exactly one model request. Agent

@@ -109,8 +109,48 @@ describe("release schema contract", () => {
     );
   });
 
-  test("preserves published host-export history and appends the forward repair", async () => {
+  test("registers automatic session title migrations without repinning host-export history", async () => {
     const completeSourceContract = await buildSchemaContract();
+    const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0353_automatic_session_title_policy_fence.sql",
+    );
+    const automaticSessionTitleQuarantineIndex = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0354_automatic_session_title_quarantine_index.sql",
+    );
+    const automaticSessionTitleQuarantine = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0355_automatic_session_title_quarantine.sql",
+    );
+    const automaticSessionTitleMigrationPaths = new Set([
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
+    ]);
+    const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
+      (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
+    );
+
+    expect(completeSourceContract).toMatchObject({
+      fileCount:
+        migrationsBeforeAutomaticSessionTitles.length +
+        (automaticSessionTitlePolicyFence ? 1 : 0) +
+        (automaticSessionTitleQuarantineIndex ? 1 : 0) +
+        (automaticSessionTitleQuarantine ? 1 : 0),
+      latestMigration: automaticSessionTitleQuarantine
+        ? "0355_automatic_session_title_quarantine.sql"
+        : automaticSessionTitleQuarantineIndex
+          ? "0354_automatic_session_title_quarantine_index.sql"
+          : automaticSessionTitlePolicyFence
+            ? "0353_automatic_session_title_policy_fence.sql"
+            : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
+    });
+  });
+
+  test("preserves published host-export history and appends the forward repair", async () => {
+    const completeSourceContract = await contractWithoutMigrations([
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
+    ]);
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
       "0239_task_tree_notes.sql",
@@ -129,6 +169,9 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
       "0237_interaction_transition_reaper.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
@@ -187,6 +230,13 @@ describe("release schema contract", () => {
       "0351_organization_user_setup_delivery.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    // The shared complete-contract assertion intentionally excludes these
+    // branch-local migrations, but the governed hash must exclude them too.
+    appendedMigrationPaths.unshift(
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
     );
     // Each appended migration moves both of these, and two candidates can be in
     // flight at once, so derive them from what is actually on disk rather than

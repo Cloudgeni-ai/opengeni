@@ -127,6 +127,29 @@ async function flushWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<
 }
 
 /**
+ * Flush a durable outbox publication and reject unless the NATS server confirms
+ * the write within the bounded wait. A timeout can still leave the original
+ * bytes buffered for reconnect, so callers must remain duplicate-safe when they
+ * retry the durable obligation.
+ */
+async function flushConfirmedWithTimeout(nc: NatsConnection, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`NATS publish confirmation timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+  });
+  try {
+    await Promise.race([nc.flush(), timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * Drain a long-lived connection's status async-iterator to the log so a future
  * broker outage is OBSERVABLE (disconnect → reconnecting → reconnect → update).
  * Fire-and-forget for the connection's lifetime; the loop ends when the
@@ -228,8 +251,66 @@ export type RequestHandler = (
   subject: string,
 ) => Promise<Uint8Array> | Uint8Array;
 
+/**
+ * Versioned recovery contract for already-durable session-event fanout.
+ *
+ * A publisher acknowledgement alone cannot prove that every API subscriber was
+ * connected for the live message. Supported broker-backed buses must therefore
+ * notify consumers after transport subscriptions have been restored so an
+ * already-open SSE stream can run one bounded Postgres catch-up. A bus that can
+ * never disconnect may implement this as a listener registry that never fires.
+ */
+export const SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION = 1 as const;
+
+export type SessionEventDurableFanoutCapability = {
+  version: typeof SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION;
+  subscribeRecovery: (onRecovery: (generation: number) => void) => () => void;
+};
+
+export function requireSessionEventDurableFanoutCapability(
+  bus: unknown,
+): SessionEventDurableFanoutCapability {
+  const capability = (bus as { sessionEventDurableFanout?: unknown } | null)
+    ?.sessionEventDurableFanout as
+    | { version?: unknown; subscribeRecovery?: unknown }
+    | null
+    | undefined;
+  if (
+    capability?.version !== SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION ||
+    typeof capability.subscribeRecovery !== "function"
+  ) {
+    throw new Error(
+      "EventBus must provide sessionEventDurableFanout v1 so accepted durable publications reconcile after subscriber reconnect",
+    );
+  }
+  return capability as SessionEventDurableFanoutCapability;
+}
+
 export type EventBus = {
+  /**
+   * Mandatory paired recovery contract for durable session-event publication.
+   * API and worker instances sharing one broker must expose the same semantics.
+   */
+  sessionEventDurableFanout: SessionEventDurableFanoutCapability;
+  /**
+   * Publish a session-event batch. Embedding implementations without the
+   * optional publishConfirmed capability must resolve only after their
+   * transport has accepted the batch and reject transport failures so durable
+   * outbox callers can retry safely. Ordinary live-fanout callers remain
+   * best-effort because they catch failures around this contract.
+   */
   publish: (workspaceId: string, sessionId: string, events: SessionEvent[]) => Promise<void>;
+  /**
+   * Publish an already-durable batch and reject unless the transport confirms
+   * acceptance with a stronger provider-specific acknowledgement. Optional for
+   * embedding-host buses; durable fanout reconcilers fall back to the required
+   * publish promise when this capability is unavailable.
+   */
+  publishConfirmed?: (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ) => Promise<void>;
   subscribe: (
     workspaceId: string,
     sessionId: string,
@@ -311,6 +392,8 @@ export async function createNatsEventBus(
   }
   const nc = await (options.connect ?? connect)(withReconnectDefaults(connectOptions));
   let connected = true;
+  let reconnectGeneration = 0;
+  const reconnectSubscribers = new Set<(generation: number) => void>();
   logConnectionStatus(nc, "event-bus", options.logger, (type) => {
     if (
       type === "disconnect" ||
@@ -321,6 +404,20 @@ export async function createNatsEventBus(
       connected = false;
     } else if (type === "connect" || type === "reconnect") {
       connected = true;
+    }
+    if (type === "reconnect") {
+      reconnectGeneration += 1;
+      for (const subscriber of reconnectSubscribers) {
+        try {
+          subscriber(reconnectGeneration);
+        } catch (error) {
+          (options.logger?.warn ?? silentLogger.warn)("NATS reconnect observer failed", {
+            label: "event-bus",
+            reconnectGeneration,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
     }
   });
   const requestConnection: RequestConnection = {
@@ -333,7 +430,37 @@ export async function createNatsEventBus(
     },
     flush: () => nc.flush(),
   };
+  const publishSessionEvents = (
+    workspaceId: string,
+    sessionId: string,
+    events: SessionEvent[],
+  ): void => {
+    const batches = sessionEventBatchesByBytes(workspaceId, sessionId, events);
+    for (const batch of batches) {
+      nc.publish(
+        sessionSubject(workspaceId, sessionId),
+        codec.encode({ workspaceId, sessionId, events: batch }),
+      );
+    }
+    if (batches.length > 1) {
+      (options.logger?.debug ?? silentLogger.debug)("NATS session event batch chunked", {
+        workspaceId,
+        sessionId,
+        eventCount: events.length,
+        batchCount: batches.length,
+        maxMessageBytes: SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
+      });
+    }
+    observeEventBoundaries(batches.flat(), options.logger);
+  };
   return {
+    sessionEventDurableFanout: {
+      version: SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+      subscribeRecovery: (onRecovery) => {
+        reconnectSubscribers.add(onRecovery);
+        return () => reconnectSubscribers.delete(onRecovery);
+      },
+    },
     publish: async (workspaceId, sessionId, events) => {
       if (events.length === 0) {
         return;
@@ -347,23 +474,7 @@ export async function createNatsEventBus(
       // next successful publish's gap-backfill, or a stream reconnect); it must
       // never throw the in-flight turn to death.
       try {
-        const batches = sessionEventBatchesByBytes(workspaceId, sessionId, events);
-        for (const batch of batches) {
-          nc.publish(
-            sessionSubject(workspaceId, sessionId),
-            codec.encode({ workspaceId, sessionId, events: batch }),
-          );
-        }
-        if (batches.length > 1) {
-          (options.logger?.debug ?? silentLogger.debug)("NATS session event batch chunked", {
-            workspaceId,
-            sessionId,
-            eventCount: events.length,
-            batchCount: batches.length,
-            maxMessageBytes: SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
-          });
-        }
-        observeEventBoundaries(batches.flat(), options.logger);
+        publishSessionEvents(workspaceId, sessionId, events);
       } catch (error) {
         // `publish()` throws synchronously only when the connection is fully
         // CLOSED (with infinite reconnect, effectively never outside shutdown).
@@ -378,6 +489,13 @@ export async function createNatsEventBus(
         return;
       }
       await flushWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
+    },
+    publishConfirmed: async (workspaceId, sessionId, events) => {
+      if (events.length === 0) {
+        return;
+      }
+      publishSessionEvents(workspaceId, sessionId, events);
+      await flushConfirmedWithTimeout(nc, PUBLISH_FLUSH_TIMEOUT_MS);
     },
     subscribe: async (workspaceId, sessionId, onEvents) =>
       subscribeSession(nc, workspaceId, sessionId, onEvents),
@@ -418,6 +536,7 @@ export async function createNatsEventBus(
     getOpStreamConnection: () => opStreamConnection,
     isConnected: () => connected && !nc.isClosed() && !nc.isDraining(),
     close: async () => {
+      reconnectSubscribers.clear();
       await nc.drain();
     },
   };
