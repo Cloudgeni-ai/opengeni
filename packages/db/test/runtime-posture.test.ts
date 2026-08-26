@@ -460,16 +460,23 @@ describe("runtime database posture evaluator", () => {
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
           new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
       ).length;
+      const automaticSessionTitleProtectedTableCount = [
+        "automatic_session_title_fanout_outbox_v1",
+      ].filter(
+        (table) =>
+          new Set<string>(FORCE_RLS_TABLES).has(table) &&
+          new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
+      ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 293],
+            [FORCE_RLS_TABLES, 292],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 58],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 57],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
@@ -486,7 +493,9 @@ describe("runtime database posture evaluator", () => {
       for (const [tables, length] of contracts) {
         const expectedLength =
           tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
-            ? length + personalResourceProtectedTableCount
+            ? length +
+              personalResourceProtectedTableCount +
+              automaticSessionTitleProtectedTableCount
             : length;
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -494,12 +503,12 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 305 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 304 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount,
+        tableCount + personalResourceProtectedTableCount + automaticSessionTitleProtectedTableCount,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount,
+        tableCount + personalResourceProtectedTableCount + automaticSessionTitleProtectedTableCount,
       );
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
@@ -628,9 +637,9 @@ describe("runtime database posture evaluator", () => {
       {
         name: "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
-        securityDefiner: true,
+        securityDefiner: false,
       },
       {
         name: "claim_automatic_session_title_fanout_v1(integer)",
@@ -656,7 +665,7 @@ describe("runtime database posture evaluator", () => {
       {
         name: "enforce_automatic_session_title_policy_v1()",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: false,
       },
@@ -678,25 +687,84 @@ describe("runtime database posture evaluator", () => {
     const policyTrigger = posture.privateRoutines.find(
       (routine) => routine.name === "enforce_automatic_session_title_policy_v1()",
     )!;
-    enqueue.execute = true;
+    enqueue.execute = false;
+    enqueue.publicExecute = true;
+    enqueue.securityDefiner = true;
     claim.execute = false;
     claim.publicExecute = true;
     claim.securityDefiner = false;
+    policyTrigger.execute = false;
     policyTrigger.publicExecute = true;
     policyTrigger.securityDefiner = true;
 
     expect(evaluateRuntimeDatabasePosture(posture, titleFanoutOptions)).toEqual(
       expect.arrayContaining([
         expect.stringContaining(
-          "runtime role has forbidden automatic session title fanout internal routine",
+          "runtime role lacks rolling-compatible automatic session title fanout migration helper",
         ),
+        expect.stringContaining(
+          "PUBLIC has forbidden automatic session title fanout migration helper",
+        ),
+        expect.stringContaining("must be SECURITY INVOKER"),
         expect.stringContaining("runtime role lacks automatic session title fanout capability"),
         expect.stringContaining("PUBLIC has forbidden automatic session title fanout capability"),
         expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining(
+          "runtime role lacks rolling-compatible automatic session title policy trigger",
+        ),
         expect.stringContaining("PUBLIC has forbidden automatic session title policy trigger"),
         expect.stringContaining("must be SECURITY INVOKER"),
       ]),
     );
+  });
+
+  test("keeps pre-policy binaries ready against the post-policy-migration private routine catalog", () => {
+    const postPolicyMigrationRoutines = [
+      {
+        name: "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "claim_automatic_session_title_fanout_v1(integer)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "enforce_automatic_session_title_policy_v1()",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+    ];
+    const evaluatePrePolicyPrivateRoutinePosture = () =>
+      postPolicyMigrationRoutines.flatMap((routine) => {
+        const violations: string[] = [];
+        if (routine.owner === options.expectedRole) {
+          violations.push(`runtime role owns private routine ${routine.name}`);
+        }
+        // These title routines are not in the pre-policy binary's narrow
+        // artifact-helper exception, so every one must remain executable.
+        if (!routine.execute) {
+          violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
+        }
+        return violations;
+      });
+
+    expect(evaluatePrePolicyPrivateRoutinePosture()).toEqual([]);
+    postPolicyMigrationRoutines.at(-1)!.execute = false;
+    expect(evaluatePrePolicyPrivateRoutinePosture()).toEqual([
+      "runtime role lacks EXECUTE on private routine enforce_automatic_session_title_policy_v1()",
+    ]);
   });
 
   test("enforces the exact personal-resource private capability boundary", () => {

@@ -38,15 +38,15 @@ import {
 } from "../src/index";
 
 const fenceMigrationUrl = new URL(
-  "../drizzle/0350_automatic_session_title_policy_fence.sql",
+  "../drizzle/0353_automatic_session_title_policy_fence.sql",
   import.meta.url,
 );
 const quarantineIndexMigrationUrl = new URL(
-  "../drizzle/0351_automatic_session_title_quarantine_index.sql",
+  "../drizzle/0354_automatic_session_title_quarantine_index.sql",
   import.meta.url,
 );
 const quarantineMigrationUrl = new URL(
-  "../drizzle/0352_automatic_session_title_quarantine.sql",
+  "../drizzle/0355_automatic_session_title_quarantine.sql",
   import.meta.url,
 );
 const provisionRolesUrl = new URL("../src/provision-roles.ts", import.meta.url);
@@ -250,7 +250,7 @@ async function addAcceptedScheduledOccurrence(input: {
   );
 }
 
-describe("migrations 0350-0352 automatic session title policy fence", () => {
+describe("migrations 0353-0355 automatic session title policy fence", () => {
   test("use a short rolling fence, concurrent candidate index, and bounded resumable quarantine", async () => {
     const fence = await readFile(fenceMigrationUrl, "utf8");
     const quarantineIndex = await readFile(quarantineIndexMigrationUrl, "utf8");
@@ -270,14 +270,15 @@ describe("migrations 0350-0352 automatic session title policy fence", () => {
     expect(fence).toContain("automatic_title_fanout_workspace_event_fk");
     expect(fence).toContain("automatic_title_fanout_pending_idx");
     expect(fence).toContain("enqueue_automatic_session_title_fanout_v1");
+    expect(fence).toContain("SECURITY INVOKER");
     expect(fence).toContain("claim_automatic_session_title_fanout_v1");
     expect(fence).toContain("mark_automatic_session_title_fanout_delivered_v1");
     expect(fence).toContain("mark_automatic_session_title_fanout_failed_v1");
     expect(provisionRoles).toContain(
-      "REVOKE EXECUTE ON FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid) FROM %I",
+      "GRANT EXECUTE ON FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid) TO %I",
     );
     expect(provisionRoles).toContain(
-      "REVOKE EXECUTE ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1() FROM %I",
+      "GRANT EXECUTE ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1() TO %I",
     );
     expect(provisionRoles).not.toContain(
       "REVOKE EXECUTE ON FUNCTION opengeni_private.claim_automatic_session_title_fanout_v1(integer) FROM %I",
@@ -313,6 +314,9 @@ describe("migrations 0350-0352 automatic session title policy fence", () => {
       "REVOKE ALL ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()",
     );
     expect(fence).toContain("FROM PUBLIC");
+    expect(fence).toContain(
+      "GRANT EXECUTE ON FUNCTION\n      opengeni_private.enforce_automatic_session_title_policy_v1()\n      TO opengeni_app",
+    );
 
     expect(
       quarantineIndex.startsWith(
@@ -325,7 +329,7 @@ describe("migrations 0350-0352 automatic session title policy fence", () => {
     expect(quarantineIndex).toContain("title_source IS DISTINCT FROM 'user'");
     expect(
       parseConcurrentIndexMigration(
-        "0351_automatic_session_title_quarantine_index.sql",
+        "0354_automatic_session_title_quarantine_index.sql",
         quarantineIndex,
       ),
     ).toMatchObject({
@@ -758,6 +762,126 @@ describe("migrations 0350-0352 automatic session title policy fence", () => {
       title: "New conversation",
       titleSource: "agent",
     });
+  }, 180_000);
+
+  test("keeps the pre-policy runtime posture ready with invoker-only compatibility grants", async () => {
+    const database = shared;
+    if (!database) return;
+
+    const routines = await database.admin<
+      Array<{
+        name: string;
+        appExecute: boolean;
+        publicExecute: boolean;
+        securityDefiner: boolean;
+      }>
+    >`
+      select
+        (procedure.proname || '(' || pg_catalog.oidvectortypes(procedure.proargtypes) || ')')::text
+          as name,
+        has_function_privilege('opengeni_app', procedure.oid, 'EXECUTE') as "appExecute",
+        exists (
+          select 1
+          from aclexplode(coalesce(procedure.proacl, acldefault('f', procedure.proowner))) acl
+          where acl.grantee = 0 and acl.privilege_type = 'EXECUTE'
+        ) as "publicExecute",
+        procedure.prosecdef as "securityDefiner"
+      from pg_catalog.pg_proc procedure
+      join pg_catalog.pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'opengeni_private'
+        and procedure.proname = any(array[
+          'claim_automatic_session_title_fanout_v1',
+          'mark_automatic_session_title_fanout_delivered_v1',
+          'mark_automatic_session_title_fanout_failed_v1',
+          'enqueue_automatic_session_title_fanout_v1',
+          'enforce_automatic_session_title_policy_v1'
+        ]::text[])
+      order by name
+    `;
+    expect([...routines]).toEqual([
+      {
+        name: "claim_automatic_session_title_fanout_v1(integer)",
+        appExecute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "enforce_automatic_session_title_policy_v1()",
+        appExecute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+      {
+        name: "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
+        appExecute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+        appExecute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+        appExecute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+    ]);
+    const [appOutboxPrivileges] = await database.admin<
+      Array<{
+        select: boolean;
+        insert: boolean;
+        update: boolean;
+        delete: boolean;
+      }>
+    >`
+      select
+        has_table_privilege(
+          'opengeni_app',
+          'automatic_session_title_fanout_outbox_v1',
+          'SELECT'
+        ) as select,
+        has_table_privilege(
+          'opengeni_app',
+          'automatic_session_title_fanout_outbox_v1',
+          'INSERT'
+        ) as insert,
+        has_table_privilege(
+          'opengeni_app',
+          'automatic_session_title_fanout_outbox_v1',
+          'UPDATE'
+        ) as update,
+        has_table_privilege(
+          'opengeni_app',
+          'automatic_session_title_fanout_outbox_v1',
+          'DELETE'
+        ) as delete
+    `;
+    expect(appOutboxPrivileges).toEqual({
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+    const executeAsAppRole = async (statement: string) =>
+      await database.admin.begin(async (transaction) => {
+        await transaction`select set_config('statement_timeout', '5s', true)`;
+        await transaction.unsafe("set local role opengeni_app");
+        return await transaction.unsafe(statement);
+      });
+    await expect(
+      executeAsAppRole(`
+          select opengeni_private.enqueue_automatic_session_title_fanout_v1(
+            gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), gen_random_uuid()
+          )
+        `),
+    ).rejects.toThrow(/permission denied for table automatic_session_title_fanout_outbox_v1/iu);
+    await expect(
+      executeAsAppRole("select opengeni_private.enforce_automatic_session_title_policy_v1()"),
+    ).rejects.toThrow(/trigger functions can only be called as triggers/iu);
   }, 180_000);
 
   test("keeps the pre-policy scheduler writer safe and non-throwing during rollout", async () => {

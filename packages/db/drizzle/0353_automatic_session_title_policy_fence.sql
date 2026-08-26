@@ -123,11 +123,12 @@ WITH CHECK (
   )
 );
 
--- The bounded backfill remains one WITH statement by migration-runner
--- contract. Route only its exact event identity through this ungranted definer
--- seam so the non-superuser table owner can write the FORCE-RLS outbox without
--- opening a tenant-spoofable GUC policy or taking an ACCESS EXCLUSIVE posture
--- window for every batch.
+-- Keep the batched backfill as one WITH statement while preserving the old
+-- runtime posture's all-private-routines EXECUTE rule. This helper is
+-- deliberately SECURITY INVOKER: the application role may execute it but the
+-- table ACL and owner-only FORCE-RLS policy deny its INSERT, while the
+-- non-superuser table owner running migration 0355 can enqueue the exact event
+-- identity.
 CREATE OR REPLACE FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(
   p_account_id uuid,
   p_workspace_id uuid,
@@ -136,7 +137,7 @@ CREATE OR REPLACE FUNCTION opengeni_private.enqueue_automatic_session_title_fano
 )
 RETURNS boolean
 LANGUAGE sql
-SECURITY DEFINER
+SECURITY INVOKER
 SET search_path FROM CURRENT
 AS $automatic_title_fanout_enqueue$
   WITH enqueued AS (
@@ -284,6 +285,9 @@ DO $automatic_title_fanout_grants$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
     GRANT EXECUTE ON FUNCTION
+      opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)
+      TO opengeni_app;
+    GRANT EXECUTE ON FUNCTION
       opengeni_private.claim_automatic_session_title_fanout_v1(integer)
       TO opengeni_app;
     GRANT EXECUTE ON FUNCTION
@@ -394,6 +398,21 @@ $$;
 
 REVOKE ALL ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()
 FROM PUBLIC;
+
+-- Pre-policy API and worker binaries require EXECUTE on every non-artifact
+-- opengeni_private routine during startup/readiness. Preserve that rolling and
+-- rollback posture without granting data authority: PostgreSQL trigger
+-- functions cannot be called as ordinary functions, this routine remains
+-- SECURITY INVOKER, and PUBLIC has no EXECUTE.
+DO $automatic_title_policy_trigger_grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.enforce_automatic_session_title_policy_v1()
+      TO opengeni_app;
+  END IF;
+END
+$automatic_title_policy_trigger_grants$;
 
 CREATE TRIGGER sessions_automatic_title_policy_v1_fence
 BEFORE INSERT OR UPDATE OF title, title_source ON sessions

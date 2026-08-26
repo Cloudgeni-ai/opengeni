@@ -112,18 +112,18 @@ describe("release schema contract", () => {
   test("registers automatic session title migrations without repinning host-export history", async () => {
     const completeSourceContract = await buildSchemaContract();
     const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0350_automatic_session_title_policy_fence.sql",
+      (migration) => migration.path === "0353_automatic_session_title_policy_fence.sql",
     );
     const automaticSessionTitleQuarantineIndex = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0351_automatic_session_title_quarantine_index.sql",
+      (migration) => migration.path === "0354_automatic_session_title_quarantine_index.sql",
     );
     const automaticSessionTitleQuarantine = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0352_automatic_session_title_quarantine.sql",
+      (migration) => migration.path === "0355_automatic_session_title_quarantine.sql",
     );
     const automaticSessionTitleMigrationPaths = new Set([
-      "0350_automatic_session_title_policy_fence.sql",
-      "0351_automatic_session_title_quarantine_index.sql",
-      "0352_automatic_session_title_quarantine.sql",
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -136,20 +136,20 @@ describe("release schema contract", () => {
         (automaticSessionTitleQuarantineIndex ? 1 : 0) +
         (automaticSessionTitleQuarantine ? 1 : 0),
       latestMigration: automaticSessionTitleQuarantine
-        ? "0352_automatic_session_title_quarantine.sql"
+        ? "0355_automatic_session_title_quarantine.sql"
         : automaticSessionTitleQuarantineIndex
-          ? "0351_automatic_session_title_quarantine_index.sql"
+          ? "0354_automatic_session_title_quarantine_index.sql"
           : automaticSessionTitlePolicyFence
-            ? "0350_automatic_session_title_policy_fence.sql"
+            ? "0353_automatic_session_title_policy_fence.sql"
             : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
     });
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
     const completeSourceContract = await contractWithoutMigrations([
-      "0350_automatic_session_title_policy_fence.sql",
-      "0351_automatic_session_title_quarantine_index.sql",
-      "0352_automatic_session_title_quarantine.sql",
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
     ]);
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
@@ -169,9 +169,9 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0350_automatic_session_title_policy_fence.sql",
-      "0351_automatic_session_title_quarantine_index.sql",
-      "0352_automatic_session_title_quarantine.sql",
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
       "0237_interaction_transition_reaper.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
@@ -231,9 +231,9 @@ describe("release schema contract", () => {
     // The shared complete-contract assertion intentionally excludes these
     // branch-local migrations, but the governed hash must exclude them too.
     appendedMigrationPaths.unshift(
-      "0350_automatic_session_title_policy_fence.sql",
-      "0351_automatic_session_title_quarantine_index.sql",
-      "0352_automatic_session_title_quarantine.sql",
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
     );
     // Each appended migration moves both of these, and two candidates can be in
     // flight at once, so derive them from what is actually on disk rather than

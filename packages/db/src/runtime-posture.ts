@@ -42,9 +42,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
-const AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES = [
-  "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
-] as const;
+const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
+  "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)";
 
 const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
   "enforce_automatic_session_title_policy_v1()";
@@ -55,8 +54,6 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
-  ...AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES,
-  AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
 ]);
 
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_ROUTINE =
@@ -2388,37 +2385,36 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     }
-    for (const expectedRoutine of AUTOMATIC_SESSION_TITLE_FANOUT_INTERNAL_ROUTINES) {
-      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
-      if (matches.length !== 1) {
+    const enqueueMatches = posture.privateRoutines.filter(
+      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
+    );
+    if (enqueueMatches.length !== 1) {
+      violations.push(
+        `automatic session title fanout migration helper ${AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE} is missing or ambiguous`,
+      );
+    } else {
+      const routine = enqueueMatches[0]!;
+      if (routine.securityDefiner) {
         violations.push(
-          `automatic session title fanout internal routine ${expectedRoutine} is missing or ambiguous`,
-        );
-        continue;
-      }
-      const routine = matches[0]!;
-      if (!routine.securityDefiner) {
-        violations.push(
-          `automatic session title fanout internal routine ${routine.name} is not SECURITY DEFINER`,
+          `automatic session title fanout migration helper ${routine.name} must be SECURITY INVOKER`,
         );
       }
       if (routine.owner !== automaticTitleFanoutOutbox.owner) {
         violations.push(
-          `automatic session title fanout internal routine ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
+          `automatic session title fanout migration helper ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
         );
       }
-      if (routine.execute) {
+      if (!routine.execute) {
         violations.push(
-          `runtime role has forbidden automatic session title fanout internal routine ${routine.name}`,
+          `runtime role lacks rolling-compatible automatic session title fanout migration helper ${routine.name}`,
         );
       }
       if (routine.publicExecute) {
         violations.push(
-          `PUBLIC has forbidden automatic session title fanout internal routine ${routine.name}`,
+          `PUBLIC has forbidden automatic session title fanout migration helper ${routine.name}`,
         );
       }
     }
-
     const policyTriggerMatches = posture.privateRoutines.filter(
       (routine) => routine.name === AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
     );
@@ -2438,9 +2434,9 @@ export function evaluateRuntimeDatabasePosture(
           `automatic session title policy trigger ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
         );
       }
-      if (routine.execute) {
+      if (!routine.execute) {
         violations.push(
-          `runtime role has forbidden automatic session title policy trigger ${routine.name}`,
+          `runtime role lacks rolling-compatible automatic session title policy trigger ${routine.name}`,
         );
       }
       if (routine.publicExecute) {
