@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { useOptionalBrowserAccounts } from "@opengeni/react/accounts";
-import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useAppContext } from "@/context";
+import {
+  useOptionalBrowserAccountBridge,
+  type BrowserAccountSafeSlot,
+} from "@/lib/browser-account-bridge";
 import {
   authorizedSessionReadWorkspaceIds,
   canonicalSessionDeepLinkTarget,
@@ -13,7 +15,7 @@ import {
 
 export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
   const context = useAppContext();
-  const browserAccounts = useOptionalBrowserAccounts();
+  const browserAccounts = useOptionalBrowserAccountBridge();
   const resolveCrossSlot = browserAccounts?.resolveDeepLink;
   const selectCrossSlot = browserAccounts?.selectSlot;
   const [attempt, setAttempt] = useState(0);
@@ -21,7 +23,7 @@ export function SessionDeepLinkRoute({ sessionId }: { sessionId: string }) {
     | { kind: "loading" }
     | { kind: "not-found" }
     | { kind: "error" }
-    | { kind: "switch"; slot: ManagedAuthSessionSetProjection["slots"][number] }
+    | { kind: "switch"; slot: BrowserAccountSafeSlot }
   >({ kind: "loading" });
   const authorizedWorkspaceIds = useMemo(
     () => authorizedSessionReadWorkspaceIds(context.accessContext, context.workspaces),

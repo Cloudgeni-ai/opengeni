@@ -25,7 +25,6 @@ import {
   type UseRigsResult,
   type UseVariableSetsResult,
 } from "@opengeni/react";
-import { useOptionalBrowserAccountTransitionBlocker } from "@opengeni/react/accounts";
 import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
 import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
 import {
@@ -78,6 +77,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
+import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
@@ -793,7 +793,7 @@ function SessionsIndexRouteContent({
       return await createComposer.send();
     },
   };
-  useOptionalBrowserAccountTransitionBlocker(`new-session-composer:${workspaceId}`, () => {
+  useBrowserAccountBridgeBlocker(`new-session-composer:${workspaceId}`, () => {
     if (attachments.hasUnresolved) {
       return {
         id: "ignored",

@@ -254,9 +254,14 @@ const budgets = {
   // bytes of headroom); the existing 600-KiB gzip envelope retains 2,866 bytes
   // of headroom, above the 1.5-KiB platform-skew allowance. Every file-count,
   // initial, per-file, lazy-chunk, and CSS cap remains fixed.
+  // Multi-account browser isolation adds actor-fenced transport state and two
+  // small direct-session bridge chunks while account controls and the
+  // credential popup remain lazy. Current main's larger raw/gzip envelopes
+  // remain authoritative; only the measured direct-session file-count boundary
+  // advances from 24 to 26.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 600 * kib,
-  directSessionFiles: 24,
+  directSessionFiles: 26,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 31 * kib,

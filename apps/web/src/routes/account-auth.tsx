@@ -1,19 +1,22 @@
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
-import { Loader2Icon, ShieldCheckIcon } from "lucide-react";
+import { Loader2Icon } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
-import { apiBaseUrl } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Notice } from "@/components/ui/notice";
 import {
   isAccountAuthTransactionId,
   postAccountAuthPopupMessage,
 } from "@/lib/browser-account-popup";
 
+const browserAccountsApiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
+
 export function AccountAuthRoute({ transactionId }: { transactionId: string | undefined }) {
-  const client = useMemo(() => createBrowserAccountsClient({ baseUrl: apiBaseUrl }), []);
+  const client = useMemo(
+    () => createBrowserAccountsClient({ baseUrl: browserAccountsApiBaseUrl }),
+    [],
+  );
   const completionOperationId = useRef(crypto.randomUUID());
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -63,9 +66,15 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
   if (!validTransactionId) {
     return (
       <section className="flex flex-1 items-center justify-center px-4">
-        <Notice tone="failed" title="Invalid account request">
-          Close this window and start the account action again from OpenGeni.
-        </Notice>
+        <div
+          role="alert"
+          className="w-full max-w-sm rounded-lg border border-status-failed/50 bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]"
+        >
+          <h1 className="text-base font-semibold">Invalid account request</h1>
+          <p className="mt-2 text-sm text-fg-subtle">
+            Close this window and start the account action again from OpenGeni.
+          </p>
+        </div>
       </section>
     );
   }
@@ -80,17 +89,12 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
           void submit();
         }}
       >
-        <div className="mb-5 flex items-start gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand forced-colors:border forced-colors:border-[CanvasText]">
-            <ShieldCheckIcon className="size-5" />
-          </span>
-          <div className="min-w-0">
-            <h1 className="text-base font-semibold">Authenticate this account</h1>
-            <p className="mt-1 text-sm text-fg-subtle">
-              Credentials stay in this isolated window. Your active account changes only after
-              OpenGeni verifies the transaction.
-            </p>
-          </div>
+        <div className="mb-5">
+          <h1 className="text-base font-semibold">Authenticate this account</h1>
+          <p className="mt-1 text-sm text-fg-subtle">
+            Credentials stay in this isolated window. Your active account changes only after
+            OpenGeni verifies the transaction.
+          </p>
         </div>
         <div className="mb-3">
           <Label htmlFor="account-auth-email">Email</Label>

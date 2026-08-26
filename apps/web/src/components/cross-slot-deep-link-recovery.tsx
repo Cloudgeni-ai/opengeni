@@ -1,14 +1,16 @@
-import { useOptionalBrowserAccounts } from "@opengeni/react/accounts";
-import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import {
+  useOptionalBrowserAccountBridge,
+  type BrowserAccountSafeSlot,
+} from "@/lib/browser-account-bridge";
 
-type Slot = ManagedAuthSessionSetProjection["slots"][number];
+type Slot = BrowserAccountSafeSlot;
 
 export function CrossSlotDeepLinkRecovery(props: { path: string; fallback: ReactNode }) {
-  const accounts = useOptionalBrowserAccounts();
+  const accounts = useOptionalBrowserAccountBridge();
   const resolveDeepLink = accounts?.resolveDeepLink;
   const selectSlot = accounts?.selectSlot;
   const [attempt, setAttempt] = useState(0);

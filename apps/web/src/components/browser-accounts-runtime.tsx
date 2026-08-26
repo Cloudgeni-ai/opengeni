@@ -18,6 +18,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
+import {
+  browserAccountBridgeBlockersSnapshot,
+  installBrowserAccountBridgeOperations,
+  subscribeBrowserAccountBridgeBlockers,
+} from "@/lib/browser-account-bridge";
 
 export type BrowserAccountsRuntimeProps = {
   bootstrapLegacySession: boolean;
@@ -41,9 +46,37 @@ export function BrowserAccountsRuntime({
     >
       <RootMutationBlocker busy={mutationBusy} />
       <ExternalActorInvalidation />
+      <BrowserAccountBridge />
       {children}
     </BrowserAccountsProvider>
   );
+}
+
+function BrowserAccountBridge() {
+  const accounts = useBrowserAccounts();
+  const registerTransitionBlocker = accounts.registerTransitionBlocker;
+  const resolveDeepLink = accounts.resolveDeepLink;
+  const selectSlot = accounts.selectSlot;
+  const blockers = useSyncExternalStore(
+    subscribeBrowserAccountBridgeBlockers,
+    browserAccountBridgeBlockersSnapshot,
+    browserAccountBridgeBlockersSnapshot,
+  );
+  useEffect(() => {
+    const unregister = blockers.map(({ id, inspect }) => registerTransitionBlocker(id, inspect));
+    return () => {
+      for (const release of unregister) release();
+    };
+  }, [blockers, registerTransitionBlocker]);
+  useEffect(
+    () =>
+      installBrowserAccountBridgeOperations({
+        resolveDeepLink,
+        selectSlot,
+      }),
+    [resolveDeepLink, selectSlot],
+  );
+  return null;
 }
 
 function RootMutationBlocker({ busy }: { busy: boolean }) {

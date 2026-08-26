@@ -2,7 +2,6 @@
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
-import { useOptionalBrowserAccountTransitionBlocker } from "@opengeni/react/accounts";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -62,6 +61,7 @@ import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
+import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
@@ -1446,7 +1446,7 @@ function SessionChatPane(props: {
     onSent: (_text, input) => personalAttachment.onAccepted(input),
     onDeliveryError: personalAttachment.onDeliveryError,
   });
-  useOptionalBrowserAccountTransitionBlocker(`session-composer:${props.session.id}`, () => {
+  useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
       return {
         id: "ignored",
