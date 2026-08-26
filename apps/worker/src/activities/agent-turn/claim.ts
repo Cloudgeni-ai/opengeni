@@ -404,9 +404,13 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     return appended;
   };
   eventing.settle = async (inputSettlement) => {
-    const attemptClosing = ["completed", "failed", "cancelled", "requires_action"].includes(
-      inputSettlement.turnStatus,
-    );
+    const attemptClosing = [
+      "completed",
+      "failed",
+      "cancelled",
+      "superseded",
+      "requires_action",
+    ].includes(inputSettlement.turnStatus);
     const recordingForSettlement =
       attemptClosing && recordingState.activeRecording && sandboxState.resolvedSandbox
         ? (recordingState.activeRecording as ActiveRecording)

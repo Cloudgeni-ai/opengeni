@@ -1262,6 +1262,229 @@ describe("standalone context compaction execution", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
   });
 
+  test("Steer waits for in-turn compaction and supersedes before inference resumes", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Deferred Steer compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Deferred Steer compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "continue after safely compacting the prior work",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        position: 0,
+        item: {
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "large prior work ".repeat(2_000) }],
+        },
+      });
+    });
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+
+    let signalSummaryStarted!: () => void;
+    const summaryStarted = new Promise<void>((resolve) => {
+      signalSummaryStarted = resolve;
+    });
+    let releaseSummary!: () => void;
+    const summaryRelease = new Promise<void>((resolve) => {
+      releaseSummary = resolve;
+    });
+    let compactionCalls = 0;
+    let forbiddenInferenceCalls = 0;
+    const runtime = {
+      configure: () => undefined,
+      resolveTurnModel: () => ({
+        client: {
+          chat: {
+            completions: {
+              create: async () => {
+                compactionCalls += 1;
+                signalSummaryStarted();
+                await summaryRelease;
+                return {
+                  id: "chatcmpl-deferred-steer",
+                  usage: {
+                    prompt_tokens: 2_000,
+                    completion_tokens: 20,
+                    total_tokens: 2_020,
+                  },
+                  choices: [
+                    {
+                      message: {
+                        content: "The prior work was compacted before changing direction.",
+                      },
+                    },
+                  ],
+                };
+              },
+            },
+          },
+        },
+        provider: {
+          id: "test-chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
+        configured: {
+          id: "scripted-compactor",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactLimitTokens: 225_000,
+          hostedWebSearch: false,
+        },
+      }),
+      prepareTools: async () => ({
+        mcpServers: [],
+        resolvedMcpConnectionIds: new Map<string, string>(),
+        codexConnectorNamespaces: new Set<string>(),
+        close: async () => undefined,
+      }),
+      buildAgent: () => ({ instructions: "" }),
+      prepareInput: () => {
+        forbiddenInferenceCalls += 1;
+        throw new Error("deferred Steer prepared inference after compaction");
+      },
+      runStream: () => {
+        forbiddenInferenceCalls += 1;
+        throw new Error("deferred Steer started inference after compaction");
+      },
+      serializeApprovals: () => {
+        throw new Error("deferred Steer serialized approvals");
+      },
+    } as unknown as OpenGeniRuntime;
+    const bus = new MemoryEventBus();
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiModel: "scripted-compactor",
+        sandboxBackend: "none",
+      }),
+      db: client.db,
+      bus,
+      runtime,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const runPromise = activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    await summaryStarted;
+
+    let steered: Awaited<ReturnType<typeof submitHumanPromptInTransaction>>;
+    try {
+      steered = await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        grant.workspaceId!,
+        grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as Database, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId!,
+              sessionId: session.id,
+              subjectId: grant.subjectId,
+              actor: { type: "human", subjectId: grant.subjectId },
+              operationKey: `steer-during-compaction-${crypto.randomUUID()}`,
+              delivery: "steer",
+              text: "take the new direction immediately after compaction",
+              resources: [],
+              reasoningEffortFallback: "low",
+              source: "user",
+            }),
+          ),
+      );
+      expect(steered).toMatchObject({
+        interruptionCount: 0,
+        routing: "accepted_for_steering",
+      });
+      expect(steered.receipt.result.deferredUntilCompaction).toBe(true);
+      expect(
+        await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id),
+      ).toMatchObject({
+        stoppingPreviousAttempt: false,
+        items: [],
+      });
+    } finally {
+      releaseSummary();
+    }
+
+    const result = await runPromise;
+    expect(result).toMatchObject({ status: "idle", attemptId });
+    if (result.status === "unclaimed") throw new Error("User turn was not claimed");
+    expect(compactionCalls).toBe(1);
+    expect(forbiddenInferenceCalls).toBe(0);
+    expect(await isSessionCompactionRequested(client.db, grant.workspaceId!, session.id)).toBe(
+      false,
+    );
+    expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
+      source: "user",
+      status: "superseded",
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "queued",
+      activeTurnId: null,
+    });
+    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
+      after: 0,
+      limit: 100,
+    });
+    const eventTypes = events.map((event) => event.type);
+    expect(eventTypes.indexOf("session.context.compaction.started")).toBeGreaterThanOrEqual(0);
+    expect(eventTypes.indexOf("session.context.compacted")).toBeGreaterThan(
+      eventTypes.indexOf("session.context.compaction.started"),
+    );
+    expect(eventTypes.indexOf("turn.superseded")).toBeGreaterThan(
+      eventTypes.indexOf("session.context.compacted"),
+    );
+    const next = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(next).toMatchObject({
+      action: "claimed",
+      turn: { id: steered.turnId, source: "user" },
+    });
+  });
+
   test("same-turn empty-summary recovery settles once and waits for actionable durable input", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {

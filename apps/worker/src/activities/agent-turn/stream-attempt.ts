@@ -213,6 +213,7 @@ export type TurnStreamAttemptDeps = {
   runSettings: Settings;
   turnTools: ReturnType<typeof withFirstPartyTools>;
   compactSummarizer: CompactionSummarizer;
+  settleDeferredSteerAfterCompaction: () => Promise<RunAgentTurnResult | null>;
   compactionModelHistoryProjector: (
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
@@ -293,6 +294,7 @@ export async function runTurnStreamAttempt(
     runSettings,
     turnTools,
     compactSummarizer,
+    settleDeferredSteerAfterCompaction,
     compactionModelHistoryProjector,
     generatedImageHistoryProjector,
     modelHistoryProjector,
@@ -1601,6 +1603,8 @@ export async function runTurnStreamAttempt(
         );
         compactionRequestCleared = landmark.requestConsumed;
         if (!isCompactionSummaryFailure(compactError)) throw compactError;
+        const deferredSteer = await settleDeferredSteerAfterCompaction();
+        if (deferredSteer) return deferredSteer;
         compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
         observability.warn("context compaction recovery compaction failed", {
           sessionId: input.sessionId,
@@ -1653,6 +1657,8 @@ export async function runTurnStreamAttempt(
         // machine updates stay pending for that actionable wake.
         return claimedResult({ status: "idle", deferredUntilWake: true });
       }
+      const deferredSteer = await settleDeferredSteerAfterCompaction();
+      if (deferredSteer) return deferredSteer;
       // Codex parity: compaction remains inside the same logical turn and
       // the same activity. Rebuild the model-visible history from the
       // durable replacement and continue the sampling loop; do not create

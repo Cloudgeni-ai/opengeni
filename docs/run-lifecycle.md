@@ -518,8 +518,16 @@ preserved. It never drops history units, folds chunks, or falls back to portable
 A Codex terminal SSE failure carried
 on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
 cannot masquerade as an empty successful summary. After a fenced durable
-replacement, the same activity, turn, attempt, and sandbox rebuild model input
-and continue; compaction never creates queue or recovery work.
+replacement, the same activity, turn, attempt, and sandbox normally rebuild
+model input and continue; compaction never creates queue or recovery work.
+Steer admission is immediate but deliberately does not interrupt while the
+latest exact-attempt compaction landmark is `started`, because an interruption
+row would also fence the terminal checkpoint write. Once
+`session.context.compacted` or `session.context.compaction.skipped` is durable,
+a waiting human/API or Agent Steer cooperatively settles the ordinary turn as
+`superseded` before another model request. A claimed standalone compaction
+instead completes its maintenance turn, then the waiting Steer is first to
+claim. Pause and Cancel remain immediate interruption fences.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -783,10 +791,17 @@ terminal event on a unique contiguous durable sequence. The operator output is
 limited to safe IDs, event counts, sequences, and model name; credentials and
 event payloads are never printed.
 Pause closes the exact live attempt as `interrupted_recoverable` and leaves its
-logical turn `recovering`; Steer closes it as `superseded`, makes the steered
-human prompt first, and does not revive the old turn. A missing or already
-closed owner is an event-free stale no-op. This prevents a superseded activity
-that keeps running from publishing contradictory history or terminal truth.
+logical turn `recovering`; Steer normally closes it as `superseded`, makes the
+steered human prompt first, and does not revive the old turn. The exact
+exception is active compaction: while the latest exact-attempt landmark is
+`session.context.compaction.started`, and for the whole lifetime of a claimed
+standalone compaction turn, Steer records durable waiting work but inserts no
+interruption. The terminal checkpoint write therefore remains authorized; its
+first safe boundary supersedes the ordinary turn before another model request,
+or completes standalone maintenance before the Steer claim. A missing or
+already closed owner is an event-free stale no-op. This prevents a superseded
+activity that keeps running from publishing contradictory history or terminal
+truth without creating a compaction/Steer retry loop.
 If provider failure races with an accepted exact-attempt Pause or Steer, that
 control request owns the attempt: recovery returns stale and the normal
 settlement/quiescence path completes the transition. The workspace-control lock
