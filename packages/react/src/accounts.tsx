@@ -66,6 +66,7 @@ type PendingNonSecretTransition = {
   kind: Exclude<BrowserAccountTransitionKind, "add" | "reauth" | "cross_tab">;
   operationId: string;
   expectedGeneration: string | null;
+  changesActor: (projection: ManagedAuthSessionSetProjection) => boolean;
   execute: (expectedGeneration: string) => Promise<ManagedAuthSessionSetProjection>;
 };
 
@@ -97,6 +98,11 @@ export type BrowserAccountsContextValue = {
 
 const BrowserAccountsContext = createContext<BrowserAccountsContextValue | null>(null);
 const DEFAULT_CHANNEL = "opengeni:browser-account-epoch:v1";
+const CROSS_TAB_ACTOR_HOLD_MS = 30_000;
+
+async function yieldToCrossTabActorHold(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
 
 function operationId(): string {
   return crypto.randomUUID();
@@ -199,6 +205,7 @@ export function BrowserAccountsProvider({
   const sequenceRef = useRef(0);
   const transitionAbortRef = useRef<AbortController | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
+  const crossTabActorHoldsRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   projectionRef.current = projection;
   transactionRef.current = transaction;
 
@@ -220,6 +227,25 @@ export function BrowserAccountsProvider({
       type: "actor-epoch-changed",
       generation: next.generation,
       actorEpoch: next.actorEpoch,
+    });
+  }, []);
+
+  const publishActorHold = useCallback(
+    (transitionId: string, current: ManagedAuthSessionSetProjection) => {
+      channelRef.current?.postMessage({
+        type: "actor-transition-pending",
+        transitionId,
+        generation: current.generation,
+        actorEpoch: current.actorEpoch,
+      });
+    },
+    [],
+  );
+
+  const publishActorRelease = useCallback((transitionId: string) => {
+    channelRef.current?.postMessage({
+      type: "actor-transition-released",
+      transitionId,
     });
   }, []);
 
@@ -369,6 +395,16 @@ export function BrowserAccountsProvider({
       pendingRef.current = pending;
       setPhase("committing");
       setError(null);
+      const changesActor = pending.changesActor(current);
+      if (changesActor) {
+        // Peers must hide and abort the old actor before this request can be
+        // accepted. Yielding one task after the secret-free hold lets queued
+        // BroadcastChannel delivery run before the network mutation starts;
+        // a peer that was already dispatching remains an ordinary pre-commit
+        // in-flight request and is still fenced by the server epoch.
+        publishActorHold(pending.operationId, current);
+        await yieldToCrossTabActorHold();
+      }
       try {
         let accepted: ManagedAuthSessionSetProjection;
         try {
@@ -397,13 +433,14 @@ export function BrowserAccountsProvider({
       } catch (caught) {
         return await fail(caught, pending.kind);
       } finally {
+        if (changesActor) publishActorRelease(pending.operationId);
         if (pendingCommitSequenceRef.current === sequence) {
           pendingCommitSequenceRef.current = null;
           invalidatedDuringPendingCommitRef.current = false;
         }
       }
     },
-    [client, fail, inspectBlockers, settleActorTransition],
+    [client, fail, inspectBlockers, publishActorHold, publishActorRelease, settleActorTransition],
   );
 
   const refresh = useCallback(async () => {
@@ -649,6 +686,7 @@ export function BrowserAccountsProvider({
         kind: "select",
         operationId: id,
         expectedGeneration: null,
+        changesActor: (current) => current.selectedSlotId !== slotId,
         execute: async (expectedGeneration) =>
           await client.selectLoginSlot({
             operationId: id,
@@ -667,6 +705,7 @@ export function BrowserAccountsProvider({
         kind: "logout_one",
         operationId: id,
         expectedGeneration: null,
+        changesActor: (current) => current.selectedSlotId === slotId,
         execute: async (expectedGeneration) =>
           await client.logoutLoginSlot({
             operationId: id,
@@ -685,6 +724,7 @@ export function BrowserAccountsProvider({
       kind: "logout_all",
       operationId: id,
       expectedGeneration: null,
+      changesActor: (current) => current.selectedSlotId !== null,
       execute: async (expectedGeneration) => {
         await client.logoutSessionSet({ operationId: id, expectedGeneration });
         return await client.getSessionSet();
@@ -713,11 +753,66 @@ export function BrowserAccountsProvider({
   useEffect(() => {
     if (!broadcastChannelName || typeof BroadcastChannel === "undefined") return;
     const channel = new BroadcastChannel(broadcastChannelName);
+    const actorHolds = crossTabActorHoldsRef.current;
     channelRef.current = channel;
     channel.onmessage = (event: MessageEvent<unknown>) => {
       const value = event.data;
       if (!value || typeof value !== "object") return;
-      const hint = value as { type?: unknown; actorEpoch?: unknown; generation?: unknown };
+      const hint = value as {
+        type?: unknown;
+        transitionId?: unknown;
+        actorEpoch?: unknown;
+        generation?: unknown;
+      };
+      if (hint.type === "actor-transition-pending") {
+        if (
+          typeof hint.transitionId !== "string" ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+            hint.transitionId,
+          ) ||
+          typeof hint.actorEpoch !== "string" ||
+          typeof hint.generation !== "string" ||
+          crossTabActorHoldsRef.current.has(hint.transitionId)
+        ) {
+          return;
+        }
+        const current = projectionRef.current;
+        if (
+          current &&
+          (current.actorEpoch !== hint.actorEpoch || current.generation !== hint.generation)
+        ) {
+          return;
+        }
+        if (!current && crossTabActorHoldsRef.current.size === 0) return;
+        const firstHold = crossTabActorHoldsRef.current.size === 0;
+        const timeout = setTimeout(() => {
+          if (!crossTabActorHoldsRef.current.delete(hint.transitionId as string)) return;
+          if (crossTabActorHoldsRef.current.size === 0) {
+            void invalidateActor().catch(() => undefined);
+          }
+        }, CROSS_TAB_ACTOR_HOLD_MS);
+        crossTabActorHoldsRef.current.set(hint.transitionId, timeout);
+        if (firstHold) {
+          if (pendingCommitSequenceRef.current !== null) {
+            invalidatedDuringPendingCommitRef.current = true;
+          } else {
+            ++sequenceRef.current;
+          }
+          void beginNeutralActorInvalidation(current).catch(() => undefined);
+        }
+        return;
+      }
+      if (hint.type === "actor-transition-released") {
+        if (typeof hint.transitionId !== "string") return;
+        const timeout = crossTabActorHoldsRef.current.get(hint.transitionId);
+        if (timeout === undefined) return;
+        clearTimeout(timeout);
+        crossTabActorHoldsRef.current.delete(hint.transitionId);
+        if (crossTabActorHoldsRef.current.size === 0) {
+          void invalidateActor().catch(() => undefined);
+        }
+        return;
+      }
       if (
         hint.type !== "actor-epoch-changed" ||
         typeof hint.actorEpoch !== "string" ||
@@ -727,13 +822,17 @@ export function BrowserAccountsProvider({
       ) {
         return;
       }
+      for (const timeout of crossTabActorHoldsRef.current.values()) clearTimeout(timeout);
+      crossTabActorHoldsRef.current.clear();
       void invalidateActor().catch(() => undefined);
     };
     return () => {
+      for (const timeout of actorHolds.values()) clearTimeout(timeout);
+      actorHolds.clear();
       channel.close();
       if (channelRef.current === channel) channelRef.current = null;
     };
-  }, [broadcastChannelName, invalidateActor]);
+  }, [beginNeutralActorInvalidation, broadcastChannelName, invalidateActor]);
 
   const value = useMemo<BrowserAccountsContextValue>(
     () => ({

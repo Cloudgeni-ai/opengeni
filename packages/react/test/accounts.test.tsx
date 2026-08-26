@@ -571,20 +571,109 @@ describe("BrowserAccountsProvider", () => {
       let selection!: Promise<boolean>;
       await act(async () => {
         selection = accounts!.current.selectSlot(SLOT_B);
-        await Promise.resolve();
-        await Promise.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 5));
       });
-      expect(messages).toEqual([{ type: "actor-epoch-changed", generation: "2", actorEpoch: "2" }]);
+      expect(messages).toHaveLength(2);
+      expect(messages[0]).toEqual({
+        type: "actor-transition-pending",
+        transitionId: expect.any(String),
+        generation: "1",
+        actorEpoch: "1",
+      });
+      expect(messages[1]).toEqual({
+        type: "actor-epoch-changed",
+        generation: "2",
+        actorEpoch: "2",
+      });
       expect(accounts.current.phase).toBe("loading");
 
       await act(async () => {
         releaseTransition();
         expect(await selection).toBe(true);
       });
-      expect(messages).toHaveLength(1);
+      expect(messages).toEqual([
+        expect.objectContaining({ type: "actor-transition-pending" }),
+        { type: "actor-epoch-changed", generation: "2", actorEpoch: "2" },
+        {
+          type: "actor-transition-released",
+          transitionId: (messages[0] as { transitionId: string }).transitionId,
+        },
+      ]);
     } finally {
       releaseTransition();
       await accounts?.unmount();
+      Object.defineProperty(globalThis, "BroadcastChannel", {
+        configurable: true,
+        value: originalBroadcastChannel,
+      });
+    }
+  });
+
+  test("holds peer actor work before an actor-changing mutation can start", async () => {
+    const originalBroadcastChannel = globalThis.BroadcastChannel;
+    class FakeBroadcastChannel {
+      static readonly instances = new Set<FakeBroadcastChannel>();
+      onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+
+      constructor(readonly name: string) {
+        FakeBroadcastChannel.instances.add(this);
+      }
+
+      postMessage(value: unknown): void {
+        for (const peer of FakeBroadcastChannel.instances) {
+          if (peer !== this && peer.name === this.name) {
+            peer.onmessage?.(new MessageEvent("message", { data: value }));
+          }
+        }
+      }
+
+      close(): void {
+        FakeBroadcastChannel.instances.delete(this);
+      }
+    }
+    Object.defineProperty(globalThis, "BroadcastChannel", {
+      configurable: true,
+      value: FakeBroadcastChannel,
+    });
+
+    let current = projection();
+    const peerTransitions: BrowserAccountTransition[] = [];
+    let peer: Awaited<ReturnType<typeof renderAccounts>> | null = null;
+    let initiator: Awaited<ReturnType<typeof renderAccounts>> | null = null;
+    try {
+      peer = await renderAccounts(
+        scriptedClient({ getSessionSet: async () => current }),
+        async (transition) => {
+          peerTransitions.push(transition);
+        },
+        "accounts-precommit-hold-test",
+      );
+      peerTransitions.length = 0;
+      initiator = await renderAccounts(
+        scriptedClient({
+          getSessionSet: async () => current,
+          selectLoginSlot: async () => {
+            expect(peerTransitions.at(-1)?.to).toBeNull();
+            current = projection({
+              generation: "2",
+              actorEpoch: "2",
+              selectedSlotId: SLOT_B,
+            });
+            return current;
+          },
+        }),
+        async () => undefined,
+        "accounts-precommit-hold-test",
+      );
+
+      expect(await actRun(() => initiator!.current.selectSlot(SLOT_B))).toBe(true);
+      await flush();
+      expect(peerTransitions[0]?.to).toBeNull();
+      expect(peer.current.projection?.selectedSlotId).toBe(SLOT_B);
+      expect(peer.current.projection?.actorEpoch).toBe("2");
+    } finally {
+      await initiator?.unmount();
+      await peer?.unmount();
       Object.defineProperty(globalThis, "BroadcastChannel", {
         configurable: true,
         value: originalBroadcastChannel,
