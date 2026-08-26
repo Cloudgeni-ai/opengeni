@@ -101,6 +101,48 @@ describe("useComposer embedding policy", () => {
     await hook.unmount();
   });
 
+  test("ordinary Send clears its local draft before the host submission callback", async () => {
+    const draftVisibilityOnSubmitted: boolean[] = [];
+    let readDraftContent = () => true;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => ({
+        id: crypto.randomUUID(),
+        workspaceId: WORKSPACE_ID,
+        sessionId: SESSION_ID,
+        sequence: 1,
+        type: "user.message",
+        clientEventId: typeof input === "string" ? undefined : input.clientEventId,
+        payload: input,
+        occurredAt: new Date().toISOString(),
+      }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: {
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
+          onSubmitted: () => {
+            draftVisibilityOnSubmitted.push(readDraftContent());
+          },
+        }),
+      undefined,
+    );
+    readDraftContent = () => hook.result.current.hasDraftContent();
+
+    await actRun(() => hook.result.current.setValue("submitted once"));
+    expect(await actRun(() => hook.result.current.send())).toBe(true);
+
+    expect(draftVisibilityOnSubmitted).toEqual([false]);
+    expect(hook.result.current.value).toBe("");
+    await hook.unmount();
+  });
+
   test("annotation-only send preserves structured source data and clears on acceptance", async () => {
     const sent: unknown[] = [];
     const client = fakeClient({
