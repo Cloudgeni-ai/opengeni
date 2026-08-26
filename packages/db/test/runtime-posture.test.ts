@@ -288,6 +288,7 @@ function safePosture(): RuntimeDatabasePosture {
     ownedSchemas: [],
     ownedRelations: [],
     sessionTenancyProductActivationPresent: false,
+    sessionVariableSetAttachmentsCutoverPresent: true,
     tables: [
       {
         name: "tenant_rows",
@@ -425,6 +426,15 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("requires the 0352 session Variable Set runtime receipt", () => {
+    const posture = safePosture();
+    posture.sessionVariableSetAttachmentsCutoverPresent = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the 0352 session Variable Set attachment runtime receipt",
+    );
+  });
+
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const hasOpe121SlackPublicationLedger = FORCE_RLS_TABLES.includes("memory_slack_publications");
     if (hasOpe121SlackPublicationLedger) {
@@ -466,26 +476,26 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 297],
+            [FORCE_RLS_TABLES, 298],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 62],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 63],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 200],
+            [FORCE_RLS_TABLES, 201],
             [NON_RLS_RUNTIME_TABLES, 11],
-            [RUNTIME_FULL_DML_TABLES, 117],
+            [RUNTIME_FULL_DML_TABLES, 118],
             [RUNTIME_READ_ONLY_TABLES, 16],
             [readUpdateTables, 0],
             [RUNTIME_READ_INSERT_TABLES, 38],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 28],
-            [RUNTIME_DML_TABLES, 183],
+            [RUNTIME_DML_TABLES, 184],
           ] as const);
       for (const [tables, length] of contracts) {
         const expectedLength =
@@ -498,7 +508,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 309 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 310 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -559,15 +569,15 @@ describe("runtime database posture evaluator", () => {
     }
 
     const contracts = [
-      [FORCE_RLS_TABLES, 217],
+      [FORCE_RLS_TABLES, 218],
       [NON_RLS_RUNTIME_TABLES, 11],
-      [RUNTIME_FULL_DML_TABLES, 134],
+      [RUNTIME_FULL_DML_TABLES, 135],
       [RUNTIME_READ_ONLY_TABLES, 14],
       [RUNTIME_READ_UPDATE_TABLES, 1],
       [RUNTIME_READ_INSERT_TABLES, 41],
       [RUNTIME_READ_INSERT_UPDATE_TABLES, 18],
       [PROTECTED_NO_DIRECT_DML_TABLES, 25],
-      [RUNTIME_DML_TABLES, 208],
+      [RUNTIME_DML_TABLES, 209],
     ] as const;
     for (const [tables, length] of contracts) {
       expect(tables).toHaveLength(length);
@@ -576,8 +586,8 @@ describe("runtime database posture evaluator", () => {
     }
 
     expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(233);
-    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(228);
+    expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(234);
+    expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(229);
     expect(RUNTIME_TABLE_PRIVILEGES.editable_artifact_session_links).toEqual([
       "SELECT",
       "INSERT",
@@ -1001,6 +1011,13 @@ describe("runtime database posture evaluator", () => {
     expect(RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES).toContain(
       "organization_private_sessions_enabled(uuid)",
     );
+  });
+
+  test("classifies ordered session Variable Set attachments as lifecycle-only FORCE-RLS state", () => {
+    expect(FORCE_RLS_TABLES).toContain("session_variable_set_attachments");
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("session_variable_set_attachments");
+    expect(RUNTIME_FULL_DML_TABLES).not.toContain("session_variable_set_attachments");
+    expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toBeUndefined();
   });
 
   test("classifies organization setup delivery journals as capability-only FORCE-RLS state", () => {

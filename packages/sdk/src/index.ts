@@ -924,6 +924,7 @@ export type {
   UpdateSessionArchiveRequest,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
+  UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
   UpdateVariableSetRequest,
   UpdateWorkspaceEnvironmentRequest,

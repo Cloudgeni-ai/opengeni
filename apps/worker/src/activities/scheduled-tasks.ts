@@ -615,6 +615,9 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 tools: targetSessionExecution.tools,
                 firstPartyMcpTools: targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions: targetSessionExecution.firstPartyMcpPermissions,
+                variableSetIds: targetSessionExecution.variableSets.map(
+                  (variableSet) => variableSet.id,
+                ),
                 variableSetId: targetSessionExecution.variableSetId,
                 rigId: targetSessionExecution.rigId,
                 rigVersionId: targetSessionExecution.rigVersionId,
@@ -1701,6 +1704,9 @@ async function prepareIncidentTelemetrySource(input: {
                   input.acceptedExecution.targetSessionExecution.firstPartyMcpTools,
                 firstPartyMcpPermissions:
                   input.acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
+                variableSetIds: input.acceptedExecution.targetSessionExecution.variableSets.map(
+                  (variableSet) => variableSet.id,
+                ),
                 variableSetId: input.acceptedExecution.targetSessionExecution.variableSetId,
                 rigId: input.acceptedExecution.targetSessionExecution.rigId,
                 rigVersionId: input.acceptedExecution.targetSessionExecution.rigVersionId,

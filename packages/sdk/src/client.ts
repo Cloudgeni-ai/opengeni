@@ -431,6 +431,7 @@ import type {
   UpdateSessionGoalRequest,
   ApplySessionGoalRevisionRequest,
   UpdateSessionRequest,
+  UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
@@ -929,6 +930,19 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      request,
+    );
+  }
+
+  /** Replace the complete ordered Variable Set selection at a quiescent turn boundary. */
+  async updateSessionVariableSets(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionVariableSetsRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/variable-sets`,
       request,
     );
   }

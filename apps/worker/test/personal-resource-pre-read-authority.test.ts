@@ -28,7 +28,9 @@ describe("personal-resource direct-read authority", () => {
     expect(toolEnvironment).toContain("initiator: turn.initiator");
     expect(toolEnvironment).toContain("initiatingHumanSubjectId: fileAuthoritySubjectId");
     expect(toolEnvironment.match(/variableSetAuthority,/gu)?.length).toBe(2);
-    const selectionGuard = toolEnvironment.indexOf("session.variableSetId !== null ||");
+    const selectionGuard = toolEnvironment.indexOf(
+      "sessionVariableSetIds.length > 0 || rigDefaultVariableSetIds.length > 0",
+    );
     expect(selectionGuard).toBeGreaterThan(0);
     expect(selectionGuard).toBeLessThan(variableRead);
     expect(orchestrator.indexOf("prepareGovernanceAndModel(")).toBeGreaterThan(0);

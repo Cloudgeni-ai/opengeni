@@ -595,6 +595,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       ownerSql = postgres(owned.ownerUrl, { max: 1, prepare: false });
       const rows = await ownerSql.begin(async (transaction) => {
         await transaction`select
+          set_config('opengeni.session_variable_set_attachments_v1', '1', true),
           set_config('lock_timeout', '1s', true),
           set_config('statement_timeout', '10s', true)`;
         return await transaction.unsafe<Array<{ id: string }>>(await quarantineStatement());

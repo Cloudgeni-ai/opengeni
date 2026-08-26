@@ -1206,6 +1206,8 @@ export type ForkSessionRequest = {
   idempotencyKey: string;
   visibility: SessionVisibility;
   workspaceSharedAcknowledged: boolean;
+  rigId?: string | null | undefined;
+  variableSetIds?: string[] | undefined;
 };
 
 export type ForkSessionResponse = {
@@ -1285,6 +1287,8 @@ export type Session = {
   activeEpoch: number;
   /** Explicit connected-machine project root; null uses the agent launch root. */
   workingDir: string | null;
+  /** Ordered low-to-high precedence; the final entry is the legacy singular alias. */
+  variableSetIds?: string[] | undefined;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
   environmentId: string | null;
@@ -1627,6 +1631,8 @@ export type SessionHumanInputRequest = {
 
 export const SESSION_EVENT_TYPES = [
   "session.created",
+  "session.variable_sets.updated",
+  "session.runtime.configured",
   // Defensive bounded projection for malformed/legacy oversized envelopes.
   "session.event.envelope_omitted",
   "session.status.changed",
@@ -2657,6 +2663,8 @@ export type CreateSessionRequest = {
   // Host working directory for a connected-machine target (the agent runs here;
   // default = the machine's launch dir). Ignored for managed sandboxes.
   workingDir?: string | undefined;
+  /** Ordered low-to-high precedence; later sets win name collisions. */
+  variableSetIds?: string[] | undefined;
   variableSetId?: string | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | undefined;
@@ -4282,6 +4290,11 @@ export type UpdateSessionRequest = {
   title: string;
 };
 
+/** Replace the complete ordered low-to-high precedence Variable Set selection. */
+export type UpdateSessionVariableSetsRequest = {
+  variableSetIds: string[];
+};
+
 // --- Operator context controls (/clear, /compact) ----------------------------
 
 /** Outcome of a manual /compact trigger. */
@@ -4366,6 +4379,7 @@ export type NewSessionDraftOptions = {
   sandboxBackend?: SandboxBackend | undefined;
   targetSandboxId?: string | undefined;
   workingDir?: string | undefined;
+  variableSetIds?: string[] | undefined;
   variableSetId?: string | undefined;
   rigId?: string | undefined;
   goal?: GoalSpec | undefined;

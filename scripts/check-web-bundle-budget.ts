@@ -210,23 +210,22 @@ const budgets = {
   // guard's one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance by
   // advancing each to its next compliant whole-KiB envelope. Every file-count,
   // initial, per-file, lazy-chunk, and CSS cap stays fixed.
-  // The final one-time setup path keeps multiple pending invitations explicit,
-  // removes implicit shared-workspace creation, and scrubs setup authority from
-  // browser URLs. The exact Bun 1.4 Linux/x64 production graph on the complete
-  // 0344-0348 stack measures 2,180,307 raw / 608,688 gzip bytes. Advance only
-  // the direct-session aggregates to preserve the guard's one-KiB raw headroom
-  // and 1.5-KiB gzip platform-skew allowance. The measured 31,498-byte CSS
-  // asset and every initial, per-file, file-count, lazy-chunk, and CSS cap stay
-  // within their existing envelopes.
-  // The causal older-history receipt adds one boolean ownership mark to the
-  // always-loaded session hook and timeline. The exact Bun 1.4 Linux/x64
-  // production graph measures 2,182,276 raw / 609,893 gzip bytes. Advance only
-  // the raw aggregate to its next whole-KiB envelope. Protected-main Linux/x64
-  // then measured 610,305 gzip bytes, one byte beyond the old cap. Advance the
-  // gzip aggregate to the first whole-KiB envelope that preserves the existing
-  // 1.5-KiB platform-skew allowance over that maximum; every file-count,
-  // initial, per-file, lazy-chunk, and CSS cap stays fixed.
-  directSessionRaw: 2132 * kib,
+  // The merged organization setup, organization-admin document migration audit,
+  // and ordered session Variable Set surfaces all retain methods on the shared
+  // OpenGeni client graph. The exact Bun 1.4 Linux/x64 production graph measures
+  // 2,184,325 raw / 608,446 gzip bytes, leaving 4,987 raw and 3,906 gzip bytes of
+  // headroom before the causal older-history receipt from current main adds one
+  // boolean ownership mark to the always-loaded session hook and timeline.
+  // That main graph measured 2,182,276 raw / 609,893 gzip bytes, and protected
+  // main later measured 610,305 gzip bytes. Its restored 598-KiB gzip envelope
+  // therefore matches this merged head's existing cap.
+  // Preserve the higher merged 2,138-KiB raw and 598-KiB gzip envelopes so both
+  // independently measured growths remain covered; exact-head package CI
+  // verifies the combined graph. Initial, per-file, file-count, lazy-chunk, and
+  // CSS limits remain unchanged. The separately tracked structural fix is to
+  // make the client tree-shakeable instead of continuing to grow this shared
+  // class.
+  directSessionRaw: 2138 * kib,
   directSessionGzip: 598 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,

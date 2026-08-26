@@ -213,6 +213,8 @@ export function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
 export function eventLabel(type: string): string {
   const labels: Record<string, string> = {
     "session.created": "Session created",
+    "session.variable_sets.updated": "Variable Sets updated",
+    "session.runtime.configured": "Restart setup configured",
     "session.status.changed": "Status changed",
     "session.requiresAction": "Approval required",
     "user.message": "User message",
