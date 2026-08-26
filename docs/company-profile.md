@@ -140,11 +140,11 @@ mission are always-on prompt context. An **agent** author is bounded more tightl
 through `AgentAuthoredCompanyProfileContent`, and the first-party proposal tool
 accepts only the two scalar fields:
 
-| Field | Agent bound | Human bound |
-| --- | --- | --- |
-| `identity`, `mission` | 400 characters each | 2,048 characters each |
-| legacy list entry | not accepted by the current tool | 1,024 characters |
-| whole canonical compatibility profile | 4,096 UTF-8 bytes | 28,672 UTF-8 bytes |
+| Field                                 | Agent bound                      | Human bound           |
+| ------------------------------------- | -------------------------------- | --------------------- |
+| `identity`, `mission`                 | 400 characters each              | 2,048 characters each |
+| legacy list entry                     | not accepted by the current tool | 1,024 characters      |
+| whole canonical compatibility profile | 4,096 UTF-8 bytes                | 28,672 UTF-8 bytes    |
 
 Entry counts and total byte bounds remain unchanged so historical payloads keep
 validating under the same hash contract. The human `account:admin` API keeps
@@ -207,14 +207,14 @@ empty value.
 The authority-native adapter retains the original organization-scope subjects
 so historical receipts, rollbacks, and rolling clients remain valid:
 
-| Router subject | Authority operation |
-| --- | --- |
-| `company_identity` | replace `identity` |
-| `company_mission` | replace `mission` |
-| `company_product` | legacy stable-key upsert in `products` (not prompt-composed) |
-| `company_customer` | legacy stable-key upsert in `customers` (not prompt-composed) |
-| `company_goal` | legacy stable-key upsert in `goals` (not prompt-composed) |
-| `company_constraint` | legacy stable-key upsert in `constraints` (not prompt-composed) |
+| Router subject       | Authority operation                                                                                                                                  |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `company_identity`   | replace `identity`                                                                                                                                   |
+| `company_mission`    | replace `mission`                                                                                                                                    |
+| `company_product`    | legacy stable-key upsert in `products`; a nonempty active historical value remains labeled compatibility prompt context until profile replacement    |
+| `company_customer`   | legacy stable-key upsert in `customers`; a nonempty active historical value remains labeled compatibility prompt context until profile replacement   |
+| `company_goal`       | legacy stable-key upsert in `goals`; a nonempty active historical value remains labeled compatibility prompt context until profile replacement       |
+| `company_constraint` | legacy stable-key upsert in `constraints`; a nonempty active historical value remains labeled compatibility prompt context until profile replacement |
 
 Repeatable list subjects require a valid stable key and fail closed without one.
 New learning decisions must route those facts to organization-scoped knowledge;
@@ -258,7 +258,7 @@ instruction, so "write one imperative rule" would be the wrong shape.
 
 The returned question's `helpText` binds the revision number and content
 SHA-256 and renders a readable summary of the proposed identity and mission
-(bounded to the human-input contract), never raw JSON. Migration `0358` narrows
+(bounded to the human-input contract), never raw JSON. Migration `0359` narrows
 new confirmation copy while preserving immutable prompts on older proposals;
 during a rolling deploy it still discloses any nonempty legacy lists submitted
 by an older API instance before the human can activate them.

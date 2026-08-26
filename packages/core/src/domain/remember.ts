@@ -27,10 +27,9 @@ import {
   getWorkspaceInstructionPolicyBaseline,
   getWorkspaceKnowledgeChangeProposalSummary,
   getWorkspaceKnowledgeClaimInitiatingHuman,
-  getConfirmedRememberKnowledgeMemorySource,
+  materializeConfirmedRememberKnowledgeMemory,
   nestedPostgresSqlState,
   rebaselineWorkspaceInstructionPolicyKnowledgeProposal,
-  saveWorkspaceMemory,
 } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -103,8 +102,7 @@ export type RememberRouterOptions = {
   rebaselineProposal?: typeof rebaselineWorkspaceInstructionPolicyKnowledgeProposal;
   activateHumanConfirmed?: typeof activateHumanConfirmedLearningDecision;
   confirmKnowledgeClaim?: typeof confirmRememberKnowledgeClaim;
-  confirmedKnowledgeMemorySource?: typeof getConfirmedRememberKnowledgeMemorySource;
-  saveMemory?: typeof saveWorkspaceMemory;
+  materializeKnowledgeMemory?: typeof materializeConfirmedRememberKnowledgeMemory;
   proposalSummary?: typeof getWorkspaceKnowledgeChangeProposalSummary;
   claimInitiatingHuman?: typeof getWorkspaceKnowledgeClaimInitiatingHuman;
   instructionPolicyBaseline?: typeof getWorkspaceInstructionPolicyBaseline;
@@ -303,9 +301,8 @@ export function createRememberRouter(options: RememberRouterOptions): {
   const activateHumanConfirmed =
     options.activateHumanConfirmed ?? activateHumanConfirmedLearningDecision;
   const confirmKnowledgeClaim = options.confirmKnowledgeClaim ?? confirmRememberKnowledgeClaim;
-  const confirmedKnowledgeMemorySource =
-    options.confirmedKnowledgeMemorySource ?? getConfirmedRememberKnowledgeMemorySource;
-  const saveMemory = options.saveMemory ?? saveWorkspaceMemory;
+  const materializeKnowledgeMemory =
+    options.materializeKnowledgeMemory ?? materializeConfirmedRememberKnowledgeMemory;
   const proposalSummary = options.proposalSummary ?? getWorkspaceKnowledgeChangeProposalSummary;
   const claimInitiatingHuman =
     options.claimInitiatingHuman ?? getWorkspaceKnowledgeClaimInitiatingHuman;
@@ -371,7 +368,11 @@ export function createRememberRouter(options: RememberRouterOptions): {
         scope: request.scope,
       };
       if (route.decision === "blocked" || route.write === null) {
-        return RememberReceipt.parse({ ...base, status: "blocked", reason: "learning_policy_off" });
+        return RememberReceipt.parse({
+          ...base,
+          status: "blocked",
+          reason: "learning_policy_off",
+        });
       }
       if (route.write.knowledgeChangeProposalId === null) {
         // Knowledge is owned by the human review lifecycle: the same one-click
@@ -436,7 +437,7 @@ export function createRememberRouter(options: RememberRouterOptions): {
         // Approval and Memory materialization are one outer transaction. The
         // nested RLS helpers use savepoints, so a failed Memory write rolls the
         // approval back instead of leaving an approved but unretrievable claim.
-        const { receipt, saved } = await options.db.transaction(async (tx) => {
+        const { receipt, materialization } = await options.db.transaction(async (tx) => {
           const transaction = tx as unknown as Database;
           const activationReceipt = await confirmKnowledgeClaim(transaction, {
             caller: {
@@ -452,24 +453,8 @@ export function createRememberRouter(options: RememberRouterOptions): {
               humanInputRequestId: request.humanInputRequestId,
             },
           });
-          const source = await confirmedKnowledgeMemorySource(transaction, activationReceipt);
-          const savedMemory = await saveMemory(transaction, {
-            accountId: activationReceipt.accountId,
-            workspaceId: activationReceipt.workspaceId,
-            text: source.text,
-            kind: "semantic",
-            confidence: 1,
-            sessionId: activationReceipt.sessionId,
-            origin: "human",
-            metadata: {
-              source: "remember_confirmation",
-              confirmationReceiptId: activationReceipt.id,
-              claimId: activationReceipt.claimId,
-              evidenceId: activationReceipt.evidenceId,
-              taskNoteId: activationReceipt.taskNoteId,
-            },
-          });
-          return { receipt: activationReceipt, saved: savedMemory };
+          const materialization = await materializeKnowledgeMemory(transaction, activationReceipt);
+          return { receipt: activationReceipt, materialization };
         });
         return RememberConfirmReceipt.parse({
           status: "activated",
@@ -481,7 +466,7 @@ export function createRememberRouter(options: RememberRouterOptions): {
             destination: "knowledge",
             receiptId: receipt.id,
             claimId: receipt.claimId,
-            memoryId: saved.memory.id,
+            memoryId: materialization.memoryId,
             approvalReviewId: receipt.approvalReviewId,
             effectiveAt: receipt.createdAt,
             authorityKind: "human_confirmed",

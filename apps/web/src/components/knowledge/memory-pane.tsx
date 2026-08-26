@@ -72,6 +72,12 @@ const kindFilterOptions: KnowledgeMemoryKind[] = [
   "decision",
   "episodic",
 ];
+const memoryCreationKindOptions: KnowledgeMemoryKind[] = ["semantic", "decision", "episodic"];
+const MEMORY_CREATION_KIND_LABEL: Partial<Record<KnowledgeMemoryKind, string>> = {
+  semantic: "Fact",
+  decision: "Decision",
+  episodic: "Incident or outcome",
+};
 // The statuses worth browsing; "active" is the default working set an agent sees.
 const statusFilterOptions: KnowledgeMemoryStatus[] = [
   "active",
@@ -259,7 +265,10 @@ export function MemoryPane({
     try {
       // No explicit status ⇒ the server's active default, routed through the one
       // validation/deduplication write gate without rewriting accepted content.
-      const created = await client.createKnowledgeMemory(workspaceId, { text, kind: draftKind });
+      const created = await client.createKnowledgeMemory(workspaceId, {
+        text,
+        kind: draftKind,
+      });
       setDraftText("");
       setAdding(false);
       toast.success("Memory saved");
@@ -459,8 +468,8 @@ export function MemoryPane({
             onChange={(event) => setDraftText(event.target.value)}
             placeholder={
               personalWorkspace
-                ? "A private fact, incident, decision, or procedure for your personal workspace"
-                : "A durable fact, preference, decision, or procedure for this workspace"
+                ? "A private fact, incident, decision, or outcome for your personal workspace"
+                : "A durable fact, incident, decision, or outcome for this workspace"
             }
             className="min-h-20 text-xs"
           />
@@ -471,9 +480,9 @@ export function MemoryPane({
               onChange={(event) => setDraftKind(event.target.value as KnowledgeMemoryKind)}
               className="h-9 text-xs pointer-coarse:min-h-10"
             >
-              {kindFilterOptions.map((kind) => (
+              {memoryCreationKindOptions.map((kind) => (
                 <option key={kind} value={kind}>
-                  {KIND_LABEL[kind]}
+                  {MEMORY_CREATION_KIND_LABEL[kind]}
                 </option>
               ))}
             </Select>
@@ -805,7 +814,10 @@ function MemoryCard(props: {
         {memory.createdBySessionId ? (
           <Link
             to="/workspaces/$workspaceId/sessions/$sessionId"
-            params={{ workspaceId: props.workspaceId, sessionId: memory.createdBySessionId }}
+            params={{
+              workspaceId: props.workspaceId,
+              sessionId: memory.createdBySessionId,
+            }}
             className="hover:text-[color:var(--color-fg)]"
             title="Open the session that created this memory"
           >

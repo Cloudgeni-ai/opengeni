@@ -17,6 +17,7 @@ import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
+import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
@@ -542,7 +543,12 @@ export function OnboardingProposalInventory({
       return;
     }
     if (proposals.error || !proposals.response) {
-      onReviewSummary({ status: "unavailable", pendingCount: 0, staleCount: 0, partial: false });
+      onReviewSummary({
+        status: "unavailable",
+        pendingCount: 0,
+        staleCount: 0,
+        partial: false,
+      });
       return;
     }
     let staleCount = 0;
@@ -1158,61 +1164,78 @@ function FocusedInstructions({
           </p>
         )}
       </section>
-      <AgentKnowledgePrompt kind="workspace_instructions" workspaceId={workspaceId} />
-      <details className="group rounded-lg border border-border bg-surface">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
-          {instructionConfigured ? "Edit manually" : "Add manually"}
-          <ChevronDownIcon className="size-4 text-fg-muted transition-transform group-open:rotate-180" />
-        </summary>
-        <form
-          className="grid gap-3 border-t border-border p-4"
-          onSubmit={(event) => void save(event)}
-        >
-          <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            {personalWorkspace
-              ? "Instructions for your personal workspace"
-              : "Instructions for this workspace"}
-            <textarea
-              className="min-h-48 rounded-md border border-border bg-surface px-3 py-2 text-sm leading-6 text-fg outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60"
-              value={content}
-              maxLength={WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS}
-              disabled={!canEdit || loadingContent || saving}
-              placeholder="For example: Keep updates concise, explain important decisions, and surface blockers early."
-              onChange={(event) => setContent(event.target.value)}
-            />
-          </label>
-          <p className="text-xs leading-5 text-fg-subtle">
-            {personalWorkspace
-              ? "These instructions are included automatically only for agents working in your personal workspace."
-              : "These instructions are included automatically for agents working in this workspace."}{" "}
-            Changes are versioned and can be audited or rolled back.
-          </p>
-          {!canEdit ? (
-            <p className="text-xs text-status-waiting">
-              Workspace admin access is required to edit.
-            </p>
-          ) : null}
-          {editorError ? (
-            <p role="alert" className="text-xs text-status-error">
-              {editorError}
-            </p>
-          ) : null}
-          {message ? (
-            <p role="status" className="text-xs text-status-success">
-              {message}
-            </p>
-          ) : null}
-          <div>
-            <button
-              type="submit"
-              className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!canEdit || loadingContent || saving || !content.trim()}
+      {canEdit ? (
+        <>
+          <AgentKnowledgePrompt kind="workspace_instructions" workspaceId={workspaceId} />
+          <details className="group rounded-lg border border-border bg-surface">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
+              {instructionConfigured ? "Edit manually" : "Add manually"}
+              <ChevronDownIcon className="size-4 text-fg-muted transition-transform group-open:rotate-180" />
+            </summary>
+            <form
+              className="grid gap-3 border-t border-border p-4"
+              onSubmit={(event) => void save(event)}
             >
-              {saving ? "Saving…" : "Save instructions"}
-            </button>
-          </div>
-        </form>
-      </details>
+              <label className="grid gap-1 text-xs font-medium text-fg-muted">
+                {personalWorkspace
+                  ? "Instructions for your personal workspace"
+                  : "Instructions for this workspace"}
+                <textarea
+                  className="min-h-48 rounded-md border border-border bg-surface px-3 py-2 text-sm leading-6 text-fg outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60"
+                  value={content}
+                  maxLength={WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS}
+                  disabled={!canEdit || loadingContent || saving}
+                  placeholder="For example: Keep updates concise, explain important decisions, and surface blockers early."
+                  onChange={(event) => setContent(event.target.value)}
+                />
+              </label>
+              <p className="text-xs leading-5 text-fg-subtle">
+                {personalWorkspace
+                  ? "These instructions are included automatically only for agents working in your personal workspace."
+                  : "These instructions are included automatically for agents working in this workspace."}{" "}
+                Changes are versioned and can be audited or rolled back.
+              </p>
+              {!canEdit ? (
+                <p className="text-xs text-status-waiting">
+                  Workspace admin access is required to edit.
+                </p>
+              ) : null}
+              {editorError ? (
+                <p role="alert" className="text-xs text-status-error">
+                  {editorError}
+                </p>
+              ) : null}
+              {message ? (
+                <p role="status" className="text-xs text-status-success">
+                  {message}
+                </p>
+              ) : null}
+              <div>
+                <button
+                  type="submit"
+                  className="rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={!canEdit || loadingContent || saving || !content.trim()}
+                >
+                  {saving ? "Saving…" : "Save instructions"}
+                </button>
+              </div>
+            </form>
+          </details>
+        </>
+      ) : (
+        <Notice
+          tone="info"
+          title={
+            personalWorkspace
+              ? "Personal instruction editing is not available yet"
+              : "Workspace instructions are read-only for you"
+          }
+        >
+          {personalWorkspace
+            ? "You can see the instruction currently applied here. Personal Skills, Documents, and Memory are available now; editing this personal instruction needs the upcoming personal-policy authority."
+            : "You can see the instruction currently applied here. A workspace administrator can change it."}
+        </Notice>
+      )}
     </div>
   );
 }
@@ -1250,7 +1273,7 @@ export function WorkspaceStateRoute({
         description={
           view === "instructions"
             ? personalWorkspace
-              ? "Set concise, always-on guidance for agents in your personal workspace."
+              ? "View the always-on guidance currently applied in your personal workspace."
               : "Set the concise, always-on guidance for agents in this workspace."
             : view === "skills"
               ? personalWorkspace

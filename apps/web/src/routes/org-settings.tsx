@@ -87,7 +87,7 @@ function OrganizationKnowledgeSummary({
         <div className="rounded-lg border border-dashed border-border bg-surface-2/20 p-4 text-xs leading-5 text-fg-muted">
           {canManage
             ? "No organization identity has been saved yet. Describe who the organization is and why it exists below, and OpenGeni will prepare a concise version."
-            : "No organization identity has been saved yet. An organization owner or administrator can add one."}
+            : "No organization identity has been saved yet. An organization owner can add one."}
         </div>
         {legacyDetailCount > 0 ? (
           <p className="rounded-lg border border-status-waiting/30 bg-status-waiting/5 p-3 text-xs leading-5 text-fg-muted">
@@ -431,8 +431,7 @@ export function OrgSettingsRoute({
               <OrganizationKnowledgePrompt workspaceId={workspaceId} />
             ) : (
               <p className="rounded-lg border border-border bg-surface p-4 text-xs leading-5 text-fg-muted">
-                Organization identity is read-only for you. An organization owner or administrator
-                can update it.
+                Organization identity is read-only for you. An organization owner can update it.
               </p>
             )}
             <section className="rounded-lg border border-border bg-surface p-4">

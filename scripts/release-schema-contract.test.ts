@@ -130,7 +130,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0357_rig_platform_base_only.sql",
     );
     const organizationIdentityConfirmationPrompt = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0358_organization_identity_confirmation_prompt.sql",
+      (migration) => migration.path === "0359_organization_identity_confirmation_prompt.sql",
     );
     expect(
       completeSourceContract.migrations.find(
@@ -143,7 +143,7 @@ describe("release schema contract", () => {
       "0355_automatic_session_title_quarantine.sql",
       "0356_set_based_insights_session_visibility.sql",
       "0357_rig_platform_base_only.sql",
-      "0358_organization_identity_confirmation_prompt.sql",
+      "0359_organization_identity_confirmation_prompt.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -159,7 +159,7 @@ describe("release schema contract", () => {
         (rigPlatformBaseOnly ? 1 : 0) +
         (organizationIdentityConfirmationPrompt ? 1 : 0),
       latestMigration: organizationIdentityConfirmationPrompt
-        ? "0358_organization_identity_confirmation_prompt.sql"
+        ? "0359_organization_identity_confirmation_prompt.sql"
         : rigPlatformBaseOnly
           ? "0357_rig_platform_base_only.sql"
           : setBasedInsightsSessionVisibility
@@ -183,7 +183,7 @@ describe("release schema contract", () => {
       "0355_automatic_session_title_quarantine.sql",
       "0356_set_based_insights_session_visibility.sql",
       "0357_rig_platform_base_only.sql",
-      "0358_organization_identity_confirmation_prompt.sql",
+      "0359_organization_identity_confirmation_prompt.sql",
     ]);
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
@@ -276,7 +276,7 @@ describe("release schema contract", () => {
       "0355_automatic_session_title_quarantine.sql",
       "0356_set_based_insights_session_visibility.sql",
       "0357_rig_platform_base_only.sql",
-      "0358_organization_identity_confirmation_prompt.sql",
+      "0359_organization_identity_confirmation_prompt.sql",
     );
     // Each appended migration moves both of these, and two candidates can be in
     // flight at once, so derive them from what is actually on disk rather than

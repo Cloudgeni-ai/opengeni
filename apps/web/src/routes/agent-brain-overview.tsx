@@ -31,7 +31,10 @@ export type BrainAttentionInput = {
     | { availability: "unavailable" }
     | {
         availability: "available";
-        gaps: Array<{ code: WorkspaceStateGapCode; relatedCount: number | null }>;
+        gaps: Array<{
+          code: WorkspaceStateGapCode;
+          relatedCount: number | null;
+        }>;
       };
   proposals: BrainProposalReview;
 };
@@ -272,9 +275,9 @@ export function BrainOverview({
             <h2 className="text-sm font-medium text-fg">Your personal workspace</h2>
             <p className="mt-1 text-xs leading-5 text-fg-muted">
               Personal Skills and Only me documents belong to you and can follow you across the
-              organization. Instructions and Memory created here stay private inside this personal
-              workspace. Company knowledge you can access remains available and is labeled
-              separately.
+              organization. Memory created here stays private inside this personal workspace. You
+              can view the instruction currently applied here; personal instruction editing needs
+              the upcoming personal-policy authority. Company knowledge remains labeled separately.
             </p>
           </div>
         </section>
@@ -291,7 +294,7 @@ export function BrainOverview({
           }
           action={
             <FocusAction view="instructions" workspaceId={workspaceId}>
-              Review
+              {personalWorkspace ? "View" : "Review"}
             </FocusAction>
           }
         />

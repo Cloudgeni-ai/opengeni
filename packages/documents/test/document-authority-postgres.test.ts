@@ -709,6 +709,21 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
       expect(effectiveAll.map((result) => result.documentId).sort()).toEqual(
         [organization.documentId, workspace.documentId, personal.documentId].sort(),
       );
+      const effectiveOrganizationOnly = await searchEffectiveDocuments(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "authoritycommon",
+        mode: "keyword",
+        limit: 1,
+        authorityKinds: ["organization"],
+        initiatingSubjectId: "user:alice",
+        surface: "agent",
+      });
+      expect(effectiveOrganizationOnly).toHaveLength(1);
+      expect(effectiveOrganizationOnly[0]).toMatchObject({
+        documentId: organization.documentId,
+        authorityKind: "organization",
+      });
       const knowledge = await searchEffectiveKnowledge(client.db, {
         accountId: origin.accountId,
         workspaceId: origin.workspaceId,
@@ -723,6 +738,19 @@ describe("document retrieval authority (real PostgreSQL + pgvector)", () => {
           .map((id) => `document_chunk:${id}`)
           .sort(),
       );
+      const organizationKnowledge = await searchEffectiveKnowledge(client.db, {
+        accountId: origin.accountId,
+        workspaceId: origin.workspaceId,
+        query: "authoritycommon",
+        mode: "keyword",
+        limit: 1,
+        authorityKinds: ["organization"],
+        initiatingSubjectId: "user:alice",
+        surface: "agent",
+      });
+      expect(organizationKnowledge.results.map((result) => result.record.id)).toEqual([
+        `document_chunk:${organization.chunkId}`,
+      ]);
       expect(JSON.stringify(knowledge)).not.toContain("user:alice");
       expect(knowledge.results[0]?.record).toMatchObject({
         kind: "document_chunk",

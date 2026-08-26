@@ -192,6 +192,7 @@ function PreferenceProposalComposer({
   defaultOpen = true,
   compact = false,
   onCreated,
+  onProposalCreated,
 }: {
   workspaceId: string;
   personalWorkspace: boolean;
@@ -201,6 +202,7 @@ function PreferenceProposalComposer({
   defaultOpen?: boolean;
   compact?: boolean;
   onCreated: (preference: PreferenceRegistryRecord) => Promise<void>;
+  onProposalCreated?: (() => Promise<void>) | undefined;
 }) {
   const { client } = useAppContext();
   const defaultScope: PreferenceRegistryScope = personalWorkspace
@@ -258,6 +260,7 @@ function PreferenceProposalComposer({
         provenanceSourceId: null,
       });
       if (compact) {
+        await onProposalCreated?.().catch(() => undefined);
         const detail = await client.getPreferenceRegistry(workspaceId, preference.id);
         const revision = [...detail.revisions].sort(
           (left, right) => right.revision - left.revision,
@@ -1305,11 +1308,26 @@ export function PreferenceRegistryAdministration({
   useEffect(() => {
     if (!onReviewSummary) return;
     if (inventory.loading) {
-      onReviewSummary({ status: "loading", pendingCount: 0, conflictCount: 0, partial: false });
+      onReviewSummary({
+        status: "loading",
+        pendingCount: 0,
+        conflictCount: 0,
+        partial: false,
+      });
     } else if (inventory.error) {
-      onReviewSummary({ status: "unavailable", pendingCount: 0, conflictCount: 0, partial: false });
+      onReviewSummary({
+        status: "unavailable",
+        pendingCount: 0,
+        conflictCount: 0,
+        partial: false,
+      });
     } else if (!inventory.response) {
-      onReviewSummary({ status: "unavailable", pendingCount: 0, conflictCount: 0, partial: false });
+      onReviewSummary({
+        status: "unavailable",
+        pendingCount: 0,
+        conflictCount: 0,
+        partial: false,
+      });
     } else {
       onReviewSummary({
         status: "ready",
@@ -1408,6 +1426,9 @@ export function PreferenceRegistryAdministration({
           canManageWorkspace={canManageWorkspace}
           defaultOpen={!compact}
           compact={compact}
+          onProposalCreated={async () => {
+            await inventory.reload();
+          }}
           onCreated={async (preference) => {
             if (!compact) setSelectedId(preference.id);
             await Promise.all([inventory.reload(), onWorkspaceStateReload()]);

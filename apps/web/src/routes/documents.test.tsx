@@ -83,6 +83,21 @@ const context = {
     createDocumentOriginalFileDownloadUrl,
   },
   clientConfig: { fileUploads: { enabled: true, maxSizeBytes: 10_000_000 } },
+  accessContext: {
+    mode: "managed" as const,
+    subjectId: "subject-a",
+    accountGrants: [
+      {
+        accountId: "account-a",
+        subjectId: "subject-a",
+        role: "owner" as const,
+        permissions: ["account:admin"],
+      },
+    ],
+    workspaceGrants: [],
+    defaultAccountId: "account-a",
+    defaultWorkspaceId: "workspace-a",
+  },
   workspaces: [{ id: "workspace-a", accountId: "account-a", kind: "shared", settings: {} }],
   managedSelfContext: null,
 };
@@ -237,8 +252,16 @@ describe("Documents scope-first UX", () => {
 
   test("opens the organization explorer filtered to Company and defaults new knowledge there", async () => {
     listAccessibleDocuments.mockResolvedValueOnce([
-      { ...indexedDocument("workspace"), id: crypto.randomUUID(), title: "Workspace runbook" },
-      { ...indexedDocument("organization"), id: crypto.randomUUID(), title: "Company strategy" },
+      {
+        ...indexedDocument("workspace"),
+        id: crypto.randomUUID(),
+        title: "Workspace runbook",
+      },
+      {
+        ...indexedDocument("organization"),
+        id: crypto.randomUUID(),
+        title: "Company strategy",
+      },
     ]);
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -258,6 +281,14 @@ describe("Documents scope-first UX", () => {
       expect(
         container.querySelector<HTMLSelectElement>('[aria-label="Drop authority"]')?.value,
       ).toBe("organization");
+      expect(
+        container.querySelector<HTMLSelectElement>('[aria-label="Drop authority"]')?.disabled,
+      ).toBe(true);
+      expect(
+        [
+          ...container.querySelector<HTMLSelectElement>('[aria-label="Drop authority"]')!.options,
+        ].map((option) => option.value),
+      ).toEqual(["organization"]);
 
       const query = container.querySelector<HTMLInputElement>(
         '[aria-label="Search indexed documents"]',
@@ -273,7 +304,8 @@ describe("Documents scope-first UX", () => {
       await settleRoute();
       expect(searchKnowledge).toHaveBeenCalledWith("workspace-a", {
         query: "company strategy",
-        limit: 50,
+        authorityKinds: ["organization"],
+        limit: 8,
         mode: "hybrid",
       });
 
@@ -292,11 +324,44 @@ describe("Documents scope-first UX", () => {
 
       expect(createKnowledgeDrop).toHaveBeenCalledWith(
         "workspace-a",
-        expect.objectContaining({ text: "Organization fact", authorityKind: "organization" }),
+        expect.objectContaining({
+          text: "Organization fact",
+          authorityKind: "organization",
+        }),
       );
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("keeps organization knowledge read-only for non-owners", async () => {
+    context.accessContext.accountGrants = [];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DocumentsRoute workspaceId="workspace-a" authorityKind="organization" />);
+        await Promise.resolve();
+      });
+      await settleRoute();
+
+      expect(container.textContent).toContain("Explore knowledge shared across this organization");
+      expect(container.textContent).toContain("only an organization owner can add");
+      expect(container.querySelector('[aria-label="Knowledge drop zone"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      context.accessContext.accountGrants = [
+        {
+          accountId: "account-a",
+          subjectId: "subject-a",
+          role: "owner",
+          permissions: ["account:admin"],
+        },
+      ];
     }
   });
 
@@ -369,8 +434,13 @@ describe("Documents scope-first UX", () => {
       const fileUpload = container.querySelector<HTMLInputElement>(
         '[aria-label="Add files as a knowledge drop"]',
       )!;
-      const upload = new File(["company"], "company.txt", { type: "text/plain" });
-      Object.defineProperty(fileUpload, "files", { configurable: true, value: [upload] });
+      const upload = new File(["company"], "company.txt", {
+        type: "text/plain",
+      });
+      Object.defineProperty(fileUpload, "files", {
+        configurable: true,
+        value: [upload],
+      });
       await act(async () => {
         fileUpload.dispatchEvent(new Event("change", { bubbles: true }));
         await Promise.resolve();
@@ -412,7 +482,9 @@ describe("Documents scope-first UX", () => {
         }),
       );
 
-      const droppedFile = new File(["personal file"], "personal.txt", { type: "text/plain" });
+      const droppedFile = new File(["personal file"], "personal.txt", {
+        type: "text/plain",
+      });
       await act(async () => {
         fireFileDrop(container.querySelector<HTMLElement>('[aria-label="Knowledge drop zone"]')!, [
           droppedFile,

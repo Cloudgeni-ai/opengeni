@@ -151,7 +151,11 @@ const activatePreferenceRegistryRevision = mock(
     _preferenceId: string,
     _request: Record<string, unknown>,
   ): Promise<PreferenceRegistryMutationResponse> => ({
-    preference: { ...preference, activeRevision: revisionOne, activationVersion: 3 },
+    preference: {
+      ...preference,
+      activeRevision: revisionOne,
+      activationVersion: 3,
+    },
     event: {
       ...detail.events[1]!,
       id: "00000000-0000-4000-8000-000000000009",
@@ -607,7 +611,10 @@ describe("structured preference Workspace State administration", () => {
       activationVersion: 0,
     };
     listPreferenceRegistry.mockResolvedValueOnce({ preferences: [pending] });
-    getPreferenceRegistry.mockResolvedValueOnce({ ...detail, preference: pending });
+    getPreferenceRegistry.mockResolvedValueOnce({
+      ...detail,
+      preference: pending,
+    });
     const reloadWorkspaceState = mock(async () => undefined);
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -645,6 +652,66 @@ describe("structured preference Workspace State administration", () => {
         }),
       );
       expect(reloadWorkspaceState).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("reveals Finish saving immediately when compact Skill activation fails", async () => {
+    const pending = {
+      ...preference,
+      id: "00000000-0000-4000-8000-000000000008",
+      stableKey: "incident-review",
+      status: "proposed" as const,
+      activeRevision: null,
+      activationVersion: 0,
+      scopeVersion: 1,
+    };
+    listPreferenceRegistry
+      .mockResolvedValueOnce({ preferences: [] })
+      .mockResolvedValueOnce({ preferences: [pending] });
+    getPreferenceRegistry.mockResolvedValueOnce({
+      ...detail,
+      preference: pending,
+    });
+    activatePreferenceRegistryRevision.mockRejectedValueOnce(
+      new Error("activation temporarily unavailable"),
+    );
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            compact
+            onWorkspaceStateReload={async () => undefined}
+          />,
+        ),
+      );
+      await settle();
+
+      const form = container.querySelector<HTMLFormElement>('form[aria-label="Add skill"]')!;
+      await setValue(controlForLabel(form, "Name"), "Incident review");
+      await setValue(controlForLabel(form, "Short summary"), "Check prior incidents first.");
+      await setValue(
+        controlForLabel(form, "Skill instructions"),
+        "Search Memory for similar incidents before changing production systems.",
+      );
+      await act(async () => {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        await Promise.resolve();
+      });
+      await settle();
+      await settle();
+
+      expect(container.textContent).toContain("activation temporarily unavailable");
+      expect(container.textContent).toContain("Skill needs activation");
+      expect(
+        [...container.querySelectorAll<HTMLButtonElement>("button")].some(
+          (button) => button.textContent?.trim() === "Finish saving",
+        ),
+      ).toBe(true);
     } finally {
       await act(async () => root.unmount());
     }
@@ -706,7 +773,9 @@ describe("structured preference Workspace State administration", () => {
         supersededByPreferenceId:
           status === "superseded" ? replacementPreferenceId : preference.supersededByPreferenceId,
       } satisfies PreferenceRegistryRecord;
-      listPreferenceRegistry.mockResolvedValueOnce({ preferences: [retainedPreference] });
+      listPreferenceRegistry.mockResolvedValueOnce({
+        preferences: [retainedPreference],
+      });
       getPreferenceRegistry.mockResolvedValueOnce({
         ...detail,
         preference: retainedPreference,

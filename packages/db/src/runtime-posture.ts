@@ -344,6 +344,7 @@ const GOVERNED_LEARNING_ACTIVATION_ROUTINES = [
   "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
   "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
   "confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
+  "materialize_remember_knowledge_memory(uuid, uuid, uuid)",
   "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
 ] as const;
 const GOVERNED_LEARNING_INSPECTION_ROUTINES = [
@@ -406,6 +407,7 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
   "remember_knowledge_confirmation_receipts",
+  "remember_knowledge_memory_materializations",
   "session_human_input_requests",
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_deactivation_events",
@@ -742,6 +744,7 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_snapshots",
   "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
+  "remember_knowledge_memory_materializations",
   "retained_screenshot_artifacts",
   "rig_changes",
   "rig_versions",
@@ -1223,6 +1226,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "personal_resource_once_consumption_receipts",
   "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
+  "remember_knowledge_memory_materializations",
   "scheduled_task_connection_authority_snapshots",
   "scheduled_task_personal_resource_authorities",
   "scheduled_task_personal_resource_snapshots",

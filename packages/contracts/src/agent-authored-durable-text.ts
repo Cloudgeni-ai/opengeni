@@ -17,7 +17,9 @@
  *   more room rather than less.
  * - Organization identity and mission are always-on context for root sessions
  *   across the whole organization. Historical company-profile list fields stay
- *   in the storage contract for compatibility but are not composed.
+ *   in the storage contract for compatibility; nonempty values on an already-
+ *   active historical revision remain composed with an explicit compatibility
+ *   label until an organization owner replaces the profile.
  * - Knowledge is retrieval evidence and never joins the always-composed prefix.
  *
  * These caps deliberately bind only agent-authored writes. The human-facing
