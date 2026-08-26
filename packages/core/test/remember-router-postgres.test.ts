@@ -9,6 +9,7 @@ import {
   ensureManagedAccessForUser,
   getWorkspaceInstructionPolicyBaseline,
   listGovernedLearningActivationHistory,
+  searchWorkspaceMemories,
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
@@ -442,7 +443,26 @@ describe("remember router (real PostgreSQL)", () => {
         destination: "knowledge",
         claimId: receipt.claimId,
         authorityKind: "human_confirmed",
-        undo: "knowledge_review",
+        undo: "memory_management",
+      },
+    });
+    expect(confirmed.activation.destination).toBe("knowledge");
+    if (confirmed.activation.destination !== "knowledge") return;
+    const memories = await searchWorkspaceMemories(client.db, f.grant.workspaceId, {
+      query: "Globex",
+      mode: "keyword",
+      limit: 10,
+    });
+    expect(memories.map((memory) => memory.memory.id)).toContain(confirmed.activation.memoryId);
+    expect(
+      memories.find((memory) => memory.memory.id === confirmed.activation.memoryId)?.memory,
+    ).toMatchObject({
+      text: content,
+      status: "active",
+      metadata: {
+        origin: "human",
+        source: "remember_confirmation",
+        claimId: receipt.claimId,
       },
     });
     const replay = await router.confirm({ attempt: f.attempt, request: confirmRequest });

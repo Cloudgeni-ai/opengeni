@@ -145,11 +145,13 @@ export const RememberActivationSummary = z.discriminatedUnion("destination", [
     destination: z.literal("knowledge"),
     receiptId: z.string().uuid(),
     claimId: z.string().uuid(),
+    /** The retrievable Memory record materialized from the approved claim. */
+    memoryId: z.string().uuid(),
     approvalReviewId: z.string().uuid(),
     effectiveAt: z.string().datetime().nullable(),
     authorityKind: z.literal("human_confirmed"),
-    /** Knowledge approvals are undone through the Knowledge review lifecycle (`knowledge_correct` or a human revocation). */
-    undo: z.literal("knowledge_review"),
+    /** Correct or archive the materialized record through the Memory lifecycle. */
+    undo: z.literal("memory_management"),
   }),
 ]);
 export type RememberActivationSummary = z.infer<typeof RememberActivationSummary>;

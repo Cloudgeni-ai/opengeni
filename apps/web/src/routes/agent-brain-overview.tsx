@@ -4,15 +4,13 @@ import {
   ArrowRightIcon,
   BookOpenIcon,
   BrainCircuitIcon,
-  Building2Icon,
-  CheckCircle2Icon,
-  CircleAlertIcon,
-  Clock3Icon,
   FileSearchIcon,
-  SlidersHorizontalIcon,
-  SparklesIcon,
+  UserRoundIcon,
+  WandSparklesIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
+
+import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
 
 export type BrainProposalReview = {
   status: "loading" | "unavailable" | "ready";
@@ -55,7 +53,7 @@ function counted(label: string, count: number | null): string {
 
 export function deriveBrainAttention(input: BrainAttentionInput): string[] {
   const attention: string[] = [];
-  if (input.inventoryRefreshFailed) attention.push("Company Brain refresh failed");
+  if (input.inventoryRefreshFailed) attention.push("Agent Knowledge refresh failed");
   if (input.companyProfileStatus.tone === "warning") {
     attention.push("Company profile review is unavailable");
   } else if (input.companyProfileStatus.label === "Loading…") {
@@ -156,7 +154,7 @@ function FocusAction({
   workspaceId,
 }: {
   children: ReactNode;
-  view: "company" | "instructions" | "preferences" | "learning";
+  view: "instructions" | "skills";
   workspaceId: string;
 }) {
   return (
@@ -195,17 +193,17 @@ function RouteAction({
 }
 
 function workspaceInstructionStatus(state: WorkspaceStateResponse): string {
-  if (state.policy.activeHeads.length > 0) {
-    const suffix = state.policy.activeHeadsTruncated ? "+" : "";
-    return `${state.policy.activeHeads.length}${suffix} active`;
-  }
+  if (activeGlobalWorkspaceInstructionHead(state)) return "Set";
   if (state.policy.legacyRuntime.workspaceOverrideConfigured) {
     return "Custom instructions configured";
   }
   return "Not set";
 }
 
-function documentStatus(state: WorkspaceStateResponse): {
+function documentStatus(
+  state: WorkspaceStateResponse,
+  personalWorkspace: boolean,
+): {
   status: string;
   tone: "default" | "warning";
 } {
@@ -216,7 +214,13 @@ function documentStatus(state: WorkspaceStateResponse): {
   const counts = state.knowledge.documentStatusCounts;
   const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
   const needsAttention = counts.failed + counts.queued + counts.indexing;
-  const parts = [`${total} document${total === 1 ? "" : "s"}`, `${counts.ready} ready`];
+  const parts = personalWorkspace
+    ? [
+        `${state.knowledge.authorityKindCounts.personal} personal`,
+        `${total} available`,
+        `${counts.ready} ready`,
+      ]
+    : [`${total} document${total === 1 ? "" : "s"}`, `${counts.ready} ready`];
   if (needsAttention > 0) parts.push(`${needsAttention} need attention`);
   if (state.knowledge.coverage === "partial") parts.push("partial view");
   return {
@@ -225,7 +229,10 @@ function documentStatus(state: WorkspaceStateResponse): {
   };
 }
 
-function memoryStatus(state: WorkspaceStateResponse): {
+function memoryStatus(
+  state: WorkspaceStateResponse,
+  personalWorkspace: boolean,
+): {
   status: string;
   tone: "default" | "warning";
 } {
@@ -233,10 +240,11 @@ function memoryStatus(state: WorkspaceStateResponse): {
     return { status: "Permission required", tone: "warning" };
   }
   const sample = state.knowledge.memorySample;
+  const prefix = personalWorkspace ? "personal " : "recent ";
   return {
     status: sample.limitReached
-      ? `${sample.recordCount}+ recent records`
-      : `${sample.recordCount} recent record${sample.recordCount === 1 ? "" : "s"}`,
+      ? `${sample.recordCount}+ ${prefix}records`
+      : `${sample.recordCount} ${prefix}record${sample.recordCount === 1 ? "" : "s"}`,
     tone: sample.limitReached ? "warning" : "default",
   };
 }
@@ -244,103 +252,82 @@ function memoryStatus(state: WorkspaceStateResponse): {
 export function BrainOverview({
   state,
   workspaceId,
-  companyProfileStatus,
-  proposalReview,
-  preferenceConflictCount,
-  inventoryRefreshFailed = false,
+  personalWorkspace = false,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
-  companyProfileStatus: { label: string; tone?: "default" | "warning" };
-  proposalReview: BrainProposalReview;
-  preferenceConflictCount: number;
-  inventoryRefreshFailed?: boolean;
+  personalWorkspace?: boolean;
 }) {
-  const documents = documentStatus(state);
-  const memory = memoryStatus(state);
-  const attention = deriveBrainAttention({
-    companyProfileStatus,
-    workspaceInstructionsMissing: workspaceInstructionStatus(state) === "Not set",
-    policyRevisionPending: state.policy.latestRevision?.state === "inactive",
-    policyInventoryPartial: state.policy.activeHeadsTruncated,
-    preferenceInventoryPartial: state.preferences.truncated,
-    preferenceConflictCount,
-    inventoryRefreshFailed,
-    knowledge:
-      state.knowledge.availability === "unavailable"
-        ? { availability: "unavailable" }
-        : { availability: "available", gaps: state.knowledge.gaps },
-    proposals: proposalReview,
-  });
-  const recentChanges = [
-    ...state.policy.activeHeads.map((head) => ({ label: "Rules", at: head.activatedAt })),
-    ...(state.knowledge.availability === "available" && state.knowledge.latestDocumentUpdatedAt
-      ? [{ label: "Knowledge", at: state.knowledge.latestDocumentUpdatedAt }]
-      : []),
-    ...(state.knowledge.availability === "available" && state.knowledge.memorySample.latestUpdatedAt
-      ? [{ label: "Memory", at: state.knowledge.memorySample.latestUpdatedAt }]
-      : []),
-  ];
-  recentChanges.sort((left, right) => right.at.localeCompare(left.at));
+  const documents = documentStatus(state, personalWorkspace);
+  const memory = memoryStatus(state, personalWorkspace);
 
   return (
     <div className="grid gap-6">
-      <SummaryGroup title="Always followed">
-        <SummaryRow
-          icon={<Building2Icon className="size-4" />}
-          title="Company profile & goals"
-          status={companyProfileStatus.label}
-          tone={companyProfileStatus.tone}
-          description="The essential company context every agent should know."
-          action={
-            <FocusAction view="company" workspaceId={workspaceId}>
-              Manage
-            </FocusAction>
-          }
-        />
+      {personalWorkspace ? (
+        <section className="flex gap-3 rounded-lg border border-brand/25 bg-brand/5 p-4">
+          <span className="self-start rounded-md bg-brand/10 p-2 text-brand">
+            <UserRoundIcon className="size-4" />
+          </span>
+          <div>
+            <h2 className="text-sm font-medium text-fg">Your personal workspace</h2>
+            <p className="mt-1 text-xs leading-5 text-fg-muted">
+              Personal Skills and Only me documents belong to you and can follow you across the
+              organization. Instructions and Memory created here stay private inside this personal
+              workspace. Company knowledge you can access remains available and is labeled
+              separately.
+            </p>
+          </div>
+        </section>
+      ) : null}
+      <SummaryGroup title="How agents work">
         <SummaryRow
           icon={<BookOpenIcon className="size-4" />}
-          title="Workspace instructions"
+          title={personalWorkspace ? "Personal workspace instructions" : "Workspace instructions"}
           status={workspaceInstructionStatus(state)}
-          description="How agents should work in this workspace."
+          description={
+            personalWorkspace
+              ? "Always-on guidance for agents working in your personal workspace."
+              : "How agents should work in this workspace."
+          }
           action={
             <FocusAction view="instructions" workspaceId={workspaceId}>
               Review
             </FocusAction>
           }
         />
-      </SummaryGroup>
-
-      <SummaryGroup title="Available when needed">
         <SummaryRow
-          icon={<SparklesIcon className="size-4" />}
-          title="Learning & autonomy"
-          status="Governed"
-          description="Choose whether source-backed changes stay off, wait for review, or apply automatically."
-          action={
-            <FocusAction view="learning" workspaceId={workspaceId}>
-              Manage
-            </FocusAction>
+          icon={<WandSparklesIcon className="size-4" />}
+          title="Skills"
+          status={
+            personalWorkspace
+              ? `${state.preferences.scopeCounts.user} personal · ${state.preferences.activeDescriptorCount} available`
+              : `${state.preferences.activeDescriptorCount} active`
           }
-        />
-        <SummaryRow
-          icon={<SlidersHorizontalIcon className="size-4" />}
-          title="Guides & preferences"
-          status={`${state.preferences.activeDescriptorCount} active`}
-          description="Short summaries are always known; full instructions are fetched when needed."
+          description={
+            personalWorkspace
+              ? "Your personal Skills follow you; company and workspace Skills remain available here."
+              : "Reusable instructions agents fetch and follow when relevant."
+          }
           tone={state.preferences.truncated ? "warning" : "default"}
           action={
-            <FocusAction view="preferences" workspaceId={workspaceId}>
+            <FocusAction view="skills" workspaceId={workspaceId}>
               Manage
             </FocusAction>
           }
         />
+      </SummaryGroup>
+
+      <SummaryGroup title="What agents can find">
         <SummaryRow
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
           status={documents.status}
           tone={documents.tone}
-          description="Uploaded files and connected sources, kept within their selected scope."
+          description={
+            personalWorkspace
+              ? "Your Only me documents, plus company knowledge you are allowed to use."
+              : "Uploaded files and connected sources, kept within their selected scope."
+          }
           action={
             <RouteAction to="/workspaces/$workspaceId/documents" workspaceId={workspaceId}>
               Open
@@ -352,58 +339,17 @@ export function BrainOverview({
           title="Memory"
           status={memory.status}
           tone={memory.tone}
-          description="Facts, decisions and observations learned across agent work."
+          description={
+            personalWorkspace
+              ? "Private facts, incidents, and decisions learned in your personal workspace."
+              : "Facts, decisions and observations learned across agent work."
+          }
           action={
             <RouteAction to="/workspaces/$workspaceId/memory" workspaceId={workspaceId}>
               Open
             </RouteAction>
           }
         />
-      </SummaryGroup>
-
-      <SummaryGroup title="Needs attention">
-        {attention.length === 0 ? (
-          <SummaryRow
-            icon={<CheckCircle2Icon className="size-4" />}
-            title="No visible review signals"
-            status="Up to date"
-            description="The loaded review authorities show no proposals, gaps, stale baselines, or partial projections."
-          />
-        ) : (
-          attention.map((item) => (
-            <SummaryRow
-              key={item}
-              icon={<CircleAlertIcon className="size-4" />}
-              title={item}
-              status="Review"
-              tone="warning"
-              description="Open the relevant Company Brain section to inspect the current authority."
-            />
-          ))
-        )}
-      </SummaryGroup>
-
-      <SummaryGroup title="Recent changes">
-        {recentChanges.length === 0 ? (
-          <SummaryRow
-            icon={<Clock3Icon className="size-4" />}
-            title="No recent changes"
-            status="Empty"
-            description="No visible Company Brain change timestamps are available yet."
-          />
-        ) : (
-          recentChanges
-            .slice(0, 3)
-            .map((change) => (
-              <SummaryRow
-                key={`${change.label}:${change.at}`}
-                icon={<Clock3Icon className="size-4" />}
-                title={change.label}
-                status={new Date(change.at).toLocaleString()}
-                description="Visible authority changed at this time. Open the relevant section for history."
-              />
-            ))
-        )}
       </SummaryGroup>
     </div>
   );

@@ -1,76 +1,36 @@
 import {
-  COMPANY_PROFILE_ENTRY_MAX_CHARS,
   COMPANY_PROFILE_SCALAR_MAX_CHARS,
   OpenGeniApiError,
-  normalizeCompanyProfileStableKey,
   type CompanyProfileContent,
-  type CompanyProfileEntry,
   type CompanyProfileRevision,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   normalizeWorkspaceInstructionPolicyRoleKey,
   type WorkspaceInstructionPolicyKind,
   type WorkspaceInstructionPolicyOnboardingProposal,
   type WorkspaceInstructionPolicyScope,
-  type WorkspaceStateGapCode,
   type WorkspaceStateGovernanceDriftStatus,
   type WorkspaceStateResponse,
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
-import {
-  ArrowLeftIcon,
-  BrainCircuitIcon,
-  ChevronDownIcon,
-  CircleAlertIcon,
-  Clock3Icon,
-} from "lucide-react";
-import {
-  type FormEvent,
-  lazy,
-  type ReactNode,
-  Suspense,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { ArrowLeftIcon, BrainCircuitIcon, ChevronDownIcon } from "lucide-react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
 
-import { BrainOverview, type BrainProposalReview } from "./agent-brain-overview";
-import { AgentBrainPrompt } from "./agent-brain-prompt";
-import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
-import { CompanyBrainExportButton } from "./company-brain-export";
+import { BrainOverview } from "./agent-brain-overview";
+import { AgentKnowledgePrompt } from "./agent-brain-prompt";
 import {
   useCompanyProfileInventory,
   useWorkspaceInstructionPolicyOnboardingProposals,
   useWorkspaceStateInventory,
 } from "./workspace-state-loader";
-import {
-  PreferenceRegistryAdministration,
-  type PreferenceRegistryReviewSummary,
-} from "./preference-registry-admin";
-
-const LazyCompanyBrainInspector = lazy(() =>
-  import("./company-brain-inspector").then(({ CompanyBrainInspector }) => ({
-    default: CompanyBrainInspector,
-  })),
-);
-
-const GAP_LABELS: Record<WorkspaceStateGapCode, string> = {
-  no_document_bases: "No document bases are configured.",
-  no_visible_documents: "The visible document bases are empty.",
-  failed_documents: "Some visible documents failed indexing.",
-  processing_documents: "Some visible documents are queued or indexing.",
-  missing_topic_coverage: "Ready documents do not have topic metadata.",
-  no_memory_records: "The newest memory sample is empty.",
-  pending_memory_review: "Some sampled memories are awaiting review.",
-  partial_inventory:
-    "The inventory reached a safety bound; one or more lists or samples is truncated.",
-};
+import { PreferenceRegistryAdministration } from "./preference-registry-admin";
 
 function formatDate(value: string | null): string {
   if (!value) return "No activity";
@@ -102,13 +62,6 @@ const LOADING_PROPOSAL_REVIEW: OnboardingProposalReviewSummary = {
   status: "loading",
   pendingCount: 0,
   staleCount: 0,
-  partial: false,
-};
-
-const LOADING_PREFERENCE_REVIEW: PreferenceRegistryReviewSummary = {
-  status: "loading",
-  pendingCount: 0,
-  conflictCount: 0,
   partial: false,
 };
 
@@ -156,7 +109,7 @@ function Metric({ label, value }: { label: string; value: ReactNode }) {
 
 function WorkspaceStateLoading() {
   return (
-    <div aria-label="Loading Company Brain" className="grid gap-4">
+    <div aria-label="Loading Agent Knowledge" className="grid gap-4">
       <Skeleton className="h-28 w-full" />
       <div className="grid gap-4 lg:grid-cols-2">
         <Skeleton className="h-64 w-full" />
@@ -166,140 +119,12 @@ function WorkspaceStateLoading() {
   );
 }
 
-function PolicyInventory({ state }: { state: WorkspaceStateResponse }) {
-  const { policy } = state;
-  return (
-    <StateCard
-      title="Instruction policy inventory"
-      description="Metadata from the authoritative instruction-policy backend. Policy bodies are intentionally excluded."
-    >
-      <div className="grid gap-3 sm:grid-cols-3">
-        <Metric label="Active heads" value={policy.activeHeads.length} />
-        <Metric
-          label="Latest revision"
-          value={policy.latestRevision ? `r${policy.latestRevision.revision}` : "None"}
-        />
-        <Metric
-          label="Runtime source"
-          value={
-            policy.legacyRuntime.workspaceOverrideConfigured ? "Workspace override" : "Default"
-          }
-        />
-      </div>
-
-      <div className="mt-4 rounded-md border border-status-waiting/30 bg-status-waiting/10 p-3 text-xs leading-5 text-fg-muted">
-        <span className="font-medium text-fg">Current governance:</span> active heads are read-time
-        metadata, not prompt bodies. Inspect an accepted attempt below to compare them with the
-        immutable governance frozen for that attempt.
-      </div>
-
-      {policy.latestRevision ? (
-        <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-          <span className="rounded-full border border-border px-2 py-1">
-            {humanize(policy.latestRevision.kind)} · {humanize(policy.latestRevision.scope)}
-          </span>
-          <span className="rounded-full border border-border px-2 py-1">
-            {humanize(policy.latestRevision.state)}
-          </span>
-          <span className="rounded-full border border-border px-2 py-1">
-            Provenance: {humanize(policy.latestRevision.provenanceSource)}
-          </span>
-        </div>
-      ) : (
-        <div className="mt-4">
-          <EmptyState>No instruction-policy revisions exist yet.</EmptyState>
-        </div>
-      )}
-
-      {policy.activeHeads.length > 0 ? (
-        <div className="mt-4 divide-y divide-border rounded-md border border-border">
-          {policy.activeHeads.map((head) => (
-            <div
-              key={`${head.kind}:${head.scope}:${head.roleKey ?? "global"}`}
-              className="flex flex-col gap-1 p-3 text-xs sm:flex-row sm:items-center sm:justify-between"
-            >
-              <div className="font-medium text-fg">
-                {humanize(head.kind)} · {head.roleKey ?? humanize(head.scope)}
-              </div>
-              <div className="text-fg-muted">
-                r{head.revision} · activated {formatDate(head.activatedAt)}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {policy.activeHeadsTruncated ? (
-        <p className="mt-2 text-xs text-status-waiting">
-          Only the first 32 active heads are shown.
-        </p>
-      ) : null}
-    </StateCard>
-  );
-}
-
-function PreferenceInventory({ state }: { state: WorkspaceStateResponse }) {
-  const { preferences } = state;
-  return (
-    <StateCard
-      title="Preference authority inventory"
-      description="Identity-only metadata from the structured preference registry. Titles, descriptions, values, and retrieval handles are excluded."
-    >
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Metric label="Active descriptors" value={preferences.activeDescriptorCount} />
-        <Metric label="Organization" value={preferences.scopeCounts.organization} />
-        <Metric label="Workspace" value={preferences.scopeCounts.workspace} />
-        <Metric label="Personal" value={preferences.scopeCounts.user} />
-      </div>
-      <div className="mt-4 text-xs text-fg-muted">
-        Current identity:{" "}
-        <code className="break-all">sha256:{preferences.activeDescriptorHash}</code>
-      </div>
-      {preferences.truncated ? (
-        <p className="mt-2 text-xs text-status-waiting">
-          The descriptor inventory reached its safety bound; the hash must not be treated as
-          complete.
-        </p>
-      ) : null}
-    </StateCard>
-  );
-}
-
-function profileEntriesText(entries: readonly CompanyProfileEntry[]): string {
-  return entries.map((entry) => `${entry.key}: ${entry.content}`).join("\n");
-}
-
-function parseProfileEntries(value: string): CompanyProfileEntry[] {
-  return value
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const separator = line.indexOf(":");
-      if (separator < 1) throw new Error("Each list line must use `stable-key: content`.");
-      const key = normalizeCompanyProfileStableKey(line.slice(0, separator));
-      const content = line.slice(separator + 1).trim();
-      if (!key || !content) throw new Error("Each list line needs a stable key and content.");
-      if (content.length > COMPANY_PROFILE_ENTRY_MAX_CHARS) {
-        throw new Error(
-          `Company-profile list entries must be at most ${COMPANY_PROFILE_ENTRY_MAX_CHARS} characters.`,
-        );
-      }
-      return { key, content };
-    });
-}
-
-function emptyCompanyProfile(): CompanyProfileContent {
-  return {
-    identity: null,
-    mission: null,
-    products: [],
-    customers: [],
-    goals: [],
-    constraints: [],
-  };
-}
-
 export function CompanyProfileContentView({ profile }: { profile: CompanyProfileContent }) {
+  const hasRetiredStructuredDetails =
+    profile.products.length > 0 ||
+    profile.customers.length > 0 ||
+    profile.goals.length > 0 ||
+    profile.constraints.length > 0;
   return (
     <div className="grid gap-3 rounded-md border border-border bg-surface-2/30 p-3 text-xs leading-5 text-fg-muted">
       {profile.identity ? (
@@ -312,21 +137,12 @@ export function CompanyProfileContentView({ profile }: { profile: CompanyProfile
           <strong className="text-fg">Mission:</strong> {profile.mission}
         </div>
       ) : null}
-      {(["products", "customers", "goals", "constraints"] as const).map((field) =>
-        profile[field].length > 0 ? (
-          <div key={field}>
-            <strong className="text-fg">{humanize(field)}:</strong>
-            <ul className="mt-1 grid gap-0.5">
-              {profile[field].map((entry) => (
-                <li key={entry.key}>
-                  <span className="font-mono text-2xs text-fg-subtle">{entry.key}:</span>{" "}
-                  {entry.content}
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null,
-      )}
+      {hasRetiredStructuredDetails ? (
+        <p className="text-fg-subtle">
+          This historical revision contains retired structured details. They remain available to
+          agents for compatibility until an organization owner replaces this revision.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -451,22 +267,13 @@ export function CompanyProfileInventory({
   const currentRevision = inventory.response?.activeRevision ?? null;
   const [identity, setIdentity] = useState("");
   const [mission, setMission] = useState("");
-  const [products, setProducts] = useState("");
-  const [customers, setCustomers] = useState("");
-  const [goals, setGoals] = useState("");
-  const [constraints, setConstraints] = useState("");
-  const [reason, setReason] = useState("Update organization company profile");
+  const [reason, setReason] = useState("Update organization identity");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const profile = currentRevision?.profile ?? emptyCompanyProfile();
-    setIdentity(profile.identity ?? "");
-    setMission(profile.mission ?? "");
-    setProducts(profileEntriesText(profile.products));
-    setCustomers(profileEntriesText(profile.customers));
-    setGoals(profileEntriesText(profile.goals));
-    setConstraints(profileEntriesText(profile.constraints));
+    setIdentity(currentRevision?.profile.identity ?? "");
+    setMission(currentRevision?.profile.mission ?? "");
   }, [currentRevision]);
 
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -480,10 +287,10 @@ export function CompanyProfileInventory({
         profile: {
           identity: identity.trim() || null,
           mission: mission.trim() || null,
-          products: parseProfileEntries(products),
-          customers: parseProfileEntries(customers),
-          goals: parseProfileEntries(goals),
-          constraints: parseProfileEntries(constraints),
+          products: [],
+          customers: [],
+          goals: [],
+          constraints: [],
         },
         expectedCurrentRevisionId: inventory.response.current?.revisionId ?? null,
         expectedActivationVersion: inventory.response.current?.activationVersion ?? 0,
@@ -541,8 +348,8 @@ export function CompanyProfileInventory({
 
   return (
     <StateCard
-      title="Organization company profile"
-      description="Concise mandatory context shared across the organization. Longer material stays in Documents; this is not Memory, Preference Registry, or workspace policy."
+      title="Organization identity"
+      description="Small, stable context shared across the organization: who it is and why it exists. Other company knowledge stays in Documents and is retrieved when relevant."
     >
       {inventory.loading && !inventory.response ? <Skeleton className="h-40 w-full" /> : null}
       {inventory.error && !inventory.response ? (
@@ -575,7 +382,7 @@ export function CompanyProfileInventory({
 
           {canManage ? (
             <form
-              aria-label="Edit organization company profile"
+              aria-label="Edit organization identity"
               className="grid gap-3 rounded-md border border-border p-3"
               onSubmit={(event) => void save(event)}
             >
@@ -599,26 +406,6 @@ export function CompanyProfileInventory({
                   />
                 </label>
               </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                {(
-                  [
-                    ["Products", products, setProducts],
-                    ["Customers", customers, setCustomers],
-                    ["Goals", goals, setGoals],
-                    ["Critical constraints", constraints, setConstraints],
-                  ] as const
-                ).map(([label, value, setter]) => (
-                  <label key={label} className="grid gap-1 text-xs font-medium text-fg-muted">
-                    {label}
-                    <textarea
-                      className="min-h-24 rounded-md border border-border bg-surface px-3 py-2 font-mono text-xs text-fg"
-                      placeholder="stable-key: concise content"
-                      value={value}
-                      onChange={(event) => setter(event.target.value)}
-                    />
-                  </label>
-                ))}
-              </div>
               <label className="grid gap-1 text-xs font-medium text-fg-muted">
                 Audit reason
                 <input
@@ -640,8 +427,8 @@ export function CompanyProfileInventory({
             </form>
           ) : (
             <p className="text-xs text-fg-muted">
-              Only organization owners and admins can edit or activate the company profile. You can
-              still ask OpenGeni to draft a proposal above.
+              Only organization owners and admins can edit or activate the organization identity.
+              You can still ask OpenGeni to draft a proposal above.
             </p>
           )}
 
@@ -712,7 +499,7 @@ function onboardingProposalErrorMessage(error: unknown): string {
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED":
         return "The proposal is larger than the instruction-policy draft limit.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE":
-        return "The active policy changed. Refresh Company Brain and review the new baseline.";
+        return "The active policy changed. Refresh Agent Knowledge and review the new baseline.";
       case "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT":
         return "That source version already proposed a draft for this policy target.";
       case "WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED":
@@ -1253,168 +1040,24 @@ export function AttemptGovernanceInventory({
   );
 }
 
-function KnowledgeInventory({
-  state,
-  workspaceId,
-}: {
-  state: WorkspaceStateResponse;
-  workspaceId: string;
-}) {
-  if (state.knowledge.availability === "unavailable") {
-    return (
-      <StateCard
-        title="Knowledge map"
-        description="Documents and Memory remain separate authorities."
-      >
-        <EmptyState>
-          This inventory is unavailable because your grant does not include{" "}
-          <code>documents:search</code>. No knowledge counts were disclosed.
-        </EmptyState>
-      </StateCard>
-    );
-  }
-
-  const knowledge = state.knowledge;
-  return (
-    <StateCard
-      title="Knowledge map"
-      description="A structural view of visible Documents and the newest Memory sample; no document or memory text is returned."
-    >
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Metric label="Document bases" value={knowledge.baseCount} />
-        <Metric label="Visible documents" value={knowledge.inspectedVisibleDocumentCount} />
-        <Metric label="Ready" value={knowledge.documentStatusCounts.ready} />
-        <Metric label="Memory sample" value={knowledge.memorySample.recordCount} />
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
-        <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-1">
-          <Clock3Icon className="size-3" /> Latest document{" "}
-          {formatDate(knowledge.latestDocumentUpdatedAt)}
-        </span>
-        <span className="rounded-full border border-border px-2 py-1">
-          Coverage: {humanize(knowledge.coverage)}
-        </span>
-        {knowledge.basesTruncated ? (
-          <span className="rounded-full border border-status-waiting/50 px-2 py-1 text-status-waiting">
-            Base list truncated
-          </span>
-        ) : null}
-        {knowledge.memorySample.limitReached ? (
-          <span className="rounded-full border border-status-waiting/50 px-2 py-1 text-status-waiting">
-            Memory sample reached {knowledge.memorySample.sampleLimit}
-          </span>
-        ) : null}
-      </div>
-
-      <div className="mt-4 grid gap-3 sm:grid-cols-3">
-        <Metric label="Company documents" value={knowledge.authorityKindCounts.organization} />
-        <Metric label="Workspace documents" value={knowledge.authorityKindCounts.workspace} />
-        <Metric label="Personal documents" value={knowledge.authorityKindCounts.personal} />
-      </div>
-
-      <div className="mt-5 grid gap-4 lg:grid-cols-2">
-        <div>
-          <div className="mb-2 flex items-center justify-between gap-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">Bases</h3>
-            <Link
-              to="/workspaces/$workspaceId/documents"
-              params={{ workspaceId }}
-              className="text-xs font-medium text-brand hover:underline"
-            >
-              Open Documents
-            </Link>
-          </div>
-          {knowledge.bases.length === 0 ? (
-            <EmptyState>No document bases are visible.</EmptyState>
-          ) : (
-            <div className="divide-y divide-border rounded-md border border-border">
-              {knowledge.bases.map((base) => (
-                <div key={base.id} className="p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="truncate text-sm font-medium text-fg">{base.name}</span>
-                    <span className="shrink-0 text-xs text-fg-muted">
-                      {base.visibleDocumentCount} visible
-                    </span>
-                  </div>
-                  <div className="mt-1 text-2xs text-fg-subtle">
-                    {base.statusCounts.ready} ready ·{" "}
-                    {base.statusCounts.indexing + base.statusCounts.queued} processing ·{" "}
-                    {base.statusCounts.failed} failed
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div>
-          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-            Topics
-          </h3>
-          {knowledge.topics.length === 0 ? (
-            <EmptyState>No topic metadata was found in the visible documents.</EmptyState>
-          ) : (
-            <div className="flex flex-wrap gap-2 rounded-md border border-border p-3">
-              {knowledge.topics.map((topic) => (
-                <span
-                  key={topic.name}
-                  className="rounded-full border border-border bg-surface-2/50 px-2 py-1 text-xs text-fg-muted"
-                >
-                  {topic.name} · {topic.documentCount}
-                </span>
-              ))}
-            </div>
-          )}
-          {knowledge.topicsTruncated ? (
-            <p className="mt-2 text-xs text-status-waiting">Only the top 24 topics are shown.</p>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="mt-5">
-        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
-          Deterministic gap signals
-        </h3>
-        {knowledge.gaps.length === 0 ? (
-          <EmptyState>No structural gaps were detected in the visible inventory.</EmptyState>
-        ) : (
-          <ul className="grid gap-2">
-            {knowledge.gaps.map((gap) => (
-              <li
-                key={gap.code}
-                className="flex items-start gap-2 rounded-md border border-border bg-surface-2/30 p-3 text-xs text-fg-muted"
-              >
-                <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0 text-status-waiting" />
-                <span>
-                  {GAP_LABELS[gap.code]}
-                  {gap.relatedCount === null ? "" : ` (${gap.relatedCount})`}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </StateCard>
-  );
-}
-
 function FocusedInstructions({
   state,
   workspaceId,
+  personalWorkspace,
   onWorkspaceStateReload,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
+  personalWorkspace: boolean;
   onWorkspaceStateReload: () => Promise<void>;
 }) {
   const context = useAppContext();
   const { client } = context;
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-  const activeHead = state.policy.activeHeads.find(
-    (head) => head.kind === "policy" && head.scope === "global" && head.roleKey === null,
-  );
+  const activeHead = activeGlobalWorkspaceInstructionHead(state);
   const activeRevisionId = activeHead?.revisionId ?? null;
+  const instructionConfigured =
+    activeRevisionId !== null || state.policy.legacyRuntime.workspaceOverrideConfigured;
   const [content, setContent] = useState("");
   const [loadingContent, setLoadingContent] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1424,6 +1067,8 @@ function FocusedInstructions({
   useEffect(() => {
     let cancelled = false;
     setLoadingContent(true);
+    setContent("");
+    setMessage(null);
     setEditorError(null);
     void (async () => {
       try {
@@ -1473,7 +1118,7 @@ function FocusedInstructions({
         operationId: crypto.randomUUID(),
         expectedCurrentRevisionId: activeHead?.revisionId ?? null,
         expectedActivationVersion: activeHead?.activationVersion ?? 0,
-        reason: "Updated by a workspace admin from Company Brain",
+        reason: "Updated by a workspace admin from Agent Knowledge",
       });
       await onWorkspaceStateReload();
       setMessage("Saved. New agent turns will use these workspace instructions.");
@@ -1486,10 +1131,37 @@ function FocusedInstructions({
 
   return (
     <div className="grid gap-4">
-      <AgentBrainPrompt kind="workspace_instructions" workspaceId={workspaceId} />
+      <section
+        aria-labelledby="current-workspace-instruction-heading"
+        className="rounded-lg border border-border bg-surface p-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 id="current-workspace-instruction-heading" className="text-sm font-medium text-fg">
+            {personalWorkspace ? "Current personal workspace instruction" : "Current instruction"}
+          </h2>
+          <span className="rounded-full border border-border px-2 py-0.5 text-2xs text-fg-muted">
+            {instructionConfigured ? "Active" : "Not set"}
+          </span>
+        </div>
+        {loadingContent ? (
+          <Skeleton aria-label="Loading current instruction" className="mt-3 h-16 w-full" />
+        ) : editorError && !content.trim() ? (
+          <p role="alert" className="mt-3 text-xs text-status-error">
+            {editorError}
+          </p>
+        ) : content.trim() ? (
+          <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-fg-muted">{content}</p>
+        ) : (
+          <p className="mt-3 text-xs leading-5 text-fg-muted">
+            No workspace instruction is active yet. Tell OpenGeni what agents should always do, or
+            add a concise instruction manually below.
+          </p>
+        )}
+      </section>
+      <AgentKnowledgePrompt kind="workspace_instructions" workspaceId={workspaceId} />
       <details className="group rounded-lg border border-border bg-surface">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
-          Write manually
+          {instructionConfigured ? "Edit manually" : "Add manually"}
           <ChevronDownIcon className="size-4 text-fg-muted transition-transform group-open:rotate-180" />
         </summary>
         <form
@@ -1497,7 +1169,9 @@ function FocusedInstructions({
           onSubmit={(event) => void save(event)}
         >
           <label className="grid gap-1 text-xs font-medium text-fg-muted">
-            Instructions for this workspace
+            {personalWorkspace
+              ? "Instructions for your personal workspace"
+              : "Instructions for this workspace"}
             <textarea
               className="min-h-48 rounded-md border border-border bg-surface px-3 py-2 text-sm leading-6 text-fg outline-none focus:border-brand disabled:cursor-not-allowed disabled:opacity-60"
               value={content}
@@ -1508,7 +1182,9 @@ function FocusedInstructions({
             />
           </label>
           <p className="text-xs leading-5 text-fg-subtle">
-            These instructions are included automatically for agents working in this workspace.
+            {personalWorkspace
+              ? "These instructions are included automatically only for agents working in your personal workspace."
+              : "These instructions are included automatically for agents working in this workspace."}{" "}
             Changes are versioned and can be audited or rolled back.
           </p>
           {!canEdit ? (
@@ -1546,131 +1222,43 @@ export function WorkspaceStateRoute({
   view,
 }: {
   workspaceId: string;
-  view?: "company" | "instructions" | "preferences" | "learning";
+  view?: "instructions" | "skills";
 }) {
   const context = useAppContext();
   const { client } = context;
-  const workspaceGrant = context.accessContext.workspaceGrants.find(
-    (grant) => grant.workspaceId === workspaceId,
-  );
-  const canManageCompanyProfile = Boolean(
-    workspaceGrant?.accountId &&
-    hasAccountPermission(context.accessContext, workspaceGrant.accountId, "account:admin"),
-  );
-  const [attemptInput, setAttemptInput] = useState("");
-  const [attemptId, setAttemptId] = useState<string | undefined>();
-  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
-  const activeWorkspaceId = useRef(workspaceId);
-  activeWorkspaceId.current = workspaceId;
-  const [storedPreferenceReview, setStoredPreferenceReview] = useState<
-    WorkspaceReviewSummary<PreferenceRegistryReviewSummary>
-  >(() => ({ workspaceId, summary: LOADING_PREFERENCE_REVIEW }));
-  const [storedOnboardingReview, setStoredOnboardingReview] = useState<
-    WorkspaceReviewSummary<OnboardingProposalReviewSummary>
-  >(() => ({ workspaceId, summary: LOADING_PROPOSAL_REVIEW }));
-  const updatePreferenceReview = useCallback(
-    (summary: PreferenceRegistryReviewSummary) => {
-      if (activeWorkspaceId.current !== workspaceId) return;
-      setStoredPreferenceReview({ workspaceId, summary });
-    },
-    [workspaceId],
-  );
-  const updateOnboardingReview = useCallback(
-    (summary: OnboardingProposalReviewSummary) => {
-      if (activeWorkspaceId.current !== workspaceId) return;
-      setStoredOnboardingReview({ workspaceId, summary });
-    },
-    [workspaceId],
-  );
-  const preferenceReview = reviewSummaryForWorkspace(
-    workspaceId,
-    storedPreferenceReview,
-    LOADING_PREFERENCE_REVIEW,
-  );
-  const onboardingReview = reviewSummaryForWorkspace(
-    workspaceId,
-    storedOnboardingReview,
-    LOADING_PROPOSAL_REVIEW,
-  );
-  const companyProfile = useCompanyProfileInventory(client, workspaceId);
-  const { state, error, loading, reload } = useWorkspaceStateInventory(
-    client,
-    workspaceId,
-    attemptId,
-  );
-  const inspectAttempt = (event: FormEvent<HTMLFormElement>): void => {
-    event.preventDefault();
-    setAttemptId(attemptInput.trim());
-  };
-  const clearAttempt = (): void => {
-    setAttemptInput("");
-    setAttemptId(undefined);
-  };
-  const companyProfileStatus = companyProfile.loading
-    ? { label: "Loading…" }
-    : companyProfile.error
-      ? { label: "Unavailable", tone: "warning" as const }
-      : companyProfile.response?.current
-        ? { label: "Configured" }
-        : { label: "Not configured" };
-  const pendingProfileProposalCount = pendingCompanyProfileProposals(
-    companyProfile.response,
-  ).length;
-  const profileProposalStatus = companyProfile.loading
-    ? "loading"
-    : companyProfile.error
-      ? "unavailable"
-      : companyProfile.response
-        ? "ready"
-        : "unavailable";
-  const proposalStatuses = [
-    profileProposalStatus,
-    preferenceReview.status,
-    onboardingReview.status,
-  ];
-  const proposalReview: BrainProposalReview = {
-    status: proposalStatuses.includes("unavailable")
-      ? "unavailable"
-      : proposalStatuses.includes("loading")
-        ? "loading"
-        : "ready",
-    pendingCount:
-      pendingProfileProposalCount + preferenceReview.pendingCount + onboardingReview.pendingCount,
-    staleCount: onboardingReview.staleCount,
-    partial:
-      (companyProfile.response?.revisions.length ?? 0) >= 50 ||
-      preferenceReview.partial ||
-      onboardingReview.partial,
-  };
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const { state, error, loading, reload } = useWorkspaceStateInventory(client, workspaceId);
 
   return (
     <ContentPage width="standard">
       <PageHeader
         icon={<BrainCircuitIcon className="size-4" />}
         title={
-          view === "company"
-            ? "Company profile & goals"
-            : view === "instructions"
-              ? "Workspace instructions"
-              : view === "preferences"
-                ? "Preferences"
-                : view === "learning"
-                  ? "Learning & autonomy"
-                  : "Company Brain"
+          view === "instructions"
+            ? personalWorkspace
+              ? "Personal workspace instructions"
+              : "Workspace instructions"
+            : view === "skills"
+              ? personalWorkspace
+                ? "Your Skills"
+                : "Skills"
+              : personalWorkspace
+                ? "Your Agent Knowledge"
+                : "Agent Knowledge"
         }
         description={
-          view === "company"
-            ? "Set the essential organization context every agent should know."
-            : view === "instructions"
-              ? "Set how agents should work in this workspace."
-              : view === "preferences"
-                ? "Save reusable instructions agents can apply when relevant."
-                : view === "learning"
-                  ? "Choose whether agents may turn what they learn into durable rules and preferences, and whether a human reviews first."
-                  : "Knowledge, rules, guides, review, and learning - with scope and delivery kept explicit."
-        }
-        actions={
-          view ? undefined : <CompanyBrainExportButton client={client} workspaceId={workspaceId} />
+          view === "instructions"
+            ? personalWorkspace
+              ? "Set concise, always-on guidance for agents in your personal workspace."
+              : "Set the concise, always-on guidance for agents in this workspace."
+            : view === "skills"
+              ? personalWorkspace
+                ? "Manage personal Skills that follow you, alongside other Skills available here."
+                : "Create reusable instructions agents can fetch when relevant."
+              : personalWorkspace
+                ? "Your private instructions, Skills, documents, and Memory, together with company knowledge you can access."
+                : "The instructions, skills, documents, and memories available to agents in this workspace."
         }
       />
       <div className="mt-6">
@@ -1682,13 +1270,13 @@ export function WorkspaceStateRoute({
             className="mb-4 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
           >
             <ArrowLeftIcon className="size-3" />
-            Back to Company Brain
+            Back to Agent Knowledge
           </Link>
         ) : null}
         {loading && !state ? <WorkspaceStateLoading /> : null}
         {error && !state ? (
           <LoadErrorState
-            title="Couldn't load Company Brain"
+            title="Couldn't load Agent Knowledge"
             error={error}
             onRetry={() => void reload()}
           />
@@ -1697,99 +1285,33 @@ export function WorkspaceStateRoute({
           <div className="grid gap-4">
             {error ? (
               <LoadErrorState
-                title="Couldn't refresh Company Brain"
+                title="Couldn't refresh Agent Knowledge"
                 error={error}
                 onRetry={() => void reload()}
               />
-            ) : null}
-            {view === "company" ? (
-              <div className="grid gap-4">
-                <AgentBrainPrompt kind="company_profile" workspaceId={workspaceId} />
-                <CompanyProfilePendingProposals
-                  workspaceId={workspaceId}
-                  canManage={canManageCompanyProfile}
-                  inventory={companyProfile}
-                />
-                <details className="rounded-lg border border-border bg-surface">
-                  <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium text-fg [&::-webkit-details-marker]:hidden">
-                    Edit manually and view history
-                  </summary>
-                  <div className="border-t border-border p-4">
-                    <CompanyProfileInventory workspaceId={workspaceId} inventory={companyProfile} />
-                  </div>
-                </details>
-              </div>
             ) : null}
             {view === "instructions" ? (
               <FocusedInstructions
                 state={state}
                 workspaceId={workspaceId}
+                personalWorkspace={personalWorkspace}
                 onWorkspaceStateReload={reload}
               />
             ) : null}
-            {view === "preferences" ? (
+            {view === "skills" ? (
               <PreferenceRegistryAdministration
                 workspaceId={workspaceId}
                 onWorkspaceStateReload={reload}
                 compact
+                personalWorkspace={personalWorkspace}
               />
             ) : null}
-            {view === "learning" ? (
-              <WorkspaceLearningAdministration workspaceId={workspaceId} />
-            ) : null}
             {!view ? (
-              <>
-                <BrainOverview
-                  state={state}
-                  workspaceId={workspaceId}
-                  companyProfileStatus={companyProfileStatus}
-                  proposalReview={proposalReview}
-                  preferenceConflictCount={preferenceReview.conflictCount}
-                  inventoryRefreshFailed={Boolean(error)}
-                />
-                <Suspense fallback={<Skeleton className="h-96 w-full" />}>
-                  <LazyCompanyBrainInspector key={workspaceId} workspaceId={workspaceId} />
-                </Suspense>
-                <details
-                  id="brain-diagnostics"
-                  className="group scroll-mt-4 rounded-lg border border-border bg-surface"
-                  open={diagnosticsOpen}
-                  onToggle={(event) => setDiagnosticsOpen(event.currentTarget.open)}
-                >
-                  <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-surface-2/50 [&::-webkit-details-marker]:hidden">
-                    <div>
-                      <h2 className="text-sm font-semibold text-fg">Advanced & diagnostics</h2>
-                      <p className="mt-1 text-xs leading-5 text-fg-muted">
-                        Technical details, audit history and administration.
-                      </p>
-                    </div>
-                    <ChevronDownIcon className="size-4 shrink-0 text-fg-muted transition-transform group-open:rotate-180" />
-                  </summary>
-                  <div className="grid gap-4 border-t border-border p-4">
-                    <PolicyInventory state={state} />
-                    <PreferenceInventory state={state} />
-                    <PreferenceRegistryAdministration
-                      workspaceId={workspaceId}
-                      onWorkspaceStateReload={reload}
-                      onReviewSummary={updatePreferenceReview}
-                    />
-                    <OnboardingProposalInventory
-                      state={state}
-                      workspaceId={workspaceId}
-                      onWorkspaceStateReload={reload}
-                      onReviewSummary={updateOnboardingReview}
-                    />
-                    <AttemptGovernanceInventory
-                      state={state}
-                      attemptInput={attemptInput}
-                      onAttemptInput={setAttemptInput}
-                      onInspect={inspectAttempt}
-                      onClear={clearAttempt}
-                    />
-                    <KnowledgeInventory state={state} workspaceId={workspaceId} />
-                  </div>
-                </details>
-              </>
+              <BrainOverview
+                state={state}
+                workspaceId={workspaceId}
+                personalWorkspace={personalWorkspace}
+              />
             ) : null}
           </div>
         ) : null}

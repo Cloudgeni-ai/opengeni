@@ -92,10 +92,12 @@ function sortMemories(memories: KnowledgeMemory[]): KnowledgeMemory[] {
 export function MemoryPane({
   workspaceId,
   memoryEnabled,
+  personalWorkspace = false,
   focusMemoryId,
 }: {
   workspaceId: string;
   memoryEnabled: boolean;
+  personalWorkspace?: boolean;
   /** A memory record to reveal + highlight, deep-linked from a timeline memory step (`?memory=<id>`). */
   focusMemoryId?: string | undefined;
 }) {
@@ -390,7 +392,11 @@ export function MemoryPane({
             Working set
           </span>
         }
-        description="Durable facts agents carry across sessions in this workspace."
+        description={
+          personalWorkspace
+            ? "Private memories agents carry across sessions in your personal workspace."
+            : "Durable facts agents carry across sessions in this workspace."
+        }
         actions={
           <>
             <Button
@@ -451,7 +457,11 @@ export function MemoryPane({
             aria-label="Memory text"
             value={draftText}
             onChange={(event) => setDraftText(event.target.value)}
-            placeholder="A durable fact, preference, decision, or procedure for this workspace"
+            placeholder={
+              personalWorkspace
+                ? "A private fact, incident, decision, or procedure for your personal workspace"
+                : "A durable fact, preference, decision, or procedure for this workspace"
+            }
             className="min-h-20 text-xs"
           />
           <div className="grid gap-2 sm:grid-cols-[minmax(10rem,1fr)_auto_auto]">

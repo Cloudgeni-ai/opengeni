@@ -1,10 +1,19 @@
-# Organization company profile
+# Organization identity
 
-The organization company profile is the single active authority for concise
-company identity, mission, products, customers, goals, and critical constraints.
-It is organization-scoped (`managed_accounts.id`) and is known across every
-workspace in that account. It is not a generic knowledge store, policy engine,
-preference store, Memory record, or document corpus.
+Organization identity is the single active always-on authority for two small,
+stable facts: who the company is and why it exists. It is organization-scoped
+(`managed_accounts.id`) and is known across every workspace in that account.
+Products, customers, goals, constraints, strategy, and changing facts are
+organization-scoped Documents/RAG evidence, retrieved only when relevant. They
+are not standing identity fields.
+
+The persistence and public API retain the historical `company_profile` name and
+its list fields so old revisions, hashes, snapshots, and integrations remain
+readable without mutation. Current product surfaces and new writes use only
+`identity` and `mission`. Nonempty list fields on an already-active historical
+revision remain prompt-composed as explicitly labeled compatibility context
+until an organization owner replaces that profile; this prevents silent context
+loss while the organization moves those facts into Documents.
 
 Canonical implementation:
 
@@ -24,8 +33,8 @@ Canonical implementation:
   `0324_human_confirmed_company_profile_agent_admin.sql`;
 - the only prompt composer: `packages/runtime/src/workspace-governance.ts`,
   resolved by `apps/worker/src/activities/agent-turn/governance-model.ts`;
-- admin presentation: the existing Company Brain / Workspace State route at
-  `apps/web/src/routes/workspace-state.tsx`.
+- admin presentation: Organization settings → Knowledge in
+  `apps/web/src/routes/org-settings.tsx`.
 
 ## Scope and authority
 
@@ -50,8 +59,8 @@ separate `company_profile_propose` → structured human input →
 initiating human and requires that human's current active organization
 membership to be the `owner` role, i.e. exactly the authority the manual
 `account:admin` route requires; an organization admin who cannot use the
-manual editor cannot activate through an agent either. The proposal is a
-complete, inactive, immutable profile revision. Confirmation requires the
+manual editor cannot activate through an agent either. The proposal is an
+inactive, immutable identity/mission revision with empty compatibility lists. Confirmation requires the
 canonical question returned by the proposal to have been answered `activate`
 by that same human, then revalidates the current attempt, organization
 membership, immutable proposal provenance/hash, and unchanged active-profile
@@ -100,15 +109,16 @@ workspace learning mode. In particular, `learning_policy_off` cannot block the
 owner's explicit request to manage the organization profile. The browser HTTP
 administration route remains direct-human-only.
 
-Autonomous company-level learning remains separate. The canonical
-durable-learning router is the sole caller of the authority-native
-`writeCompanyProfileLearning` / `rollbackCompanyProfileLearning` seam. This
-authority does not implement the router, its ledger, natural-language commands,
-or learning-policy resolution.
+The historical durable-learning adapter remains readable for compatibility.
+New products, customers, goals, constraints, strategy, and other changing facts
+must go to organization-scoped Documents/knowledge rather than this authority.
+Automatic derivation of explorable organization knowledge from sessions and
+integrations is a separate retrieval pipeline, not a reason to widen the
+always-on prompt.
 
 ## Bounded structured content
 
-Each immutable revision contains exactly:
+Each immutable revision retains the compatibility shape:
 
 - nullable `identity` and `mission` strings, each at most 2,048 characters;
 - up to 16 keyed entries in each of `products`, `customers`, `goals`, and
@@ -119,29 +129,30 @@ Each immutable revision contains exactly:
 
 At least one field is required. List keys are unique within their section. The
 server stores one canonical JSON representation and hashes those exact UTF-8
-bytes. Longer source material belongs in organization-authority Documents/RAG
-and is retrieved as evidence; it is never copied wholesale into this profile or
-the mandatory prompt.
+bytes. The four lists are legacy storage only: current UI and agent proposals
+write them empty. Existing revisions are not rewritten, and nonempty historical
+lists remain composed with a legacy compatibility label until the next explicit
+profile replacement. Richer material belongs in organization-authority
+Documents/RAG and is retrieved as evidence.
 
-Those numbers are the human ceiling, not a target, and this is the largest
-always-on prompt surface in the product: every field is mandatory context in
-every session across the whole organization. An **agent** author is therefore
-bounded much more tightly, through `AgentAuthoredCompanyProfileContent`:
+Those numbers are compatibility ceilings, not targets. Only identity and
+mission are always-on prompt context. An **agent** author is bounded more tightly
+through `AgentAuthoredCompanyProfileContent`, and the first-party proposal tool
+accepts only the two scalar fields:
 
 | Field | Agent bound | Human bound |
 | --- | --- | --- |
 | `identity`, `mission` | 400 characters each | 2,048 characters each |
-| each list entry | 200 characters | 1,024 characters |
-| whole canonical profile | 4,096 UTF-8 bytes | 28,672 UTF-8 bytes |
+| legacy list entry | not accepted by the current tool | 1,024 characters |
+| whole canonical compatibility profile | 4,096 UTF-8 bytes | 28,672 UTF-8 bytes |
 
-Entry counts are unchanged at 16 per list, so the whole-profile byte ceiling is
-what stops sixteen individually legal entries becoming standing prompt weight.
-The human `account:admin` route keeps `CompanyProfileContent` and the wider
-bounds, for the same reason as workspace rules: a person filling this in is
-making a deliberate, visible choice, and lowering their limit would reject a
-profile they had already typed. Existing revisions are never rewritten.
+Entry counts and total byte bounds remain unchanged so historical payloads keep
+validating under the same hash contract. The human `account:admin` API keeps
+`CompanyProfileContent` and the wider bounds for compatibility; the current UI
+edits only identity and mission and clears the retired lists on the next write.
+Existing revisions are never rewritten.
 
-Either way a good profile is one plain descriptive statement per field: no
+Identity and mission should each be one plain descriptive statement: no
 numbered procedure, no marketing copy, no rationale essay, no restating of
 platform defaults. The equivalent rule for workspace rules and preferences is in
 [`workspace-instruction-policies.md`](workspace-instruction-policies.md).
@@ -184,26 +195,30 @@ that operation. No history row is edited or deleted.
 
 The API below `/v1/workspaces/:workspaceId/company-profile` exposes current and
 historical revisions, one revision, deterministic JSON diff, direct-admin
-update-and-activate, proposal activation, and rollback. The Company Brain UI uses
-only this API. List responses contain a separate bounded `activeRevision`
+update-and-activate, proposal activation, and rollback. Purpose-built governance
+clients may use this API directly; the simplified organization settings entry
+uses the owner-confirmed agent administration path below. List responses contain a separate bounded `activeRevision`
 lookup in addition to the bounded newest-revision page, so more than 50 newer
 proposals cannot hide the effective profile or initialize the editor from an
 empty value.
 
-## Durable-learning adapter contract
+## Durable-learning adapter compatibility contract
 
-The canonical router sends only organization-scope `company_profile` subjects here:
+The authority-native adapter retains the original organization-scope subjects
+so historical receipts, rollbacks, and rolling clients remain valid:
 
 | Router subject | Authority operation |
 | --- | --- |
 | `company_identity` | replace `identity` |
 | `company_mission` | replace `mission` |
-| `company_product` | stable-key upsert in `products` |
-| `company_customer` | stable-key upsert in `customers` |
-| `company_goal` | stable-key upsert in `goals` |
-| `company_constraint` | stable-key upsert in `constraints` |
+| `company_product` | legacy stable-key upsert in `products` (not prompt-composed) |
+| `company_customer` | legacy stable-key upsert in `customers` (not prompt-composed) |
+| `company_goal` | legacy stable-key upsert in `goals` (not prompt-composed) |
+| `company_constraint` | legacy stable-key upsert in `constraints` (not prompt-composed) |
 
 Repeatable list subjects require a valid stable key and fail closed without one.
+New learning decisions must route those facts to organization-scoped knowledge;
+this adapter compatibility is not permission to create new standing fields.
 `createCompanyProfileDurableLearningAdapter` is the concrete structural adapter
 installed under canonical durable-learning router's `authorities.company_profile` port. It accepts the
 router's attempt/request/decision envelope, requires the resolved organization
@@ -213,7 +228,7 @@ authority operation id, and delegates only to `writeCompanyProfileLearning` or
 attempt ledger, or workspace learning-policy resolver.
 
 `authority=proposal` appends an inactive proposal revision and never changes the
-head. `authority=active` appends and activates one full-profile revision, returns
+head. `authority=active` appends and activates one compatibility-profile revision, returns
 `effectiveBoundary=next_accepted_attempt`, and returns an opaque rollback token.
 The operation identity is the router attempt id, so exact router retry converges
 without duplicate profile state. The router remains responsible for attempt-ledger
@@ -223,36 +238,38 @@ receipts and public `AUTHORITY_WRITE_FAILED` translation.
 
 The first-party `company_profile_propose` and `company_profile_confirm` tools
 (`apps/api/src/mcp/company-profile-agent-admin.ts`) are the agent-facing path the
-Company Brain "Create with OpenGeni" prompt directs a session to. They register
+Organization settings → Knowledge "Create with OpenGeni" prompt directs a session to. They register
 only for exact worker-signed agent attempts with `workspace:read` plus
-`sessions:control`. Proposal input is the complete profile; omitted list keys are
-derived from entry content and de-duplicated before the exact canonical profile
-is hashed. The proposal appends one inactive revision with `agent_admin`
+`sessions:control`. Proposal input contains only identity and mission; the
+canonical compatibility lists are written empty before the exact profile is
+hashed. The proposal appends one inactive revision with `agent_admin`
 provenance and returns the exact structured-human-input payload. It never changes
 the head or activation events.
 
 Proposal input is validated against `AgentAuthoredCompanyProfileContent` rather
 than `CompanyProfileContent`, so the agent bounds in "Bounded structured content"
 above apply here and not on the manual `account:admin` route. The tool
-description states both those bounds and the authoring style, because a model
-left to itself writes an essay into a field that is then prepended to every
+description states those scalar bounds and the authoring style, because a model
+left to itself writes an essay into a field that is then prepended to every root
 prompt in the organization: one concise descriptive statement per field, no
 numbered procedure and no marketing copy. The style clause used for workspace
 rules is deliberately not reused here; a profile is descriptive, not an
 instruction, so "write one imperative rule" would be the wrong shape.
 
 The returned question's `helpText` binds the revision number and content
-SHA-256 and renders a readable summary of the proposed identity, mission,
-products, customers, goals, and constraints (bounded to the human-input
-contract), never raw JSON.
+SHA-256 and renders a readable summary of the proposed identity and mission
+(bounded to the human-input contract), never raw JSON. Migration `0357` narrows
+new confirmation copy while preserving immutable prompts on older proposals;
+during a rolling deploy it still discloses any nonempty legacy lists submitted
+by an older API instance before the human can activate them.
 
 Only `company_profile_confirm`, after the initiating owner answered the bound
 question with `activate`, can move the head. It revalidates the live attempt,
 current organization role, proposal receipt/hash, human-input request, and
-active-head compare-and-swap baseline. The Company Brain → Company profile &
-goals view also lists inactive revisions under "Pending proposals" so a current
-`account:admin` human can review and activate them manually through the same
-lifecycle. The earlier proposal-only `company_profile_propose` tool
+active-head compare-and-swap baseline. The simplified organization Knowledge
+section intentionally does not expose revision lists or proposal lifecycle
+controls; those remain available through the canonical API for authorized
+governance clients. The earlier proposal-only `company_profile_propose` tool
 (`durable_learning` provenance, `agent-attempt:<attemptId>` source id) and its
 `proposeCompanyProfile` helper are retired; this propose/confirm path fully
 supersedes them.
@@ -269,7 +286,8 @@ The existing workspace-governance composer is the sole prompt authority. When a
 profile is active, the bounded deterministic order after non-bypassable platform
 CORE is:
 
-1. organization company profile;
+1. organization identity and mission, plus explicitly labeled nonempty legacy
+   details retained by an older active revision until replacement;
 2. organization preference descriptors;
 3. workspace charter;
 4. workspace global policy;
@@ -288,14 +306,15 @@ ceiling. Snapshot/revision hashes and activation evidence are prompt-visible;
 raw operation ids, actor identities, source ids, Documents, Memory, and
 preference full content are not.
 
-When no company profile exists, its section is absent. Existing legacy
-workspace persona and structured policy/preference composition remain
-byte-for-byte unchanged; migration `0201` performs no backfill and creates no
-default profile.
+When an active revision contains only historical list fields, its compatibility
+section remains present until replacement. When all six fields are empty, the
+section is absent. Migration `0201` performs no backfill and creates no default
+profile.
 
 ## Deliberate non-goals
 
-This authority does not implement natural-language remember commands, learning-policy
-resolution, durable-learning routing/ledger storage, Documents ingestion or search,
-Memory, Preference Registry, workspace charter/policy activation, or generic
-company knowledge retrieval.
+This authority does not implement natural-language remember commands,
+learning-policy resolution, Documents ingestion/search, automatic derivation of
+organization knowledge, Memory, Skills, workspace-instruction activation, or a
+generic company knowledge explorer. Organization Documents own that larger
+retrieval surface.

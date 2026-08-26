@@ -63,6 +63,7 @@ import {
   hasWorkspacePermission,
 } from "@/lib/permissions";
 import type { ApiKey, SlackUserLinkAccessRequest } from "@/types";
+import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 
 export function WorkspaceSettingsRoute({
   workspaceId,
@@ -408,6 +409,8 @@ export function WorkspaceSettingsRoute({
                 <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
               </div>
             </section>
+
+            <WorkspaceLearningAdministration workspaceId={workspaceId} />
           </>
         ) : null}
 

@@ -16,6 +16,7 @@ import {
   type GovernedLearningActivationUndoReceipt as UndoReceipt,
   type UndoGovernedLearningActivationRequest as UndoRequest,
 } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls } from "./database";
@@ -560,6 +561,71 @@ export async function confirmRememberKnowledgeClaim(
   } catch (error) {
     translate(error);
   }
+}
+
+export type ConfirmedRememberKnowledgeMemorySource = {
+  text: string;
+  taskNoteId: string;
+};
+
+/**
+ * Resolve the exact text behind a completed remember confirmation. The
+ * content-free confirmation receipt is the authority; this read merely
+ * materializes the already-approved Task-note claim into retrievable Memory.
+ */
+export async function getConfirmedRememberKnowledgeMemorySource(
+  db: Database,
+  receipt: RememberKnowledgeConfirmationReceiptType,
+): Promise<ConfirmedRememberKnowledgeMemorySource> {
+  const confirmed = RememberKnowledgeConfirmationReceipt.parse(receipt);
+  const source = await withWorkspaceRls(db, confirmed.workspaceId, async (scoped) => {
+    const rows = await rawRows<{ note_text: string; task_note_id: string }>(
+      scoped,
+      sql`SELECT
+            fact.object_value #>> '{}' AS note_text,
+            evidence.task_note_id AS task_note_id
+          FROM knowledge_claims claim
+          JOIN knowledge_facts fact
+            ON fact.account_id = claim.account_id
+           AND fact.scope_key = claim.scope_key
+           AND fact.id = claim.fact_id
+          JOIN knowledge_claim_evidence evidence
+            ON evidence.account_id = claim.account_id
+           AND evidence.scope_key = claim.scope_key
+           AND evidence.claim_id = claim.id
+          JOIN knowledge_claim_reviews review
+            ON review.account_id = claim.account_id
+           AND review.scope_key = claim.scope_key
+           AND review.claim_id = claim.id
+          WHERE claim.account_id = ${confirmed.accountId}::uuid
+            AND claim.scope_kind = 'workspace'
+            AND claim.scope_workspace_id = ${confirmed.workspaceId}::uuid
+            AND claim.scope_subject_id IS NULL
+            AND claim.id = ${confirmed.claimId}::uuid
+            AND claim.extraction_method = 'task-note-promotion-v1'
+            AND claim.initiating_human_subject_id = ${confirmed.initiatingHumanSubjectId}
+            AND fact.object_kind = 'text'
+            AND evidence.id = ${confirmed.evidenceId}::uuid
+            AND evidence.task_note_id = ${confirmed.taskNoteId}::uuid
+            AND evidence.task_note_version = 1
+            AND evidence.content_hash = ${confirmed.taskNoteTextHash}
+            AND review.id = ${confirmed.approvalReviewId}::uuid
+            AND review.state = 'approved'
+          LIMIT 1`,
+    );
+    return rows[0] ?? null;
+  });
+  if (
+    !source ||
+    source.task_note_id !== confirmed.taskNoteId ||
+    createHash("sha256").update(source.note_text, "utf8").digest("hex") !==
+      confirmed.taskNoteTextHash
+  ) {
+    throw new GovernedLearningActivationInvalidOperationError(
+      "remember Knowledge confirmation no longer resolves to its exact approved text",
+    );
+  }
+  return { text: source.note_text, taskNoteId: source.task_note_id };
 }
 
 /**

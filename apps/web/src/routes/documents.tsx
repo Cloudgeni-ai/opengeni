@@ -28,6 +28,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { usePageLiveActivity } from "@opengeni/react";
 import { listViewState } from "@/lib/load-state";
 import type {
@@ -38,6 +39,10 @@ import type {
 } from "@/types";
 
 export const DEFAULT_DOCUMENT_AUTHORITY_KIND: DocumentAuthorityKind = "workspace";
+
+export function defaultDocumentAuthorityKind(personalWorkspace: boolean): DocumentAuthorityKind {
+  return personalWorkspace ? "personal" : DEFAULT_DOCUMENT_AUTHORITY_KIND;
+}
 
 export const DOCUMENT_AUTHORITY_OPTIONS = [
   { value: "organization", label: "Company" },
@@ -148,12 +153,16 @@ export function localPopulatedDocumentsPreview(
 export function DocumentsRoute({
   workspaceId,
   returnToBrain = false,
+  authorityKind,
 }: {
   workspaceId: string;
   returnToBrain?: boolean;
+  authorityKind?: DocumentAuthorityKind;
 }) {
   const context = useAppContext();
   const client = context.client;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
   const pageLive = usePageLiveActivity();
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
@@ -166,7 +175,7 @@ export function DocumentsRoute({
   const [query, setQuery] = useState("");
   const [dropText, setDropText] = useState("");
   const [dropAuthorityKind, setDropAuthorityKind] = useState<DocumentAuthorityKind>(
-    DEFAULT_DOCUMENT_AUTHORITY_KIND,
+    () => authorityKind ?? defaultDocumentAuthorityKind(personalWorkspace),
   );
   const [dropping, setDropping] = useState(false);
   const dropFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -180,9 +189,12 @@ export function DocumentsRoute({
   // Set when background indexing-status polling fails, so stale "indexing…"
   // rows carry a visible notice instead of silently freezing.
   const [pollFailed, setPollFailed] = useState(false);
-  const failedDocuments = documents.filter((document) => document.status === "failed");
   const populatedPreview = localPopulatedDocumentsPreview(window.location.search, workspaceId);
-  const visibleDocuments = populatedPreview?.documents ?? documents;
+  const allVisibleDocuments = populatedPreview?.documents ?? documents;
+  const visibleDocuments = authorityKind
+    ? allVisibleDocuments.filter((document) => document.authorityKind === authorityKind)
+    : allVisibleDocuments;
+  const failedDocuments = visibleDocuments.filter((document) => document.status === "failed");
   // Honest list states: an initial fetch renders as loading and a failed load
   // as an error with retry instead of exposing the internal storage model.
   const basesView = listViewState({
@@ -190,13 +202,20 @@ export function DocumentsRoute({
     error: basesError,
     count: bases.length,
   });
-  const documentsView = listViewState({
-    loading: documentsLoading,
-    error: documentsError,
-    count: documents.length,
-  });
   const visibleBasesView = populatedPreview ? "ready" : basesView;
-  const visibleDocumentsView = populatedPreview ? "ready" : documentsView;
+  const visibleDocumentsView = populatedPreview
+    ? visibleDocuments.length === 0
+      ? "empty"
+      : "ready"
+    : listViewState({
+        loading: documentsLoading,
+        error: documentsError,
+        count: visibleDocuments.length,
+      });
+
+  useEffect(() => {
+    setDropAuthorityKind(authorityKind ?? defaultDocumentAuthorityKind(personalWorkspace));
+  }, [authorityKind, personalWorkspace, workspaceId]);
 
   const refreshBases = useCallback(async () => {
     setBasesLoading(true);
@@ -350,10 +369,19 @@ export function DocumentsRoute({
     try {
       const response = await client.searchKnowledge(workspaceId, {
         query: query.trim(),
-        limit: 8,
+        // The API currently searches the caller's complete effective knowledge.
+        // Fetch a wider candidate set before applying a scoped explorer filter so
+        // relevant organization/personal results are not displaced by another
+        // authority in the first eight matches.
+        limit: authorityKind ? 50 : 8,
         mode: "hybrid",
       });
-      setResults(response.results);
+      setResults(
+        (authorityKind
+          ? response.results.filter((result) => result.authorityKind === authorityKind)
+          : response.results
+        ).slice(0, 8),
+      );
       setSearched(query.trim());
     } catch (error) {
       // Clear stale matches so a failed search never leaves prior results
@@ -436,8 +464,14 @@ export function DocumentsRoute({
       <section className="flex min-h-0 flex-1 flex-col text-left">
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
-          title="Documents"
-          description="Add information agents can find when it is relevant."
+          title={personalWorkspace ? "Your Documents" : "Documents"}
+          description={
+            authorityKind === "organization"
+              ? "Explore and add knowledge shared across this organization."
+              : personalWorkspace
+                ? "Manage your private documents and the company knowledge available to you."
+                : "Add information agents can find when it is relevant."
+          }
         />
         {returnToBrain ? (
           <Link
@@ -447,8 +481,23 @@ export function DocumentsRoute({
             className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
           >
             <ArrowLeftIcon className="size-3" />
-            Back to Company Brain
+            Back to Agent Knowledge
           </Link>
+        ) : null}
+
+        {personalWorkspace ? (
+          <Notice tone="info" className="mt-5" title="Your personal document library">
+            New knowledge defaults to Only me. Personal documents belong to you and can follow you
+            into other workspaces in this organization; company documents you can access are shown
+            with their own scope label.
+          </Notice>
+        ) : null}
+
+        {authorityKind === "organization" ? (
+          <Notice tone="info" className="mt-5" title="Company knowledge">
+            This view shows only organization-scoped Documents. New knowledge defaults to Company
+            and is available across authorized workspaces in this organization.
+          </Notice>
         ) : null}
 
         <div
@@ -544,7 +593,13 @@ export function DocumentsRoute({
               <>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
-                    <div className="truncate text-base font-medium">Your documents</div>
+                    <div className="truncate text-base font-medium">
+                      {authorityKind === "organization"
+                        ? "Organization knowledge"
+                        : personalWorkspace
+                          ? "Knowledge available to you"
+                          : "Your documents"}
+                    </div>
                   </div>
                   {failedDocuments.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
@@ -601,7 +656,11 @@ export function DocumentsRoute({
                   ) : visibleDocumentsView === "empty" ? (
                     <EmptyState
                       icon={<FilesIcon className="size-4" />}
-                      title="No documents yet"
+                      title={
+                        authorityKind === "organization"
+                          ? "No organization documents yet"
+                          : "No documents yet"
+                      }
                       description={
                         fileUploadsEnabled
                           ? "Add files or text above to make them available to agents."

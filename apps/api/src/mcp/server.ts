@@ -3257,7 +3257,7 @@ function registerPreferenceRegistryTools(
     "preference_registry_summary",
     {
       description:
-        "List bounded deterministic descriptors for organization, workspace, and immutable initiating-human preferences frozen to this exact attempt. Full content is omitted; retrieve only a relevant returned handle.",
+        "List bounded deterministic Skill descriptors for organization, workspace, and the immutable initiating human, frozen to this exact attempt. Full Skill instructions are omitted; retrieve only a relevant returned handle.",
       inputSchema: {},
     },
     async () => json(await getOrCreatePreferenceRegistrySnapshot(deps.db, attemptClaims())),
@@ -3267,7 +3267,7 @@ function registerPreferenceRegistryTools(
     "preference_registry_get",
     {
       description:
-        "Retrieve full content for one preference in this exact attempt snapshot. Handles from another account, workspace, human, or attempt are rejected.",
+        "Retrieve the full instructions for one Skill in this exact attempt snapshot. Handles from another account, workspace, human, or attempt are rejected.",
       inputSchema: { retrievalHandle: z4.string().min(1).max(512) },
     },
     async ({ retrievalHandle }) =>

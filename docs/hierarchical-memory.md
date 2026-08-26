@@ -7,6 +7,29 @@ deterministic apply/revert operations, and FORCE-RLS enforcement. A later
 reversible containment slice changes only how the legacy V1 surface contributes
 to model context; it does not adopt the final scoped selector or write router.
 
+## Agent Knowledge routing contract
+
+Agent Knowledge is not one generic storage destination. Agents and user-facing
+creation flows apply these boundaries:
+
+- a specific fact, decision, incident, bug fix, or confirmed outcome that a user
+  asks to remember uses `remember lane=knowledge`. It enters the governed
+  scoped-Knowledge review lifecycle; after the initiating human confirms the
+  exact text, that text is materialized as an active `knowledge_memories` record
+  and can be found later through `memory_search` and the Memory UI;
+- reusable conditional how-to guidance belongs in a Skill backed by the
+  structured preference authority;
+- an unconditional rule that every agent must follow belongs in Workspace
+  instructions and should use the minimum wording that fully states the rule.
+
+The same material should not be copied across these authorities. A Workspace
+instruction may tell agents to search for related incidents, while the incident
+itself remains Memory and the reusable investigation method remains a Skill.
+Generic model-facing Memory write tools remain retired. `remember lane=knowledge`
+is the narrow exception: its claim review and exact human confirmation authorize
+one idempotent write through the canonical Memory gate, with claim, evidence,
+Task-note, and confirmation receipt ids retained as metadata.
+
 ## Data model
 
 `knowledge_memories` remains the canonical memory row. Migration

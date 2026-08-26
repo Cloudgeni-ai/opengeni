@@ -55,14 +55,14 @@ export default defineConfig({
             },
             {
               // The hierarchy rail is substantial and belongs to the lazy
-              // workspace shell. Its channel, browse, pin, and row-action
-              // expansion must not turn route-shared helpers into startup
-              // dependencies for signed-out and non-workspace pages.
+              // workspace shell. Keep the component itself route-only: a
+              // recursive entry-aware group can merge it into the direct
+              // session graph when an unrelated lazy route becomes smaller.
+              // Its shared helpers remain available for normal consumer-aware
+              // splitting without pulling the full rail implementation in.
               name: "session-rail",
               test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/]session-list\.tsx$/,
-              includeDependenciesRecursively: true,
-              entriesAware: true,
-              entriesAwareMergeThreshold: 192 * 1024,
+              includeDependenciesRecursively: false,
               priority: 3,
             },
             {
@@ -122,6 +122,25 @@ export default defineConfig({
               entriesAware: true,
               entriesAwareMergeThreshold: 128 * 1024,
               priority: 3,
+            },
+            {
+              // Route simplification can otherwise make entry-aware merging
+              // attach the large Office command/query schemas to the live
+              // session graph. Keep these editor-only contracts behind the
+              // editable-artifact routes that consume them.
+              name: "editable-artifact-contracts",
+              test: /packages[\\/]contracts[\\/]src[\\/](?:document-artifact-(?:commands|query)|presentation-artifact-(?:commands|query)|spreadsheet-artifact-(?:commands|date|query)|editable-artifact-(?:binary|causal-frontier|codec-registry|committed-transaction|live|serialized-commit|versions)|editable-artifacts)\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
+              // Skills administration is lazy workspace governance. Pinning
+              // its schema prevents a small Agent Knowledge route from
+              // re-bucketing that schema into every direct session load.
+              name: "preference-registry-contracts",
+              test: /packages[\\/]contracts[\\/]src[\\/]preference-registry\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
             },
             {
               // Keep schema parsing from being folded into a larger shared

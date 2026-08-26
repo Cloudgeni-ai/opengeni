@@ -4,177 +4,102 @@ async function source(path: string): Promise<string> {
   return Bun.file(`${import.meta.dir}/${path}`).text();
 }
 
-describe("Company Brain authority surface", () => {
-  test("registers a first-class workspace route and rail destination", async () => {
+describe("Agent Knowledge surface", () => {
+  test("registers the renamed workspace destination with only focused subviews", async () => {
     const [app, navigation] = await Promise.all([
       source("App.tsx"),
       source("components/rail/workspace-nav-data.ts"),
     ]);
     expect(app).toContain('path: "state"');
     expect(app).toContain('import("@/routes/workspace-state")');
+    expect(app).toContain('search.view === "instructions" || search.view === "skills"');
     expect(navigation).toContain('to: "/workspaces/$workspaceId/state"');
-    expect(navigation).toContain('label: "Company Brain"');
-    expect(navigation).toContain('description: "Knowledge, rules, guides, review, and learning"');
+    expect(navigation).toContain('label: "Agent Knowledge"');
+    expect(navigation).toContain('description: "Instructions, skills, documents, and memory"');
   });
 
-  test("keeps the default Company Brain simple while preserving canonical governance APIs", async () => {
-    const [route, overview, prompt, loader, preferences, exportControl] = await Promise.all([
+  test("keeps the default page to four understandable destinations", async () => {
+    const [route, overview, preferences] = await Promise.all([
       source("routes/workspace-state.tsx"),
       source("routes/agent-brain-overview.tsx"),
-      source("routes/agent-brain-prompt.tsx"),
-      source("routes/workspace-state-loader.ts"),
       source("routes/preference-registry-admin.tsx"),
-      source("routes/company-brain-export.tsx"),
     ]);
     for (const required of [
-      "Loading Company Brain",
-      "Couldn't load Company Brain",
-      "Knowledge, rules, guides, review, and learning",
-      "Always followed",
-      "Company profile & goals",
-      "Not configured",
+      "Agent Knowledge",
+      "Loading Agent Knowledge",
+      "Couldn't load Agent Knowledge",
+      "Back to Agent Knowledge",
       "Workspace instructions",
-      "Not set",
-      "Guides & preferences",
-      "Short summaries are always known; full instructions are fetched when needed.",
-      "Back to Company Brain",
-      "Instructions for this workspace",
-      "Save instructions",
-      "Changes are versioned and can be audited or rolled back.",
+      "Current instruction",
+      "Loading current instruction",
+      "Edit manually",
+      "Skills",
+      "Documents",
+      "Memory",
+      "How agents work",
+      "What agents can find",
+    ]) {
+      expect(`${route}\n${overview}`).toContain(required);
+    }
+    for (const removed of [
+      "Always followed",
       "Available when needed",
       "Needs attention",
       "Recent changes",
-      "Export OKF",
-      "Documents",
-      "Memory",
-      "Facts, decisions and observations learned across agent work.",
+      "Learning & autonomy",
+      "Company profile & goals",
       "Advanced & diagnostics",
-      "Technical details, audit history and administration.",
-      "No instruction-policy revisions exist yet.",
-      "Preference authority inventory",
-      "PreferenceRegistryAdministration",
-      "Company documents",
-      "Workspace documents",
-      "Personal documents",
-      "No document bases are visible.",
-      "No knowledge counts were disclosed.",
-      "Current versus snapshot",
-      "Accepted snapshot",
-      "Current authority",
-      "Deterministic drift compares stable IDs",
-      "Base list truncated",
-      "Memory sample reached",
-      "Create draft proposal",
-      "Proposals never activate themselves",
-      "Inactive proposal",
+      "LazyCompanyBrainInspector",
+      "CompanyBrainExportButton",
     ]) {
-      expect(`${route}\n${overview}\n${exportControl}`).toContain(required);
+      expect(`${route}\n${overview}`).not.toContain(removed);
     }
-    expect(route.indexOf("<BrainOverview")).toBeLessThan(route.indexOf('id="brain-diagnostics"'));
-    expect(overview).toContain("search={{ view }}");
-    expect(overview).toContain('view="company"');
     expect(overview).toContain('view="instructions"');
-    expect(overview).toContain('view="preferences"');
+    expect(overview).toContain('view="skills"');
     expect(route).toContain("compact");
-    expect(preferences).toContain("Write manually");
-    expect(preferences).toContain("Save preference");
-    expect(preferences).toContain("Always visible summary");
-    expect(prompt).toContain("Tell OpenGeni what you want it to remember");
-    expect(prompt).toContain("Tell OpenGeni how agents should work");
-    expect(prompt).toContain("Tell OpenGeni about your company and goals");
-    expect(prompt).toContain("show you the result before saving it");
-    expect(prompt).toContain("context.startSession");
-    expect(prompt).toContain("canonical durable-learning");
-    expect(prompt).toContain("Never save the preference as ordinary Memory");
-    expect(overview).not.toContain("workspace_instruction_policy_heads");
-    expect(overview).not.toContain("Runtime composition");
-    expect(overview).not.toContain("Four authorities, two ways agents use them");
-    expect(route).not.toContain("Authoritative source surfaces");
-    expect(route).not.toContain("Generated {formatDate(state.generatedAt)}");
-    expect(route).toContain("open={diagnosticsOpen}");
-    expect(route.lastIndexOf("<PreferenceRegistryAdministration")).toBeGreaterThan(
-      route.indexOf('id="brain-diagnostics"'),
+    expect(preferences).toContain("Add skill manually");
+    expect(preferences).toContain("Save skill");
+    expect(preferences).toContain("Skill instructions");
+    expect(preferences).toContain("SkillSummary");
+    expect(route).toContain("Your Agent Knowledge");
+    expect(overview).toContain("Your personal workspace");
+    expect(overview).toContain("Personal workspace instructions");
+    expect(preferences).toContain("Your personal Skills");
+    expect(preferences).toContain("Company and workspace Skills available here");
+  });
+
+  test("routes organization profile and learning autonomy to settings", async () => {
+    const [organization, shell, workspaceSettings, learning] = await Promise.all([
+      source("routes/org-settings.tsx"),
+      source("components/settings/organization-settings-shell.tsx"),
+      source("routes/workspace-settings.tsx"),
+      source("routes/workspace-learning-admin.tsx"),
+    ]);
+    expect(shell).toContain('id: "knowledge"');
+    expect(shell).toContain('title: "Organization knowledge"');
+    expect(organization).toContain('section === "knowledge"');
+    expect(organization).toContain("OrganizationKnowledgePrompt");
+    expect(organization).toContain("Organization identity");
+    expect(organization).toContain("Explore organization knowledge");
+    expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
+    expect(learning).toContain("Learning & autonomy");
+  });
+
+  test("teaches agents the three durable destinations and compact instruction budget", async () => {
+    const [prompt, remember, governance] = await Promise.all([
+      source("routes/agent-brain-prompt.tsx"),
+      source("../../api/src/mcp/remember.ts"),
+      source("../../api/src/mcp/company-brain-governed-writes.ts"),
+    ]);
+    expect(prompt).toContain("normally 1–5 sentences and no more than 120 words");
+    expect(prompt).toContain("fact, decision, incident, bug fix, or outcome");
+    expect(prompt).toContain("Describe a reusable skill");
+    expect(prompt).toContain("one-sentence always-visible summary");
+    expect(remember).toContain(
+      "lane=knowledge for a fact, decision, incident, bug fix, or outcome",
     );
-    expect(overview).not.toMatch(/getPreferenceRegistry|preference_registry_get/);
-    expect(loader).toContain("getWorkspaceState");
-    expect(loader).toContain("listWorkspaceInstructionPolicyOnboardingProposals");
-    expect(loader).toContain("listPreferenceRegistry");
-    expect(loader).toContain("getPreferenceRegistry");
-    expect(loader).toContain("listCompanyProfile");
-    expect(route).toContain("CompanyProfileInventory");
-    expect(route).toContain("inventory.response?.activeRevision");
-    expect(route).not.toContain("inventory.response.revisions.find");
-    for (const required of [
-      "Organization company profile",
-      "Concise mandatory context shared across the organization",
-      "Edit organization company profile",
-      "Save and activate new revision",
-      "Only organization owners and admins can edit or activate the company profile",
-      "Pending proposals",
-      "Only an organization owner or admin can activate this proposal.",
-      "Current revision",
-      "Activation version",
-      "History",
-      "Activate",
-      "Rollback",
-    ]) {
-      expect(route).toContain(required);
-    }
-    for (const operation of [
-      "updateCompanyProfile",
-      "activateCompanyProfileRevision",
-      "rollbackCompanyProfile",
-    ]) {
-      expect(route).toContain(operation);
-    }
-    expect(route.indexOf("<CompanyProfileInventory")).toBeLessThan(
-      route.indexOf('id="brain-diagnostics"'),
-    );
-    expect(route).toContain("createWorkspaceInstructionPolicyOnboardingProposal");
-    expect(route).toContain("onReviewSummary={updatePreferenceReview}");
-    expect(route).toContain("onReviewSummary={updateOnboardingReview}");
-    expect(overview).toContain("deriveBrainAttention");
-    expect(overview).toContain("Proposal review is still loading");
-    expect(overview).toContain("Some learned memories await review");
-    expect(overview).not.toContain("No review needed");
-    for (const required of [
-      "dedicated organization/workspace/personal registry",
-      "not ordinary Memory",
-      "Create structured preference proposal",
-      "Organization",
-      "Workspace",
-      "Personal",
-      "Full content stays on demand",
-      "preference_registry_summary",
-      "preference_registry_get",
-      "Immutable revisions and rollback",
-      "Create correction revision",
-      "Retained head descriptor",
-      "Supersede with replacement",
-      "Refresh registry and detail",
-      "correction immediately activates",
-      "Immutable lifecycle audit",
-      "automatic-activation seam",
-    ]) {
-      expect(preferences).toContain(required);
-    }
-    for (const operation of [
-      "createPreferenceRegistryProposal",
-      "activatePreferenceRegistryRevision",
-      "correctPreferenceRegistry",
-      "changePreferenceRegistryScope",
-      "deactivatePreferenceRegistry",
-      "supersedePreferenceRegistry",
-      "rejectPreferenceRegistryProposal",
-    ]) {
-      expect(preferences).toContain(operation);
-    }
-    expect(route).toContain("createWorkspaceInstructionPolicyDraft");
-    expect(route).toContain("activateWorkspaceInstructionPolicyRevision");
-    expect(`${route}\n${overview}\n${loader}\n${preferences}`).not.toMatch(
-      /updateKnowledgeMemory|createKnowledgeMemory/,
-    );
-    expect(route).not.toMatch(/method:\s*["'](?:POST|PATCH|PUT|DELETE)/);
-    expect(route).not.toContain("policy snapshots are not implemented");
+    expect(remember).toContain("lane=preference creates a Skill");
+    expect(governance).toContain("Use this only for a minimal universal rule");
+    expect(governance).toContain("workspace Skill proposal");
   });
 });

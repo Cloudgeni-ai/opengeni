@@ -1765,6 +1765,7 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective.",
+    "When the user explicitly asks you to remember or learn something, use the remember tool when it is available and route it by purpose: lane=knowledge for facts, decisions, incidents, bug fixes, and outcomes that should become searchable Memory; lane=preference (a Skill) for reusable conditional how-to guidance; lane=instruction_policy only for the shortest universal rules every agent must follow. After a confirmed lane=knowledge save, retrieve it later with memory_search. Do not store the same material in multiple authorities.",
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.

@@ -346,6 +346,49 @@ function controlForLabel<T extends HTMLInputElement | HTMLTextAreaElement | HTML
 }
 
 describe("structured preference Workspace State administration", () => {
+  test("foregrounds personal Skills and defaults new Skills to Personal in a personal workspace", async () => {
+    const personalPreference: PreferenceRegistryRecord = {
+      ...preference,
+      id: "00000000-0000-4000-8000-000000000012",
+      stableKey: "response.personal",
+      target: { scope: "user", workspaceId: null, subjectId: "user:admin" },
+      activeRevision: {
+        ...revisionTwo,
+        id: "00000000-0000-4000-8000-000000000013",
+        preferenceId: "00000000-0000-4000-8000-000000000012",
+        title: "My concise updates",
+      },
+    };
+    listPreferenceRegistry.mockImplementationOnce(async () => ({
+      preferences: [preference, personalPreference],
+    }));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            onWorkspaceStateReload={async () => undefined}
+            compact
+            personalWorkspace
+          />,
+        ),
+      );
+      await settle();
+
+      expect(controlForLabel<HTMLSelectElement>(container, "Who should use it?").value).toBe(
+        "user",
+      );
+      expect(container.textContent).toContain("Your personal Skills");
+      expect(container.textContent).toContain("My concise updates");
+      expect(container.textContent).toContain("Company and workspace Skills available here");
+      expect(container.textContent).toContain("Concise recommendations");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
   test("reports loading while a cached preference inventory refresh is pending", async () => {
     const onReviewSummary = mock(() => undefined);
     const container = document.createElement("div");
@@ -549,6 +592,57 @@ describe("structured preference Workspace State administration", () => {
       });
       expect(container.textContent).toContain(
         "Organization proposal created inactive. No prompt behavior changed.",
+      );
+      expect(reloadWorkspaceState).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  test("keeps a partial compact Skill save visible and lets the user finish activation", async () => {
+    const pending = {
+      ...preference,
+      status: "proposed" as const,
+      activeRevision: null,
+      activationVersion: 0,
+    };
+    listPreferenceRegistry.mockResolvedValueOnce({ preferences: [pending] });
+    getPreferenceRegistry.mockResolvedValueOnce({ ...detail, preference: pending });
+    const reloadWorkspaceState = mock(async () => undefined);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <PreferenceRegistryAdministration
+            workspaceId={workspaceId}
+            compact
+            onWorkspaceStateReload={reloadWorkspaceState}
+          />,
+        ),
+      );
+      await settle();
+
+      expect(container.textContent).toContain("Skill needs activation");
+      expect(container.textContent).toContain("No agent is using it yet");
+      const finish = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Finish saving",
+      )!;
+      expect(finish).toBeDefined();
+      await act(async () => {
+        finish.click();
+        await Promise.resolve();
+      });
+      await settle();
+
+      expect(activatePreferenceRegistryRevision).toHaveBeenCalledWith(
+        workspaceId,
+        pending.id,
+        expect.objectContaining({
+          expectedCurrentRevisionId: null,
+          expectedScopeVersion: pending.scopeVersion,
+          reason: "Finished saving from Agent Knowledge",
+        }),
       );
       expect(reloadWorkspaceState).toHaveBeenCalledTimes(1);
     } finally {

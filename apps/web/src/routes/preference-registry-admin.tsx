@@ -35,7 +35,7 @@ import {
   usePreferenceRegistryDetail,
   usePreferenceRegistryInventory,
 } from "./workspace-state-loader";
-import { AgentBrainPrompt } from "./agent-brain-prompt";
+import { AgentKnowledgePrompt } from "./agent-brain-prompt";
 
 export type PreferenceRegistryReviewSummary = {
   status: "loading" | "unavailable" | "ready";
@@ -185,6 +185,7 @@ function ScopeAuthorityNotice({
 
 function PreferenceProposalComposer({
   workspaceId,
+  personalWorkspace,
   directHuman,
   canManageOrganization,
   canManageWorkspace,
@@ -193,6 +194,7 @@ function PreferenceProposalComposer({
   onCreated,
 }: {
   workspaceId: string;
+  personalWorkspace: boolean;
   directHuman: boolean;
   canManageOrganization: boolean;
   canManageWorkspace: boolean;
@@ -201,7 +203,11 @@ function PreferenceProposalComposer({
   onCreated: (preference: PreferenceRegistryRecord) => Promise<void>;
 }) {
   const { client } = useAppContext();
-  const defaultScope: PreferenceRegistryScope = canManageWorkspace ? "workspace" : "user";
+  const defaultScope: PreferenceRegistryScope = personalWorkspace
+    ? "user"
+    : canManageWorkspace
+      ? "workspace"
+      : "user";
   const [scope, setScope] = useState<PreferenceRegistryScope>(defaultScope);
   const [stableKey, setStableKey] = useState("");
   const [title, setTitle] = useState("");
@@ -215,6 +221,10 @@ function PreferenceProposalComposer({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [createdMessage, setCreatedMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setScope(defaultScope);
+  }, [defaultScope, workspaceId]);
 
   const canManageScope =
     directHuman &&
@@ -249,9 +259,10 @@ function PreferenceProposalComposer({
       });
       if (compact) {
         const detail = await client.getPreferenceRegistry(workspaceId, preference.id);
-        const revision = detail.revisions.reduce((latest, candidate) =>
-          candidate.revision > latest.revision ? candidate : latest,
-        );
+        const revision = [...detail.revisions].sort(
+          (left, right) => right.revision - left.revision,
+        )[0];
+        if (!revision) throw new Error("The Skill proposal has no revision to activate.");
         const activated = await client.activatePreferenceRegistryRevision(
           workspaceId,
           preference.id,
@@ -259,7 +270,7 @@ function PreferenceProposalComposer({
             revisionId: revision.id,
             expectedCurrentRevisionId: null,
             expectedScopeVersion: preference.scopeVersion,
-            reason: "Saved by a user from Company Brain",
+            reason: "Saved by a user from Agent Knowledge",
           },
         );
         preference = activated.preference;
@@ -274,7 +285,7 @@ function PreferenceProposalComposer({
       setExpiresAt("");
       setCreatedMessage(
         compact
-          ? `${scopeLabel(preference.target.scope)} preference saved. Agents can now use it.`
+          ? `${scopeLabel(preference.target.scope)} skill saved. Agents can now use it.`
           : `${scopeLabel(preference.target.scope)} proposal created inactive. No prompt behavior changed.`,
       );
       await onCreated(preference);
@@ -288,10 +299,10 @@ function PreferenceProposalComposer({
   return (
     <details open={defaultOpen} className="rounded-md border border-border bg-surface-2/20">
       <summary className="cursor-pointer px-3 py-3 text-sm font-medium text-fg">
-        {compact ? "Write manually" : "Create structured preference proposal"}
+        {compact ? "Add skill manually" : "Create structured preference proposal"}
       </summary>
       <form
-        aria-label={compact ? "Add preference" : "Create structured preference proposal"}
+        aria-label={compact ? "Add skill" : "Create structured preference proposal"}
         className="grid gap-3 border-t border-border p-3"
         onSubmit={(event) => void submit(event)}
       >
@@ -362,7 +373,7 @@ function PreferenceProposalComposer({
           </label>
         </div>
         <label className="grid gap-1 text-xs font-medium text-fg-muted">
-          {compact ? "Instructions" : "Full preference content"}
+          {compact ? "Skill instructions" : "Full preference content"}
           <textarea
             className={`${fieldClass} min-h-36 leading-6`}
             placeholder={
@@ -465,7 +476,7 @@ function PreferenceProposalComposer({
                 ? "Saving…"
                 : "Creating proposal…"
               : compact
-                ? "Save preference"
+                ? "Save skill"
                 : "Create inactive proposal"}
           </button>
         </div>
@@ -535,6 +546,85 @@ function PreferenceExample() {
         <span className="font-medium text-fg">Fetched when relevant:</span> Use short paragraphs.
         Mention decisions, blockers, and the next action. Avoid long implementation diaries.
       </p>
+    </div>
+  );
+}
+
+function SkillSummary({ preference }: { preference: PreferenceRegistryRecord }) {
+  const revision = preference.activeRevision;
+  if (!revision) return null;
+  return (
+    <article className="rounded-lg border border-border bg-surface p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-medium text-fg">{revision.title}</h3>
+        <span className="rounded-full border border-border px-2 py-0.5 text-2xs text-fg-muted">
+          {scopeLabel(preference.target.scope)}
+        </span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-fg-muted">{revision.description}</p>
+    </article>
+  );
+}
+
+function PendingSkillActivation({
+  workspaceId,
+  preference,
+  canManage,
+  onActivated,
+}: {
+  workspaceId: string;
+  preference: PreferenceRegistryRecord;
+  canManage: boolean;
+  onActivated: () => Promise<void>;
+}) {
+  const { client } = useAppContext();
+  const [activating, setActivating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const activate = async (): Promise<void> => {
+    if (!canManage || activating) return;
+    setActivating(true);
+    setError(null);
+    try {
+      const detail = await client.getPreferenceRegistry(workspaceId, preference.id);
+      const revision = [...detail.revisions].sort(
+        (left, right) => right.revision - left.revision,
+      )[0];
+      if (!revision) throw new Error("The Skill proposal has no revision to activate.");
+      await client.activatePreferenceRegistryRevision(workspaceId, preference.id, {
+        revisionId: revision.id,
+        expectedCurrentRevisionId: null,
+        expectedScopeVersion: preference.scopeVersion,
+        reason: "Finished saving from Agent Knowledge",
+      });
+      await onActivated();
+    } catch (caught) {
+      setError(registryErrorMessage(caught));
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-status-waiting/40 bg-status-waiting/5 p-3">
+      <div className="text-sm font-medium text-fg">Skill needs activation</div>
+      <p className="mt-1 text-xs leading-5 text-fg-muted">
+        {preference.stableKey} was created, but the final activation did not finish. No agent is
+        using it yet.
+      </p>
+      <button
+        type="button"
+        className={`${primaryButtonClass} mt-3`}
+        disabled={!canManage || activating}
+        onClick={() => void activate()}
+      >
+        {activating ? "Finishing…" : "Finish saving"}
+      </button>
+      {error ? (
+        <p role="alert" className="mt-2 text-xs text-status-error">
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -1172,11 +1262,13 @@ export function PreferenceRegistryAdministration({
   workspaceId,
   onWorkspaceStateReload,
   compact = false,
+  personalWorkspace = false,
   onReviewSummary,
 }: {
   workspaceId: string;
   onWorkspaceStateReload: () => Promise<void>;
   compact?: boolean;
+  personalWorkspace?: boolean;
   onReviewSummary?: (summary: PreferenceRegistryReviewSummary) => void;
 }) {
   const context = useAppContext();
@@ -1199,6 +1291,14 @@ export function PreferenceRegistryAdministration({
       (scope === "workspace" && canManageWorkspace) ||
       (scope === "organization" && canManageOrganization));
   const inventory = usePreferenceRegistryInventory(client, workspaceId);
+  const activeSkills = (inventory.response?.preferences ?? []).filter(
+    (preference) => preference.status === "active" && preference.activeRevision !== null,
+  );
+  const pendingSkills = (inventory.response?.preferences ?? []).filter(
+    (preference) => preference.status === "proposed",
+  );
+  const personalSkills = activeSkills.filter((preference) => preference.target.scope === "user");
+  const inheritedSkills = activeSkills.filter((preference) => preference.target.scope !== "user");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [manualDetailRefreshVersion, setManualDetailRefreshVersion] = useState(0);
 
@@ -1227,6 +1327,10 @@ export function PreferenceRegistryAdministration({
   }, [workspaceId]);
 
   useEffect(() => {
+    if (compact) {
+      setSelectedId(null);
+      return;
+    }
     const preferences = inventory.response?.preferences;
     if (!preferences?.length) {
       if (inventory.response) setSelectedId(null);
@@ -1235,9 +1339,9 @@ export function PreferenceRegistryAdministration({
     if (!selectedId || !preferences.some((preference) => preference.id === selectedId)) {
       setSelectedId(preferences[0]!.id);
     }
-  }, [inventory.response, selectedId]);
+  }, [compact, inventory.response, selectedId]);
 
-  const detail = usePreferenceRegistryDetail(client, workspaceId, selectedId);
+  const detail = usePreferenceRegistryDetail(client, workspaceId, compact ? null : selectedId);
   const reloadAll = async (): Promise<void> => {
     await Promise.all([inventory.reload(), detail.reload(), onWorkspaceStateReload()]);
   };
@@ -1287,29 +1391,32 @@ export function PreferenceRegistryAdministration({
         </div>
       )}
 
-      {compact ? <AgentBrainPrompt kind="preference" workspaceId={workspaceId} /> : null}
+      {compact ? (
+        <AgentKnowledgePrompt
+          kind="skill"
+          workspaceId={workspaceId}
+          personalWorkspace={personalWorkspace}
+        />
+      ) : null}
 
       <div className="mt-4">
         <PreferenceProposalComposer
           workspaceId={workspaceId}
+          personalWorkspace={personalWorkspace}
           directHuman={directHuman}
           canManageOrganization={canManageOrganization}
           canManageWorkspace={canManageWorkspace}
           defaultOpen={!compact}
           compact={compact}
           onCreated={async (preference) => {
-            setSelectedId(preference.id);
+            if (!compact) setSelectedId(preference.id);
             await Promise.all([inventory.reload(), onWorkspaceStateReload()]);
           }}
         />
       </div>
 
       <div
-        className={
-          compact && inventory.response?.preferences.length === 0
-            ? "min-w-0"
-            : "grid min-w-0 gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]"
-        }
+        className={compact ? "min-w-0" : "grid min-w-0 gap-4 lg:grid-cols-[20rem_minmax(0,1fr)]"}
       >
         <div className="min-w-0">
           {compact ? null : (
@@ -1330,7 +1437,10 @@ export function PreferenceRegistryAdministration({
               onRetry={() => void inventory.reload()}
             />
           ) : null}
-          {inventory.response?.preferences.length === 0 ? (
+          {inventory.response &&
+          (compact
+            ? activeSkills.length + pendingSkills.length
+            : inventory.response.preferences.length) === 0 ? (
             compact ? (
               <PreferenceExample />
             ) : (
@@ -1339,17 +1449,77 @@ export function PreferenceRegistryAdministration({
               </EmptyState>
             )
           ) : null}
-          {inventory.response?.preferences.length ? (
-            <div className="max-h-[36rem] divide-y divide-border overflow-y-auto rounded-md border border-border">
-              {inventory.response.preferences.map((preference) => (
-                <PreferenceRecordButton
+          {compact && pendingSkills.length > 0 ? (
+            <div className="mb-5 grid gap-3">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                Finish saving
+              </h3>
+              {pendingSkills.map((preference) => (
+                <PendingSkillActivation
                   key={preference.id}
+                  workspaceId={workspaceId}
                   preference={preference}
-                  selected={preference.id === selectedId}
-                  onSelect={() => setSelectedId(preference.id)}
+                  canManage={canManageScope(preference.target.scope)}
+                  onActivated={async () => {
+                    await Promise.all([inventory.reload(), onWorkspaceStateReload()]);
+                  }}
                 />
               ))}
             </div>
+          ) : null}
+          {(compact ? activeSkills.length : inventory.response?.preferences.length) ? (
+            compact ? (
+              personalWorkspace ? (
+                <div className="grid gap-5">
+                  <div>
+                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                      Your personal Skills
+                    </h3>
+                    {personalSkills.length > 0 ? (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {personalSkills.map((preference) => (
+                          <SkillSummary key={preference.id} preference={preference} />
+                        ))}
+                      </div>
+                    ) : (
+                      <EmptyState>
+                        No personal Skills yet. Add one above and it can follow you into other
+                        workspaces in this organization.
+                      </EmptyState>
+                    )}
+                  </div>
+                  {inheritedSkills.length > 0 ? (
+                    <div>
+                      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
+                        Company and workspace Skills available here
+                      </h3>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {inheritedSkills.map((preference) => (
+                          <SkillSummary key={preference.id} preference={preference} />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {activeSkills.map((preference) => (
+                    <SkillSummary key={preference.id} preference={preference} />
+                  ))}
+                </div>
+              )
+            ) : (
+              <div className="max-h-[36rem] divide-y divide-border overflow-y-auto rounded-md border border-border">
+                {inventory.response!.preferences.map((preference) => (
+                  <PreferenceRecordButton
+                    key={preference.id}
+                    preference={preference}
+                    selected={preference.id === selectedId}
+                    onSelect={() => setSelectedId(preference.id)}
+                  />
+                ))}
+              </div>
+            )
           ) : null}
           {inventory.error && inventory.response ? (
             <p className="mt-2 text-xs text-status-error">
@@ -1358,7 +1528,7 @@ export function PreferenceRegistryAdministration({
           ) : null}
         </div>
 
-        {compact && !selectedId ? null : (
+        {compact ? null : (
           <div className="min-w-0">
             <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-fg-subtle">
               Selected preference

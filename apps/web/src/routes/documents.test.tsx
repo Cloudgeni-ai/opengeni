@@ -83,6 +83,8 @@ const context = {
     createDocumentOriginalFileDownloadUrl,
   },
   clientConfig: { fileUploads: { enabled: true, maxSizeBytes: 10_000_000 } },
+  workspaces: [{ id: "workspace-a", accountId: "account-a", kind: "shared", settings: {} }],
+  managedSelfContext: null,
 };
 
 mock.module("@/context", () => ({
@@ -93,6 +95,7 @@ const {
   DEFAULT_DOCUMENT_AUTHORITY_KIND,
   DOCUMENT_AUTHORITY_OPTIONS,
   DocumentsRoute,
+  defaultDocumentAuthorityKind,
   documentAuthorityLabel,
   documentTypeLabel,
   localPopulatedDocumentsPreview,
@@ -200,9 +203,101 @@ describe("Documents scope-first UX", () => {
       { value: "personal", label: "Only me" },
     ]);
     expect(DEFAULT_DOCUMENT_AUTHORITY_KIND).toBe("workspace");
+    expect(defaultDocumentAuthorityKind(false)).toBe("workspace");
+    expect(defaultDocumentAuthorityKind(true)).toBe("personal");
     expect(documentAuthorityLabel("organization")).toBe("Company");
     expect(documentAuthorityLabel("workspace")).toBe("Current workspace");
     expect(documentAuthorityLabel("personal")).toBe("Only me");
+  });
+
+  test("defaults new knowledge to Only me in a personal workspace", async () => {
+    context.workspaces[0]!.kind = "personal";
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DocumentsRoute workspaceId="workspace-a" />);
+        await Promise.resolve();
+      });
+      await settleRoute();
+
+      expect(
+        container.querySelector<HTMLSelectElement>('[aria-label="Drop authority"]')?.value,
+      ).toBe("personal");
+      expect(container.textContent).toContain("Your personal document library");
+      expect(container.textContent).toContain("Knowledge available to you");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      context.workspaces[0]!.kind = "shared";
+    }
+  });
+
+  test("opens the organization explorer filtered to Company and defaults new knowledge there", async () => {
+    listAccessibleDocuments.mockResolvedValueOnce([
+      { ...indexedDocument("workspace"), id: crypto.randomUUID(), title: "Workspace runbook" },
+      { ...indexedDocument("organization"), id: crypto.randomUUID(), title: "Company strategy" },
+    ]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DocumentsRoute workspaceId="workspace-a" authorityKind="organization" />);
+        await Promise.resolve();
+      });
+      await settleRoute();
+
+      expect(container.textContent).toContain("Company knowledge");
+      expect(container.textContent).toContain("Organization knowledge");
+      expect(container.textContent).toContain("Company strategy");
+      expect(container.textContent).not.toContain("Workspace runbook");
+      expect(
+        container.querySelector<HTMLSelectElement>('[aria-label="Drop authority"]')?.value,
+      ).toBe("organization");
+
+      const query = container.querySelector<HTMLInputElement>(
+        '[aria-label="Search indexed documents"]',
+      )!;
+      await act(async () => setControlledInput(query, "company strategy"));
+      const search = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Search",
+      )!;
+      await act(async () => {
+        search.click();
+        await Promise.resolve();
+      });
+      await settleRoute();
+      expect(searchKnowledge).toHaveBeenCalledWith("workspace-a", {
+        query: "company strategy",
+        limit: 50,
+        mode: "hybrid",
+      });
+
+      const dropText = container.querySelector<HTMLTextAreaElement>(
+        '[aria-label="Knowledge drop text"]',
+      )!;
+      await act(async () => setControlledTextarea(dropText, "Organization fact"));
+      const add = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Add",
+      )!;
+      await act(async () => {
+        add.click();
+        await Promise.resolve();
+      });
+      await settleRoute();
+
+      expect(createKnowledgeDrop).toHaveBeenCalledWith(
+        "workspace-a",
+        expect.objectContaining({ text: "Organization fact", authorityKind: "organization" }),
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   test("shows one upload surface and keeps internal collections out of the UI", async () => {
