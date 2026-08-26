@@ -415,6 +415,8 @@ describe("Documents scope-first UX", () => {
         "Add information agents can find when it is relevant",
       );
       expect(container.textContent).toContain("Add knowledge");
+      expect(container.textContent).toContain("Available documents");
+      expect(container.textContent).not.toContain("Your documents");
       expect(container.textContent).not.toContain("Collections");
       expect(container.textContent).not.toContain("Create collection");
       expect(container.textContent).not.toContain("Add files to collection");

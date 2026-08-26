@@ -69,11 +69,12 @@ describe("Agent Knowledge surface", () => {
   });
 
   test("routes organization profile and learning autonomy to settings", async () => {
-    const [organization, shell, workspaceSettings, learning] = await Promise.all([
+    const [organization, shell, workspaceSettings, learning, memory] = await Promise.all([
       source("routes/org-settings.tsx"),
       source("components/settings/organization-settings-shell.tsx"),
       source("routes/workspace-settings.tsx"),
       source("routes/workspace-learning-admin.tsx"),
+      source("components/knowledge/memory-pane.tsx"),
     ]);
     expect(shell).toContain('id: "knowledge"');
     expect(shell).toContain('title: "Organization knowledge"');
@@ -82,7 +83,12 @@ describe("Agent Knowledge surface", () => {
     expect(organization).toContain("Organization identity");
     expect(organization).toContain("Explore organization knowledge");
     expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
+    expect(workspaceSettings).toContain("manage them in Memory");
+    expect(workspaceSettings).not.toContain("editable on Documents");
     expect(learning).toContain("Learning & autonomy");
+    expect(memory).toContain('preference: "Legacy preference"');
+    expect(memory).toContain('procedural: "Legacy procedure"');
+    expect(memory).toContain('episodic: "Incident or outcome"');
   });
 
   test("teaches agents the three durable destinations and compact instruction budget", async () => {

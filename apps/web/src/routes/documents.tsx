@@ -610,7 +610,7 @@ export function DocumentsRoute({
                         ? "Organization knowledge"
                         : personalWorkspace
                           ? "Knowledge available to you"
-                          : "Your documents"}
+                          : "Available documents"}
                     </div>
                   </div>
                   {failedDocuments.length > 0 ? (

@@ -50,11 +50,11 @@ import type {
 // Human labels — no raw enum slugs ever reach the UI. Chips read as singular
 // nouns; the injected working-set block uses the plural section names.
 const KIND_LABEL: Record<KnowledgeMemoryKind, string> = {
-  preference: "Preference",
+  preference: "Legacy preference",
   semantic: "Fact",
-  procedural: "Procedure",
+  procedural: "Legacy procedure",
   decision: "Decision",
-  episodic: "History",
+  episodic: "Incident or outcome",
 };
 const STATUS_LABEL: Record<KnowledgeMemoryStatus, string> = {
   active: "Active",
