@@ -920,6 +920,12 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     expect(alternateMemberships.memberships).toHaveLength(1);
     const alternateOrganizationId = alternateCreated.organization.id;
     expect(alternateMemberships.memberships[0]!.organizationId).toBe(alternateOrganizationId);
+    await expect(
+      owner.getOrganizationAdministrationOverview(alternateOrganizationId),
+    ).rejects.toMatchObject({ status: 403 });
+    await expect(
+      alternateOwner.getOrganizationAdministrationOverview(organizationId),
+    ).rejects.toMatchObject({ status: 403 });
 
     const registeredEmail = `ope306-registered-${RUN_ID}@example.test`;
     const registeredContext = await browser.newContext({
