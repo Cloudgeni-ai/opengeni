@@ -1573,7 +1573,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // while the actively-working label remains independent of acknowledgment.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
@@ -1587,6 +1593,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
+        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
         ...parsed.data,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
@@ -1619,7 +1626,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   // for this member and remain recoverable through the archived list view.
   app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/archive", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "sessions:read",
+    );
+    const grant = authorization.grant;
     const sessionId = c.req.param("sessionId");
     const parsed = UpdateSessionArchiveRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
@@ -1630,6 +1643,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
+        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
         ...parsed.data,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
