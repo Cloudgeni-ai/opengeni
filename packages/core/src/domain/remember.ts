@@ -453,8 +453,11 @@ export function createRememberRouter(options: RememberRouterOptions): {
               humanInputRequestId: request.humanInputRequestId,
             },
           });
-          const materialization = await materializeKnowledgeMemory(transaction, activationReceipt);
-          return { receipt: activationReceipt, materialization };
+          const materializedMemory = await materializeKnowledgeMemory(
+            transaction,
+            activationReceipt,
+          );
+          return { receipt: activationReceipt, materialization: materializedMemory };
         });
         return RememberConfirmReceipt.parse({
           status: "activated",
