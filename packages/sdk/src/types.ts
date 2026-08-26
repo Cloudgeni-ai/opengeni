@@ -4924,6 +4924,7 @@ export type RigChangeVerification = {
   startedAt?: string | undefined;
   finishedAt?: string | undefined;
   log?: string | undefined;
+  platformCheckResults?: RigCheckResult[] | undefined;
   checkResults?: RigCheckResult[] | undefined;
   [key: string]: unknown;
 };
@@ -4946,7 +4947,7 @@ export type CreateRigRequest = {
   scope?: ResourceAuthorityScope;
   name: string;
   description?: string | undefined;
-  image?: string | undefined;
+  image?: never;
   setupScript?: string | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;
@@ -4964,7 +4965,7 @@ export type RigSetupAppendPayload = {
 };
 
 export type RigDefinitionEditPayload = {
-  image?: string | null | undefined;
+  image?: never;
   setupScript?: string | null | undefined;
   checks?: RigCheck[] | undefined;
   credentialHooks?: string[] | undefined;

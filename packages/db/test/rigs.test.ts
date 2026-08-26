@@ -35,6 +35,7 @@ import {
   registerSandboxCheckpointArtifact,
   RigActiveVersionChangedError,
   RigChangeTransitionError,
+  RigImageOverrideUnsupportedError,
   updateRig,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
@@ -223,7 +224,6 @@ describe("rig CRUD lifecycle", () => {
       description: "the stress rig",
       createdBy: "user:alice",
       initialVersion: {
-        image: "ubuntu:24.04",
         setupScript: "apt-get install -y ripgrep",
         checks: [{ name: "rg", command: "rg --version" }],
         credentialHooks: ["azure-cli-login"],
@@ -236,7 +236,7 @@ describe("rig CRUD lifecycle", () => {
     expect(rig.versionCount).toBe(1);
     expect(rig.activeVersion?.version).toBe(1);
     expect(rig.activeVersion?.active).toBe(true);
-    expect(rig.activeVersion?.image).toBe("ubuntu:24.04");
+    expect(rig.activeVersion?.image).toBeNull();
     expect(rig.activeVersion?.checks).toEqual([{ name: "rg", command: "rg --version" }]);
 
     const fetched = await getRig(db, ws.workspaceId, rig.id);
@@ -252,6 +252,33 @@ describe("rig CRUD lifecycle", () => {
     expect(listed[0]!.versionCount).toBe(1);
 
     expect(await countRigs(db, ws.workspaceId)).toBe(1);
+  });
+
+  test("rejects explicit Rig images before database access", async () => {
+    const unreachableDb = undefined as unknown as Database;
+    const accountId = randomUUID();
+    const workspaceId = randomUUID();
+    const rigId = randomUUID();
+    await expect(
+      createRig(unreachableDb, {
+        accountId,
+        workspaceId,
+        name: "custom-base",
+        initialVersion: { image: "ubuntu:24.04" },
+      }),
+    ).rejects.toBeInstanceOf(RigImageOverrideUnsupportedError);
+
+    await expect(
+      createRigVersion(unreachableDb, workspaceId, rigId, { image: "ubuntu:24.04" }),
+    ).rejects.toBeInstanceOf(RigImageOverrideUnsupportedError);
+  });
+
+  test("rejects explicit Rig images at the storage boundary", async () => {
+    if (!available) return;
+    await expect(shared!.admin`
+      insert into rig_versions(account_id, workspace_id, rig_id, version, image)
+      values (${randomUUID()}, ${randomUUID()}, ${randomUUID()}, 1, 'ubuntu:24.04')
+    `).rejects.toThrow("Rig image overrides are unsupported");
   });
 
   test("update touches name/description only; delete removes the rig + versions", async () => {
@@ -338,7 +365,6 @@ describe("rig version invariants", () => {
       workspaceId: ws.workspaceId,
       name: "immutable",
       initialVersion: {
-        image: "img:1",
         setupScript: "setup-one",
         checks: [{ name: "c", command: "true" }],
       },
@@ -349,14 +375,14 @@ describe("rig version invariants", () => {
       db,
       ws.workspaceId,
       rig.id,
-      { image: "img:2", setupScript: "setup-two" },
+      { setupScript: "setup-two" },
       { activate: true },
     );
 
     // v1 is now inactive but its CONTENT is byte-identical to before.
     const afterV1 = await getRigVersion(db, ws.workspaceId, rig.id, v1Id);
     expect(afterV1?.active).toBe(false);
-    expect(afterV1?.image).toBe(before!.image);
+    expect(afterV1?.image).toBeNull();
     expect(afterV1?.setupScript).toBe(before!.setupScript);
     expect(afterV1?.checks).toEqual(before!.checks);
     expect(afterV1?.version).toBe(before!.version);
@@ -380,14 +406,14 @@ describe("rig version invariants", () => {
 });
 
 describe("rig provider image build ledger", () => {
-  test("claims one build, reuses one finalized image, and rejects planted content drift", async () => {
+  test("claims one build, reuses one finalized image, and rejects planted setup drift", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const rig = await createRig(db, {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       name: "provider-image-ledger",
-      initialVersion: { image: "ubuntu:24.04", setupScript: "echo ready" },
+      initialVersion: { setupScript: "echo ready" },
     });
     const versionId = rig.activeVersion!.id;
     const building = rigProviderImage({
@@ -499,6 +525,82 @@ describe("rig provider image build ledger", () => {
     expect(orphanClaims.some((claim) => claim.id === artifact.artifactId)).toBe(true);
   });
 
+  test("rebuilds operational provider metadata when the deployment base rotates", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const rig = await createRig(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      name: "provider-image-base-rotation",
+      initialVersion: { setupScript: "echo ready" },
+    });
+    const versionId = rig.activeVersion!.id;
+    const firstBuild = rigProviderImage({
+      provenance: {
+        kind: "rig_verification",
+        targetKind: "version",
+        targetId: versionId,
+      },
+    });
+    const firstClaim = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: firstBuild,
+      staleAfterMs: 60_000,
+    });
+    expect(firstClaim.status).toBe("claimed");
+    const oldArtifact = await registerRigProviderImageArtifact(ws, versionId, "im-old-base");
+    const oldReady = rigProviderImage({
+      ...firstClaim.image,
+      status: "ready",
+      imageId: "im-old-base",
+      artifactId: oldArtifact.artifactId,
+      providerBindingKeyHash: oldArtifact.providerBindingKeyHash,
+      finishedAt: new Date().toISOString(),
+      error: null,
+    });
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: oldReady,
+      }),
+    ).toBe(true);
+
+    const rotatedBuild = rigProviderImage({
+      ...firstBuild,
+      sourceImage: "ubuntu:24.04@sha256:new-base",
+      contentHash: `sha256:${"d".repeat(64)}`,
+      buildRequestId: "99999999-9999-4999-8999-999999999999",
+      startedAt: new Date().toISOString(),
+    });
+    const rotation = await claimRigVersionProviderImageBuild(db, {
+      workspaceId: ws.workspaceId,
+      versionId,
+      image: rotatedBuild,
+      staleAfterMs: 60_000,
+    });
+    expect(rotation).toEqual({ status: "claimed", image: rotatedBuild });
+    expect((await getRigVersionById(db, ws.workspaceId, versionId))?.providerImages.modal).toEqual(
+      rotatedBuild,
+    );
+    expect(
+      await finalizeRigVersionProviderImageBuild(db, {
+        workspaceId: ws.workspaceId,
+        versionId,
+        image: oldReady,
+      }),
+    ).toBe(false);
+    expect(
+      await markSandboxCheckpointArtifactDeletePending(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        artifactId: oldArtifact.artifactId,
+        reason: "deployment base rotated",
+      }),
+    ).toBe(true);
+  });
+
   test("rejects a ready image that has no exact artifact ownership row", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
@@ -506,7 +608,7 @@ describe("rig provider image build ledger", () => {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
       name: "provider-image-missing-artifact",
-      initialVersion: { image: "ubuntu:24.04", setupScript: "echo ready" },
+      initialVersion: { setupScript: "echo ready" },
     });
     const versionId = rig.activeVersion!.id;
     const building = rigProviderImage({

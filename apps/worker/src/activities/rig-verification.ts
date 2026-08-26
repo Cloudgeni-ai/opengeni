@@ -2,6 +2,7 @@ import type {
   AccessGrant,
   Rig,
   RigChange,
+  RigCheck,
   RigProviderImage,
   RigVersion,
   SandboxBackend,
@@ -58,11 +59,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import type { Context } from "@temporalio/activity";
 import type { ControlActivityServices } from "./types";
-import {
-  rigProviderImageSourceImage,
-  settingsWithPackSandboxImage,
-  settingsWithRigImage,
-} from "./sandbox-images";
+import { rigProviderImageSourceImage } from "./sandbox-images";
 import { resolveWorkspacePackRuntime, type WorkspacePackRuntime } from "./packs";
 import { currentActivityContext } from "./streaming";
 
@@ -88,6 +85,83 @@ type CommandResult = {
   exitCode: number | null;
   output: string;
 };
+
+export type RigPlatformCheckResult = CommandResult & RigCheck;
+
+/**
+ * Platform-owned checks run after Rig setup and independently of user-declared
+ * checks. They prove that a Rig layered on the deployment image did not remove
+ * or replace the Browser, Terminal, or Computer/Desktop services. The commands
+ * start each enabled service on its canonical loopback port, wait for its own
+ * readiness contract, probe it, and tear it down before provider snapshotting.
+ */
+export function rigPlatformChecksForSettings(
+  settings: ControlActivityServices["settings"],
+): RigCheck[] {
+  const backend = settings.sandboxBackend as SandboxBackend;
+  if (!rigProviderImageSourceImage(settings, backend)) return [];
+
+  const checks: RigCheck[] = [
+    {
+      name: "opengeni-platform-browser",
+      command: [
+        "set -eu",
+        "test -x /usr/local/bin/opengeni-browserd",
+        "test -x /usr/local/bin/opengeni-browserd-up",
+        "test -x /usr/local/bin/opengeni-browserd-down",
+        "test -r /etc/opengeni/browser-engine",
+        '__og_browser_engine="$(head -n 1 /etc/opengeni/browser-engine)"',
+        'test -n "$__og_browser_engine"',
+        'test -x "$__og_browser_engine"',
+        '__og_browser_token="$(mktemp)"',
+        "trap 'opengeni-browserd-down >/dev/null 2>&1 || true; rm -f \"$__og_browser_token\"' EXIT",
+        "printf '%s\\n' 'rig-platform-check' > \"$__og_browser_token\"",
+        'chmod 0600 "$__og_browser_token"',
+        'OPENGENI_BROWSERD_ADMIN_TOKEN_FILE="$__og_browser_token" OPENGENI_BROWSERD_PORT=7682 OPENGENI_BROWSERD_ALLOWED_ORIGINS= opengeni-browserd-up',
+        "curl --noproxy '*' -fsS http://127.0.0.1:7682/healthz >/dev/null",
+        "curl --noproxy '*' -fsS -H 'Authorization: Bearer rig-platform-check' http://127.0.0.1:7682/v1/browser-sessions >/dev/null",
+      ].join("\n"),
+    },
+  ];
+
+  if (settings.sandboxTerminalEnabled) {
+    checks.push({
+      name: "opengeni-platform-terminal",
+      command: [
+        "set -eu",
+        "test -x /usr/local/bin/opengeni-terminal-up",
+        "test -x /usr/local/bin/opengeni-terminal-down",
+        "command -v ttyd >/dev/null",
+        "trap 'opengeni-terminal-down >/dev/null 2>&1 || true' EXIT",
+        "TERMINAL_PORT=7681 opengeni-terminal-up",
+        "curl --noproxy '*' -fsS http://127.0.0.1:7681/ >/dev/null",
+      ].join("\n"),
+    });
+  }
+
+  if (settings.sandboxDesktopEnabled) {
+    checks.push({
+      name: "opengeni-platform-computer-desktop",
+      command: [
+        "set -eu",
+        "test -x /usr/local/bin/opengeni-desktop-up",
+        "test -x /usr/local/bin/opengeni-desktop-down",
+        "command -v Xvfb >/dev/null",
+        "command -v x11vnc >/dev/null",
+        "command -v websockify >/dev/null",
+        "command -v scrot >/dev/null",
+        "command -v xdotool >/dev/null",
+        '__og_desktop_home="$(mktemp -d)"',
+        "trap 'opengeni-desktop-down >/dev/null 2>&1 || true; rm -rf \"$__og_desktop_home\"' EXIT",
+        'HOME="$__og_desktop_home" STREAM_PORT=6080 DESKTOP_W=1280 DESKTOP_H=800 opengeni-desktop-up',
+        "curl --noproxy '*' -fsS http://127.0.0.1:6080/vnc.html >/dev/null",
+        "nc -z 127.0.0.1 5900",
+      ].join("\n"),
+    });
+  }
+
+  return checks;
+}
 
 const RIG_VERIFICATION_CLEANUP_RESERVE_MAX_MS = 2 * 60_000;
 const RIG_VERIFICATION_CLEANUP_OPERATION_MAX_MS = 60_000;
@@ -750,6 +824,23 @@ async function runCommand(
   };
 }
 
+async function runRigChecks(
+  session: TurnSandboxCommandSession,
+  checks: readonly RigCheck[],
+  timeoutMs: number,
+  commandRunner: SandboxLifecycleCommandRunner,
+): Promise<RigPlatformCheckResult[]> {
+  const results: RigPlatformCheckResult[] = [];
+  for (const check of checks) {
+    results.push({
+      name: check.name,
+      command: check.command,
+      ...(await runCommand(session, check.command, timeoutMs, commandRunner)),
+    });
+  }
+  return results;
+}
+
 function setupAppendCommand(change: RigChange): string | null {
   if (change.kind !== "setup_append") {
     return null;
@@ -760,10 +851,9 @@ function setupAppendCommand(change: RigChange): string | null {
 
 function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): RigVersion {
   if (change.kind !== "definition_edit") {
-    return { ...baseVersion, providerImages: {} };
+    return { ...baseVersion, image: null, providerImages: {} };
   }
   const payload = change.payload as {
-    image?: unknown;
     setupScript?: unknown;
     checks?: unknown;
     credentialHooks?: unknown;
@@ -772,7 +862,7 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
   };
   return {
     ...baseVersion,
-    image: payload.image === undefined ? baseVersion.image : (payload.image as string | null),
+    image: null,
     setupScript:
       payload.setupScript === undefined
         ? baseVersion.setupScript
@@ -799,7 +889,6 @@ function providerImageDefinitionForChange(
   if (change.kind !== "setup_append") return candidateVersion;
   const command = setupAppendCommand(change);
   return {
-    image: baseVersion.image,
     setupScript: command
       ? appendRigSetupCommand(baseVersion.setupScript, command)
       : baseVersion.setupScript,
@@ -888,6 +977,19 @@ export async function verifyRigProviderImageColdBoot(
       );
       if (markerResult.exitCode !== 0) {
         throw new Error("built provider image is missing its exact rig-content marker");
+      }
+      for (const check of rigPlatformChecksForSettings(input.settings)) {
+        const result = await runCommand(
+          established.session as TurnSandboxCommandSession,
+          check.command,
+          input.settings.rigSetupTimeoutMs,
+          runContext.commandRunner,
+        );
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `built provider image failed mandatory platform check ${JSON.stringify(check.name)}: ${result.output.slice(-2000)}`,
+          );
+        }
       }
       for (const check of input.checks) {
         const result = await runCommand(
@@ -1175,14 +1277,12 @@ export function settingsForRigVerification(
   packRuntime: WorkspacePackRuntime,
   rigImage: string | null,
 ): ControlActivityServices["settings"] {
-  return settingsWithRigImage(
-    settingsWithPackSandboxImage(
-      settings,
-      packRuntime.sandboxImage,
-      packRuntime.sandboxProviderImages,
-    ),
-    rigImage,
-  );
+  // Rig verification must prove setup and provider-image materialization on
+  // the deployment-owned platform base. Legacy Pack and historical Rig image
+  // values are intentionally ignored here.
+  void packRuntime;
+  void rigImage;
+  return settings;
 }
 
 async function loadChangeTarget(
@@ -1353,22 +1453,23 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
                 );
               }
-              const checkResults = [];
-              for (const check of candidateVersion.checks) {
-                const result = await runCommand(
-                  established.session as TurnSandboxCommandSession,
-                  check.command,
-                  settings.rigSetupTimeoutMs,
-                  runContext.commandRunner,
-                );
-                checkResults.push({
-                  name: check.name,
-                  command: check.command,
-                  ...result,
-                });
-              }
+              const platformCheckResults = await runRigChecks(
+                established.session as TurnSandboxCommandSession,
+                rigPlatformChecksForSettings(runSettings),
+                settings.rigSetupTimeoutMs,
+                runContext.commandRunner,
+              );
+              verification.platformCheckResults = platformCheckResults;
+              const checkResults = await runRigChecks(
+                established.session as TurnSandboxCommandSession,
+                candidateVersion.checks,
+                settings.rigSetupTimeoutMs,
+                runContext.commandRunner,
+              );
               verification.checkResults = checkResults;
-              const passed = checkResults.every((result) => result.exitCode === 0);
+              const passed =
+                platformCheckResults.every((result) => result.exitCode === 0) &&
+                checkResults.every((result) => result.exitCode === 0);
               if (passed) {
                 verification.providerImage = await buildVerifiedRigProviderImage({
                   settings: runSettings,
@@ -1515,20 +1616,21 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   `Failed to seal rig provider image content marker: ${markerResult.output.slice(-2000)}`,
                 );
               }
-              const checkResults = [];
-              for (const check of version.checks) {
-                checkResults.push({
-                  name: check.name,
-                  command: check.command,
-                  ...(await runCommand(
-                    established.session as TurnSandboxCommandSession,
-                    check.command,
-                    settings.rigSetupTimeoutMs,
-                    runContext.commandRunner,
-                  )),
-                });
-              }
-              const passed = checkResults.every((result) => result.exitCode === 0);
+              const platformCheckResults = await runRigChecks(
+                established.session as TurnSandboxCommandSession,
+                rigPlatformChecksForSettings(runSettings),
+                settings.rigSetupTimeoutMs,
+                runContext.commandRunner,
+              );
+              const checkResults = await runRigChecks(
+                established.session as TurnSandboxCommandSession,
+                version.checks,
+                settings.rigSetupTimeoutMs,
+                runContext.commandRunner,
+              );
+              const passed =
+                platformCheckResults.every((result) => result.exitCode === 0) &&
+                checkResults.every((result) => result.exitCode === 0);
               const providerImage = passed
                 ? await buildVerifiedRigProviderImage({
                     settings: runSettings,
@@ -1554,11 +1656,18 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   startedAt,
                   finishedAt: new Date().toISOString(),
                   passed,
+                  platformCheckResults,
                   checkResults,
                   providerImage,
                 },
               });
-              return { versionId: version.id, passed, checkResults, providerImage };
+              return {
+                versionId: version.id,
+                passed,
+                platformCheckResults,
+                checkResults,
+                providerImage,
+              };
             },
           );
         } catch (error) {
