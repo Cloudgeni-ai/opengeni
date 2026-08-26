@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
-import { StrictMode, useState } from "react";
+import { StrictMode, useState, type ComponentType } from "react";
 import { flushSync } from "react-dom";
 import {
-  MessageTimeline,
+  MessageTimeline as PublicMessageTimeline,
+  createOlderHistoryLoadReceipt,
   type MessageTimelineProps,
+  type OlderHistoryLoader,
+  type OlderHistoryLoadReceipt,
   type TimelineItem,
   type UserMessageItem,
 } from "../src";
@@ -13,10 +16,46 @@ import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 
 registerDom();
 
-const nonBooleanPromiseLoadOlder: NonNullable<MessageTimelineProps["onLoadOlder"]> = async () => [
-  "older-event",
-];
-void nonBooleanPromiseLoadOlder;
+type LegacyTestMessageTimelineProps = Omit<MessageTimelineProps, "onLoadOlder"> & {
+  onLoadOlder?: (() => unknown) | undefined;
+};
+
+// Most cases below retain explicit runtime coverage for hosts compiled against
+// the previous callback shape. Public contract checks use PublicMessageTimeline
+// and OlderHistoryLoader directly so unsafe wrappers cannot regress silently.
+const MessageTimeline = PublicMessageTimeline as ComponentType<LegacyTestMessageTimelineProps>;
+
+const receiptedLoader: OlderHistoryLoader = () =>
+  createOlderHistoryLoadReceipt(() => Promise.resolve(true));
+const forwardingWrapper: NonNullable<MessageTimelineProps["onLoadOlder"]> = () => receiptedLoader();
+void forwardingWrapper;
+// @ts-expect-error The public callback must return the causal receipt.
+const droppingWrapper: NonNullable<MessageTimelineProps["onLoadOlder"]> = () => {
+  void receiptedLoader();
+};
+void droppingWrapper;
+
+function controlledOlderReceipt(promise: Promise<boolean>): {
+  receipt: OlderHistoryLoadReceipt;
+  commit: () => void;
+} {
+  let commitReceipt: (() => void) | null = null;
+  let commitRequested = false;
+  const receipt = createOlderHistoryLoadReceipt((markCommitted) => {
+    commitReceipt = markCommitted;
+    if (commitRequested) {
+      markCommitted();
+    }
+    return promise;
+  });
+  return {
+    receipt,
+    commit: () => {
+      commitRequested = true;
+      commitReceipt?.();
+    },
+  };
+}
 
 function event(sequence: number): SessionEvent {
   return {
@@ -1704,12 +1743,9 @@ describe("MessageTimeline pagination affordances", () => {
     const second = deferred<boolean>();
     const retryLoad = deferred<boolean>();
     const loads = [first, second, retryLoad];
-    const owners: unknown[][] = [];
+    const receipts = loads.map((load) => controlledOlderReceipt(load.promise));
     let calls = 0;
-    const onLoadOlder = (owner?: unknown[]) => {
-      if (owner) owners.push(owner);
-      return loads[calls++]!.promise;
-    };
+    const onLoadOlder = () => receipts[calls++]!.receipt;
     const initialItems = [reasoningItem("full-window-tail", "collapsed live tail")];
     const r = await renderComponent(
       <MessageTimeline items={initialItems} hasOlder onLoadOlder={onLoadOlder} />,
@@ -1751,7 +1787,7 @@ describe("MessageTimeline pagination affordances", () => {
     // source with zero overlap. Marking A's exact owner as committed releases
     // it and permits exactly one follow-on underfill request for page B.
     const olderReplacement = [reasoningItem("full-window-older", "older collapsed page")];
-    owners[0]![0] = "";
+    receipts[0]!.commit();
     await r.rerender(
       <MessageTimeline items={olderReplacement} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
     );
@@ -1784,7 +1820,7 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     expect(calls).toBe(3);
 
-    owners[2]![0] = "";
+    receipts[2]!.commit();
     await r.rerender(
       <MessageTimeline
         items={[reasoningItem("durable-start", "durable start")]}
@@ -1795,6 +1831,101 @@ describe("MessageTimeline pagination affordances", () => {
     await actRun(() => retryLoad.resolve(true));
     await flush();
     expect(calls).toBe(3);
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("a forwarding wrapper preserves the reader seam for a zero-overlap older replacement", async () => {
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    const load = deferred<boolean>();
+    const controlled = controlledOlderReceipt(load.promise);
+    let calls = 0;
+    const loadOlder: OlderHistoryLoader = () => {
+      calls += 1;
+      return controlled.receipt;
+    };
+    const forwardingLoadOlder: OlderHistoryLoader = () => loadOlder();
+    const initialItems = Array.from({ length: 40 }, (_, index) =>
+      userItem(`tail-${index}`, `tail ${index}`),
+    );
+    const replacement = Array.from({ length: 40 }, (_, index) =>
+      userItem(`older-${index}`, `older ${index}`),
+    );
+    const r = await renderComponent(
+      <PublicMessageTimeline items={initialItems} hasOlder onLoadOlder={forwardingLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 1_600,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <PublicMessageTimeline
+        items={initialItems}
+        status="idle"
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+    await readerScrollUp(scroller, 80);
+    const target = observed.at(-1);
+    if (!target) {
+      throw new Error("expected observed top sentinel");
+    }
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    expect(calls).toBe(1);
+    expect(scroller.scrollTop).toBe(80);
+
+    controlled.commit();
+    layout.setContentHeight(2_000);
+    await r.rerender(
+      <PublicMessageTimeline
+        items={replacement}
+        status="idle"
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+
+    expect(scroller.scrollTop).toBe(1_600);
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    await actRun(() => load.resolve(true));
+    await flush();
+    expect(calls).toBe(1);
     layout.restore();
     await r.unmount();
   });
@@ -2703,6 +2834,91 @@ describe("MessageTimeline pagination affordances", () => {
     expect(calls).toBe(2);
 
     await actRun(() => retryLoad.resolve(true));
+    await flush();
+    await r.unmount();
+  });
+
+  test("a declined prefetch promotes to retry when the viewport later collapses", async () => {
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const acceptedRetry = deferred<boolean>();
+    let calls = 0;
+    const onLoadOlder: OlderHistoryLoader = () =>
+      createOlderHistoryLoadReceipt(() => {
+        calls += 1;
+        return calls === 1 ? false : acceptedRetry.promise;
+      });
+    const r = await renderComponent(
+      <PublicMessageTimeline events={manyEvents(4)} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await armOlderPrefetch(r.container);
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    const target = observed.at(-1);
+    if (!(scroller instanceof HTMLElement) || !target) {
+      throw new Error("expected timeline scroller and top sentinel");
+    }
+
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    await flush();
+    expect(calls).toBe(1);
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
+
+    // The explicit decline has already settled while this ordinary prefetch
+    // still owns a scrollable top-band visit. A later collapse must expose the
+    // same owner as Retry instead of dispatching a second automatic request.
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    expect(calls).toBe(1);
+
+    await actRun(() => {
+      resizeCallback([], resizeObserver!);
+      resizeCallback([], resizeObserver!);
+    });
+    expect(calls).toBe(1);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(2);
+    await actRun(() => acceptedRetry.resolve(true));
     await flush();
     await r.unmount();
   });

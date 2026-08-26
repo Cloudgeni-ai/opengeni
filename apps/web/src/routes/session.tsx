@@ -17,6 +17,7 @@ import {
   type AgentMessageItem,
   type AuthNeededItem,
   type PendingApproval,
+  type OlderHistoryLoader,
   type TimelineItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
@@ -996,7 +997,7 @@ function SessionChatPane(props: {
   agentNodes: LineageNode[];
   hasOlder: boolean;
   loadingOlder: boolean;
-  onLoadOlder: () => Promise<boolean>;
+  onLoadOlder: OlderHistoryLoader;
   hasNewer: boolean;
   loadingNewer: boolean;
   onLoadNewer: () => Promise<boolean>;

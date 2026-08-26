@@ -2,7 +2,13 @@ import { StrictMode, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
-import { MessageTimeline, type TimelineItem } from "@opengeni/react";
+import {
+  MessageTimeline,
+  createOlderHistoryLoadReceipt,
+  type OlderHistoryLoader,
+  type OlderHistoryLoadReceipt,
+  type TimelineItem,
+} from "@opengeni/react";
 import "./styles.css";
 
 type TimelineCollapsedHistoryHarness = {
@@ -163,18 +169,19 @@ function Harness() {
   const liveAppendRef = useRef(0);
   const livePageRef = useRef(0);
   const pendingLoadRef = useRef<{
-    promise: Promise<boolean>;
+    receipt: OlderHistoryLoadReceipt;
     resolve: (value: boolean) => void;
     reject: (reason: unknown) => void;
-    owner: unknown[] | undefined;
+    markCommitted: () => void;
   } | null>(null);
+  const settledCommitRef = useRef<(() => void) | null>(null);
   const overlappingLoadsRef = useRef(
     new Map<
       number,
       {
         resolve: (value: boolean) => void;
         reject: (reason: unknown) => void;
-        owner: unknown[] | undefined;
+        markCommitted: () => void;
       }
     >(),
   );
@@ -194,13 +201,18 @@ function Harness() {
     }
     pendingLoadRef.current = null;
     if (outcome === "failure") {
+      settledCommitRef.current = null;
       pending.reject(new Error("transient collapsed-history load failure"));
       return;
     }
+    settledCommitRef.current = pending.markCommitted;
     pending.resolve(true);
   }, []);
 
   const prependOlderPage = useCallback(() => {
+    pendingLoadRef.current?.markCommitted();
+    settledCommitRef.current?.();
+    settledCommitRef.current = null;
     setItems((current) => [...olderConversation(), ...current]);
     setHasOlder(false);
   }, []);
@@ -220,6 +232,8 @@ function Harness() {
 
   const prependUnderfilledPage = useCallback(() => {
     const call = loadCallsRef.current;
+    pendingLoadRef.current?.markCommitted();
+    overlappingLoadsRef.current.get(call)?.markCommitted();
     setItems((current) => [
       ...settledTurn(100 + call * 40, `overlap-turn-${call}`, `Overlap turn ${call}`, false),
       ...current,
@@ -228,6 +242,8 @@ function Harness() {
 
   const prependFilteredOlderPage = useCallback(() => {
     const call = loadCallsRef.current;
+    pendingLoadRef.current?.markCommitted();
+    overlappingLoadsRef.current.get(call)?.markCommitted();
     setItems((current) => [authNeeded(50 + call), ...current]);
   }, []);
 
@@ -289,6 +305,7 @@ function Harness() {
         return;
       }
       if (complete) {
+        pending.markCommitted();
         flushSync(() => {
           setItems((current) => [...olderConversation(), ...current]);
           setHasOlder(false);
@@ -299,73 +316,93 @@ function Harness() {
     [],
   );
 
-  const loadOlder = useCallback(
-    (owner?: unknown[]): Promise<boolean> | void => {
-      if (declineDuringNewer && loadingNewer) {
-        const call = ++loadCallsRef.current;
-        setLoadCalls(call);
-        return Promise.resolve(false);
-      }
-      if (syncCachedPrefetch || syncCachedUnderfill) {
+  const loadOlder: OlderHistoryLoader = useCallback(() => {
+    if (declineDuringNewer && loadingNewer) {
+      const call = ++loadCallsRef.current;
+      setLoadCalls(call);
+      return createOlderHistoryLoadReceipt(() => false);
+    }
+    if (syncCachedPrefetch || syncCachedUnderfill) {
+      return createOlderHistoryLoadReceipt((markCommitted) => {
         const call = ++loadCallsRef.current;
         flushSync(() => {
           setLoadCalls(call);
           if (call === 1) {
+            markCommitted();
             setItems((current) =>
               syncCachedUnderfill ? [userMessage(499)] : [userMessage(499), ...current],
             );
           }
         });
         flushSync(() => undefined);
-        return;
-      }
-      if (overlapLoads) {
+        return true;
+      });
+    }
+    if (overlapLoads) {
+      return createOlderHistoryLoadReceipt((markCommitted) => {
         const call = ++loadCallsRef.current;
         setLoadCalls(call);
         return new Promise<boolean>((resolve, reject) => {
-          overlappingLoadsRef.current.set(call, { resolve, reject, owner });
+          overlappingLoadsRef.current.set(call, { resolve, reject, markCommitted });
         });
-      }
-      const pending = pendingLoadRef.current;
-      if (pending) {
-        return pending.promise;
-      }
-      loadCallsRef.current += 1;
-      setLoadCalls(loadCallsRef.current);
-      setLoadingOlder(true);
-      let resolveLoad!: (value: boolean) => void;
-      let rejectLoad!: (reason: unknown) => void;
-      const load = new Promise<boolean>((resolve, reject) => {
-        resolveLoad = resolve;
-        rejectLoad = reject;
-      }).finally(() => setLoadingOlder(false));
-      pendingLoadRef.current = {
-        promise: load,
-        resolve: resolveLoad,
-        reject: rejectLoad,
-        owner,
-      };
-      if (!manualLoad) {
-        window.setTimeout(() => settleOlder("success"), 250);
+      });
+    }
+    const pending = pendingLoadRef.current;
+    if (pending) {
+      return pending.receipt;
+    }
+    loadCallsRef.current += 1;
+    setLoadCalls(loadCallsRef.current);
+    setLoadingOlder(true);
+    let resolveLoad!: (value: boolean) => void;
+    let rejectLoad!: (reason: unknown) => void;
+    const load = new Promise<boolean>((resolve, reject) => {
+      resolveLoad = resolve;
+      rejectLoad = reject;
+    }).finally(() => setLoadingOlder(false));
+    let commitReceipt: (() => void) | null = null;
+    let commitRequested = false;
+    const receipt = createOlderHistoryLoadReceipt((mark) => {
+      commitReceipt = mark;
+      if (commitRequested) {
+        mark();
       }
       return load;
-    },
-    [
-      declineDuringNewer,
-      loadingNewer,
-      manualLoad,
-      overlapLoads,
-      settleOlder,
-      syncCachedPrefetch,
-      syncCachedUnderfill,
-    ],
-  );
+    });
+    pendingLoadRef.current = {
+      receipt,
+      resolve: resolveLoad,
+      reject: rejectLoad,
+      markCommitted: () => {
+        commitRequested = true;
+        commitReceipt?.();
+      },
+    };
+    if (!manualLoad) {
+      window.setTimeout(() => settleOlder("success"), 250);
+    }
+    return receipt;
+  }, [
+    declineDuringNewer,
+    loadingNewer,
+    manualLoad,
+    overlapLoads,
+    settleOlder,
+    syncCachedPrefetch,
+    syncCachedUnderfill,
+  ]);
 
   const replaceWithFullOlderPage = useCallback(() => {
-    const owner = pendingLoadRef.current?.owner ?? overlappingLoadsRef.current.get(1)?.owner;
-    if (owner) owner[0] = "";
-    flushSync(() => setItems(prefetchWindow()));
-  }, []);
+    pendingLoadRef.current?.markCommitted();
+    overlappingLoadsRef.current.get(1)?.markCommitted();
+    flushSync(() =>
+      setItems(
+        usePrefetchWindow
+          ? Array.from({ length: 40 }, (_, index) => userMessage(100 + index))
+          : prefetchWindow(),
+      ),
+    );
+  }, [usePrefetchWindow]);
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {

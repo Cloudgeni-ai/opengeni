@@ -695,6 +695,49 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 
+  test("anchors a reader-driven zero-overlap older replacement at its bottom seam", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&overlap-loads&omit-loading-older&prefetch-window`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 400,
+    );
+
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop < 100,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+    const before = await page.evaluate(() => window.timelineCollapsedHistoryHarness!.metrics());
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.replaceWithFullOlderPage());
+    await page.locator('[data-conversation-message="user-100"]').waitFor({ timeout: 5_000 });
+    const after = await page.evaluate(() => window.timelineCollapsedHistoryHarness!.metrics());
+    expect(before.scrollTop).toBeLessThan(100);
+    expect(after.maxScroll - after.scrollTop).toBeLessThan(2);
+    expect(after.scrollTop).toBeGreaterThan(before.scrollTop + 400);
+    expect(await page.getByRole("button", { name: "Jump to latest" }).count()).toBe(1);
+
+    // The delayed request settlement cannot reclaim the committed owner. Once
+    // the reader leaves the seam and approaches the top again, exactly one new
+    // sentinel request owns the replacement window.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleLoad(1, "success"));
+    await page.mouse.wheel(0, 8_000);
+    await page.waitForFunction(() => {
+      const metrics = window.timelineCollapsedHistoryHarness!.metrics();
+      return metrics.maxScroll - metrics.scrollTop < 2;
+    });
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop < 100,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+  }, 30_000);
+
   test("retries one transient underfill failure without resize loops or duplicate requests", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);

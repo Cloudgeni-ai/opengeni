@@ -42,6 +42,11 @@ import {
 import { cn } from "../lib/cn";
 import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
+import {
+  invokeOlderHistoryLoaderWithReceiptCapture,
+  type OlderHistoryLoadReceipt,
+  type OlderHistoryLoader,
+} from "../older-history";
 import { Markdown } from "./markdown";
 import {
   UserMessageBody,
@@ -181,11 +186,11 @@ export type MessageTimelineProps = {
   /** An older window is being fetched; shows the quiet top shimmer. */
   loadingOlder?: boolean | undefined;
   /**
-   * Called when older history should backfill. Return the load promise when
-   * available so an underfilled timeline can expose a bounded retry after a
-   * rejection, synchronous throw, or an exact `false` no-progress receipt.
+   * Called when older history should backfill. Return the exact causal receipt
+   * from useSessionEvents.loadOlder (including through wrappers) so bounded
+   * zero-overlap replacement direction and retry settlement cannot be lost.
    */
-  onLoadOlder?: (() => unknown) | undefined;
+  onLoadOlder?: OlderHistoryLoader | undefined;
   /** Jump to the durable session start (bounded oldest window, no middle). */
   onJumpToStart?: (() => void | Promise<void>) | undefined;
   /** True while the oldest window is loading. */
@@ -247,30 +252,44 @@ const WAITING_PILL_CLASS =
 const LOADING_CHIP_CLASS =
   "pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur";
 
-// State: 0 underfill, 1 prefetch pending, 2 prefetch settled.
+// State: 0 underfill retry, 1 prefetch pending, 2 compatibility-settled,
+// 3 explicit no-progress waiting to become an underfill retry.
 // The tuple identity is the exact request ownership fence. The boundary may rebase
 // forward while that request is pending when a bounded live-tail append evicts
 // its former oldest row. First-party loaders mark the exact owner when their
 // older page commits; retained direction is the fallback for other hosts.
-type OlderLoadAttempt = [boundary: string | undefined, state?: number];
+type OlderLoadAttempt = [
+  boundary: string | undefined,
+  state?: number,
+  receipt?: OlderHistoryLoadReceipt,
+];
 
 function invokeOlderLoad(
-  load: () => unknown,
+  load: OlderHistoryLoader,
   noProgress: () => void,
   attempt: OlderLoadAttempt,
 ): 1 | undefined {
   try {
-    const result = (load as (attempt: OlderLoadAttempt) => unknown)(attempt);
-    if (result === false) {
-      noProgress();
-    } else if (typeof (result as PromiseLike<unknown> | undefined)?.then == "function") {
+    // Runtime compatibility for hosts compiled against the prior callback
+    // shape. The exported type requires a receipt, so newly compiled wrappers
+    // cannot silently discard it; old JS/plain-promise callbacks retain their
+    // prior one-shot/no-progress behavior while they migrate.
+    const result = invokeOlderHistoryLoaderWithReceiptCapture(load, (receipt) => {
+      attempt[2] = receipt;
+    }) as OlderHistoryLoadReceipt | PromiseLike<unknown> | unknown;
+    if (typeof (result as PromiseLike<unknown> | undefined)?.then != "function") {
+      return;
+    }
+    if (typeof (result as { committed?: unknown }).committed !== "boolean") {
       void (result as PromiseLike<unknown>).then(
         (value) => value === false && noProgress(),
         noProgress,
       );
-    } else {
-      return;
+      return 1;
     }
+    const receipt = result as OlderHistoryLoadReceipt;
+    attempt[2] = receipt;
+    void receipt.then((value) => value === false && !receipt.committed && noProgress(), noProgress);
   } catch {
     noProgress();
   }
@@ -531,8 +550,11 @@ export function MessageTimeline({
   }, []);
 
   const rearmOlderPrefetchAfterLeavingTop = useCallback((node: HTMLElement) => {
-    if (node.scrollTop > OLDER_PREFETCH_MARGIN_PX && olderLoadAttemptRef.current?.[1] === 2) {
-      olderLoadAttemptRef.current = null;
+    if (node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+      const state = olderLoadAttemptRef.current?.[1];
+      if (state === 2 || state === 3) {
+        olderLoadAttemptRef.current = null;
+      }
     }
   }, []);
 
@@ -801,6 +823,14 @@ export function MessageTimeline({
         return;
       }
       const underfilled = maxScrollOf(node) <= 1;
+      if (!retry && underfilled && currentAttempt?.[1] === 3) {
+        // A receipted prefetch already declined or failed while the viewport
+        // was still scrollable. Collapse may later remove the scroll range;
+        // promote that exact owner to Retry without issuing another request.
+        currentAttempt[1] = 0;
+        setUnderfillSettledAttempt(currentAttempt);
+        return;
+      }
       if (!retry && underfilled && currentAttempt?.[1] === 2) {
         // A settled ordinary prefetch owns only this visit to the top band.
         // If its resulting window cannot scroll, yield to automatic underfill
@@ -974,6 +1004,12 @@ export function MessageTimeline({
     const firstItemChanged = !!previousFirstItemId && firstItemId !== previousFirstItemId;
     const prepended =
       firstItemChanged && resolvedItems.some((item) => item.id === previousFirstItemId);
+    const attempt = olderLoadAttemptRef.current;
+    const committedZeroOverlapOlderReplacement = !!(
+      attempt?.[2]?.committed &&
+      firstItemChanged &&
+      !prepended
+    );
     const restorePrependAnchor = () => {
       // Keep the reader on the same retained rows. Prefer the exact first-item
       // content coordinate (needed when a prepend merges inside one group),
@@ -1030,6 +1066,18 @@ export function MessageTimeline({
       if (autoFollow) {
         applyPinned(true);
         snapToBottom(node);
+      }
+    } else if (committedZeroOverlapOlderReplacement) {
+      // An oldest-directed bounded page can replace every previously mounted
+      // row. Its receipt is the only causal proof that this is backward
+      // progress rather than live-tail forward eviction. Anchor at the bottom
+      // seam before recording this window's scroll baselines so an unpinned
+      // reader stays adjacent to the history they were reading.
+      clearPendingReaderLeave();
+      stopFollow();
+      writeScrollTop(node, maxScrollOf(node));
+      if (attempt?.[1] === 1 && pinnedRef.current) {
+        applyPinned(false);
       }
     } else if (prepended) {
       if (
@@ -1113,14 +1161,17 @@ export function MessageTimeline({
     // bounded window. Without that mark, retain the compatibility fallback: a
     // retained prior boundary proves prepend, while a missing prior boundary is
     // forward eviction and merely rebases.
-    const attempt = olderLoadAttemptRef.current;
     if (!attempt) {
       return;
     }
     if (attempt[0] === olderBoundaryKey) {
       return;
     }
-    if (attempt[0] && !sourceItems?.find((entry) => entry.id === attempt[0])) {
+    if (
+      !attempt[2]?.committed &&
+      attempt[0] &&
+      !sourceItems?.find((entry) => entry.id === attempt[0])
+    ) {
       attempt[0] = olderBoundaryKey;
       return;
     }
@@ -1252,7 +1303,7 @@ export function MessageTimeline({
           // owner here; a still-pending request remains cooling so a quick
           // leave/re-enter cannot overlap it.
           const attempt = olderLoadAttemptRef.current;
-          if (attempt?.[1] === 2) {
+          if (attempt?.[1] === 2 || attempt?.[1] === 3) {
             olderLoadAttemptRef.current = null;
           }
           return;
@@ -1268,7 +1319,7 @@ export function MessageTimeline({
           if (!scrollRef.current || olderLoadAttemptRef.current !== attempt) {
             return;
           }
-          attempt[1] = 2;
+          attempt[1] = 3;
           if (root.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
             olderLoadAttemptRef.current = null;
           } else if (maxScrollOf(root) <= 1) {

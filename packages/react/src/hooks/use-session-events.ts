@@ -1,6 +1,7 @@
 import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
+import type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "../older-history";
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
@@ -38,7 +39,7 @@ export type UseSessionEventsResult = {
   /** True while an older window is being fetched. */
   loadingOlder: boolean;
   /** Prepend an older density-bounded window; resolves true when more remain. */
-  loadOlder: () => Promise<boolean>;
+  loadOlder: OlderHistoryLoader;
   /**
    * Durable events exist after the current window (history view jumped away
    * from the live tip, or a forward page is incomplete).
@@ -427,13 +428,15 @@ export function useSessionEvents(
     loadingOldestRef.current ||
     loadingLatestRef.current;
 
-  const loadOlder = useCallback(
-    async (attempt?: unknown[]): Promise<boolean> => {
+  const loadOlder = useCallback((): OlderHistoryLoadReceipt => {
+    let receipt!: OlderHistoryLoadReceipt & { committed: boolean };
+    receipt = (async () => {
       if (!sessionId || navigationBusy() || !hasOlderRef.current) {
         return false;
       }
       const before = oldestSequenceRef.current;
       if (before === null) {
+        oldestSequenceRef.current = null;
         hasOlderRef.current = false;
         setHasOlder(false);
         return false;
@@ -477,7 +480,7 @@ export function useSessionEvents(
         }
         const retainedNewest = retained.events.at(-1)?.sequence ?? null;
         eventWindowRef.current = retained;
-        if (attempt) attempt[0] = "";
+        receipt.committed = true;
         setEventWindow(retained);
         oldestSequenceRef.current = retainedOldest;
         newestSequenceRef.current = retainedNewest;
@@ -504,9 +507,10 @@ export function useSessionEvents(
         loadingOlderRef.current = false;
         setLoadingOlder(false);
       }
-    },
-    [client, workspaceId, sessionId],
-  );
+    })() as OlderHistoryLoadReceipt & { committed: boolean };
+    receipt.committed = false;
+    return receipt;
+  }, [client, workspaceId, sessionId]);
 
   const loadOldest = useCallback(async (): Promise<boolean> => {
     if (!sessionId || navigationBusy() || !hasOlderRef.current) {
