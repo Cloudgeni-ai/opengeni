@@ -43,9 +43,11 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
       }
 
       // Migration fanout is lower priority than ordinary workflow wakes and is
-      // independently capped. Confirmed publishes run with bounded concurrency
-      // in the reconciler, so a broker timeout cannot occupy the five-minute
-      // activity budget once per quarantined session.
+      // independently capped. Delivery acknowledgements run with bounded
+      // concurrency in the reconciler, so a broker timeout cannot occupy the
+      // five-minute activity budget once per quarantined session. Managed NATS
+      // uses its bounded confirmed publish; embedding buses use their required
+      // publish promise.
       const titleFanout = await reconcileAutomaticSessionTitleFanout(
         service,
         MAX_TITLE_FANOUT_PER_ACTIVITY,

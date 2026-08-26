@@ -277,10 +277,16 @@ export async function reconcilePendingParentSystemUpdates(
 }
 
 /**
- * Publish migration-created safe title events through the ordinary NATS session
- * subject. The outbox is durable and deployment-global; a crash after publish
+ * Publish migration-created safe title events through the configured session
+ * event bus. The outbox is durable and deployment-global; a crash after publish
  * but before acknowledgement can duplicate a notification, which is safe
  * because SSE consumers sequence-fence and gap-fill from the durable log.
+ *
+ * Managed NATS exposes the stronger bounded flush acknowledgement through
+ * publishConfirmed. Embedding buses predate that optional capability, so their
+ * required publish promise remains the delivery acknowledgement: resolve only
+ * after accepting the batch, and reject a real transport failure so the durable
+ * row stays retryable.
  */
 export async function reconcileAutomaticSessionTitleFanout(
   svc: NotifyServices,
@@ -304,10 +310,11 @@ export async function reconcileAutomaticSessionTitleFanout(
         if (svc.bus.isConnected?.() === false) {
           throw new Error("session event bus is disconnected");
         }
-        if (!svc.bus.publishConfirmed) {
-          throw new Error("session event bus does not support confirmed publish");
+        if (svc.bus.publishConfirmed) {
+          await svc.bus.publishConfirmed(row.event.workspaceId, row.event.sessionId, [row.event]);
+        } else {
+          await svc.bus.publish(row.event.workspaceId, row.event.sessionId, [row.event]);
         }
-        await svc.bus.publishConfirmed(row.event.workspaceId, row.event.sessionId, [row.event]);
         await markDelivered(svc.db, row);
         delivered += 1;
       } catch (error) {

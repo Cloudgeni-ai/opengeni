@@ -106,6 +106,102 @@ test("automatic-title migration fanout publishes and acknowledges the durable ev
   expect(markAutomaticSessionTitleFanoutFailed).not.toHaveBeenCalled();
 });
 
+test("automatic-title migration fanout drains through an embedding bus without confirmed publish", async () => {
+  let acceptDelivery: (() => void) | undefined;
+  let notePublishStarted: (() => void) | undefined;
+  const accepted = new Promise<void>((resolve) => {
+    acceptDelivery = resolve;
+  });
+  const publishStarted = new Promise<void>((resolve) => {
+    notePublishStarted = resolve;
+  });
+  const publish = mock(async () => {
+    notePublishStarted!();
+    await accepted;
+  });
+  const claimAutomaticSessionTitleFanout = mock(async () => [titleFanoutDelivery]);
+  const markAutomaticSessionTitleFanoutDelivered = mock(async () => true);
+  const markAutomaticSessionTitleFanoutFailed = mock(async () => true);
+  const db = {} as Database;
+
+  const reconciliation = reconcileAutomaticSessionTitleFanout(
+    {
+      db,
+      // Existing embedding implementations are conforming EventBus instances
+      // without the newer optional publishConfirmed/isConnected capabilities.
+      bus: { publish } as unknown as EventBus,
+      settings: {} as Settings,
+      observability: {} as NotifyServices["observability"],
+      wakeSessionWorkflow: null,
+    },
+    17,
+    {
+      claimAutomaticSessionTitleFanout,
+      markAutomaticSessionTitleFanoutDelivered,
+      markAutomaticSessionTitleFanoutFailed,
+    },
+  );
+
+  await publishStarted;
+  expect(publish).toHaveBeenCalledWith(
+    titleFanoutDelivery.event.workspaceId,
+    titleFanoutDelivery.event.sessionId,
+    [titleFanoutDelivery.event],
+  );
+  expect(markAutomaticSessionTitleFanoutDelivered).not.toHaveBeenCalled();
+
+  acceptDelivery!();
+  expect(await reconciliation).toEqual({ claimed: 1, delivered: 1, failed: 0 });
+  expect(markAutomaticSessionTitleFanoutDelivered).toHaveBeenCalledWith(db, titleFanoutDelivery);
+  expect(markAutomaticSessionTitleFanoutFailed).not.toHaveBeenCalled();
+});
+
+test("automatic-title migration fanout retries a real embedding-bus failure", async () => {
+  let publishAttempts = 0;
+  const publish = mock(async () => {
+    publishAttempts += 1;
+    if (publishAttempts === 1) {
+      throw new Error("embedded broker unavailable");
+    }
+  });
+  const claimAutomaticSessionTitleFanout = mock(async () => [titleFanoutDelivery]);
+  const markAutomaticSessionTitleFanoutDelivered = mock(async () => true);
+  const markAutomaticSessionTitleFanoutFailed = mock(async () => true);
+  const db = {} as Database;
+  const services = {
+    db,
+    bus: { publish } as unknown as EventBus,
+    settings: {} as Settings,
+    observability: {} as NotifyServices["observability"],
+    wakeSessionWorkflow: null,
+  };
+  const overrides = {
+    claimAutomaticSessionTitleFanout,
+    markAutomaticSessionTitleFanoutDelivered,
+    markAutomaticSessionTitleFanoutFailed,
+  };
+
+  expect(await reconcileAutomaticSessionTitleFanout(services, 17, overrides)).toEqual({
+    claimed: 1,
+    delivered: 0,
+    failed: 1,
+  });
+  expect(markAutomaticSessionTitleFanoutDelivered).not.toHaveBeenCalled();
+  expect(markAutomaticSessionTitleFanoutFailed).toHaveBeenCalledWith(
+    db,
+    titleFanoutDelivery,
+    "embedded broker unavailable",
+  );
+
+  expect(await reconcileAutomaticSessionTitleFanout(services, 17, overrides)).toEqual({
+    claimed: 1,
+    delivered: 1,
+    failed: 0,
+  });
+  expect(publish).toHaveBeenCalledTimes(2);
+  expect(markAutomaticSessionTitleFanoutDelivered).toHaveBeenCalledWith(db, titleFanoutDelivery);
+});
+
 test("automatic-title migration fanout leaves a disconnected delivery retryable", async () => {
   const publishConfirmed = mock(async () => undefined);
   const claimAutomaticSessionTitleFanout = mock(async () => [titleFanoutDelivery]);

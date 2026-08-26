@@ -252,11 +252,19 @@ export type RequestHandler = (
 ) => Promise<Uint8Array> | Uint8Array;
 
 export type EventBus = {
+  /**
+   * Publish a session-event batch. Embedding implementations without the
+   * optional publishConfirmed capability must resolve only after their
+   * transport has accepted the batch and reject transport failures so durable
+   * outbox callers can retry safely. Ordinary live-fanout callers remain
+   * best-effort because they catch failures around this contract.
+   */
   publish: (workspaceId: string, sessionId: string, events: SessionEvent[]) => Promise<void>;
   /**
    * Publish an already-durable batch and reject unless the transport confirms
-   * acceptance. Optional for embedding-host buses; durable fanout reconcilers
-   * must not acknowledge their outbox when this capability is unavailable.
+   * acceptance with a stronger provider-specific acknowledgement. Optional for
+   * embedding-host buses; durable fanout reconcilers fall back to the required
+   * publish promise when this capability is unavailable.
    */
   publishConfirmed?: (
     workspaceId: string,
