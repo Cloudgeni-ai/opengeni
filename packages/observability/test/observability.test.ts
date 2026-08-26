@@ -10,6 +10,7 @@ import {
   recordTenancyCompatibilityLaneUse,
   sandboxOperationMetricObserver,
   TENANCY_COMPATIBILITY_LANES,
+  workspaceInsightsMetricObserver,
 } from "../src";
 
 const settings = {
@@ -49,6 +50,55 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_http_request_duration_seconds_bucket");
     expect(metrics).toContain("opengeni_build_info");
     expect(metrics).toContain("opengeni_process_cpu_user_seconds_total");
+  });
+
+  test("records identity-free Insights timing with an exact two-second target bucket", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    const observe = workspaceInsightsMetricObserver(obs);
+    const observedLogs: string[] = [];
+    const originalLog = console.log;
+    console.log = (message?: unknown) => observedLogs.push(String(message));
+    try {
+      observe({
+        range: "week",
+        providerFiltered: false,
+        modelFiltered: false,
+        outcome: "completed",
+        durationMs: 1_750,
+      });
+      observe({
+        range: "caller-controlled-range",
+        providerFiltered: true,
+        modelFiltered: true,
+        outcome: "caller-controlled-outcome",
+        durationMs: Number.NaN,
+      });
+    } finally {
+      console.log = originalLog;
+    }
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_workspace_insights_request_duration_seconds_bucket\{[^}]*le="2"[^}]*model_filter="all"[^}]*outcome="completed"[^}]*provider_filter="all"[^}]*range="week"[^}]*\} 1\b/,
+    );
+    expect(metrics).toContain('range="unknown"');
+    expect(metrics).toContain('outcome="unknown"');
+    expect(metrics).not.toContain("caller-controlled-range");
+    expect(metrics).not.toContain("caller-controlled-outcome");
+
+    const completedLog = JSON.parse(observedLogs[0] ?? "{}") as Record<string, unknown>;
+    expect(completedLog).toMatchObject({
+      message: "Workspace Insights request measured",
+      surface: "workspace_insights",
+      eventType: "request_latency",
+      route: "/v1/workspaces/:workspaceId/insights",
+      outcome: "completed",
+      durationMs: 1_750,
+    });
+    expect(completedLog.workspaceId).toBeUndefined();
+    expect(completedLog.range).toBeUndefined();
+    expect(completedLog.provider).toBeUndefined();
+    expect(completedLog.model).toBeUndefined();
   });
 
   test("reports bounded configured and effective sandbox rollout state", async () => {
