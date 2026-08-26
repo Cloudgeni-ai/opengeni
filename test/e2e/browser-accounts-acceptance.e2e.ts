@@ -423,12 +423,12 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
   await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor();
   await page.evaluate(() => {
     const debugWindow = window as Window & {
-      __ope365AccountMessages?: Array<{ keys: string[]; origin: string; type: string }>;
+      __accountAcceptanceMessages?: Array<{ keys: string[]; origin: string; type: string }>;
     };
-    debugWindow.__ope365AccountMessages = [];
+    debugWindow.__accountAcceptanceMessages = [];
     window.addEventListener("message", (event: MessageEvent<unknown>) => {
       const data = event.data;
-      debugWindow.__ope365AccountMessages?.push({
+      debugWindow.__accountAcceptanceMessages?.push({
         keys:
           data && typeof data === "object" && !Array.isArray(data) ? Object.keys(data).sort() : [],
         origin: event.origin,
@@ -488,9 +488,9 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
       const projection = await sessionSet(page);
       const messages = await page.evaluate(() => {
         const debugWindow = window as Window & {
-          __ope365AccountMessages?: Array<{ keys: string[]; origin: string; type: string }>;
+          __accountAcceptanceMessages?: Array<{ keys: string[]; origin: string; type: string }>;
         };
-        return debugWindow.__ope365AccountMessages ?? [];
+        return debugWindow.__accountAcceptanceMessages ?? [];
       });
       throw new Error(
         `account settled without reaching organization onboarding: url=${page.url()} projection=${JSON.stringify({ actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.selectedSlotId !== null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) })} messages=${JSON.stringify(messages)} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,

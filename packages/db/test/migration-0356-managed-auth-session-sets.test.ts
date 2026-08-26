@@ -78,7 +78,7 @@ async function createLogin(input: {
   providerId?: string;
 }): Promise<Login> {
   if (!owned || !client) throw new Error("test database unavailable");
-  const userId = `ope365-${crypto.randomUUID()}`;
+  const userId = `session-set-${crypto.randomUUID()}`;
   const email = `${userId}@example.test`;
   const providerId = input.providerId ?? "credential";
   await owned.admin`
