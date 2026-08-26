@@ -384,7 +384,7 @@ export async function aggregateModelCallFacts(
   });
 }
 
-type ModelCallFactSeriesAggregate = {
+export type ModelCallFactSeriesAggregate = {
   costMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;

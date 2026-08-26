@@ -5,12 +5,6 @@ import {
   type WorkspaceInsightsResponse,
 } from "@opengeni/contracts";
 import {
-  aggregateModelCallFacts,
-  aggregateModelCallFactsByDay,
-  aggregateModelCallFactsByHour,
-  aggregateModelContextContributions,
-  aggregateRootSessionDrivers,
-  aggregateScheduleFacts,
   aggregateSessionDepth,
   aggregateWarmSecondsByGroup,
   countOnlineMachines,
@@ -20,9 +14,8 @@ import {
   enumerateUtcHours,
   listFloorSessions,
   listLiveWarmLeases,
-  listModelCallFacets,
-  listRecentModelCalls,
   listScheduledTasks,
+  readWorkspaceInsightsModelBundle,
   requireWorkspace,
   sumUsageQuantityByDay,
   sumUsageQuantityByHour,
@@ -196,8 +189,6 @@ export async function getWorkspaceInsights(
   const model = input.model?.trim() || null;
   const modelFilterActive = Boolean(provider || model);
   const filter = { provider, model };
-  const aggregateFactsForSeries =
-    input.range === "today" ? aggregateModelCallFactsByHour : aggregateModelCallFactsByDay;
   const sumUsageForSeries =
     input.range === "today" ? sumUsageQuantityByHour : sumUsageQuantityByDay;
 
@@ -206,24 +197,17 @@ export async function getWorkspaceInsights(
     priorWorkspaceCreditMicros,
     warmSeconds,
     priorWarmSeconds,
-    modelRows,
-    priorModelRows,
-    factDays,
+    modelBundle,
     warmDays,
     costDays,
     warmGroups,
     liveWarm,
-    rootDrivers,
-    scheduleFacts,
     tasks,
     depth,
     floorRows,
     machinesOnline,
     billableTokensUsed,
     agentRunsUsed,
-    facets,
-    recentCalls,
-    promptContributions,
   ] = await Promise.all([
     sumUsageQuantityInRange(db, {
       workspaceId: input.workspaceId,
@@ -249,22 +233,13 @@ export async function getWorkspaceInsights(
       since: window.priorSince,
       until: window.priorUntil,
     }),
-    aggregateModelCallFacts(db, {
+    readWorkspaceInsightsModelBundle(db, {
       workspaceId: input.workspaceId,
       since: window.since,
       until: window.until,
-      ...filter,
-    }),
-    aggregateModelCallFacts(db, {
-      workspaceId: input.workspaceId,
-      since: window.priorSince,
-      until: window.priorUntil,
-      ...filter,
-    }),
-    aggregateFactsForSeries(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
+      priorSince: window.priorSince,
+      priorUntil: window.priorUntil,
+      granularity: input.range === "today" ? "hour" : "day",
       ...filter,
     }),
     sumUsageForSeries(db, {
@@ -286,19 +261,6 @@ export async function getWorkspaceInsights(
       limit: 24,
     }),
     listLiveWarmLeases(db, input.workspaceId),
-    aggregateRootSessionDrivers(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-      limit: 8,
-    }),
-    aggregateScheduleFacts(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-    }),
     listScheduledTasks(db, input.workspaceId, 100),
     aggregateSessionDepth(db, input.workspaceId),
     listFloorSessions(db, input.workspaceId, 24),
@@ -315,36 +277,20 @@ export async function getWorkspaceInsights(
       eventType: "agent_run.created",
       since: startOfUtcMonth(now),
     }),
-    listModelCallFacets(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-    }),
-    listRecentModelCalls(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-      limit: 50,
-    }),
-    aggregateModelContextContributions(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-    }),
   ]);
 
-  const [priorRootDrivers, attached, fireCounts] = await Promise.all([
-    // Exact prior costs for the current top drivers — never a separate top-N page that
-    // drops roots and invents +$full as "new" spend.
-    aggregateRootSessionDrivers(db, {
-      workspaceId: input.workspaceId,
-      since: window.priorSince,
-      until: window.priorUntil,
-      ...filter,
-      rootSessionIds: rootDrivers.map((row) => row.rootSessionId),
-    }),
+  const {
+    modelRows,
+    priorModelRows,
+    factBuckets: factDays,
+    rootDrivers,
+    priorRootDrivers,
+    scheduleFacts,
+    facets,
+    recentCalls,
+    promptContributions,
+  } = modelBundle;
+  const [attached, fireCounts] = await Promise.all([
     countSessionsAttachedToGroups(
       db,
       input.workspaceId,
