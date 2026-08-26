@@ -73,6 +73,7 @@ type BrowserProblems = {
   phase: string;
   pageErrors: string[];
   failedRequests: string[];
+  pendingFiniteReads: Map<object, string>;
 };
 
 type CompletionResponseLoss = {
@@ -182,12 +183,25 @@ function observeBrowser(page: Page): BrowserProblems {
     phase: "initialization",
     pageErrors: [],
     failedRequests: [],
+    pendingFiniteReads: new Map(),
   };
   const requestPhases = new WeakMap<
     object,
     { actorEpoch: string | null; phase: string; startedAt: number }
   >();
   page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    // Product mutation helpers are awaited explicitly and remain covered by
+    // the strict failure ledger. This tracker prevents a full-document goto
+    // from tearing down background finite reads from the just-selected actor.
+    const isFiniteApiRead =
+      request.method() === "GET" &&
+      pathname.startsWith("/v1/") &&
+      !pathname.endsWith("/stream") &&
+      !pathname.includes("/live-events/stream");
+    if (isFiniteApiRead) {
+      problems.pendingFiniteReads.set(request, `${request.method()} ${request.url()}`);
+    }
     requestPhases.set(request, {
       actorEpoch: request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null,
       phase: problems.phase,
@@ -224,6 +238,9 @@ function observeBrowser(page: Page): BrowserProblems {
       });
     }
   });
+  page.on("requestfinished", (request) => {
+    problems.pendingFiniteReads.delete(request);
+  });
   page.on("console", (message) => {
     if (message.type() === "error") {
       const source = message.location().url;
@@ -240,6 +257,7 @@ function observeBrowser(page: Page): BrowserProblems {
     problems.pageErrors.push(`[${problems.phase}] ${error.message}`);
   });
   page.on("requestfailed", (request) => {
+    problems.pendingFiniteReads.delete(request);
     const failure = request.failure()?.errorText ?? "unknown";
     // Actor changes intentionally abort the preceding epoch's fetch/SSE work.
     if (/ERR_ABORTED|NS_BINDING_ABORTED|cancelled|canceled/i.test(failure)) return;
@@ -250,6 +268,28 @@ function observeBrowser(page: Page): BrowserProblems {
 
 function setBrowserPhase(problems: BrowserProblems, phase: string): void {
   problems.phase = phase;
+}
+
+async function waitForFiniteReadQuiescence(
+  problems: BrowserProblems,
+  timeout = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  let quietSince: number | null = null;
+  while (Date.now() < deadline) {
+    if (problems.pendingFiniteReads.size === 0) {
+      quietSince ??= Date.now();
+      if (Date.now() - quietSince >= 250) return;
+    } else {
+      quietSince = null;
+    }
+    await Bun.sleep(25);
+  }
+  throw new Error(
+    `finite browser reads did not settle: ${JSON.stringify(
+      [...problems.pendingFiniteReads.values()].sort(),
+    )}`,
+  );
 }
 
 function expectNoBrowserProblems(problems: BrowserProblems): void {
@@ -423,7 +463,11 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
   await page.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor();
   await page.evaluate(() => {
     const debugWindow = window as Window & {
-      __accountAcceptanceMessages?: Array<{ keys: string[]; origin: string; type: string }>;
+      __accountAcceptanceMessages?: Array<{
+        keys: string[];
+        origin: string;
+        type: string;
+      }>;
     };
     debugWindow.__accountAcceptanceMessages = [];
     window.addEventListener("message", (event: MessageEvent<unknown>) => {
@@ -478,7 +522,10 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
       const unselected = await sessionSet(page);
       expect(unselected.selectedSlotId).toBeNull();
       expect(unselected.slots).toEqual([
-        expect.objectContaining({ displayName: account.displayName, state: "active" }),
+        expect.objectContaining({
+          displayName: account.displayName,
+          state: "active",
+        }),
       ]);
       await continueAsAccount.click();
       await page.getByRole("heading", { name: "Create your organization" }).waitFor({
@@ -488,7 +535,11 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
       const projection = await sessionSet(page);
       const messages = await page.evaluate(() => {
         const debugWindow = window as Window & {
-          __accountAcceptanceMessages?: Array<{ keys: string[]; origin: string; type: string }>;
+          __accountAcceptanceMessages?: Array<{
+            keys: string[];
+            origin: string;
+            type: string;
+          }>;
         };
         return debugWindow.__accountAcceptanceMessages ?? [];
       });
@@ -605,7 +656,9 @@ async function closeResponsiveAccountMenu(page: Page, width: number): Promise<vo
 async function expectActiveAccountAnnouncement(page: Page, account: AccountFixture): Promise<void> {
   await page
     .locator('span[aria-live="polite"][aria-atomic="true"]')
-    .filter({ hasText: `Active account: ${account.displayName}, ${account.email}` })
+    .filter({
+      hasText: `Active account: ${account.displayName}, ${account.email}`,
+    })
     .waitFor();
 }
 
@@ -650,7 +703,9 @@ async function addOrReauth(
     ]);
     await completePopup(popup, target, { replayLostResponse: true });
   } else {
-    const slot = menu.getByRole("menuitem", { name: new RegExp(target.displayName) });
+    const slot = menu.getByRole("menuitem", {
+      name: new RegExp(target.displayName),
+    });
     await slot.hover();
     const [popup] = await Promise.all([
       page.waitForEvent("popup"),
@@ -729,7 +784,9 @@ async function selectAccount(
   for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
     try {
       const menu = await openAccountMenu(page, current.displayName);
-      const slot = menu.getByRole("menuitem", { name: new RegExp(target.displayName) });
+      const slot = menu.getByRole("menuitem", {
+        name: new RegExp(target.displayName),
+      });
       await slot.hover({ timeout: 5_000 });
       await page
         .getByRole("menuitem", { name: "Use this account" })
@@ -829,8 +886,14 @@ async function captureResponsiveEvidence(
     { width: 1440, height: 960, scheme: "dark" as const },
   ];
   for (const capture of captures) {
-    await page.setViewportSize({ width: capture.width, height: capture.height });
-    await page.emulateMedia({ colorScheme: capture.scheme, reducedMotion: "reduce" });
+    await page.setViewportSize({
+      width: capture.width,
+      height: capture.height,
+    });
+    await page.emulateMedia({
+      colorScheme: capture.scheme,
+      reducedMotion: "reduce",
+    });
     await openResponsiveAccountMenu(page, alpha.displayName, capture.width);
     await expectNoHorizontalOverflow(page);
     await expectNoAxeViolations(page, '[data-slot="dropdown-menu-content"]');
@@ -856,7 +919,11 @@ async function captureResponsiveEvidence(
     fullPage: true,
   });
   await closeResponsiveAccountMenu(page, 768);
-  await page.emulateMedia({ colorScheme: "light", forcedColors: "none", reducedMotion: "reduce" });
+  await page.emulateMedia({
+    colorScheme: "light",
+    forcedColors: "none",
+    reducedMotion: "reduce",
+  });
 
   const zoom = await browser.newContext({
     storageState: await context.storageState(),
@@ -968,7 +1035,10 @@ beforeAll(async () => {
     );
   }
   await migrate(owned.ownerUrl);
-  await provisionRoles(owned.adminUrl, { appPassword: owned.appPassword, rlsStrategy: "force" });
+  await provisionRoles(owned.adminUrl, {
+    appPassword: owned.appPassword,
+    rlsStrategy: "force",
+  });
   const databaseUrl = appDatabaseUrl(owned);
   client = createDb(databaseUrl, { max: 16, rlsStrategy: "force" });
 
@@ -1093,7 +1163,10 @@ beforeAll(async () => {
           ]).has(url.pathname) ||
             (request.method === "GET" && url.pathname === "/v1/auth/session-set"))
         ) {
-          actorMutationAcceptances.push({ acceptedAt: performance.now(), path: url.pathname });
+          actorMutationAcceptances.push({
+            acceptedAt: performance.now(),
+            path: url.pathname,
+          });
         }
         return response;
       }
@@ -1133,8 +1206,12 @@ describe("provider-neutral browser account acceptance", () => {
         ? { executablePath: process.env.OPENGENI_BROWSER_BIN }
         : undefined,
     );
-    const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
-    const otherBrowserSet = await browser.newContext({ viewport: { width: 1024, height: 768 } });
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 960 },
+    });
+    const otherBrowserSet = await browser.newContext({
+      viewport: { width: 1024, height: 768 },
+    });
     const page = await context.newPage();
     const secondTab = await context.newPage();
     const otherPage = await otherBrowserSet.newPage();
@@ -1178,9 +1255,11 @@ describe("provider-neutral browser account acceptance", () => {
         `Account menu. ${alpha.displayName} is active.`,
       );
       await page.keyboard.press("Enter");
-      const keyboardMenu = accountMenuSurface(page);
-      await keyboardMenu.waitFor();
-      expect(await keyboardMenu.getByRole("menuitem").all()).not.toHaveLength(0);
+      const keyboardMenu = page
+        .locator('[data-slot="dropdown-menu-content"][data-state="open"]')
+        .filter({ hasText: "Browser accounts" });
+      await keyboardMenu.getByRole("menuitem").first().waitFor();
+      expect(await keyboardMenu.getByRole("menuitem").count()).toBeGreaterThan(0);
       await page.waitForFunction(() =>
         [...document.querySelectorAll('[data-slot="dropdown-menu-content"]')].some(
           (menu) =>
@@ -1255,14 +1334,19 @@ describe("provider-neutral browser account acceptance", () => {
           phase: "cross-tab-select-race",
           status: 409,
           statusLabel: "Conflict",
-          timing: { kind: "direct-race-fence", settledAt: racedSelectionSettledAt },
+          timing: {
+            kind: "direct-race-fence",
+            settledAt: racedSelectionSettledAt,
+          },
         });
       }
 
       setBrowserPhase(pageProblems, "late-old-epoch-setup-beta-to-alpha");
       setBrowserPhase(secondTabProblems, "late-old-epoch-setup-beta-to-alpha");
       await selectAccount(page, beta, alpha);
-      await accountMenuTrigger(secondTab, alpha.displayName).waitFor({ timeout: 30_000 });
+      await accountMenuTrigger(secondTab, alpha.displayName).waitFor({
+        timeout: 30_000,
+      });
       const oldProjection = await sessionSet(secondTab);
       const delay = await delayedWorkspaceResponse(secondTab, oldProjection.actorEpoch);
       const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
@@ -1275,12 +1359,15 @@ describe("provider-neutral browser account acceptance", () => {
       delay.release();
       await reload;
       await delay.dispose();
-      await accountMenuTrigger(secondTab, beta.displayName).waitFor({ timeout: 30_000 });
+      await accountMenuTrigger(secondTab, beta.displayName).waitFor({
+        timeout: 30_000,
+      });
       expect(secondTab.url()).toContain(beta.workspaceId);
       expect(secondTab.url()).not.toContain(alpha.workspaceId);
 
       setBrowserPhase(pageProblems, "cross-slot-deep-link");
       await selectAccount(page, beta, alpha);
+      await waitForFiniteReadQuiescence(pageProblems);
       await page.goto(`${publicOrigin}/sessions/${beta.sessionId}`, {
         waitUntil: "domcontentloaded",
       });
@@ -1289,7 +1376,9 @@ describe("provider-neutral browser account acceptance", () => {
       expect(await page.getByText(beta.email, { exact: false }).count()).toBeGreaterThan(0);
       expect(await page.getByText("Account Beta Organization", { exact: false }).count()).toBe(0);
       await page.getByRole("button", { name: `Open as ${beta.displayName}` }).click();
-      await accountMenuTrigger(page, beta.displayName).waitFor({ timeout: 30_000 });
+      await accountMenuTrigger(page, beta.displayName).waitFor({
+        timeout: 30_000,
+      });
       await expectAndConsumeConsoleErrors(
         page,
         pageProblems,
@@ -1383,7 +1472,10 @@ describe("provider-neutral browser account acceptance", () => {
                 "content-type": "application/json",
                 [contractHeader]: contractRevision,
               },
-              body: JSON.stringify({ operationId: crypto.randomUUID(), expectedGeneration: "1" }),
+              body: JSON.stringify({
+                operationId: crypto.randomUUID(),
+                expectedGeneration: "1",
+              }),
             })
           ).status,
         {
@@ -1507,7 +1599,11 @@ describe("provider-neutral browser account acceptance", () => {
         operationDml: false,
       });
       const [secretShape] = await owned.admin<
-        Array<{ rawAuthorityColumns: number; rawCsrfColumns: number; providerTokenColumns: number }>
+        Array<{
+          rawAuthorityColumns: number;
+          rawCsrfColumns: number;
+          providerTokenColumns: number;
+        }>
       >`
         select
           count(*) filter (where column_name in ('authority', 'authority_token', 'authority_secret'))::int as "rawAuthorityColumns",
