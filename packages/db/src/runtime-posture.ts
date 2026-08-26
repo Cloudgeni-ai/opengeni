@@ -1342,6 +1342,8 @@ export type RuntimeDatabasePostureOptions = {
   protectedTables?: readonly string[];
   tablePrivileges?: RuntimeTablePrivilegeContract;
   protectedNoDirectDmlTables?: readonly string[];
+  targetSchemaCapabilityRoutines?: readonly string[];
+  targetSchemaForbiddenRoutines?: readonly string[];
   organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
@@ -1477,6 +1479,10 @@ export async function inspectRuntimeDatabasePosture(
   options: RuntimeDatabasePostureOptions,
 ): Promise<RuntimeDatabasePosture> {
   const targetSchema = options.targetSchema?.trim() || "public";
+  const targetSchemaCapabilityRoutines =
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
+  const targetSchemaForbiddenRoutines =
+    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
   return await db.transaction(
     async (tx) => {
@@ -1751,10 +1757,9 @@ export async function inspectRuntimeDatabasePosture(
             and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
               array[
                 ${sql.join(
-                  [
-                    ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
-                    ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
-                  ].map((name) => sql`${name}`),
+                  [...targetSchemaCapabilityRoutines, ...targetSchemaForbiddenRoutines].map(
+                    (name) => sql`${name}`,
+                  ),
                   sql`, `,
                 )}
               ]::text[]
@@ -1867,6 +1872,10 @@ export function evaluateRuntimeDatabasePosture(
     options.protectedNoDirectDmlTables ??
       (options.protectedTables ? [] : PROTECTED_NO_DIRECT_DML_TABLES),
   );
+  const targetSchemaCapabilityRoutines =
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
+  const targetSchemaForbiddenRoutines =
+    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
   if (identity.currentUser !== expectedRole || identity.sessionUser !== expectedRole) {
     violations.push(
@@ -1997,7 +2006,7 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
-  for (const forbiddenRoutine of RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES) {
+  for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
     if (matches.length !== 1) {
       violations.push(
@@ -2024,7 +2033,7 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
     }
   }
-  for (const expectedRoutine of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES) {
+  for (const expectedRoutine of targetSchemaCapabilityRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
     if (matches.length !== 1) {
       violations.push(
