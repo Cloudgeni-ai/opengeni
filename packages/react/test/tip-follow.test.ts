@@ -132,7 +132,7 @@ describe("tipFollowNoteViewportShrink", () => {
 });
 
 describe("tipFollowStep", () => {
-  test("line growth eases in — first frame is not a hard bite of Δh", () => {
+  test("pinned line growth stays at the truthful layout tip", () => {
     expect(28).toBeLessThanOrEqual(TIP_FOLLOW_LINE_GROWTH_PX);
     let state = createTipFollowState();
     state = tipFollowNoteGrowth(state, 2000, 0);
@@ -146,31 +146,33 @@ describe("tipFollowStep", () => {
       revealed: true,
     });
     const moved = first.scrollTop - 1600;
-    // Soft accel: well under half a line on frame 0; velocity is armed.
-    expect(moved).toBeGreaterThan(0);
-    expect(moved).toBeLessThan(28 * 0.35);
-    expect(first.state.scrollVelocity).toBeGreaterThan(0);
-    expect(first.state.running).toBe(true);
+    expect(moved).toBe(28);
+    expect(first.scrollTop).toBe(2028 - 400);
+    expect(first.state.scrollVelocity).toBe(0);
+    expect(first.state.running).toBe(false);
+  });
 
-    // Later frames move more as velocity rises (ease-in), then settle.
-    let scrollTop = first.scrollTop;
-    state = first.state;
-    let peakStep = moved;
-    for (let i = 0; i < 8; i += 1) {
-      const next = tipFollowStep(state, {
-        scrollTop,
-        scrollHeight: 2028,
-        clientHeight: 400,
-        now: 10 + (i + 1) * 16,
-        pinned: true,
-        reducedMotion: false,
-        revealed: true,
-      });
-      peakStep = Math.max(peakStep, next.scrollTop - scrollTop);
-      scrollTop = next.scrollTop;
-      state = next.state;
-    }
-    expect(peakStep).toBeGreaterThan(moved);
+  test("pinned growth preserves debt that existed before the frame", () => {
+    const state = {
+      ...createTipFollowState(),
+      lastHeight: 2000,
+      lastClientHeight: 400,
+      lastTs: 100,
+      scrollVelocity: 0,
+    };
+    const beforeDebt = 2000 - 400 - 1500;
+    const next = tipFollowStep(state, {
+      scrollTop: 1500,
+      scrollHeight: 2028,
+      clientHeight: 400,
+      now: 116,
+      pinned: true,
+      reducedMotion: false,
+      revealed: true,
+    });
+    const afterDebt = 2028 - 400 - next.scrollTop;
+    expect(afterDebt).toBeLessThan(beforeDebt);
+    expect(afterDebt).toBeGreaterThan(beforeDebt - 4);
   });
 
   test("camera never overshoots the tip", () => {
@@ -448,7 +450,7 @@ describe("tipFollowStep", () => {
     expect(run(280)).toBeGreaterThan(run(28));
   });
 
-  test("large wall eases in then reaches tip without a one-frame glue", () => {
+  test("large pinned wall is visible immediately instead of creating stream debt", () => {
     let state = createTipFollowState();
     state = tipFollowNoteGrowth(state, 2000, 0);
     const wall = tipFollowStep(state, {
@@ -460,29 +462,11 @@ describe("tipFollowStep", () => {
       reducedMotion: false,
       revealed: true,
     });
-    expect(wall.scrollTop - 1600).toBeLessThan(80);
-    expect(wall.state.running).toBe(true);
-
-    let scrollTop = wall.scrollTop;
-    state = wall.state;
-    const easeFrames = 50 * MOTION_INSPECT_SCALE;
-    for (let i = 0; i < easeFrames; i += 1) {
-      const next = tipFollowStep(state, {
-        scrollTop,
-        scrollHeight: 2320,
-        clientHeight: 400,
-        now: 26 + (i + 1) * 16,
-        pinned: true,
-        reducedMotion: false,
-        revealed: true,
-      });
-      scrollTop = next.scrollTop;
-      state = next.state;
-    }
-    expect(2320 - 400 - scrollTop).toBeLessThan(48);
+    expect(wall.scrollTop).toBe(2320 - 400);
+    expect(wall.state.running).toBe(false);
   });
 
-  test("token stream stays near tip without hard line snaps", () => {
+  test("token stream stays on the truthful tip", () => {
     let state = createTipFollowState();
     let height = 2000;
     let scrollTop = 1600;
@@ -504,12 +488,11 @@ describe("tipFollowStep", () => {
       state = next.state;
     }
     const tip = height - 400;
-    // Spring lags a little under inspect scale; must not snap whole lines.
-    expect(tip - scrollTop).toBeLessThan(80 * MOTION_INSPECT_SCALE);
-    expect(maxFrameStep).toBeLessThan(24);
+    expect(tip - scrollTop).toBeLessThan(1);
+    expect(maxFrameStep).toBeLessThanOrEqual(3);
   });
 
-  test("line-sized frames: accel then settle, never a full-line snap", () => {
+  test("line-sized frames remain visible without accumulating camera debt", () => {
     let state = createTipFollowState();
     let height = 2000;
     let scrollTop = 1600;
@@ -545,9 +528,9 @@ describe("tipFollowStep", () => {
         state = ease.state;
       }
     }
-    expect(maxFrameStep).toBeLessThan(line);
+    expect(maxFrameStep).toBeLessThanOrEqual(line);
     expect(maxFrameStep).toBeGreaterThan(0);
-    expect(height - 400 - scrollTop).toBeLessThan(12 * MOTION_INSPECT_SCALE);
+    expect(height - 400 - scrollTop).toBeLessThan(1);
   });
 
   test("parks at debt≈0 and clears camera velocity", () => {
@@ -597,7 +580,7 @@ describe("tipFollowStep", () => {
     expect(hidden.scrollTop).toBe(2000);
   });
 
-  test("cold oversized debt snaps; hot oversized growth eases", () => {
+  test("cold oversized debt snaps; hot oversized pinned growth stays truthful", () => {
     const tall = 2000 + TIP_FOLLOW_SNAP_PX + 80;
     const cold = {
       ...createTipFollowState(),
@@ -627,9 +610,8 @@ describe("tipFollowStep", () => {
       reducedMotion: false,
       revealed: true,
     });
-    expect(tracked.scrollTop).toBeGreaterThan(1600);
-    expect(tracked.scrollTop).toBeLessThan(tall - 400);
-    expect(tracked.state.running).toBe(true);
+    expect(tracked.scrollTop).toBe(tall - 400);
+    expect(tracked.state.running).toBe(false);
   });
 
   test("cancel clears running and camera velocity", () => {
