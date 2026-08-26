@@ -849,16 +849,32 @@ Current profiles:
 - `preview-branch`: operator-managed branch preview variable set shape.
 - `self-contained-kubernetes`: Kubernetes-hosted dependencies for demos or air-gapped evaluation.
 
-## Local Docker Compose
+## Local Development Stack
 
-`bun run dev` is the primary local Docker Compose path. It starts Postgres,
-NATS, Temporal, Garage, migrations, imports the fingerprinted reviewed
-integrations catalog, builds the sandbox image, and starts the API, control and
-turn workers, artifact materializer, artifact outbox dispatcher, and web. The
-two artifact roles receive distinct generated least-privilege database logins
-and independently selected health ports (defaults `9465` and `9466`). Their
-ignored local values are written to `.env.runtime`, not `.env`. Set
+`bun run dev` is the primary full local path. `OPENGENI_DEV_BACKEND=auto`
+prefers Docker only when its daemon answers a bounded server probe, then falls
+back to native PostgreSQL, NATS, Temporal, and pinned MinIO processes. Set
+`OPENGENI_DEV_BACKEND=docker` or `native` to require one path. The native path
+is Linux-only, changes a copied Docker sandbox default to the credentials-free
+in-process local provider, and preserves explicit remote sandbox providers.
+
+Both infrastructure paths run migrations, import the fingerprinted reviewed
+integrations catalog, and start the API, control and turn workers, Connected
+Machines relay, artifact materializer, artifact outbox dispatcher, and web.
+Docker additionally builds the local sandbox image when that sandbox backend is
+selected. The two artifact roles receive distinct generated least-privilege
+database logins and independently selected health ports (defaults `9465` and
+`9466`). Ignored local values, including the resolved infrastructure and
+sandbox backends, are written to `.env.runtime`, not `.env`. Set
 `OPENGENI_CATALOG_IMPORT_ENABLED=false` to omit the catalog import.
+
+Native dependencies remain running after `Ctrl-C`, matching Compose's warm
+restart behavior. `bun run dev:down` stops only the infrastructure recorded for
+this worktree. `bun run dev:clean -- --yes` also removes its PostgreSQL/object
+storage data and `.env.runtime`. On a mode-0700 sandbox repository mount, the
+unprivileged PostgreSQL server stores its exact hashed project cluster under
+`/var/tmp/opengeni-native-postgres`; clean removes that directory without
+loosening repository permissions.
 
 The script prepares one canonical current-host development artifact bundle only
 when its exact source/toolchain fingerprint or native receipt is absent or
@@ -875,7 +891,15 @@ per-file-size ceilings before readiness. Helm projects only the selected
 `artifactMaterializer` database/object-storage credential keys; it never imports
 the shared runtime Secret wholesale.
 
-When a common host port is already occupied, `bun run dev` auto-selects a nearby free port for Docker Compose and rewrites the in-memory runtime URLs for that run. Set `OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`, `OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`, `OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or `OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local port choices. The MinIO opt-in uses `OPENGENI_MINIO_HOST_PORT` and `OPENGENI_MINIO_CONSOLE_HOST_PORT`.
+When a common host port is already occupied, `bun run dev` auto-selects a nearby
+free port and rewrites the in-memory runtime URLs for that run. Set
+`OPENGENI_POSTGRES_HOST_PORT`, `OPENGENI_NATS_HOST_PORT`,
+`OPENGENI_NATS_MONITOR_HOST_PORT`, `OPENGENI_TEMPORAL_HOST_PORT`,
+`OPENGENI_TEMPORAL_UI_HOST_PORT`, `OPENGENI_GARAGE_HOST_PORT`,
+`OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT`, or
+`OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT` in `.env` if you need fixed local choices.
+MinIO uses `OPENGENI_MINIO_HOST_PORT` and
+`OPENGENI_MINIO_CONSOLE_HOST_PORT`.
 
 When the turn worker itself runs in a container and controls the host Docker
 daemon through its socket, configure
