@@ -370,6 +370,60 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
+  test("lets logout-all own settlement when its SSE actor-loss signal arrives concurrently", async () => {
+    const before = projection();
+    const empty = projection({ selectedSlotId: null, slotIds: [] });
+    let current = before;
+    let announcePostStarted!: () => void;
+    let releasePost!: () => void;
+    const postStarted = new Promise<void>((resolve) => {
+      announcePostStarted = resolve;
+    });
+    const postRelease = new Promise<void>((resolve) => {
+      releasePost = resolve;
+    });
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        logoutSessionSet: async () => {
+          current = empty;
+          announcePostStarted();
+          await postRelease;
+          return { generation: "2", actorEpoch: "2", state: "logged_out" };
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+      },
+    );
+
+    let logout!: Promise<boolean>;
+    await act(async () => {
+      logout = accounts.current.logoutAll();
+      await postStarted;
+    });
+    expect(accounts.current.phase).toBe("committing");
+
+    await act(async () => {
+      expect(await accounts.current.invalidateActor()).toBeNull();
+    });
+    expect(accounts.current.phase).toBe("loading");
+    expect(accounts.current.projection).toBeNull();
+
+    await act(async () => {
+      releasePost();
+      expect(await logout).toBe(true);
+    });
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection?.slots).toEqual([]);
+    expect(accounts.current.projection?.selectedSlotId).toBeNull();
+    expect(accounts.current.hasPendingTransition).toBe(false);
+    expect(transitions.at(-1)?.kind).toBe("logout_all");
+    expect(transitions.at(-1)?.to?.slots).toEqual([]);
+    await accounts.unmount();
+  });
+
   test("hides a server-invalidated actor immediately and settles only after confirmation", async () => {
     const before = projection();
     const invalidated = projection({

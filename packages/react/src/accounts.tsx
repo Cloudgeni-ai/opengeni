@@ -175,6 +175,8 @@ export function BrowserAccountsProvider({
   const bootstrapOperationRef = useRef<{ generation: string; operationId: string } | null>(null);
   const completionOperationIdRef = useRef<string | null>(null);
   const cancelOperationIdRef = useRef<string | null>(null);
+  const pendingCommitSequenceRef = useRef<number | null>(null);
+  const invalidatedDuringPendingCommitRef = useRef(false);
   const sequenceRef = useRef(0);
   const transitionAbortRef = useRef<AbortController | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
@@ -332,12 +334,18 @@ export function BrowserAccountsProvider({
       const expectedGeneration = pending.expectedGeneration ?? current.generation;
       pending.expectedGeneration = expectedGeneration;
       const sequence = ++sequenceRef.current;
+      pendingCommitSequenceRef.current = sequence;
+      invalidatedDuringPendingCommitRef.current = false;
       pendingRef.current = pending;
       setPhase("committing");
       setError(null);
       try {
-        const accepted = await pending.execute(expectedGeneration);
+        let accepted = await pending.execute(expectedGeneration);
         if (sequenceRef.current !== sequence) return false;
+        if (invalidatedDuringPendingCommitRef.current) {
+          accepted = await client.getSessionSet();
+          if (sequenceRef.current !== sequence) return false;
+        }
         pendingRef.current = null;
         if (sameSelectedActor(current, accepted)) {
           setProjection(accepted);
@@ -349,9 +357,14 @@ export function BrowserAccountsProvider({
         return true;
       } catch (caught) {
         return await fail(caught, pending.kind);
+      } finally {
+        if (pendingCommitSequenceRef.current === sequence) {
+          pendingCommitSequenceRef.current = null;
+          invalidatedDuringPendingCommitRef.current = false;
+        }
       }
     },
-    [fail, inspectBlockers, settleActorTransition],
+    [client, fail, inspectBlockers, settleActorTransition],
   );
 
   const refresh = useCallback(async () => {
@@ -366,6 +379,14 @@ export function BrowserAccountsProvider({
   }, [reconcile]);
 
   const invalidateActor = useCallback(async () => {
+    if (pendingCommitSequenceRef.current !== null) {
+      invalidatedDuringPendingCommitRef.current = true;
+      projectionRef.current = null;
+      setProjection(null);
+      setPhase("loading");
+      setError(null);
+      return null;
+    }
     const sequence = ++sequenceRef.current;
     const before = projectionRef.current;
     transitionAbortRef.current?.abort();
