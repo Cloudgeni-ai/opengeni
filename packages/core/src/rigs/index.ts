@@ -252,7 +252,7 @@ export async function createRigForApi(
     description: payload.description ?? null,
     createdBy,
     initialVersion: {
-      image: payload.image ?? null,
+      image: null,
       setupScript: payload.setupScript ?? null,
       checks: payload.checks,
       credentialHooks: payload.credentialHooks,
@@ -452,7 +452,7 @@ export async function promoteSetupAppendChange(
     });
   }
   const nextDefinition = {
-    image: base.image,
+    image: null,
     setupScript: appendRigSetupCommand(base.setupScript, payload.command),
     checks: base.checks,
     credentialHooks: base.credentialHooks,
@@ -526,7 +526,6 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     throw new HTTPException(404, { message: "base rig version not found" });
   }
   const payload = change.payload as {
-    image?: unknown;
     setupScript?: unknown;
     checks?: unknown;
     credentialHooks?: unknown;
@@ -534,7 +533,7 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     changelog?: unknown;
   };
   const nextDefinition = {
-    image: payload.image === undefined ? base.image : (payload.image as string | null),
+    image: null,
     setupScript:
       payload.setupScript === undefined ? base.setupScript : (payload.setupScript as string | null),
     checks: Array.isArray(payload.checks) ? (payload.checks as RigVersion["checks"]) : base.checks,
@@ -606,7 +605,7 @@ export async function createRigVersionForApi(
     rig.workspaceId,
     rig.id,
     {
-      image: payload.image === undefined ? base.image : payload.image,
+      image: null,
       setupScript: payload.setupScript === undefined ? base.setupScript : payload.setupScript,
       checks: payload.checks ?? base.checks,
       credentialHooks: payload.credentialHooks ?? base.credentialHooks,

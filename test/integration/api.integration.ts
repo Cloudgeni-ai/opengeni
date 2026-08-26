@@ -3990,7 +3990,7 @@ describe("API component integration", () => {
     expect(capabilityInstallationAfterDelete).toBeNull();
   });
 
-  test("installs image Packs through explicit Rigs and shares identical inline Skills", async () => {
+  test("installs platform-base Packs through explicit Rigs and shares identical inline Skills", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -4003,15 +4003,13 @@ describe("API component integration", () => {
     const workspaceId = await defaultWorkspaceId(app);
     const suffix = crypto.randomUUID().slice(0, 8);
     const skillName = `infra-ops-${suffix}`;
-    const imagePackManifest = (id: string, image: string, modalImageId?: string) => ({
+    const packManifest = (id: string) => ({
       id,
       name: `Pack ${id}`,
-      description: "Pack with a pack-scoped sandbox image.",
+      description: "Pack with an explicit Rig on the deployment platform base.",
       role: "infrastructure",
       category: "infrastructure",
       version: "0.1.0",
-      sandboxImage: image,
-      ...(modalImageId ? { sandboxProviderImages: { modal: { imageId: modalImageId } } } : {}),
       skills: [
         {
           name: skillName,
@@ -4035,25 +4033,17 @@ describe("API component integration", () => {
     });
     const packA = `img-a-${suffix}`;
     const packB = `img-b-${suffix}`;
-    const packAImage =
-      "example.com/sandbox-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const packBImage =
-      "example.com/sandbox-b@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-    const packAModalImageId = "im-1234567890123456789012";
-    for (const [packId, image, modalImageId] of [
-      [packA, packAImage, packAModalImageId],
-      [packB, packBImage, undefined],
-    ] as const) {
+    for (const packId of [packA, packB]) {
       const registered = await app.request(workspacePath(workspaceId, "/packs"), {
         method: "POST",
-        body: JSON.stringify(imagePackManifest(packId, image, modalImageId)),
+        body: JSON.stringify(packManifest(packId)),
         headers: { "content-type": "application/json" },
       });
       expect(registered.status).toBe(201);
     }
 
     // Packs that compose runtime components cannot use the legacy enable
-    // paths. They must be reviewed against an explicit Rig first.
+    // paths. This test selects an explicit Rig through the installation flow.
     const legacyEnableA = await app.request(workspacePath(workspaceId, `/packs/${packA}/enable`), {
       method: "POST",
       body: JSON.stringify({}),
@@ -4081,18 +4071,18 @@ describe("API component integration", () => {
     );
     expect(previewWithoutRig.status).toBe(200);
     expect(await previewWithoutRig.json()).toMatchObject({
-      ready: false,
-      rig: { required: true, status: "missing" },
+      ready: true,
+      rig: { required: false, status: "not_required" },
       legacyInlineSkillCount: 1,
-      legacySandboxImage: packAImage,
+      legacySandboxImage: null,
     });
 
-    const createRig = async (name: string, image: string): Promise<{ id: string }> => {
+    const createRig = async (name: string): Promise<{ id: string }> => {
       const response = await app.request(workspacePath(workspaceId, "/rigs"), {
         method: "POST",
         body: JSON.stringify({
           name,
-          image,
+          setupScript: "true",
           checks: [],
           credentialHooks: [],
           defaultVariableSetIds: [],
@@ -4104,8 +4094,8 @@ describe("API component integration", () => {
       return JSON.parse(body) as { id: string };
     };
     const [rigA, rigB] = await Promise.all([
-      createRig(`Pack A ${suffix}`, packAImage),
-      createRig(`Pack B ${suffix}`, packBImage),
+      createRig(`Pack A ${suffix}`),
+      createRig(`Pack B ${suffix}`),
     ]);
 
     const previewPack = async (
@@ -4202,17 +4192,15 @@ describe("API component integration", () => {
       ),
     ).toHaveLength(1);
 
-    // The catalog surfaces the pack's runtime composition (image ref and
-    // skill names) without leaking skill file content.
+    // The catalog surfaces skill names without accepting image metadata or
+    // leaking skill file content.
     const catalogResponse = await app.request(workspacePath(workspaceId, "/capabilities"));
     const catalog = (await catalogResponse.json()) as {
       items: Array<{ id: string; metadata: Record<string, unknown> }>;
     };
     const packAItem = catalog.items.find((item) => item.id === `pack:${packA}`);
-    expect(packAItem?.metadata.sandboxImage).toBe(packAImage);
-    expect(packAItem?.metadata.sandboxProviderImages).toEqual({
-      modal: { imageId: packAModalImageId },
-    });
+    expect(packAItem?.metadata.sandboxImage).toBeUndefined();
+    expect(packAItem?.metadata.sandboxProviderImages).toBeUndefined();
     expect(packAItem?.metadata.skills).toEqual([skillName]);
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("spoofed");
     expect(JSON.stringify(packAItem?.metadata)).not.toContain("Runbook.");

@@ -861,6 +861,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         media,
         fileAuthoritySubjectId,
         runSettings,
+        logicalSandboxSettings,
       });
       const {
         routingOn,

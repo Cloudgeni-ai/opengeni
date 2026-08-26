@@ -7986,6 +7986,7 @@ export const RigChangeVerification = z
     startedAt: z.string().optional(),
     finishedAt: z.string().optional(),
     log: z.string().optional(),
+    platformCheckResults: z.array(RigCheckResult).optional(),
     checkResults: z.array(RigCheckResult).optional(),
   })
   .passthrough();
@@ -8012,7 +8013,12 @@ export const CreateRigRequest = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(2000).optional(),
   // Initial (version 1) content, inline.
-  image: z.string().max(1024).optional(),
+  // Explicit Rig base images are temporarily disabled. Rigs always compose on
+  // the deployment-owned platform sandbox image so Computer, Browser, Terminal,
+  // and the stock runtime cannot be replaced by a user definition. Keep an
+  // explicit never-field instead of silently stripping `image` from older
+  // clients: callers must receive a validation error and remove the override.
+  image: z.never().optional(),
   setupScript: z.string().max(131072).optional(),
   checks: z.array(RigCheck).max(100).default([]),
   credentialHooks: z.array(z.string().min(1).max(200)).max(50).default([]),
@@ -8079,7 +8085,10 @@ export type RigSetupAppendPayload = z.infer<typeof RigSetupAppendPayload>;
 // definition_edit: the full next-version content (all fields optional; unset
 // fields inherit from the base version at promote time).
 export const RigDefinitionEditPayload = z.object({
-  image: z.string().max(1024).nullish(),
+  // See CreateRigRequest.image. Historical RigVersion.image values remain on
+  // the read model for compatibility, but no new definition may set or clear
+  // one through the public write contract.
+  image: z.never().optional(),
   setupScript: z.string().max(131072).nullish(),
   checks: z.array(RigCheck).max(100).optional(),
   credentialHooks: z.array(z.string().min(1).max(200)).max(50).optional(),

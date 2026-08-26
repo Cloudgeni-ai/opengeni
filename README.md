@@ -254,10 +254,12 @@ AWS S3 uses `OPENGENI_OBJECT_STORAGE_BACKEND=aws-s3` plus `OPENGENI_OBJECT_STORA
 
 For Modal runs, configure the Modal sandbox variables in `.env.example`. Private
 registry images use `OPENGENI_MODAL_IMAGE_REGISTRY_SECRET`; the global
-`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot, while v2 capability Packs
-select an explicit Rig whose active version owns its logical/provider image
-truth. Pre-v2 Pack rows retain their historical turn-time image warmup only for
-rollback compatibility. The registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
+`OPENGENI_MODAL_IMAGE_REF` is warmed at worker boot and remains the logical base
+for every Rig. A verified Rig provider image may accelerate physical cold create,
+but never replaces that logical lease identity. V2 capability Packs select a Rig
+for setup/check composition and cannot require an explicit sandbox image while
+Rig image overrides are disabled. Rig-less pre-v2 Pack rows retain their
+historical turn-time image warmup only for rollback compatibility. The registry Secret lookup uses the configured `OPENGENI_MODAL_TOKEN_ID` /
 `OPENGENI_MODAL_TOKEN_SECRET` client, so embedded hosts do not need to also set
 standard `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` env vars or provide a
 `~/.modal.toml` profile.
