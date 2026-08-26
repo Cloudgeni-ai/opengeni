@@ -251,7 +251,47 @@ export type RequestHandler = (
   subject: string,
 ) => Promise<Uint8Array> | Uint8Array;
 
+/**
+ * Versioned recovery contract for already-durable session-event fanout.
+ *
+ * A publisher acknowledgement alone cannot prove that every API subscriber was
+ * connected for the live message. Supported broker-backed buses must therefore
+ * notify consumers after transport subscriptions have been restored so an
+ * already-open SSE stream can run one bounded Postgres catch-up. A bus that can
+ * never disconnect may implement this as a listener registry that never fires.
+ */
+export const SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION = 1 as const;
+
+export type SessionEventDurableFanoutCapability = {
+  version: typeof SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION;
+  subscribeRecovery: (onRecovery: (generation: number) => void) => () => void;
+};
+
+export function requireSessionEventDurableFanoutCapability(
+  bus: unknown,
+): SessionEventDurableFanoutCapability {
+  const capability = (bus as { sessionEventDurableFanout?: unknown } | null)
+    ?.sessionEventDurableFanout as
+    | { version?: unknown; subscribeRecovery?: unknown }
+    | null
+    | undefined;
+  if (
+    capability?.version !== SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION ||
+    typeof capability.subscribeRecovery !== "function"
+  ) {
+    throw new Error(
+      "EventBus must provide sessionEventDurableFanout v1 so accepted durable publications reconcile after subscriber reconnect",
+    );
+  }
+  return capability as SessionEventDurableFanoutCapability;
+}
+
 export type EventBus = {
+  /**
+   * Mandatory paired recovery contract for durable session-event publication.
+   * API and worker instances sharing one broker must expose the same semantics.
+   */
+  sessionEventDurableFanout: SessionEventDurableFanoutCapability;
   /**
    * Publish a session-event batch. Embedding implementations without the
    * optional publishConfirmed capability must resolve only after their
@@ -276,13 +316,6 @@ export type EventBus = {
     sessionId: string,
     onEvents: (events: SessionEvent[]) => void | Promise<void>,
   ) => Promise<() => void>;
-  /**
-   * Observe successful transport reconnects. Core NATS resumes subscriptions but
-   * cannot replay messages published while this client was disconnected, so
-   * durable consumers use the monotonic generation as a bounded catch-up trigger.
-   * Optional for embedding-host and in-memory buses that do not reconnect.
-   */
-  subscribeReconnect?: (onReconnect: (generation: number) => void) => () => void;
   /** Best-effort live invalidation; the event is already durable in Postgres. */
   publishWorkspaceControl: (workspaceId: string, event: WorkspaceControlEvent) => Promise<void>;
   /** One workspace subscription fans a control change to every open descendant view. */
@@ -421,6 +454,13 @@ export async function createNatsEventBus(
     observeEventBoundaries(batches.flat(), options.logger);
   };
   return {
+    sessionEventDurableFanout: {
+      version: SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+      subscribeRecovery: (onRecovery) => {
+        reconnectSubscribers.add(onRecovery);
+        return () => reconnectSubscribers.delete(onRecovery);
+      },
+    },
     publish: async (workspaceId, sessionId, events) => {
       if (events.length === 0) {
         return;
@@ -459,10 +499,6 @@ export async function createNatsEventBus(
     },
     subscribe: async (workspaceId, sessionId, onEvents) =>
       subscribeSession(nc, workspaceId, sessionId, onEvents),
-    subscribeReconnect: (onReconnect) => {
-      reconnectSubscribers.add(onReconnect);
-      return () => reconnectSubscribers.delete(onReconnect);
-    },
     publishWorkspaceControl: async (workspaceId, event) => {
       try {
         const encoded = workspaceControlEventNatsPayload(event);

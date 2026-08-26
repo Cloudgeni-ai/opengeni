@@ -13,6 +13,7 @@ import {
   coalesceSessionEventDeltas,
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
+  requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
   sessionEventResumeSequence,
   type EventBus,
@@ -269,6 +270,7 @@ export async function sseSessionStream(
   signal: AbortSignal,
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  const durableFanout = requireSessionEventDurableFanoutCapability(bus);
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
   let bootstrapping = true;
@@ -415,8 +417,7 @@ export async function sseSessionStream(
     }, heartbeatIntervalMs);
   };
   delivery = createLatestWinsDelivery(send, fail);
-  stopReconnectObservation =
-    bus.subscribeReconnect?.(scheduleReconnectReconciliation) ?? (() => {});
+  stopReconnectObservation = durableFanout.subscribeRecovery(scheduleReconnectReconciliation);
 
   void (async () => {
     const release = await bus.subscribe(workspaceId, sessionId, (events) => {

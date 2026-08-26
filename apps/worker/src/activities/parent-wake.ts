@@ -21,7 +21,7 @@ import {
   type Database,
   type SessionSystemUpdateOutboxDelivery,
 } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
+import { requireSessionEventDurableFanoutCapability, type EventBus } from "@opengeni/events";
 import type { ActivityServices, WakeSessionWorkflowSignal } from "./types";
 
 export type NotifyServices = {
@@ -286,13 +286,15 @@ export async function reconcilePendingParentSystemUpdates(
  * publishConfirmed. Embedding buses predate that optional capability, so their
  * required publish promise remains the delivery acknowledgement: resolve only
  * after accepting the batch, and reject a real transport failure so the durable
- * row stays retryable.
+ * row stays retryable. Every supported bus also provides the mandatory paired
+ * recovery capability used by API SSE streams after subscriber reconnect.
  */
 export async function reconcileAutomaticSessionTitleFanout(
   svc: NotifyServices,
   limit = 100,
   overrides: ReconcileAutomaticSessionTitleFanoutOverrides = {},
 ): Promise<{ claimed: number; delivered: number; failed: number }> {
+  requireSessionEventDurableFanoutCapability(svc.bus);
   const claim = overrides.claimAutomaticSessionTitleFanout ?? claimAutomaticSessionTitleFanout;
   const markDelivered =
     overrides.markAutomaticSessionTitleFanoutDelivered ?? markAutomaticSessionTitleFanoutDelivered;

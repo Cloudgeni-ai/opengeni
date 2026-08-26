@@ -40,6 +40,7 @@ import {
   rlsContextForWorkspace,
   withSessionRlsActorContext,
 } from "@opengeni/db";
+import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -1118,19 +1119,23 @@ type ReadinessChecks = Record<ReadinessCheckName, ReadinessCheck>;
 type ReadinessCheckResult = { ok: boolean; error?: string };
 
 function readinessChecks(deps: AppDependencies): ReadinessChecks {
+  const configuredNatsCheck = deps.readinessChecks?.nats;
   return {
     db:
       deps.readinessChecks?.db ??
       (async () => {
         await deps.db.execute(dbSql`select 1`);
       }),
-    nats:
-      deps.readinessChecks?.nats ??
-      (() => {
+    nats: async () => {
+      requireSessionEventDurableFanoutCapability(deps.bus);
+      if (configuredNatsCheck) {
+        await configuredNatsCheck();
+      } else {
         if (deps.bus.isConnected && !deps.bus.isConnected()) {
           throw new Error("NATS is not connected");
         }
-      }),
+      }
+    },
     temporal:
       deps.readinessChecks?.temporal ??
       deps.workflowClient.check ??

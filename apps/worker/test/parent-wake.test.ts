@@ -1,7 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import type { Database } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
+import { SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION, type EventBus } from "@opengeni/events";
 import {
   deliverChildRequiresActionToParent,
   reconcileAutomaticSessionTitleFanout,
@@ -29,6 +29,16 @@ const titleFanoutDelivery = {
     duplicateReason: null,
   },
 };
+
+function durableFanoutBus(methods: Record<string, unknown>): EventBus {
+  return {
+    sessionEventDurableFanout: {
+      version: SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+      subscribeRecovery: () => () => {},
+    },
+    ...methods,
+  } as unknown as EventBus;
+}
 
 test("workflow-wake repair delivers an outstanding session receipt", async () => {
   const wakeSessionWorkflow = mock(async () => undefined);
@@ -81,7 +91,7 @@ test("automatic-title migration fanout publishes and acknowledges the durable ev
   const result = await reconcileAutomaticSessionTitleFanout(
     {
       db,
-      bus: { publish, publishConfirmed, isConnected: () => true } as unknown as EventBus,
+      bus: durableFanoutBus({ publish, publishConfirmed, isConnected: () => true }),
       settings: {} as Settings,
       observability: {} as NotifyServices["observability"],
       wakeSessionWorkflow: null,
@@ -106,7 +116,26 @@ test("automatic-title migration fanout publishes and acknowledges the durable ev
   expect(markAutomaticSessionTitleFanoutFailed).not.toHaveBeenCalled();
 });
 
-test("automatic-title migration fanout drains through an embedding bus without confirmed publish", async () => {
+test("automatic-title migration fanout refuses a legacy publish-only bus before claiming", async () => {
+  const claimAutomaticSessionTitleFanout = mock(async () => [titleFanoutDelivery]);
+
+  await expect(
+    reconcileAutomaticSessionTitleFanout(
+      {
+        db: {} as Database,
+        bus: { publish: async () => undefined } as unknown as EventBus,
+        settings: {} as Settings,
+        observability: {} as NotifyServices["observability"],
+        wakeSessionWorkflow: null,
+      },
+      17,
+      { claimAutomaticSessionTitleFanout },
+    ),
+  ).rejects.toThrow("sessionEventDurableFanout v1");
+  expect(claimAutomaticSessionTitleFanout).not.toHaveBeenCalled();
+});
+
+test("automatic-title migration fanout drains through a recovery-capable embedding bus without confirmed publish", async () => {
   let acceptDelivery: (() => void) | undefined;
   let notePublishStarted: (() => void) | undefined;
   const accepted = new Promise<void>((resolve) => {
@@ -127,9 +156,10 @@ test("automatic-title migration fanout drains through an embedding bus without c
   const reconciliation = reconcileAutomaticSessionTitleFanout(
     {
       db,
-      // Existing embedding implementations are conforming EventBus instances
-      // without the newer optional publishConfirmed/isConnected capabilities.
-      bus: { publish } as unknown as EventBus,
+      // Embedding implementations may omit the stronger publishConfirmed and
+      // isConnected capabilities, but the paired subscriber-recovery contract
+      // is mandatory before a durable row can be acknowledged.
+      bus: durableFanoutBus({ publish }),
       settings: {} as Settings,
       observability: {} as NotifyServices["observability"],
       wakeSessionWorkflow: null,
@@ -170,7 +200,7 @@ test("automatic-title migration fanout retries a real embedding-bus failure", as
   const db = {} as Database;
   const services = {
     db,
-    bus: { publish } as unknown as EventBus,
+    bus: durableFanoutBus({ publish }),
     settings: {} as Settings,
     observability: {} as NotifyServices["observability"],
     wakeSessionWorkflow: null,
@@ -212,7 +242,7 @@ test("automatic-title migration fanout leaves a disconnected delivery retryable"
   const result = await reconcileAutomaticSessionTitleFanout(
     {
       db,
-      bus: { publishConfirmed, isConnected: () => false } as unknown as EventBus,
+      bus: durableFanoutBus({ publishConfirmed, isConnected: () => false }),
       settings: {} as Settings,
       observability: {} as NotifyServices["observability"],
       wakeSessionWorkflow: null,
@@ -247,7 +277,7 @@ test("automatic-title migration fanout retries when publish confirmation fails",
   const result = await reconcileAutomaticSessionTitleFanout(
     {
       db,
-      bus: { publishConfirmed, isConnected: () => true } as unknown as EventBus,
+      bus: durableFanoutBus({ publishConfirmed, isConnected: () => true }),
       settings: {} as Settings,
       observability: {} as NotifyServices["observability"],
       wakeSessionWorkflow: null,
@@ -294,7 +324,7 @@ test("automatic-title migration fanout bounds concurrent broker confirmations", 
   const result = await reconcileAutomaticSessionTitleFanout(
     {
       db: {} as Database,
-      bus: { publishConfirmed, isConnected: () => true } as unknown as EventBus,
+      bus: durableFanoutBus({ publishConfirmed, isConnected: () => true }),
       settings: {} as Settings,
       observability: {} as NotifyServices["observability"],
       wakeSessionWorkflow: null,

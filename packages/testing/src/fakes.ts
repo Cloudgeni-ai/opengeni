@@ -3,7 +3,13 @@ import {
   type SessionEvent,
   type WorkspaceControlEvent,
 } from "@opengeni/contracts";
-import type { EventBus, RequestConnection, RequestHandler, RequestReply } from "@opengeni/events";
+import {
+  SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+  type EventBus,
+  type RequestConnection,
+  type RequestHandler,
+  type RequestReply,
+} from "@opengeni/events";
 
 export class MemoryEventBus implements EventBus {
   published: SessionEvent[][] = [];
@@ -23,6 +29,16 @@ export class MemoryEventBus implements EventBus {
     string,
     Set<(payload: Uint8Array, subject: string) => void | Promise<void>>
   >();
+  private sessionEventRecoverySubscribers = new Set<(generation: number) => void>();
+  private sessionEventRecoveryGeneration = 0;
+
+  readonly sessionEventDurableFanout = {
+    version: SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+    subscribeRecovery: (listener: (generation: number) => void) => {
+      this.sessionEventRecoverySubscribers.add(listener);
+      return () => this.sessionEventRecoverySubscribers.delete(listener);
+    },
+  };
 
   async publish(workspaceId: string, sessionId: string, events: SessionEvent[]): Promise<void> {
     this.published.push(events);
@@ -125,6 +141,15 @@ export class MemoryEventBus implements EventBus {
     await Promise.all(matching.map((handler) => handler(payload, eventSubject)));
   }
 
+  /** Test helper: model one successful broker/subscription recovery generation. */
+  emitSessionEventRecovery(): number {
+    this.sessionEventRecoveryGeneration += 1;
+    for (const listener of this.sessionEventRecoverySubscribers) {
+      listener(this.sessionEventRecoveryGeneration);
+    }
+    return this.sessionEventRecoveryGeneration;
+  }
+
   getRequestConnection(): RequestConnection {
     return {
       request: (requestSubject, payload, opts) =>
@@ -132,7 +157,9 @@ export class MemoryEventBus implements EventBus {
     };
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    this.sessionEventRecoverySubscribers.clear();
+  }
 }
 
 /** NATS-style subject wildcard match: `*` matches exactly one token. */

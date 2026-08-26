@@ -21,6 +21,8 @@ import {
   createNatsEventBus,
   createResponderConnection,
   publishDurableSessionEvents,
+  requireSessionEventDurableFanoutCapability,
+  SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
 } from "../src/index";
 
 const SENTINEL_URL = "nats://test-sentinel:4222";
@@ -169,7 +171,9 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
         }) as never,
     });
     const observed: number[] = [];
-    const unsubscribe = bus.subscribeReconnect!((generation) => observed.push(generation));
+    const capability = requireSessionEventDurableFanoutCapability(bus);
+    expect(capability.version).toBe(SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION);
+    const unsubscribe = capability.subscribeRecovery((generation) => observed.push(generation));
 
     statuses.push("disconnect");
     await Bun.sleep(0);
@@ -185,6 +189,12 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
     await Bun.sleep(0);
     expect(observed).toEqual([1, 2]);
     await bus.close();
+  });
+
+  test("legacy publish-only embedding buses fail the explicit recovery contract", () => {
+    expect(() =>
+      requireSessionEventDurableFanoutCapability({ publish: async () => undefined }),
+    ).toThrow("sessionEventDurableFanout v1");
   });
 });
 

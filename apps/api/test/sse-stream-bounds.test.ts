@@ -1,6 +1,6 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
-import type { EventBus } from "@opengeni/events";
+import { SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION, type EventBus } from "@opengeni/events";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -11,6 +11,19 @@ let durableControlEvents: WorkspaceControlEvent[] = [];
 const durableControlReads: Array<{ after: number; limit: number }> = [];
 let interactionRevisionState = { revision: 0, updatedAt: null as Date | null };
 let interactionRevisionReads = 0;
+
+function sessionEventBus(
+  methods: Record<string, unknown>,
+  subscribeRecovery: (listener: (generation: number) => void) => () => void = () => () => {},
+): EventBus {
+  return {
+    sessionEventDurableFanout: {
+      version: SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+      subscribeRecovery,
+    },
+    ...methods,
+  } as unknown as EventBus;
+}
 
 function event(sequence: number): SessionEvent {
   return {
@@ -156,7 +169,7 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   let nextSubscriptionId = 0;
   const subscribers = new Map<number, (events: SessionEvent[]) => void | Promise<void>>();
   const released: number[] = [];
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async (
       _workspaceId: string,
       _sessionId: string,
@@ -169,7 +182,7 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
         released.push(id);
       };
     },
-  } as EventBus;
+  });
   const stalledObservations: Array<{
     reason: string;
     desiredSize: number | null;
@@ -295,7 +308,7 @@ test("session SSE coalesces long durable delta runs before they reach the browse
   durableReads.length = 0;
   const response = await sseSessionStream(
     fakeDb as never,
-    { subscribe: async () => () => {} } as unknown as EventBus,
+    sessionEventBus({ subscribe: async () => () => {} }),
     WORKSPACE_ID,
     SESSION_ID,
     0,
@@ -323,7 +336,7 @@ test("an open session stream reconciles a quarantine title event from durable fa
   let subscriber: ((events: SessionEvent[]) => void | Promise<void>) | null = null;
   const response = await sseSessionStream(
     fakeDb as never,
-    {
+    sessionEventBus({
       subscribe: async (
         _workspaceId: string,
         _sessionId: string,
@@ -332,7 +345,7 @@ test("an open session stream reconciles a quarantine title event from durable fa
         subscriber = onEvents;
         return () => {};
       },
-    } as unknown as EventBus,
+    }),
     WORKSPACE_ID,
     SESSION_ID,
     0,
@@ -357,22 +370,40 @@ test("an open session stream reconciles a quarantine title event from durable fa
   await reader.cancel();
 });
 
-test("an open session stream durably catches up once after a subscriber reconnect", async () => {
+test("an open session stream catches up after an accepted embedding publish while its subscriber is offline", async () => {
   durableEvents = [];
   durableReads.length = 0;
   let reconnect: ((generation: number) => void) | null = null;
   let reconnectReleased = 0;
-  const response = await sseSessionStream(
-    fakeDb as never,
+  let subscriberConnected = true;
+  let subscriber: ((events: SessionEvent[]) => void | Promise<void>) | null = null;
+  const publish = mock(async (_workspaceId: string, _sessionId: string, events: SessionEvent[]) => {
+    if (subscriberConnected) await subscriber?.(events);
+  });
+  const bus = sessionEventBus(
     {
-      subscribe: async () => () => {},
-      subscribeReconnect: (listener: (generation: number) => void) => {
-        reconnect = listener;
+      publish,
+      subscribe: async (
+        _workspaceId: string,
+        _sessionId: string,
+        listener: (events: SessionEvent[]) => void | Promise<void>,
+      ) => {
+        subscriber = listener;
         return () => {
-          reconnectReleased += 1;
+          subscriber = null;
         };
       },
-    } as unknown as EventBus,
+    },
+    (listener) => {
+      reconnect = listener;
+      return () => {
+        reconnectReleased += 1;
+      };
+    },
+  );
+  const response = await sseSessionStream(
+    fakeDb as never,
+    bus,
     WORKSPACE_ID,
     SESSION_ID,
     0,
@@ -385,6 +416,10 @@ test("an open session stream durably catches up once after a subscriber reconnec
   // Core NATS drops publications while this subscriber is disconnected. The
   // durable row exists, but no session-event notification reaches the stream.
   durableEvents = [titleEvent(1, "New conversation")];
+  subscriberConnected = false;
+  await bus.publish(WORKSPACE_ID, SESSION_ID, durableEvents);
+  expect(publish).toHaveBeenCalledTimes(1);
+  subscriberConnected = true;
   reconnect?.(1);
   const [quarantineEvent] = await readSessionEvents(reader, 1);
   expect(quarantineEvent).toMatchObject({
@@ -415,7 +450,7 @@ test("idle session stream count does not multiply durable reads on heartbeat", a
     Array.from({ length: streamCount }, () =>
       sseSessionStream(
         fakeDb as never,
-        { subscribe: async () => () => {} } as unknown as EventBus,
+        sessionEventBus({ subscribe: async () => () => {} }),
         WORKSPACE_ID,
         SESSION_ID,
         0,
@@ -445,11 +480,11 @@ test("a session stream fails closed before its first frame when host authorizati
   durableReads.length = 0;
   let released = 0;
   let reauthorizations = 0;
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async () => () => {
       released += 1;
     },
-  } as unknown as EventBus;
+  });
   const response = await sseSessionStream(
     fakeDb as never,
     bus,
@@ -476,7 +511,7 @@ test("rechecks current authority and suppresses a live event after revocation", 
   durableReads.length = 0;
   let allowed = true;
   let publish: ((events: SessionEvent[]) => void) | null = null;
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async (
       _workspaceId: string,
       _sessionId: string,
@@ -485,7 +520,7 @@ test("rechecks current authority and suppresses a live event after revocation", 
       publish = listener;
       return () => {};
     },
-  } as unknown as EventBus;
+  });
   const response = await sseSessionStream(
     fakeDb as never,
     bus,
@@ -510,10 +545,10 @@ test("every long-lived SSE surface closes when its current workspace authority i
   durableEvents = [];
   durableControlEvents = [];
   interactionRevisionState = { revision: 0, updatedAt: null };
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async () => () => {},
     subscribeWorkspaceControl: async () => () => {},
-  } as unknown as EventBus;
+  });
   const revoked = () => ({
     reauthorizeAfterMs: 1_000,
     reauthorize: async () => {
