@@ -168,13 +168,18 @@ describe("compound composer framework", () => {
 
     function Parent() {
       const [value, setValue] = useState("");
-      return <Child value={value} setValue={setValue} />;
+      return (
+        <Child
+          value={value}
+          setValue={(next) => startTransition(() => setValue(next))}
+        />
+      );
     }
 
     mounted = await renderComponent(<Parent />);
     projectedValues.length = 0;
     await act(async () => {
-      startTransition(() => controller.setValue("alpha Xbeta gamma"));
+      controller.setValue("alpha Xbeta gamma");
       flushSync(() => controller.setHelpOpen(true));
     });
 

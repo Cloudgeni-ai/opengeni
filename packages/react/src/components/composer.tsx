@@ -20,6 +20,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -369,18 +370,27 @@ export function useChatComposerController({
   const mountedRef = useRef(true);
   const deliveredValueRef = useRef(delivery.value);
   const liveValueRef = useRef(delivery.value);
-  if (delivery.value !== deliveredValueRef.current) {
+  const [renderedValue, setRenderedValue] = useState(delivery.value);
+  const deliveryChanged = delivery.value !== deliveredValueRef.current;
+  if (deliveryChanged) {
     deliveredValueRef.current = delivery.value;
     liveValueRef.current = delivery.value;
   }
   const setComposerValue = useCallback(
     (next: string) => {
       liveValueRef.current = next;
+      setRenderedValue(next);
       delivery.setValue(next);
     },
     [delivery.setValue],
   );
-  const visibleValue = liveValueRef.current;
+  const visibleValue = deliveryChanged ? delivery.value : renderedValue;
+
+  useLayoutEffect(() => {
+    if (renderedValue !== liveValueRef.current) {
+      setRenderedValue(liveValueRef.current);
+    }
+  }, [delivery.value, renderedValue]);
 
   useEffect(() => {
     mountedRef.current = true;
