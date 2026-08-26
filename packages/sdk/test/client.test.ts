@@ -489,18 +489,28 @@ describe("OpenGeniClient", () => {
   });
 
   test("getSession and listEvents hit the expected paths and query params", async () => {
+    const variableSetIds = [
+      "00000000-0000-4000-8000-000000000011",
+      "00000000-0000-4000-8000-000000000012",
+    ];
     const { client, requests } = makeClient((request) =>
       request.url.includes("/events")
         ? jsonResponse([makeEvent(3)])
-        : jsonResponse({ id: SESSION_ID }),
+        : jsonResponse({
+            id: SESSION_ID,
+            variableSetIds,
+            variableSetId: variableSetIds[1]!,
+          }),
     );
-    await client.getSession(WORKSPACE_ID, SESSION_ID);
+    const session = await client.getSession(WORKSPACE_ID, SESSION_ID);
     const events = await client.listEvents(WORKSPACE_ID, SESSION_ID, {
       after: 2,
       before: 9,
       limit: 10,
       compact: true,
     });
+    expect(session.variableSetIds).toEqual(variableSetIds);
+    expect(session.variableSetId).toBe(variableSetIds[1]!);
     expect(events.map((event) => event.sequence)).toEqual([3]);
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
