@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { readFile } from "node:fs/promises";
+import {
+  acquireBlankTestDatabase,
+  acquireSharedTestDatabase,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
+import { readdir, readFile } from "node:fs/promises";
 import postgres from "postgres";
 
 import {
@@ -27,11 +31,11 @@ import {
   type DbClient,
 } from "../src";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
+import { migrate } from "../src/migrate";
 
-const migrationUrl = new URL(
-  "../drizzle/0356_set_based_insights_session_visibility.sql",
-  import.meta.url,
-);
+const migrationName = "0356_set_based_insights_session_visibility.sql";
+const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
+const migrationsDirectoryUrl = new URL("../drizzle/", import.meta.url);
 
 setDefaultTimeout(60_000);
 
@@ -200,6 +204,72 @@ function executionTimeMs(plan: unknown): number {
 }
 
 describe("migration 0356 set-based Insights session visibility", () => {
+  test("initializes application roles when upgrading a database recorded through 0355", async () => {
+    const blank = await acquireBlankTestDatabase("migration-0356-upgrade-roles");
+    if (!blank) return;
+    const admin = postgres(blank.databaseUrl, {
+      max: 1,
+      prepare: false,
+      onnotice: () => undefined,
+    });
+    try {
+      await admin.unsafe(`create table schema_migrations (
+        name text primary key,
+        applied_at timestamptz not null default now()
+      )`);
+      const heldMigrations = (await readdir(migrationsDirectoryUrl))
+        .filter((file) => file.endsWith(".sql") && file >= migrationName)
+        .sort();
+      expect(heldMigrations[0]).toBe(migrationName);
+      for (const file of heldMigrations) {
+        await admin`insert into schema_migrations (name) values (${file})`;
+      }
+
+      await migrate(blank.databaseUrl);
+      await admin`delete from schema_migrations where name >= ${migrationName}`;
+
+      const [before] = await admin<
+        Array<{ latest: string | null; visibilityFunction: string | null }>
+      >`
+        select
+          (select max(name) from schema_migrations) as latest,
+          to_regprocedure(
+            'opengeni_private.visible_workspace_insights_model_call_facts(uuid,timestamptz,timestamptz)'
+          )::text as "visibilityFunction"
+      `;
+      expect(before).toEqual({
+        latest: "0355_automatic_session_title_quarantine.sql",
+        visibilityFunction: null,
+      });
+
+      await migrate(blank.databaseUrl);
+
+      const [after] = await admin<
+        Array<{ recorded: boolean; visibilityFunction: string | null; appCanExecute: boolean }>
+      >`
+        select
+          exists(select 1 from schema_migrations where name = ${migrationName}) as recorded,
+          to_regprocedure(
+            'opengeni_private.visible_workspace_insights_model_call_facts(uuid,timestamptz,timestamptz)'
+          )::text as "visibilityFunction",
+          has_function_privilege(
+            'opengeni_app',
+            'opengeni_private.visible_workspace_insights_model_call_facts(uuid,timestamptz,timestamptz)',
+            'EXECUTE'
+          ) as "appCanExecute"
+      `;
+      expect(after).toEqual({
+        recorded: true,
+        visibilityFunction:
+          "opengeni_private.visible_workspace_insights_model_call_facts(uuid,timestamp with time zone,timestamp with time zone)",
+        appCanExecute: true,
+      });
+    } finally {
+      await admin.end({ timeout: 5 });
+      await blank.release();
+    }
+  }, 180_000);
+
   test("installs bounded read-only functions without weakening ordinary fact-table RLS", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
