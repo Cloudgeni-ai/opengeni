@@ -2125,9 +2125,9 @@ test("exact-head check completion succeeds while the Version PR remains unchange
   expect(
     fixture.checks.find((check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.automationCi),
   ).toMatchObject({ status: "completed", conclusion: "success" });
-  expect(
-    fixture.requests.some((request) => request.path.endsWith("/git/ref/heads/main")),
-  ).toBe(false);
+  expect(fixture.requests.some((request) => request.path.endsWith("/git/ref/heads/main"))).toBe(
+    false,
+  );
 });
 
 test("exact-head check completion accepts an exact-tree merge after branch deletion", async () => {
