@@ -498,6 +498,30 @@ composition validates this metadata before accepting invitations. Changing the
 scope while an outcome is unresolved is intentionally refused and requires
 operator reconciliation.
 
+Repository onboarding readiness is proven by the curated `onboarding` CI lane,
+which uses a bounded process-local transport and writes only safe screenshots
+and summarized JSON evidence. That green result proves application behavior,
+the real migration/runtime-role boundary, and provider-neutral delivery
+semantics. It does **not** prove that Resend or another external provider is
+configured, that staging has received a message, or that production is ready.
+
+Provider and environment acceptance are separate, ordered gates:
+
+1. configure `OPENGENI_RESEND_API_KEY`, `OPENGENI_EMAIL_FROM`,
+   `OPENGENI_PUBLIC_BASE_URL`, and `OPENGENI_BETTER_AUTH_SECRET` through the
+   environment's secret authority, never repository files or evidence;
+2. in an explicitly authorized non-production environment, send an invitation
+   through the configured provider and retain provider-side idempotency plus
+   delivery evidence without retaining the setup bearer or rendered body;
+3. prove the exact candidate in staging, including signup, verification,
+   invitation setup, sign-in/password reset, initial shared grants, revocation,
+   readiness, logs, and bounded alerts; and
+4. promote or run production acceptance only under the repository's existing
+   exact-candidate release authority and a fresh deployment authorization.
+
+A merge, green repository CI run, local Docker result, or provider-free capture
+must never be interpreted as authorization to mutate staging or production.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one

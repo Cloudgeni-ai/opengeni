@@ -665,7 +665,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -790,6 +790,19 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun test --max-concurrency=1 --timeout 300000 ./test/e2e/knowledge-surfaces.browser.e2e.ts
 
+      - name: Organization onboarding lifecycle acceptance
+        if: ${{ matrix.lane == 'onboarding' }}
+        id: organization_onboarding
+        timeout-minutes: 8
+        env:
+          # The owner migration principal, opengeni_app FORCE-RLS boundary, and
+          # durable invitation state are mandatory. A missing database must fail.
+          OPENGENI_REQUIRE_REAL_DB: "1"
+          OPENGENI_ONBOARDING_EVIDENCE_DIR: /tmp/opengeni-onboarding-evidence
+        run: >-
+          bun scripts/run-browser-e2e.ts
+          ./test/e2e/organization-onboarding-acceptance.e2e.ts
+
       - name: Workbench browser acceptance
         if: ${{ matrix.lane == 'workbench' }}
         id: workbench_browser
@@ -859,6 +872,23 @@ jobs:
             /tmp/company-brain-768-light-attention.png
             /tmp/company-brain-desktop-dark-overview.png
             /tmp/company-brain-desktop-dark-attention.png
+
+      - name: Upload organization onboarding evidence
+        if: >-
+          ${{ always() &&
+          matrix.lane == 'onboarding' &&
+          (steps.organization_onboarding.outcome == 'success' ||
+          steps.organization_onboarding.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: organization-onboarding-acceptance-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            /tmp/opengeni-onboarding-evidence/ope306-onboarding-evidence.json
+            /tmp/opengeni-onboarding-evidence/ope306-owner-desktop-1440.png
+            /tmp/opengeni-onboarding-evidence/ope306-setup-mobile-390.png
+            /tmp/opengeni-onboarding-evidence/ope306-registered-mobile-320.png
 
       - name: Upload workbench visual evidence
         if: >-

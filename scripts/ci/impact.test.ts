@@ -99,7 +99,12 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
-    expect(sdk.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(sdk.browserAcceptanceLanes).toEqual([
+      "interaction",
+      "knowledge",
+      "onboarding",
+      "workbench",
+    ]);
     expect(sdk.artifactRuntimeRequired).toBe(false);
     expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
 
@@ -205,7 +210,12 @@ describe("fail-closed change impact", () => {
       ]),
     );
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
-    expect(plan.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(plan.browserAcceptanceLanes).toEqual([
+      "interaction",
+      "knowledge",
+      "onboarding",
+      "workbench",
+    ]);
     expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual(
       expect.arrayContaining(["@opengeni/react", "@opengeni/sdk"]),
@@ -273,6 +283,10 @@ describe("fail-closed change impact", () => {
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain("test/e2e/organization-onboarding-acceptance.e2e.ts");
+    expect(OPT_IN_TESTS["test/e2e/organization-onboarding-acceptance.e2e.ts"]).toContain(
+      "onboarding",
+    );
     expect(tests.e2e).not.toContain("test/e2e/opstream-runner.e2e.ts");
   });
 
@@ -291,7 +305,12 @@ describe("fail-closed change impact", () => {
     expect(plan.unitTests).toEqual(tests.unit);
     expect(plan.integrationTests).toEqual(tests.integration);
     expect(plan.e2eTests).toEqual(tests.e2e);
-    expect(plan.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(plan.browserAcceptanceLanes).toEqual([
+      "interaction",
+      "knowledge",
+      "onboarding",
+      "workbench",
+    ]);
     expect(plan.artifactRuntimeRequired).toBe(true);
     expect(plan.typecheckProjects).toEqual(typecheckProjects());
     expect(plan.typecheckProjects).toEqual(

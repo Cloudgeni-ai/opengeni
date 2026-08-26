@@ -10,6 +10,19 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 
 const MIN_PASSWORD_LENGTH = 8;
+const SETUP_TOKEN_REMOUNT_HANDOFF_MS = 30_000;
+
+// `history.replaceState` is intentionally used to scrub the setup bearer
+// before any API request. TanStack observes that history mutation and may
+// remount this lazy route, so React component state alone is not a reliable
+// handoff. Keep at most one token in process memory for one short remount window
+// and release it when the active preview settles; never project it into history,
+// web storage, logs, or a server-side surface.
+let pendingBrowserSetupToken: {
+  pathname: string;
+  token: string;
+  expiryTimer: number;
+} | null = null;
 
 export function SetupAccountRoute({ token }: { token?: string | undefined }) {
   const [setupToken] = useState(() => token ?? consumeSetupAccountTokenFromBrowserLocation());
@@ -39,7 +52,10 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
         if (active) setPreviewFailed(true);
       })
       .finally(() => {
-        if (active) setPreviewLoading(false);
+        if (active) {
+          releasePendingBrowserSetupToken(setupToken);
+          setPreviewLoading(false);
+        }
       });
     return () => {
       active = false;
@@ -272,7 +288,34 @@ export function setupAccountTokenFromUrl(value: string): {
 function consumeSetupAccountTokenFromBrowserLocation(): string | null {
   if (typeof window === "undefined") return null;
   const { token, scrubbedPath } = setupAccountTokenFromUrl(window.location.href);
+  if (token) {
+    cachePendingBrowserSetupToken(window.location.pathname, token);
+  }
+  const availableToken =
+    token ??
+    (pendingBrowserSetupToken?.pathname === window.location.pathname
+      ? pendingBrowserSetupToken.token
+      : null);
   const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (scrubbedPath !== currentPath) window.history.replaceState(null, "", scrubbedPath);
-  return token;
+  return availableToken;
+}
+
+function cachePendingBrowserSetupToken(pathname: string, token: string): void {
+  if (pendingBrowserSetupToken) window.clearTimeout(pendingBrowserSetupToken.expiryTimer);
+  const pending = {
+    pathname,
+    token,
+    expiryTimer: 0,
+  };
+  pending.expiryTimer = window.setTimeout(() => {
+    if (pendingBrowserSetupToken === pending) pendingBrowserSetupToken = null;
+  }, SETUP_TOKEN_REMOUNT_HANDOFF_MS);
+  pendingBrowserSetupToken = pending;
+}
+
+function releasePendingBrowserSetupToken(token: string): void {
+  if (pendingBrowserSetupToken?.token !== token) return;
+  window.clearTimeout(pendingBrowserSetupToken.expiryTimer);
+  pendingBrowserSetupToken = null;
 }
