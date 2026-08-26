@@ -57,6 +57,7 @@ describe("getWorkspaceInsights", () => {
       sessionsTouched: 0,
       rootSessions: 0,
       deepestDepth: 0,
+      deepestSessionId: null,
       deepestSessionTitle: "",
       avgDepth: 0,
     });
@@ -84,7 +85,18 @@ describe("getWorkspaceInsights", () => {
       sources: [],
     });
     restores.push(() => promptContributions.mockRestore());
-    return { machines, emptyAgg, emptyDays, emptyHours, usageDay, usageHour, recent };
+    return {
+      machines,
+      emptyAgg,
+      emptyDays,
+      emptyHours,
+      usageDay,
+      usageHour,
+      recent,
+      drivers,
+      depth,
+      floor,
+    };
   }
 
   test("uses UTC-month model.tokens and agent_run.created for caps", async () => {
@@ -246,6 +258,7 @@ describe("getWorkspaceInsights", () => {
         recordedAt: new Date("2026-07-15T11:00:01.000Z"),
         sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
         sessionTitle: "External session",
+        sessionDepth: 0,
         turnId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
         provider: "codex-subscription",
         providerApi: "responses",
@@ -292,5 +305,82 @@ describe("getWorkspaceInsights", () => {
       estimatedProviderUsd: 0.000008,
       pricingSource: "configured_list_price",
     });
+  });
+
+  test("uses durable titles and factual identifiers for untitled historical sessions", async () => {
+    const { drivers, depth, floor, recent } = stubEmptyWorkspace();
+    const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(0);
+    restores.push(() => capSpy.mockRestore());
+    drivers.mockResolvedValue([
+      {
+        rootSessionId: "11111111-1111-4111-8111-111111111111",
+        title: null,
+        pricedCostMicros: 0,
+        estimatedProviderCostMicros: 0,
+        estimatedProviderCostKnownCalls: 0,
+        totalTokens: 10,
+        cachedTokens: 0,
+        cacheInputTokens: 0,
+      },
+    ]);
+    floor.mockResolvedValue([
+      {
+        id: "22222222-2222-4222-8222-222222222222",
+        title: null,
+        status: "running",
+        directControlState: "active",
+        nestedAgentDepth: 2,
+        model: "gpt-5",
+        sandboxBackend: "modal",
+        updatedAt: new Date("2026-08-26T07:00:00.000Z"),
+        createdAt: new Date("2026-08-26T06:00:00.000Z"),
+      },
+    ]);
+    depth.mockResolvedValue({
+      buckets: [{ depth: 2, sessions: 1 }],
+      goalsActive: 0,
+      goalsCompleted: 0,
+      sessionsTouched: 1,
+      rootSessions: 0,
+      deepestDepth: 2,
+      deepestSessionId: "22222222-2222-4222-8222-222222222222",
+      deepestSessionTitle: "",
+      avgDepth: 2,
+    });
+    recent.mockResolvedValue([
+      {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        occurredAt: new Date("2026-08-26T07:00:00.000Z"),
+        recordedAt: new Date("2026-08-26T07:00:01.000Z"),
+        sessionId: "22222222-2222-4222-8222-222222222222",
+        sessionTitle: null,
+        sessionDepth: 2,
+        turnId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        provider: "openai",
+        providerApi: "responses",
+        model: "gpt-5",
+        billingPath: "opengeni_credits",
+        inputTokens: 5,
+        outputTokens: 5,
+        cachedTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        totalTokens: 10,
+        pricedCostMicros: 0,
+        estimatedProviderCostMicros: null,
+        pricingSource: null,
+      },
+    ]);
+
+    const { snapshot } = await getWorkspaceInsights(
+      db,
+      testSettings({ sandboxSelfhostedEnabled: false }),
+      { workspaceId: WORKSPACE, range: "today", now: new Date("2026-08-26T08:00:00.000Z") },
+    );
+
+    expect(snapshot.drivers[0]?.label).toBe("Session 11111111");
+    expect(snapshot.floor[0]?.title).toBe("Agent 22222222");
+    expect(snapshot.recentCalls[0]?.sessionTitle).toBe("Agent 22222222");
+    expect(snapshot.deepestSessionTitle).toBe("Agent 22222222");
   });
 });

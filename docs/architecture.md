@@ -28,6 +28,7 @@ It does **not** restate the run lifecycle, goal loop, deployment procedures, or 
 **The "managed agent service" framing.** OpenGeni is the _substrate_, not the agent. You bring a goal and a workspace; OpenGeni gives you:
 
 - **A session API** — create/list/get/rename sessions, Send/Steer human prompts, Pause/Resume recursive workstreams, terminally cancel session subtrees, permanently delete quiescent root trees, approve tools, and read durable history.
+- **Durable semantic titles** — sessions begin with the prompt-free `New conversation` fallback and ask their next eligible model turn to call the canonical title tool; the write updates `sessions.title`, emits `session.title_set`, and never overwrites a human rename. Historical fallback rows self-heal when active, while malformed legacy nulls remain honest through stable session/agent identifiers rather than prompt-text backfill.
 - **An exactly-once live stream** — SSE anchored on a per-session monotonic `sequence`, with reconnect, replay, and gap backfill.
 - **Durable, recoverable runs** — runs survive worker death and provider hiccups, with no run-length limits by design.
 - **A dual compute model** — _provisioned sandboxes_ (disposable boxes OpenGeni creates, snapshots, and reaps across ten local/cloud backends) **and** _Connected Machines_ (a user's own always-on machine, enrolled via the `selfhosted` backend, as a **first-class, co-equal PRIMARY** compute target — a machine-targeted turn runs the agent **directly on the machine** with no cloud box created, leased, or billed).

@@ -2,8 +2,10 @@ import {
   getScheduledVariableSetExpectedGenerationForAttempt,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
+  updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
 } from "@opengeni/db";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   type OpenGeniRuntime,
   type AttemptConnectorActionBinding,
@@ -57,6 +59,11 @@ import type {
   SandboxRuntimeState,
   WorkspaceRefState,
 } from "./turn-context";
+import {
+  createSessionTitleAttemptToolDefinition,
+  sessionTitleToolPlan,
+  shouldRequestMissingSessionTitle,
+} from "./session-title";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -471,6 +478,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     runSettings,
     session.firstPartyMcpTools,
   );
+  const titleToolPlan = sessionTitleToolPlan({
+    tools: turnTools,
+    selectedFirstPartyMcpTools,
+    shouldRequestTitle: shouldRequestMissingSessionTitle({
+      title: session.title,
+      titleSource: session.titleSource,
+      firstPartyMcpTools: selectedFirstPartyMcpTools,
+      firstPartyMcpPermissions: session.firstPartyMcpPermissions,
+    }),
+  });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
     selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
@@ -492,6 +509,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : [];
   const attemptToolDefinitions = [
+    ...(titleToolPlan.promoteTitleTool
+      ? [
+          createSessionTitleAttemptToolDefinition({
+            updateTitle: async (title) => {
+              const result = await updateSessionTitleWithEvent(db, {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                title,
+                source: "agent",
+              });
+              await publishDurableSessionEvents(
+                bus,
+                input.workspaceId,
+                input.sessionId,
+                result.events,
+              );
+              return result;
+            },
+          }),
+        ]
+      : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
       settings: runSettings,
       scope: {
@@ -622,7 +660,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(session.firstPartyMcpPermissions?.length
           ? { firstPartyPermissions: session.firstPartyMcpPermissions }
           : {}),
-        firstPartyTools: selectedFirstPartyMcpTools,
+        firstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
@@ -732,6 +770,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ],
     connectorActionIdentity,
     postToolPreparationStartedAt,
+    preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
   };
 }
 

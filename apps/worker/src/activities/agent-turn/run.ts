@@ -1090,6 +1090,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptConnectorActionBindings,
         connectorActionIdentity,
         postToolPreparationStartedAt,
+        preparationIndependentToolNames,
       } = toolRuntime;
 
       const builtAgent = await buildTurnAgent({
@@ -1144,6 +1145,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         fileResourceDownloads,
         attemptConnectorActionBindings,
         connectorActionIdentity,
+        preparationIndependentToolNames,
         videoGenerationAcceptancesByCallId,
         activeSandboxBackend,
         groupBoxBackend,

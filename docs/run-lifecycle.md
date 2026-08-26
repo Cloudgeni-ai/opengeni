@@ -22,6 +22,26 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Session display titles are durable session metadata, not a truncation of model
+history. Creation and migration use the prompt-free `New conversation` fallback.
+While a session still has that fallback (or a legacy null title), and its exact
+selected first-party tool and permission policy permits `set_session_title`, the
+worker projects only that exact operation through the attempt-local tool server
+and removes it from the broader remote first-party catalog for the attempt. The
+request-local one-shot instruction can therefore call `set_session_title` on the
+first model request without waiting for the remaining first-party `tools/list`;
+all other selected first-party schemas stay deferred and searchable. This does
+not grant or attach any new tool authority. The attempt-local operation uses the
+canonical title mutation, which updates the session row and appends
+`session.title_set`; a human title remains protected from later agent writes.
+The hint is based on durable title state rather than history length: turn claim
+persists the accepted user item before agent construction, so history count
+cannot identify a first turn.
+Historical fallback sessions therefore self-heal on their next eligible model
+turn. Read projections encountering malformed legacy nulls use an explicit
+factual session or agent identifier and never copy prompt text into title
+metadata.
+
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
 `clientEventId`, clears the visible draft immediately, and renders that snapshot
