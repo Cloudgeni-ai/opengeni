@@ -651,6 +651,7 @@ function workspaceShape(id: string, accountId: string, name: string, slug: strin
   return {
     id,
     accountId,
+    kind: "shared",
     name,
     slug,
     externalSource: null,
