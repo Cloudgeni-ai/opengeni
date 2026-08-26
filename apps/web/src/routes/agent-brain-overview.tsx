@@ -345,7 +345,7 @@ export function BrainOverview({
           description={
             personalWorkspace
               ? "Private facts, incidents, and decisions learned in your personal workspace."
-              : "Facts, decisions and observations learned across agent work."
+              : "Facts, incidents, decisions, and outcomes agents can recall."
           }
           action={
             <RouteAction to="/workspaces/$workspaceId/memory" workspaceId={workspaceId}>
