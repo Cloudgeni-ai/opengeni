@@ -4,7 +4,8 @@ import type { Database } from "./database";
 import { rlsContextForWorkspace, withRlsContext } from "./database";
 import * as schema from "./schema";
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const INSIGHTS_WARM_GROUP_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type InsightsTimeWindow = {
   since: Date;
@@ -525,7 +526,7 @@ export async function aggregateWarmSecondsByGroup(
       .orderBy(sql`coalesce(sum(${usageEvents.quantity}), 0) desc`)
       .limit(Math.max(limit * 4, limit));
     return rows
-      .filter((row) => UUID_RE.test(row.groupId))
+      .filter((row) => INSIGHTS_WARM_GROUP_UUID_RE.test(row.groupId))
       .slice(0, limit)
       .map((row) => ({
         groupId: row.groupId,

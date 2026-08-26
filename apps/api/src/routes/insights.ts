@@ -1,8 +1,29 @@
 import { InsightsRange, WorkspaceInsightsResponse } from "@opengeni/contracts";
-import { getWorkspaceInsights, requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  getWorkspaceInsights,
+  normalizeWorkspaceInsightsFilter,
+  requireAccessGrant,
+  WorkspaceInsightsFilterValidationError,
+  type ApiRouteDeps,
+  type WorkspaceInsightsFilterField,
+} from "@opengeni/core";
 import { workspaceInsightsMetricObserver } from "@opengeni/observability";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+
+export function normalizeWorkspaceInsightsQueryFilter(
+  value: string | null | undefined,
+  field: WorkspaceInsightsFilterField,
+): string | null {
+  try {
+    return normalizeWorkspaceInsightsFilter(value, field);
+  } catch (error) {
+    if (error instanceof WorkspaceInsightsFilterValidationError) {
+      throw new HTTPException(400, { message: error.message });
+    }
+    throw error;
+  }
+}
 
 export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
   const observeRequest = workspaceInsightsMetricObserver(deps.observability);
@@ -11,8 +32,8 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rangeRaw = c.req.query("range") ?? "week";
     const providerRaw = c.req.query("provider");
     const modelRaw = c.req.query("model");
-    const provider = providerRaw && providerRaw !== "all" ? providerRaw : null;
-    const model = modelRaw && modelRaw !== "all" ? modelRaw : null;
+    let provider: string | null = null;
+    let model: string | null = null;
     let outcome = "failed";
 
     try {
@@ -25,6 +46,8 @@ export function registerInsightsRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "range must be one of today|week|month|ytd",
         });
       }
+      provider = normalizeWorkspaceInsightsQueryFilter(providerRaw, "provider");
+      model = normalizeWorkspaceInsightsQueryFilter(modelRaw, "model");
 
       const response = await getWorkspaceInsights(deps.db, deps.settings, {
         workspaceId,
