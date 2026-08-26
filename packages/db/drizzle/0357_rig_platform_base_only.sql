@@ -1,4 +1,4 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Rig definitions may customize setup and checks, but the deployment owns the
 -- sandbox base image. Preserve historical image-bearing rows for audit and
 -- harmless active/provider metadata updates while rejecting every new image
