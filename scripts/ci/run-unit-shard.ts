@@ -23,6 +23,7 @@ export type UnitTestProcessPlan = {
   parallel: UnitTestProcess[];
   explicitConcurrency: UnitTestProcess[];
   wallClockSensitive: UnitTestProcess[];
+  sharedPostgresExclusive: UnitTestProcess[];
   clusterRoleSensitive: UnitTestProcess[];
 };
 
@@ -59,6 +60,10 @@ export function sourceUsesWallClockPerformanceAssertion(source: string): boolean
     /\b(?:Bun\.nanoseconds|performance\.now|Date\.now)\s*\(/.test(source) &&
     /\.toBeLessThan(?:OrEqual)?\s*\(/.test(source)
   );
+}
+
+export function sourceRequiresExclusiveSharedPostgres(source: string): boolean {
+  return /opengeni:test-shared-postgres-exclusive/u.test(source);
 }
 
 function sourceProvisionsRolesOnSharedDatabase(source: string): boolean {
@@ -103,30 +108,53 @@ export function planUnitTestProcesses(
       )
       .map(([path]) => path),
   );
+  const sharedPostgresExclusive = new Set(
+    [...sources]
+      .filter(
+        ([path, source]) =>
+          !explicitConcurrency.has(path) &&
+          !wallClockSensitive.has(path) &&
+          sourceRequiresExclusiveSharedPostgres(source),
+      )
+      .map(([path]) => path),
+  );
   const clusterRoleSensitive = new Set(
     [...sources]
       .filter(
         ([path, source]) =>
           !explicitConcurrency.has(path) &&
           !wallClockSensitive.has(path) &&
+          !sharedPostgresExclusive.has(path) &&
           sourceMutatesSharedPostgresRole(source),
       )
       .map(([path]) => path),
   );
   const usesExplicitConcurrency = (path: string): boolean => explicitConcurrency.has(path);
   const usesWallClock = (path: string): boolean => wallClockSensitive.has(path);
+  const requiresExclusiveSharedPostgres = (path: string): boolean =>
+    sharedPostgresExclusive.has(path);
   const mutatesClusterRole = (path: string): boolean => clusterRoleSensitive.has(path);
   const parallelBatch = batch.filter(
-    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path) && !mutatesClusterRole(path),
+    (path) =>
+      !usesExplicitConcurrency(path) &&
+      !usesWallClock(path) &&
+      !requiresExclusiveSharedPostgres(path) &&
+      !mutatesClusterRole(path),
   );
   const concurrentBatch = batch.filter(usesExplicitConcurrency);
   const wallClockBatch = batch.filter(usesWallClock);
+  const sharedPostgresBatch = batch.filter(requiresExclusiveSharedPostgres);
   const clusterRoleBatch = batch.filter(mutatesClusterRole);
   const parallelIsolated = isolated.filter(
-    (path) => !usesExplicitConcurrency(path) && !usesWallClock(path) && !mutatesClusterRole(path),
+    (path) =>
+      !usesExplicitConcurrency(path) &&
+      !usesWallClock(path) &&
+      !requiresExclusiveSharedPostgres(path) &&
+      !mutatesClusterRole(path),
   );
   const concurrentIsolated = isolated.filter(usesExplicitConcurrency);
   const wallClockIsolated = isolated.filter(usesWallClock);
+  const sharedPostgresIsolated = isolated.filter(requiresExclusiveSharedPostgres);
   const clusterRoleIsolated = isolated.filter(mutatesClusterRole);
   return {
     parallel: [
@@ -150,6 +178,14 @@ export function planUnitTestProcesses(
     wallClockSensitive: [
       ...wallClockBatch.map((path) => ({ files: [path], isolated: false })),
       ...wallClockIsolated.map((path) => ({ files: [path], isolated: true })),
+    ],
+    // A small number of large FORCE-RLS/pgvector suites hold several pools and
+    // perform long authority transitions against the shared PostgreSQL fixture.
+    // Their explicit marker keeps them off the parallel acquisition path and
+    // runs them only after every ordinary sibling process has settled.
+    sharedPostgresExclusive: [
+      ...sharedPostgresBatch.map((path) => ({ files: [path], isolated: false })),
+      ...sharedPostgresIsolated.map((path) => ({ files: [path], isolated: true })),
     ],
     // PostgreSQL roles are cluster-global even when every test file owns a
     // distinct database. Run role-password/DDL mutation tests last and alone,
@@ -260,7 +296,7 @@ async function main(): Promise<void> {
   const budget = testConcurrencyBudget();
   const processes = planUnitTestProcesses(process.cwd(), batch, isolated, configuredBatchSize);
   process.stdout.write(
-    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} wallClockSensitive=${processes.wallClockSensitive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length}\n`,
+    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} wallClockSensitive=${processes.wallClockSensitive.length} sharedPostgresExclusive=${processes.sharedPostgresExclusive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length}\n`,
   );
   const parallelStatus = await runBoundedTestProcesses(
     processes.parallel,
@@ -276,6 +312,12 @@ async function main(): Promise<void> {
     run(task, budget, 1, 1),
   );
   if (wallClockStatus !== 0) process.exit(wallClockStatus);
+  const sharedPostgresStatus = await runBoundedTestProcesses(
+    processes.sharedPostgresExclusive,
+    1,
+    (task) => run(task, budget, 1, 1),
+  );
+  if (sharedPostgresStatus !== 0) process.exit(sharedPostgresStatus);
   const clusterRoleStatus = await runBoundedTestProcesses(
     processes.clusterRoleSensitive,
     1,

@@ -21,6 +21,11 @@ import {
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
+// opengeni:test-shared-postgres-exclusive
+// This broad FORCE-RLS/pgvector suite owns multiple pools and long authority
+// transitions. Running it after parallel shared-container users settle avoids
+// a cross-process PostgreSQL acquisition stall while preserving real DB proof.
+
 let available = true;
 let shared: SharedTestDatabase | null = null;
 let forced: ReturnType<typeof createDb>;
