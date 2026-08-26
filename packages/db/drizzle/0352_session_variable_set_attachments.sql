@@ -527,6 +527,431 @@ CREATE POLICY session_visibility_isolation
     OR opengeni_private.variable_set_authority_capability_active('write')
   );
 
+-- Retention finalization is the one lifecycle that must delete a departed
+-- member's personal Variable Sets even when their already-revoked sessions
+-- still retain an ordered selection. Ordinary deletion remains guarded above.
+-- This private helper is callable only from the claimed retention finalizer;
+-- it admits target-owned private or unowned workspace-shared sessions, refuses
+-- another member's private/non-quiescent sessions, preserves survivor order,
+-- rotates any warm quiescent sandbox group, and commits the selection,
+-- projection, event, audit, and activity-clock writes as one transaction.
+CREATE FUNCTION opengeni_private.detach_retention_variable_set_session_selections(
+  p_account_id uuid,
+  p_membership_id uuid,
+  p_operation_id uuid
+) RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  workspace_id_value uuid;
+  session_row sessions%ROWTYPE;
+  group_member_id uuid;
+  previous_ids jsonb;
+  next_ids jsonb;
+  removed_ids jsonb;
+  next_last_id uuid;
+  affected_session_ids uuid[];
+  activity_revision_value bigint;
+  detached_sessions integer := 0;
+  previous_workspace text := current_setting('opengeni.workspace_id', true);
+  previous_gate_state text := current_setting('opengeni.session_activity_gate_state', true);
+  previous_gate_workspace text := current_setting(
+    'opengeni.session_activity_gate_workspace_id', true
+  );
+  finalized_session_count integer;
+  write_capability_preexisting boolean;
+  fenced_access_capability_id uuid;
+BEGIN
+  IF p_account_id IS NULL OR p_membership_id IS NULL OR p_operation_id IS NULL
+    OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+    OR current_setting('opengeni.organization_tenancy_lifecycle', true)
+      IS DISTINCT FROM 'organization_membership_lifecycle'
+    OR nullif(previous_gate_state, '') IS NOT NULL
+    OR nullif(previous_gate_workspace, '') IS NOT NULL
+  THEN
+    RAISE EXCEPTION 'retention Variable Set detach authority is invalid'
+      USING ERRCODE = '42501';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1
+    FROM organization_memberships membership
+    JOIN organization_user_retention_deletions deletion
+      ON deletion.account_id = membership.account_id
+     AND deletion.membership_id = membership.id
+    WHERE membership.account_id = p_account_id
+      AND membership.id = p_membership_id
+      AND membership.status = 'revoked'
+      AND membership.personal_retention_until IS NOT NULL
+      AND membership.personal_retention_until <= clock_timestamp()
+      AND deletion.state = 'claimed'
+      AND deletion.claim_operation_id = p_operation_id
+      AND deletion.claim_expires_at > clock_timestamp()
+      AND deletion.database_finalized_at IS NULL
+  ) THEN
+    RAISE EXCEPTION 'retention Variable Set detach claim is stale'
+      USING ERRCODE = '40001';
+  END IF;
+  SELECT opengeni_private.variable_set_authority_capability_active('write')
+  INTO write_capability_preexisting;
+  INSERT INTO opengeni_private.variable_set_authority_capabilities (
+    backend_pid, transaction_id, capability_kind
+  ) VALUES (pg_backend_pid(), pg_current_xact_id(), 'write')
+  ON CONFLICT DO NOTHING;
+  fenced_access_capability_id :=
+    opengeni_private.open_session_tenancy_fenced_access(
+      session_tenancy_fence_target_schema()
+    );
+
+  FOR workspace_id_value IN
+    SELECT DISTINCT session_value.workspace_id
+    FROM sessions session_value
+    WHERE session_value.account_id = p_account_id
+      AND EXISTS (
+        SELECT 1
+        FROM session_variable_set_attachments attachment
+        JOIN workspace_variable_sets variable_set
+          ON variable_set.account_id = p_account_id
+         AND variable_set.id = attachment.variable_set_id
+        JOIN organization_user_resource_authorities authority
+          ON authority.account_id = variable_set.account_id
+         AND authority.id = variable_set.authority_id
+         AND authority.organization_membership_id = p_membership_id
+         AND authority.resource_kind = 'variable_set'
+         AND authority.resource_id = variable_set.id
+        WHERE attachment.account_id = p_account_id
+          AND attachment.workspace_id = session_value.workspace_id
+          AND attachment.session_id = session_value.id
+          AND variable_set.owner_organization_membership_id = p_membership_id
+      )
+    ORDER BY session_value.workspace_id
+  LOOP
+    PERFORM set_config('opengeni.workspace_id', workspace_id_value::text, true);
+    PERFORM 1 FROM workspace_inference_controls control
+    WHERE control.account_id = p_account_id
+      AND control.workspace_id = workspace_id_value
+    FOR SHARE;
+    PERFORM 1 FROM workspaces workspace
+    WHERE workspace.account_id = p_account_id
+      AND workspace.id = workspace_id_value
+    FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'retention Variable Set detach workspace is unavailable'
+        USING ERRCODE = '40001';
+    END IF;
+
+    affected_session_ids := ARRAY[]::uuid[];
+    FOR session_row IN
+      SELECT session_value.*
+      FROM sessions session_value
+      WHERE session_value.account_id = p_account_id
+        AND session_value.workspace_id = workspace_id_value
+        AND EXISTS (
+          SELECT 1
+          FROM session_variable_set_attachments attachment
+          JOIN workspace_variable_sets variable_set
+            ON variable_set.account_id = p_account_id
+           AND variable_set.id = attachment.variable_set_id
+          JOIN organization_user_resource_authorities authority
+            ON authority.account_id = variable_set.account_id
+           AND authority.id = variable_set.authority_id
+           AND authority.organization_membership_id = p_membership_id
+           AND authority.resource_kind = 'variable_set'
+           AND authority.resource_id = variable_set.id
+          WHERE attachment.account_id = p_account_id
+            AND attachment.workspace_id = session_value.workspace_id
+            AND attachment.session_id = session_value.id
+            AND variable_set.owner_organization_membership_id = p_membership_id
+        )
+      ORDER BY session_value.id
+      FOR NO KEY UPDATE
+    LOOP
+      IF (
+          session_row.owner_organization_membership_id IS NOT NULL
+          AND session_row.owner_organization_membership_id IS DISTINCT FROM p_membership_id
+        )
+        OR session_row.active_turn_id IS NOT NULL
+        OR session_row.status NOT IN ('queued', 'idle', 'failed', 'cancelled')
+      THEN
+        RAISE EXCEPTION 'retention Variable Set detach requires a quiescent eligible session'
+          USING ERRCODE = '55000';
+      END IF;
+      PERFORM assert_session_tenancy_quiescent(
+        p_account_id, workspace_id_value, session_row.id, false
+      );
+      IF EXISTS (
+        SELECT 1 FROM sessions group_member
+        WHERE group_member.account_id = p_account_id
+          AND group_member.workspace_id = workspace_id_value
+          AND group_member.sandbox_group_id = session_row.sandbox_group_id
+          AND (
+            (
+              group_member.owner_organization_membership_id IS NOT NULL
+              AND group_member.owner_organization_membership_id
+                IS DISTINCT FROM p_membership_id
+            )
+            OR group_member.active_turn_id IS NOT NULL
+            OR group_member.status NOT IN ('queued', 'idle', 'failed', 'cancelled')
+          )
+      ) THEN
+        RAISE EXCEPTION 'retention Variable Set detach cannot rotate a foreign or active sandbox group'
+          USING ERRCODE = '55000';
+      END IF;
+      FOR group_member_id IN
+        SELECT group_member.id
+        FROM sessions group_member
+        WHERE group_member.account_id = p_account_id
+          AND group_member.workspace_id = workspace_id_value
+          AND group_member.sandbox_group_id = session_row.sandbox_group_id
+        ORDER BY group_member.id
+      LOOP
+        PERFORM assert_session_tenancy_quiescent(
+          p_account_id, workspace_id_value, group_member_id, false
+        );
+      END LOOP;
+
+      PERFORM pg_advisory_xact_lock(hashtextextended(
+        'sandbox-lease-admission:' || workspace_id_value::text || ':'
+          || session_row.sandbox_group_id::text,
+        0
+      ));
+      PERFORM 1 FROM sandbox_leases lease
+      WHERE lease.account_id = p_account_id
+        AND lease.workspace_id = workspace_id_value
+        AND lease.sandbox_group_id = session_row.sandbox_group_id
+      FOR UPDATE;
+      IF EXISTS (
+        SELECT 1 FROM sandbox_lease_holders holder
+        JOIN sandbox_leases lease ON lease.id = holder.lease_id
+        WHERE lease.account_id = p_account_id
+          AND lease.workspace_id = workspace_id_value
+          AND lease.sandbox_group_id = session_row.sandbox_group_id
+      ) THEN
+        RAISE EXCEPTION 'retention Variable Set detach requires an unheld sandbox group'
+          USING ERRCODE = '55000';
+      END IF;
+
+      previous_ids := coalesce(
+        session_row.variable_set_ids,
+        CASE WHEN session_row.variable_set_id IS NULL THEN '[]'::jsonb
+          ELSE jsonb_build_array(session_row.variable_set_id::text) END
+      );
+      SELECT coalesce(jsonb_agg(selected.value ORDER BY selected.position)
+          FILTER (WHERE variable_set.id IS NULL), '[]'::jsonb),
+        coalesce(jsonb_agg(selected.value ORDER BY selected.position)
+          FILTER (WHERE variable_set.id IS NOT NULL), '[]'::jsonb)
+      INTO next_ids, removed_ids
+      FROM jsonb_array_elements_text(previous_ids)
+        WITH ORDINALITY selected(value, position)
+      LEFT JOIN workspace_variable_sets variable_set
+        ON variable_set.account_id = p_account_id
+       AND variable_set.id = selected.value::uuid
+       AND variable_set.owner_organization_membership_id = p_membership_id
+       AND EXISTS (
+         SELECT 1 FROM organization_user_resource_authorities authority
+         WHERE authority.account_id = p_account_id
+           AND authority.id = variable_set.authority_id
+           AND authority.organization_membership_id = p_membership_id
+           AND authority.resource_kind = 'variable_set'
+           AND authority.resource_id = variable_set.id
+       );
+      IF removed_ids = '[]'::jsonb THEN
+        RAISE EXCEPTION 'retention Variable Set detach projection drifted from the session selection'
+          USING ERRCODE = '55000';
+      END IF;
+      SELECT selected.value::uuid INTO next_last_id
+      FROM jsonb_array_elements_text(next_ids)
+        WITH ORDINALITY selected(value, position)
+      ORDER BY selected.position DESC
+      LIMIT 1;
+
+      SET CONSTRAINTS sessions_activity_insert_commit_guard,
+        sessions_activity_update_commit_guard DEFERRED;
+      PERFORM set_config('opengeni.session_activity_gate_state', 'open', true);
+      PERFORM set_config(
+        'opengeni.session_activity_gate_workspace_id', workspace_id_value::text, true
+      );
+      UPDATE sessions affected SET
+        variable_set_ids = next_ids,
+        variable_set_id = next_last_id,
+        last_sequence = affected.last_sequence + 1,
+        updated_at = clock_timestamp()
+      WHERE affected.account_id = p_account_id
+        AND affected.workspace_id = workspace_id_value
+        AND affected.id = session_row.id;
+      INSERT INTO session_events (
+        account_id, workspace_id, session_id, sequence, type, payload,
+        payload_codec_version, occurred_at
+      ) VALUES (
+        p_account_id, workspace_id_value, session_row.id,
+        session_row.last_sequence + 1, 'session.variable_sets.updated',
+        jsonb_build_object(
+          'actor', 'service:organization_retention',
+          'organizationMembershipId', p_membership_id,
+          'operationId', p_operation_id,
+          'variableSetIds', next_ids,
+          'removedIds', removed_ids,
+          'collisionPolicy', 'later_selected_set_wins',
+          'effectiveOn', 'next_turn_or_sandbox_operation',
+          'reason', 'owner_retention_deleted'
+        ), 1, clock_timestamp()
+      );
+      INSERT INTO audit_events (
+        account_id, workspace_id, subject_id, action, target_type, target_id,
+        metadata, metadata_codec_version
+      )
+      SELECT p_account_id, workspace_id_value, NULL,
+        'session.variable_set.detached', 'session', session_row.id::text,
+        jsonb_build_object(
+          'actorKind', 'service',
+          'organizationMembershipId', p_membership_id,
+          'operationId', p_operation_id,
+          'variableSetId', removed.value,
+          'reason', 'owner_retention_deleted'
+        ), 1
+      FROM jsonb_array_elements_text(removed_ids) removed(value);
+      UPDATE sandbox_leases lease SET
+        rotation_requested_at = coalesce(lease.rotation_requested_at, clock_timestamp()),
+        rotation_reason = coalesce(lease.rotation_reason, 'operator'),
+        expires_at = least(lease.expires_at, clock_timestamp()),
+        updated_at = clock_timestamp()
+      WHERE lease.account_id = p_account_id
+        AND lease.workspace_id = workspace_id_value
+        AND lease.sandbox_group_id = session_row.sandbox_group_id
+        AND lease.liveness <> 'cold';
+
+      affected_session_ids := array_append(affected_session_ids, session_row.id);
+      detached_sessions := detached_sessions + 1;
+    END LOOP;
+
+    IF coalesce(array_length(affected_session_ids, 1), 0) > 0 THEN
+      PERFORM set_config('opengeni.session_activity_gate_state', 'preparing', true);
+      SET CONSTRAINTS ALL IMMEDIATE;
+      SET CONSTRAINTS sessions_activity_insert_commit_guard,
+        sessions_activity_update_commit_guard DEFERRED;
+      PERFORM set_config('opengeni.session_activity_gate_state', 'finalizing', true);
+      UPDATE workspace_session_activity_revisions counter
+      SET revision = counter.revision + 1
+      WHERE counter.account_id = p_account_id
+        AND counter.workspace_id = workspace_id_value
+      RETURNING counter.revision INTO activity_revision_value;
+      IF activity_revision_value IS NULL THEN
+        RAISE EXCEPTION 'retention Variable Set detach activity counter is unavailable'
+          USING ERRCODE = '55000';
+      END IF;
+      UPDATE sessions affected SET
+        activity_revision = activity_revision_value,
+        activity_revision_pending_xid = NULL
+      WHERE affected.account_id = p_account_id
+        AND affected.workspace_id = workspace_id_value
+        AND affected.id = ANY(affected_session_ids)
+        AND affected.activity_revision_pending_xid = pg_current_xact_id()::text::bigint;
+      GET DIAGNOSTICS finalized_session_count = ROW_COUNT;
+      IF finalized_session_count <> array_length(affected_session_ids, 1) THEN
+        RAISE EXCEPTION 'retention Variable Set detach activity was not finalized'
+          USING ERRCODE = '55000';
+      END IF;
+      SET CONSTRAINTS sessions_activity_insert_commit_guard,
+        sessions_activity_update_commit_guard IMMEDIATE;
+      PERFORM set_config('opengeni.session_activity_gate_state', '', true);
+      PERFORM set_config('opengeni.session_activity_gate_workspace_id', '', true);
+    END IF;
+  END LOOP;
+  PERFORM opengeni_private.close_session_tenancy_fenced_access(
+    fenced_access_capability_id
+  );
+  IF NOT write_capability_preexisting THEN
+    DELETE FROM opengeni_private.variable_set_authority_capabilities
+    WHERE backend_pid = pg_backend_pid()
+      AND transaction_id = pg_current_xact_id_if_assigned()
+      AND capability_kind = 'write';
+  END IF;
+  PERFORM set_config('opengeni.workspace_id', coalesce(previous_workspace, ''), true);
+  RETURN detached_sessions;
+EXCEPTION WHEN OTHERS THEN
+  PERFORM opengeni_private.close_session_tenancy_fenced_access(
+    fenced_access_capability_id
+  );
+  IF NOT coalesce(write_capability_preexisting, false) THEN
+    DELETE FROM opengeni_private.variable_set_authority_capabilities
+    WHERE backend_pid = pg_backend_pid()
+      AND transaction_id = pg_current_xact_id_if_assigned()
+      AND capability_kind = 'write';
+  END IF;
+  PERFORM set_config('opengeni.workspace_id', coalesce(previous_workspace, ''), true);
+  PERFORM set_config(
+    'opengeni.session_activity_gate_state', coalesce(previous_gate_state, ''), true
+  );
+  PERFORM set_config(
+    'opengeni.session_activity_gate_workspace_id',
+    coalesce(previous_gate_workspace, ''), true
+  );
+  RAISE;
+END
+$body$;
+
+REVOKE ALL ON FUNCTION
+  opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)
+FROM PUBLIC;
+
+-- The source-definition anchor below contains the retained finalizer's
+-- scheduled_tasks UPDATE and its authority lookup. Keep the migration owner
+-- visible to those FORCE-RLS tables while the definition is inspected and
+-- replaced; application roles remain policy-bound, and the maintenance drain
+-- above excludes live writers.
+ALTER TABLE scheduled_tasks NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE organization_user_resource_authorities NO FORCE ROW LEVEL SECURITY;
+DO $patch_retention_variable_set_detach$
+DECLARE
+  definition text;
+  patched text;
+  occurrences integer;
+  anchor constant text :=
+    E'  UPDATE scheduled_tasks task SET status = ''paused'', variable_set_id = NULL,\n'
+    || E'    authority_revision = authority_revision + 1, updated_at = clock_timestamp()\n'
+    || E'  WHERE task.account_id = p_account_id AND task.variable_set_id IN (\n'
+    || E'    SELECT authority.resource_id FROM organization_user_resource_authorities authority\n'
+    || E'    WHERE authority.account_id = p_account_id\n'
+    || E'      AND authority.organization_membership_id = p_membership_id\n'
+    || E'      AND authority.resource_kind = ''variable_set''\n'
+    || E'  );';
+  replacement constant text :=
+    anchor
+    || E'\n  PERFORM opengeni_private.detach_retention_variable_set_session_selections(\n'
+    || E'    p_account_id, p_membership_id, p_operation_id\n'
+    || E'  );';
+BEGIN
+  definition := pg_catalog.pg_get_functiondef(
+    pg_catalog.to_regprocedure(
+      pg_catalog.quote_ident(pg_catalog.current_schema())
+        || '.finalize_organization_retention_deletion(uuid,uuid,uuid,text)'
+    )
+  );
+  occurrences := (
+    pg_catalog.length(definition)
+      - pg_catalog.length(pg_catalog.replace(definition, anchor, ''))
+  ) / pg_catalog.length(anchor);
+  IF definition IS NULL OR occurrences <> 1
+    OR pg_catalog.strpos(
+      definition,
+      'detach_retention_variable_set_session_selections'
+    ) > 0
+  THEN
+    RAISE EXCEPTION '0352 organization retention Variable Set detach definition drift'
+      USING ERRCODE = '55000';
+  END IF;
+  patched := pg_catalog.replace(definition, anchor, replacement);
+  IF pg_catalog.strpos(patched, replacement) = 0 THEN
+    RAISE EXCEPTION '0352 organization retention Variable Set detach patch failed'
+      USING ERRCODE = '55000';
+  END IF;
+  EXECUTE patched;
+END
+$patch_retention_variable_set_detach$;
+ALTER TABLE organization_user_resource_authorities FORCE ROW LEVEL SECURITY;
+ALTER TABLE scheduled_tasks FORCE ROW LEVEL SECURITY;
+
 -- A restart/fork with runtime setup is one database transaction. The original
 -- fork function still owns destination creation, history copy, receipt, and
 -- source quiescence. This helper configures only that fresh singleton

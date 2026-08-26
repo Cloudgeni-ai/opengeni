@@ -58,6 +58,7 @@ const directHotMutatorInventory = [
   "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)",
   "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
+  "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
   "opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)",
   "opengeni_private.reap_stale_interaction_transitions(bigint)",
   "opengeni_private.request_due_sandbox_rotations(bigint,integer)",
@@ -71,6 +72,10 @@ const internalHotMutatorCallers = new Map<string, string>([
   [
     "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
     "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
+  ],
+  [
+    "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
+    "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
   ],
   ["organization_membership_command_0263(jsonb)", "organization_membership_command(jsonb)"],
 ]);

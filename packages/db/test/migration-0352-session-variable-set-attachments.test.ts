@@ -63,8 +63,16 @@ describe("migration 0352 ordered session Variable Set attachments", () => {
     expect(source).toContain("FOREIGN KEY (workspace_id, session_id)");
     expect(source).toContain("REFERENCES sessions(workspace_id, id) ON DELETE CASCADE");
     expect(source).not.toContain("REFERENCES sessions(account_id, workspace_id, id)");
-    expect(source.match(/variable_set_authority_capability_active\('write'\)/gu)).toHaveLength(4);
-    expect(source).not.toContain("FROM opengeni_private.variable_set_authority_capabilities");
+    expect(source.match(/variable_set_authority_capability_active\('write'\)/gu)).toHaveLength(5);
+    const attachmentPolicies = source.slice(
+      source.indexOf("CREATE POLICY workspace_isolation ON session_variable_set_attachments"),
+      source.indexOf(
+        "CREATE FUNCTION opengeni_private.detach_retention_variable_set_session_selections",
+      ),
+    );
+    expect(attachmentPolicies).not.toContain(
+      "FROM opengeni_private.variable_set_authority_capabilities",
+    );
     expect(source).toContain("session_variable_set_attachments_session_set_uq");
     expect(source).toMatch(
       /CREATE OR REPLACE FUNCTION sync_session_variable_set_attachments\(\)[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = pg_catalog/u,
@@ -81,6 +89,39 @@ describe("migration 0352 ordered session Variable Set attachments", () => {
     );
     expect(source).toContain("AFTER UPDATE OF status ON sessions");
     expect(source).toContain("variable set remains attached to % sessions");
+    expect(source).toContain("opengeni_private.detach_retention_variable_set_session_selections");
+    expect(source).toContain("retention Variable Set detach requires a quiescent eligible session");
+    expect(source).toContain("session_row.owner_organization_membership_id IS NOT NULL");
+    expect(source).toContain(
+      "session_row.owner_organization_membership_id IS DISTINCT FROM p_membership_id",
+    );
+    expect(source).toContain("session_row.status NOT IN ('queued', 'idle', 'failed', 'cancelled')");
+    expect(source).not.toContain(
+      "session_row.owner_organization_membership_id IS DISTINCT FROM p_membership_id\n        OR",
+    );
+    expect(source).toContain(
+      "retention Variable Set detach cannot rotate a foreign or active sandbox group",
+    );
+    expect(source).toContain("'reason', 'owner_retention_deleted'");
+    expect(source).toContain("'session.variable_set.detached', 'session'");
+    expect(source).toContain("'sandbox-lease-admission:' || workspace_id_value::text");
+    expect(source).toContain("opengeni_private.open_session_tenancy_fenced_access");
+    expect(source.match(/opengeni_private\.close_session_tenancy_fenced_access/gu)).toHaveLength(2);
+    expect(source).toContain("PERFORM assert_session_tenancy_quiescent(");
+    expect(source).toContain(
+      "REVOKE ALL ON FUNCTION\n  opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
+    );
+    expect(source).toContain("DO $patch_retention_variable_set_detach$");
+    expect(source).toContain("0352 organization retention Variable Set detach definition drift");
+    const scheduledRetentionPause = source.indexOf(
+      "UPDATE scheduled_tasks task SET status = ''paused'', variable_set_id = NULL",
+    );
+    const retentionDetachCall = source.indexOf(
+      "PERFORM opengeni_private.detach_retention_variable_set_session_selections",
+      scheduledRetentionPause,
+    );
+    expect(scheduledRetentionPause).toBeGreaterThanOrEqual(0);
+    expect(retentionDetachCall).toBeGreaterThan(scheduledRetentionPause);
     expect(source).not.toContain(
       "CREATE OR REPLACE FUNCTION refresh_session_variable_set_selection",
     );

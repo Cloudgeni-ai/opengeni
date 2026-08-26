@@ -498,7 +498,15 @@ every obligation, so reconfiguration cannot reinterpret a key on resume.
 Concurrent retained references therefore abort before external
 bytes are touched; provider retries see only unfinished obligations. Each
 member has an independent expiring claim, and immutable evidence survives
-cleanup. There is no new
+cleanup. Retention finalization is also the sole exception to the ordinary
+Variable Set session-attachment delete guard: under the existing account-wide
+session-tenancy fences it removes only the departed member's selections from
+canonically quiescent target-owned private or unowned workspace-shared sessions,
+preserves survivor order, requests warm-sandbox rotation, and commits
+projection/event/audit evidence before resource deletion. A pre-turn `queued`
+session remains eligible only when its complete activity proof is quiescent;
+another member's private session and any active or held group fail closed.
+There is no new
 always-on service. Active
 memberships are re-read on managed access refresh to derive role-bounded account
 grants and only the human's own personal-workspace projections. Long-lived
