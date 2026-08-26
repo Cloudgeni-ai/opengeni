@@ -622,7 +622,6 @@ describe("SDK / contracts parity", () => {
     const create: CreateRigRequest = {
       name: "dev-machine",
       description: "cloudgeni-dev stress rig",
-      image: "ubuntu:24.04",
       setupScript: "apt-get install -y ripgrep",
       checks: [{ name: "rg", command: "rg --version" }],
       credentialHooks: ["azure-cli-login"],
@@ -638,12 +637,21 @@ describe("SDK / contracts parity", () => {
     };
     const edit: ProposeRigChangeRequest = {
       kind: "definition_edit",
-      payload: { image: "ubuntu:24.10", changelog: "bump base" },
+      payload: { setupScript: "apt-get install -y jq", changelog: "add jq" },
     };
     expect(ContractCreateRigRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateRigRequest.safeParse(update).success).toBe(true);
     expect(ContractProposeRigChangeRequest.safeParse(append).success).toBe(true);
     expect(ContractProposeRigChangeRequest.safeParse(edit).success).toBe(true);
+    expect(
+      ContractCreateRigRequest.safeParse({ name: "custom-base", image: "ubuntu:24.04" }).success,
+    ).toBe(false);
+    expect(
+      ContractProposeRigChangeRequest.safeParse({
+        kind: "definition_edit",
+        payload: { image: "ubuntu:24.10" },
+      }).success,
+    ).toBe(false);
     // Bad check shape and unknown change kind are rejected.
     expect(ContractCreateRigRequest.safeParse({ name: "x", checks: [{ name: "" }] }).success).toBe(
       false,

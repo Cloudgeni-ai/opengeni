@@ -861,6 +861,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         media,
         fileAuthoritySubjectId,
         runSettings,
+        logicalSandboxSettings,
       });
       const {
         routingOn,
@@ -1090,6 +1091,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         attemptConnectorActionBindings,
         connectorActionIdentity,
         postToolPreparationStartedAt,
+        preparationIndependentToolNames,
       } = toolRuntime;
 
       const builtAgent = await buildTurnAgent({
@@ -1144,6 +1146,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         fileResourceDownloads,
         attemptConnectorActionBindings,
         connectorActionIdentity,
+        preparationIndependentToolNames,
         videoGenerationAcceptancesByCallId,
         activeSandboxBackend,
         groupBoxBackend,

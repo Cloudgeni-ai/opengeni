@@ -105,10 +105,79 @@ describe("session control surface architecture", () => {
 
   test("reconciles the open session project without regressing an owned optimistic move", async () => {
     const list = await source("components/rail/session-list.tsx");
+    const move = await source("lib/session-channel-move.ts");
+    const route = await source("routes/session.tsx");
+    const appContext = await source("context.tsx");
+    const lineageHook = await source("../../../packages/react/src/hooks/use-session-lineage.ts");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
+    expect(list).toContain("const promise = readSessionChannelMovePoint(");
+    expect(list).toContain("sessionClient,");
+    expect(list).toContain("sessionChannelProjectionAuthority.replace(");
+    expect(list).toContain("rootReadGeneration");
+    expect(list).toContain("globalPinsReadGeneration");
+    expect(list).toContain("pinsChannelProjectionOwner");
+    expect(list).toContain("lineageChannelProjectionOwner");
+    expect(list).toContain("beginRead: context.sessionChannelProjectionAuthority.beginRead");
+    expect(list).toContain("activeLineage.readGeneration");
+    expect(lineageHook).toContain("getSessionLineage(workspaceId, sessionId, {");
+    expect(lineageHook).toContain("onRequestStart: (sharedReadGeneration) => {");
+    expect(appContext).toContain(
+      "createOpenGeniClient(sessionChannelProjectionAuthority.beginRead)",
+    );
+    expect(list).toContain(
+      "const lineageProjected = context.sessionChannelProjectionAuthority.project(",
+    );
+    expect(list).toContain("currentListChannelEvidence");
+    expect(list).toContain("sessionChannelProjectionAuthority.project(");
+    expect(list).toContain("authoritativeSessionContinuationChannels(");
+    expect(list).toContain("pageReadGeneration");
+    expect(list).not.toContain("replace(owner, channelAuthoritySessions)");
+    expect(list).not.toContain("replace(owner, listedSessions)");
+    expect(list).toContain(
+      "applySessionRailProjection(lineageProjected, projected, { channelOwned })",
+    );
+    expect(list).toContain("sessionChannelProjectionAuthority.owns(authoritative)");
+    expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
+    expect(list).toContain("sessionChannelProjectionAuthority.beginMove(");
+    expect(list).toContain("sessionChannelProjectionAuthority.ownsMove(");
+    expect(list).toContain("sessionChannelProjectionAuthority.recordMove(");
+    expect(list).toContain('if (disposition === "rejected")');
+    expect(list).not.toContain('if (disposition === "verification-required")');
+    expect(list).toContain("await verifySessionChannelMove(session.id, operation)");
+    expect(list).toContain("sessionChannelProjectionAuthority.finishMove(");
+    expect(list).toContain("context.client.updateSessionChannel(");
+    expect(list).not.toContain("moveSession: requestMoveSession");
+    expect(list).not.toContain("await requestMoveSession(");
+    expect(list).not.toContain("const movingSessions = useRef(");
+    expect(list).not.toContain("const channelMoveOperation = useRef(");
+    expect(list).toContain("useSyncExternalStore(");
+    expect(list).toContain("subscribe,");
+    expect(list).toContain("getRevision");
+    expect(list).toContain("acceptedChannelReadRevision");
+    expect(list).toContain("subscribe((accepted) =>");
+    expect(list).toContain("override?.committed");
+    expect(list).toContain("applySessionChannelProjection(current, accepted)");
     expect(list).toContain("reconcileSessionChannelMovePointRead(");
+    expect(list).toContain("reconcileSessionChannelMoves(current, channelAuthoritySessions)");
+    expect(list).not.toContain("reconcileSessionChannelMoves(current, listedSessions)");
     expect(list).toContain("requestError.status === 404");
+    expect(list).toContain("sessionChannelProjectionAuthority.beginDetailRead(");
+    expect(list).toContain("sessionChannelProjectionAuthority.finishDetailReads(detailReadOwner)");
+    expect(move).toContain("getSession(workspaceId, sessionId, {");
+    expect(move).toContain("fresh: true");
+    expect(move).toContain("onRequestStart");
+    expect(route).toContain("readRevision: sessionReadRevision");
+    expect(route).toContain("readGeneration: sessionReadGeneration");
+    expect(route).toContain("sessionChannelProjectionAuthority.beginDetailRead(");
+    expect(route).toContain("sessionChannelProjectionAuthority.finishDetailReads(");
+    expect(route).toContain("sessionChannelProjectionAuthority.recordRead(");
+    expect(route).toContain(
+      "const accepted = context.sessionChannelProjectionAuthority.recordRead(",
+    );
+    expect(route).toContain("mergeSessionDetailReadProjection(");
+    expect(route).toContain("sessionReadGeneration,\n        accepted,");
+    expect(route).toContain('context.sessionChannelProjectionAuthority,\n        "live"');
   });
 
   test("keeps the loaded creator picker identifiable and reachable", async () => {

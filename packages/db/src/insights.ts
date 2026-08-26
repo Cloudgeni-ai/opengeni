@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
 import { rlsContextForWorkspace, withRlsContext } from "./database";
@@ -119,6 +119,7 @@ export type RecentModelCallRow = {
   recordedAt: Date;
   sessionId: string;
   sessionTitle: string | null;
+  sessionDepth: number | null;
   turnId: string;
   provider: string;
   providerApi: string;
@@ -143,6 +144,62 @@ function hourKeyUtc(value: Date): string {
   return `${value.toISOString().slice(0, 13)}:00`;
 }
 
+function insightsDate(value: unknown, field: string): Date {
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (!Number.isFinite(date.getTime())) {
+    throw new Error(`Workspace Insights returned an invalid ${field}`);
+  }
+  return date;
+}
+
+function insightsNumber(value: unknown, field: string): number {
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error(`Workspace Insights returned an invalid ${field}`);
+  }
+  return number;
+}
+
+function insightsNullableNumber(value: unknown, field: string): number | null {
+  return value === null ? null : insightsNumber(value, field);
+}
+
+function visibleUsageEventsSource(input: InsightsTimeWindow & { workspaceId: string }) {
+  const usageEvents = alias(schema.usageEvents, "insights_visible_usage_events");
+  return {
+    usageEvents,
+    source: sql`opengeni_private.visible_workspace_insights_usage_events(
+      ${input.workspaceId},
+      ${input.since.toISOString()}::timestamp with time zone,
+      ${input.until.toISOString()}::timestamp with time zone
+    ) "insights_visible_usage_events"`,
+  };
+}
+
+function visibleUsageEventsSinceSource(input: { workspaceId: string; since: Date }) {
+  const usageEvents = alias(schema.usageEvents, "insights_visible_usage_events_since");
+  return {
+    usageEvents,
+    source: sql`opengeni_private.visible_workspace_insights_usage_events(
+      ${input.workspaceId},
+      ${input.since.toISOString()}::timestamp with time zone,
+      'infinity'::timestamp with time zone
+    ) "insights_visible_usage_events_since"`,
+  };
+}
+
+function visibleModelCallFactsSource(input: InsightsTimeWindow & { workspaceId: string }) {
+  const modelCallFacts = alias(schema.modelCallFacts, "insights_visible_model_call_facts");
+  return {
+    modelCallFacts,
+    source: sql`opengeni_private.visible_workspace_insights_model_call_facts(
+      ${input.workspaceId},
+      ${input.since.toISOString()}::timestamp with time zone,
+      ${input.until.toISOString()}::timestamp with time zone
+    ) "insights_visible_model_call_facts"`,
+  };
+}
+
 export async function sumUsageQuantityInRange(
   db: Database,
   input: {
@@ -154,17 +211,46 @@ export async function sumUsageQuantityInRange(
 ): Promise<number> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { usageEvents, source } = visibleUsageEventsSource(input);
     const [{ total } = { total: 0 }] = await scopedDb
       .select({
-        total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+        total: sql<number>`coalesce(sum(${usageEvents.quantity}), 0)`,
       })
-      .from(schema.usageEvents)
+      .from(source)
       .where(
         and(
-          eq(schema.usageEvents.workspaceId, input.workspaceId),
-          eq(schema.usageEvents.eventType, input.eventType),
-          gte(schema.usageEvents.occurredAt, input.since),
-          lt(schema.usageEvents.occurredAt, input.until),
+          eq(usageEvents.workspaceId, input.workspaceId),
+          eq(usageEvents.eventType, input.eventType),
+          gte(usageEvents.occurredAt, input.since),
+          lt(usageEvents.occurredAt, input.until),
+        ),
+      );
+    return Number(total);
+  });
+}
+
+/** Preserve the existing strictly-after boundary used by monthly cap meters. */
+export async function sumUsageQuantitySinceForInsights(
+  db: Database,
+  input: {
+    workspaceId: string;
+    eventType: string;
+    since: Date;
+  },
+): Promise<number> {
+  const context = await rlsContextForWorkspace(db, input.workspaceId);
+  return await withRlsContext(db, context, async (scopedDb) => {
+    const { usageEvents, source } = visibleUsageEventsSinceSource(input);
+    const [{ total } = { total: 0 }] = await scopedDb
+      .select({
+        total: sql<number>`coalesce(sum(${usageEvents.quantity}), 0)`,
+      })
+      .from(source)
+      .where(
+        and(
+          eq(usageEvents.workspaceId, input.workspaceId),
+          eq(usageEvents.eventType, input.eventType),
+          gt(usageEvents.occurredAt, input.since),
         ),
       );
     return Number(total);
@@ -183,26 +269,27 @@ async function sumUsageQuantityByBucket(
 ): Promise<Map<string, number>> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { usageEvents, source } = visibleUsageEventsSource(input);
     const bucket =
       granularity === "hour"
-        ? sql<string>`to_char(date_trunc('hour', ${schema.usageEvents.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
-        : sql<string>`to_char(date_trunc('day', ${schema.usageEvents.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
+        ? sql<string>`to_char(date_trunc('hour', ${usageEvents.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
+        : sql<string>`to_char(date_trunc('day', ${usageEvents.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
     const bucketGroup =
       granularity === "hour"
-        ? sql`date_trunc('hour', ${schema.usageEvents.occurredAt} at time zone 'UTC')`
-        : sql`date_trunc('day', ${schema.usageEvents.occurredAt} at time zone 'UTC')`;
+        ? sql`date_trunc('hour', ${usageEvents.occurredAt} at time zone 'UTC')`
+        : sql`date_trunc('day', ${usageEvents.occurredAt} at time zone 'UTC')`;
     const rows = await scopedDb
       .select({
         bucket,
-        total: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+        total: sql<number>`coalesce(sum(${usageEvents.quantity}), 0)`,
       })
-      .from(schema.usageEvents)
+      .from(source)
       .where(
         and(
-          eq(schema.usageEvents.workspaceId, input.workspaceId),
-          eq(schema.usageEvents.eventType, input.eventType),
-          gte(schema.usageEvents.occurredAt, input.since),
-          lt(schema.usageEvents.occurredAt, input.until),
+          eq(usageEvents.workspaceId, input.workspaceId),
+          eq(usageEvents.eventType, input.eventType),
+          gte(usageEvents.occurredAt, input.since),
+          lt(usageEvents.occurredAt, input.until),
         ),
       )
       .groupBy(bucketGroup);
@@ -246,39 +333,36 @@ export async function aggregateModelCallFacts(
 ): Promise<ModelCallFactAggregateRow[]> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { modelCallFacts, source } = visibleModelCallFactsSource(input);
     const clauses = [
-      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
-      gte(schema.modelCallFacts.occurredAt, input.since),
-      lt(schema.modelCallFacts.occurredAt, input.until),
-      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
-      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+      eq(modelCallFacts.workspaceId, input.workspaceId),
+      gte(modelCallFacts.occurredAt, input.since),
+      lt(modelCallFacts.occurredAt, input.until),
+      ...(input.provider ? [eq(modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(modelCallFacts.model, input.model)] : []),
     ];
     const rows = await scopedDb
       .select({
-        provider: schema.modelCallFacts.provider,
-        model: schema.modelCallFacts.model,
-        billingPath: schema.modelCallFacts.billingPath,
+        provider: sql<string>`${modelCallFacts.provider}`,
+        model: sql<string>`${modelCallFacts.model}`,
+        billingPath: sql<string>`${modelCallFacts.billingPath}`,
         calls: sql<number>`count(*)::int`,
-        inputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}), 0)`,
-        outputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.outputTokens}), 0)`,
-        cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
-        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
-        cacheWriteTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cacheWriteTokens}), 0)`,
-        reasoningTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.reasoningTokens}), 0)`,
-        totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
-        tokenKnownCalls: sql<number>`count(${schema.modelCallFacts.totalTokens})::int`,
-        cacheKnownCalls: sql<number>`count(*) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null)::int`,
-        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
-        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
-        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
+        inputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}), 0)`,
+        outputTokens: sql<number>`coalesce(sum(${modelCallFacts.outputTokens}), 0)`,
+        cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
+        cacheWriteTokens: sql<number>`coalesce(sum(${modelCallFacts.cacheWriteTokens}), 0)`,
+        reasoningTokens: sql<number>`coalesce(sum(${modelCallFacts.reasoningTokens}), 0)`,
+        totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
+        tokenKnownCalls: sql<number>`count(${modelCallFacts.totalTokens})::int`,
+        cacheKnownCalls: sql<number>`count(*) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null)::int`,
+        pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
       })
-      .from(schema.modelCallFacts)
+      .from(source)
       .where(and(...clauses))
-      .groupBy(
-        schema.modelCallFacts.provider,
-        schema.modelCallFacts.model,
-        schema.modelCallFacts.billingPath,
-      );
+      .groupBy(modelCallFacts.provider, modelCallFacts.model, modelCallFacts.billingPath);
     return rows.map((row) => ({
       provider: row.provider,
       model: row.model,
@@ -300,7 +384,7 @@ export async function aggregateModelCallFacts(
   });
 }
 
-type ModelCallFactSeriesAggregate = {
+export type ModelCallFactSeriesAggregate = {
   costMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
@@ -329,39 +413,40 @@ async function aggregateModelCallFactsByBucket(
 ): Promise<Map<string, ModelCallFactSeriesAggregate>> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { modelCallFacts, source } = visibleModelCallFactsSource(input);
     const clauses = [
-      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
-      gte(schema.modelCallFacts.occurredAt, input.since),
-      lt(schema.modelCallFacts.occurredAt, input.until),
-      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
-      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+      eq(modelCallFacts.workspaceId, input.workspaceId),
+      gte(modelCallFacts.occurredAt, input.since),
+      lt(modelCallFacts.occurredAt, input.until),
+      ...(input.provider ? [eq(modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(modelCallFacts.model, input.model)] : []),
     ];
     const bucket =
       granularity === "hour"
-        ? sql<string>`to_char(date_trunc('hour', ${schema.modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
-        : sql<string>`to_char(date_trunc('day', ${schema.modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
+        ? sql<string>`to_char(date_trunc('hour', ${modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
+        : sql<string>`to_char(date_trunc('day', ${modelCallFacts.occurredAt} at time zone 'UTC'), 'YYYY-MM-DD')`;
     const bucketGroup =
       granularity === "hour"
-        ? sql`date_trunc('hour', ${schema.modelCallFacts.occurredAt} at time zone 'UTC')`
-        : sql`date_trunc('day', ${schema.modelCallFacts.occurredAt} at time zone 'UTC')`;
+        ? sql`date_trunc('hour', ${modelCallFacts.occurredAt} at time zone 'UTC')`
+        : sql`date_trunc('day', ${modelCallFacts.occurredAt} at time zone 'UTC')`;
     const rows = await scopedDb
       .select({
         bucket,
-        costMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
-        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
-        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
-        inputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}), 0)`,
-        outputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.outputTokens}), 0)`,
-        cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
-        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
-        cacheWriteTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cacheWriteTokens}), 0)`,
-        reasoningTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.reasoningTokens}), 0)`,
-        totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
-        tokenKnownCalls: sql<number>`count(${schema.modelCallFacts.totalTokens})::int`,
-        cacheKnownCalls: sql<number>`count(*) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null)::int`,
+        costMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        inputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}), 0)`,
+        outputTokens: sql<number>`coalesce(sum(${modelCallFacts.outputTokens}), 0)`,
+        cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
+        cacheWriteTokens: sql<number>`coalesce(sum(${modelCallFacts.cacheWriteTokens}), 0)`,
+        reasoningTokens: sql<number>`coalesce(sum(${modelCallFacts.reasoningTokens}), 0)`,
+        totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
+        tokenKnownCalls: sql<number>`count(${modelCallFacts.totalTokens})::int`,
+        cacheKnownCalls: sql<number>`count(*) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null)::int`,
         calls: sql<number>`count(*)::int`,
       })
-      .from(schema.modelCallFacts)
+      .from(source)
       .where(and(...clauses))
       .groupBy(bucketGroup);
     return new Map(
@@ -420,23 +505,24 @@ export async function aggregateWarmSecondsByGroup(
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   const limit = input.limit ?? 24;
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { usageEvents, source } = visibleUsageEventsSource(input);
     const rows = await scopedDb
       .select({
-        groupId: sql<string>`split_part(${schema.usageEvents.sourceResourceId}, ':', 1)`,
-        warmSeconds: sql<number>`coalesce(sum(${schema.usageEvents.quantity}), 0)`,
+        groupId: sql<string>`split_part(${usageEvents.sourceResourceId}, ':', 1)`,
+        warmSeconds: sql<number>`coalesce(sum(${usageEvents.quantity}), 0)`,
       })
-      .from(schema.usageEvents)
+      .from(source)
       .where(
         and(
-          eq(schema.usageEvents.workspaceId, input.workspaceId),
-          eq(schema.usageEvents.eventType, "sandbox.warm_seconds"),
-          gte(schema.usageEvents.occurredAt, input.since),
-          lt(schema.usageEvents.occurredAt, input.until),
-          sql`${schema.usageEvents.sourceResourceId} is not null`,
+          eq(usageEvents.workspaceId, input.workspaceId),
+          eq(usageEvents.eventType, "sandbox.warm_seconds"),
+          gte(usageEvents.occurredAt, input.since),
+          lt(usageEvents.occurredAt, input.until),
+          sql`${usageEvents.sourceResourceId} is not null`,
         ),
       )
-      .groupBy(sql`split_part(${schema.usageEvents.sourceResourceId}, ':', 1)`)
-      .orderBy(sql`coalesce(sum(${schema.usageEvents.quantity}), 0) desc`)
+      .groupBy(sql`split_part(${usageEvents.sourceResourceId}, ':', 1)`)
+      .orderBy(sql`coalesce(sum(${usageEvents.quantity}), 0) desc`)
       .limit(Math.max(limit * 4, limit));
     return rows
       .filter((row) => UUID_RE.test(row.groupId))
@@ -527,31 +613,32 @@ export async function aggregateRootSessionDrivers(
   const childSessions = alias(schema.sessions, "insight_child_sessions");
   const rootSessions = alias(schema.sessions, "insight_root_sessions");
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { modelCallFacts, source } = visibleModelCallFactsSource(input);
     const clauses = [
-      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
-      gte(schema.modelCallFacts.occurredAt, input.since),
-      lt(schema.modelCallFacts.occurredAt, input.until),
-      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
-      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+      eq(modelCallFacts.workspaceId, input.workspaceId),
+      gte(modelCallFacts.occurredAt, input.since),
+      lt(modelCallFacts.occurredAt, input.until),
+      ...(input.provider ? [eq(modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(modelCallFacts.model, input.model)] : []),
       ...(input.rootSessionIds ? [inArray(childSessions.rootSessionId, input.rootSessionIds)] : []),
     ];
     const query = scopedDb
       .select({
         rootSessionId: childSessions.rootSessionId,
         title: rootSessions.title,
-        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
-        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
-        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
-        totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
-        cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
-        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
+        pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
+        cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
       })
-      .from(schema.modelCallFacts)
+      .from(source)
       .innerJoin(
         childSessions,
         and(
-          eq(childSessions.workspaceId, schema.modelCallFacts.workspaceId),
-          eq(childSessions.id, schema.modelCallFacts.sessionId),
+          eq(childSessions.workspaceId, modelCallFacts.workspaceId),
+          eq(childSessions.id, modelCallFacts.sessionId),
         ),
       )
       .leftJoin(
@@ -563,7 +650,7 @@ export async function aggregateRootSessionDrivers(
       )
       .where(and(...clauses))
       .groupBy(childSessions.rootSessionId, rootSessions.title)
-      .orderBy(sql`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0) desc`);
+      .orderBy(sql`coalesce(sum(${modelCallFacts.totalTokens}), 0) desc`);
     const rows = input.rootSessionIds ? await query : await query.limit(input.limit ?? 8);
     return rows.map((row) => ({
       rootSessionId: row.rootSessionId,
@@ -584,20 +671,21 @@ export async function listModelCallFacets(
 ): Promise<ModelCallFacetRow[]> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { modelCallFacts, source } = visibleModelCallFactsSource(input);
     const rows = await scopedDb
       .selectDistinct({
-        provider: schema.modelCallFacts.provider,
-        model: schema.modelCallFacts.model,
+        provider: sql<string>`${modelCallFacts.provider}`,
+        model: sql<string>`${modelCallFacts.model}`,
       })
-      .from(schema.modelCallFacts)
+      .from(source)
       .where(
         and(
-          eq(schema.modelCallFacts.workspaceId, input.workspaceId),
-          gte(schema.modelCallFacts.occurredAt, input.since),
-          lt(schema.modelCallFacts.occurredAt, input.until),
+          eq(modelCallFacts.workspaceId, input.workspaceId),
+          gte(modelCallFacts.occurredAt, input.since),
+          lt(modelCallFacts.occurredAt, input.until),
         ),
       )
-      .orderBy(schema.modelCallFacts.provider, schema.modelCallFacts.model)
+      .orderBy(modelCallFacts.provider, modelCallFacts.model)
       .limit(500);
     return rows;
   });
@@ -615,47 +703,66 @@ export async function listRecentModelCalls(
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   const factSessions = alias(schema.sessions, "insight_recent_fact_sessions");
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { modelCallFacts, source } = visibleModelCallFactsSource(input);
     const clauses = [
-      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
-      gte(schema.modelCallFacts.occurredAt, input.since),
-      lt(schema.modelCallFacts.occurredAt, input.until),
-      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
-      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+      eq(modelCallFacts.workspaceId, input.workspaceId),
+      gte(modelCallFacts.occurredAt, input.since),
+      lt(modelCallFacts.occurredAt, input.until),
+      ...(input.provider ? [eq(modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(modelCallFacts.model, input.model)] : []),
     ];
     const rows = await scopedDb
       .select({
-        id: schema.modelCallFacts.id,
-        occurredAt: schema.modelCallFacts.occurredAt,
-        recordedAt: schema.modelCallFacts.recordedAt,
-        sessionId: schema.modelCallFacts.sessionId,
+        id: sql<string>`${modelCallFacts.id}`,
+        occurredAt: sql<Date>`${modelCallFacts.occurredAt}`,
+        recordedAt: sql<Date>`${modelCallFacts.recordedAt}`,
+        sessionId: sql<string>`${modelCallFacts.sessionId}`,
         sessionTitle: factSessions.title,
-        turnId: schema.modelCallFacts.turnId,
-        provider: schema.modelCallFacts.provider,
-        providerApi: schema.modelCallFacts.providerApi,
-        model: schema.modelCallFacts.model,
-        billingPath: schema.modelCallFacts.billingPath,
-        inputTokens: schema.modelCallFacts.inputTokens,
-        outputTokens: schema.modelCallFacts.outputTokens,
-        cachedTokens: schema.modelCallFacts.cachedTokens,
-        cacheWriteTokens: schema.modelCallFacts.cacheWriteTokens,
-        reasoningTokens: schema.modelCallFacts.reasoningTokens,
-        totalTokens: schema.modelCallFacts.totalTokens,
-        pricedCostMicros: schema.modelCallFacts.pricedCostMicros,
-        estimatedProviderCostMicros: schema.modelCallFacts.estimatedProviderCostMicros,
-        pricingSource: schema.modelCallFacts.pricingSource,
+        sessionDepth: factSessions.nestedAgentDepth,
+        turnId: sql<string>`${modelCallFacts.turnId}`,
+        provider: sql<string>`${modelCallFacts.provider}`,
+        providerApi: sql<string>`${modelCallFacts.providerApi}`,
+        model: sql<string>`${modelCallFacts.model}`,
+        billingPath: sql<string>`${modelCallFacts.billingPath}`,
+        inputTokens: sql<number | null>`${modelCallFacts.inputTokens}`,
+        outputTokens: sql<number | null>`${modelCallFacts.outputTokens}`,
+        cachedTokens: sql<number | null>`${modelCallFacts.cachedTokens}`,
+        cacheWriteTokens: sql<number | null>`${modelCallFacts.cacheWriteTokens}`,
+        reasoningTokens: sql<number | null>`${modelCallFacts.reasoningTokens}`,
+        totalTokens: sql<number | null>`${modelCallFacts.totalTokens}`,
+        pricedCostMicros: sql<number>`${modelCallFacts.pricedCostMicros}`,
+        estimatedProviderCostMicros: sql<
+          number | null
+        >`${modelCallFacts.estimatedProviderCostMicros}`,
+        pricingSource: sql<string | null>`${modelCallFacts.pricingSource}`,
       })
-      .from(schema.modelCallFacts)
+      .from(source)
       .leftJoin(
         factSessions,
         and(
-          eq(factSessions.workspaceId, schema.modelCallFacts.workspaceId),
-          eq(factSessions.id, schema.modelCallFacts.sessionId),
+          eq(factSessions.workspaceId, modelCallFacts.workspaceId),
+          eq(factSessions.id, modelCallFacts.sessionId),
         ),
       )
       .where(and(...clauses))
-      .orderBy(desc(schema.modelCallFacts.occurredAt), desc(schema.modelCallFacts.id))
+      .orderBy(desc(modelCallFacts.occurredAt), desc(modelCallFacts.id))
       .limit(Math.max(1, Math.min(input.limit ?? 50, 100)));
-    return rows;
+    return rows.map((row) => ({
+      ...row,
+      occurredAt: insightsDate(row.occurredAt, "model-call occurrence timestamp"),
+      recordedAt: insightsDate(row.recordedAt, "model-call recording timestamp"),
+      inputTokens: insightsNullableNumber(row.inputTokens, "input token count"),
+      outputTokens: insightsNullableNumber(row.outputTokens, "output token count"),
+      cachedTokens: insightsNullableNumber(row.cachedTokens, "cached token count"),
+      cacheWriteTokens: insightsNullableNumber(row.cacheWriteTokens, "cache-write token count"),
+      reasoningTokens: insightsNullableNumber(row.reasoningTokens, "reasoning token count"),
+      totalTokens: insightsNullableNumber(row.totalTokens, "total token count"),
+      pricedCostMicros: insightsNumber(row.pricedCostMicros, "priced cost"),
+      estimatedProviderCostMicros: insightsNullableNumber(
+        row.estimatedProviderCostMicros,
+        "estimated provider cost",
+      ),
+    }));
   });
 }
 
@@ -669,12 +776,13 @@ export async function aggregateModelContextContributions(
 ): Promise<ModelContextContributionAggregate> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { modelCallFacts, source } = visibleModelCallFactsSource(input);
     const clauses = [
-      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
-      gte(schema.modelCallFacts.occurredAt, input.since),
-      lt(schema.modelCallFacts.occurredAt, input.until),
-      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
-      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+      eq(modelCallFacts.workspaceId, input.workspaceId),
+      gte(modelCallFacts.occurredAt, input.since),
+      lt(modelCallFacts.occurredAt, input.until),
+      ...(input.provider ? [eq(modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(modelCallFacts.model, input.model)] : []),
     ];
     type ContributionRow = {
       total_calls: number | string;
@@ -688,9 +796,9 @@ export async function aggregateModelContextContributions(
     const rows = (await scopedDb.execute(sql<ContributionRow>`
       with filtered as (
         select
-          ${schema.modelCallFacts.id} as id,
-          ${schema.modelCallFacts.contextContributions} as context_contributions
-        from ${schema.modelCallFacts}
+          ${modelCallFacts.id} as id,
+          ${modelCallFacts.contextContributions} as context_contributions
+        from ${source}
         where ${and(...clauses)}
       ), coverage as (
         select
@@ -762,33 +870,34 @@ export async function aggregateScheduleFacts(
 ): Promise<ScheduleFactAggregate[]> {
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async (scopedDb) => {
+    const { modelCallFacts, source } = visibleModelCallFactsSource(input);
     const clauses = [
-      eq(schema.modelCallFacts.workspaceId, input.workspaceId),
-      gte(schema.modelCallFacts.occurredAt, input.since),
-      lt(schema.modelCallFacts.occurredAt, input.until),
-      sql`${schema.modelCallFacts.scheduledTaskId} is not null`,
-      ...(input.provider ? [eq(schema.modelCallFacts.provider, input.provider)] : []),
-      ...(input.model ? [eq(schema.modelCallFacts.model, input.model)] : []),
+      eq(modelCallFacts.workspaceId, input.workspaceId),
+      gte(modelCallFacts.occurredAt, input.since),
+      lt(modelCallFacts.occurredAt, input.until),
+      sql`${modelCallFacts.scheduledTaskId} is not null`,
+      ...(input.provider ? [eq(modelCallFacts.provider, input.provider)] : []),
+      ...(input.model ? [eq(modelCallFacts.model, input.model)] : []),
     ];
     const rows = await scopedDb
       .select({
-        scheduledTaskId: schema.modelCallFacts.scheduledTaskId,
-        pricedCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.pricedCostMicros}) filter (where ${schema.modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
-        estimatedProviderCostMicros: sql<number>`coalesce(sum(${schema.modelCallFacts.estimatedProviderCostMicros}), 0)`,
-        estimatedProviderCostKnownCalls: sql<number>`count(${schema.modelCallFacts.estimatedProviderCostMicros})::int`,
-        totalTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.totalTokens}), 0)`,
-        cachedTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.cachedTokens}), 0)`,
-        cacheInputTokens: sql<number>`coalesce(sum(${schema.modelCallFacts.inputTokens}) filter (where ${schema.modelCallFacts.cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null), 0)`,
+        scheduledTaskId: sql<string | null>`${modelCallFacts.scheduledTaskId}`,
+        pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
+        estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
+        estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
+        cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
+        cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
         calls: sql<number>`count(*)::int`,
         billingPath: sql<string>`case
-          when bool_or(${schema.modelCallFacts.billingPath} = 'opengeni_credits')
+          when bool_or(${modelCallFacts.billingPath} = 'opengeni_credits')
           then 'opengeni_credits'
           else 'external'
         end`,
       })
-      .from(schema.modelCallFacts)
+      .from(source)
       .where(and(...clauses))
-      .groupBy(schema.modelCallFacts.scheduledTaskId);
+      .groupBy(modelCallFacts.scheduledTaskId);
     return rows
       .filter((row): row is typeof row & { scheduledTaskId: string } => row.scheduledTaskId != null)
       .map((row) => ({
@@ -839,6 +948,7 @@ export async function aggregateSessionDepth(
   sessionsTouched: number;
   rootSessions: number;
   deepestDepth: number;
+  deepestSessionId: string | null;
   deepestSessionTitle: string;
   avgDepth: number;
   goalsActive: number;
@@ -866,6 +976,7 @@ export async function aggregateSessionDepth(
       .where(eq(schema.sessions.workspaceId, workspaceId));
     const [deepest] = await scopedDb
       .select({
+        id: schema.sessions.id,
         title: schema.sessions.title,
         depth: schema.sessions.nestedAgentDepth,
       })
@@ -888,6 +999,7 @@ export async function aggregateSessionDepth(
       sessionsTouched: Number(stats?.sessionsTouched ?? 0),
       rootSessions: Number(stats?.rootSessions ?? 0),
       deepestDepth: Number(stats?.deepestDepth ?? 0),
+      deepestSessionId: deepest?.id ?? null,
       deepestSessionTitle: deepest?.title?.trim() || "",
       avgDepth: Number(stats?.avgDepth ?? 0),
       goalsActive: Number(goals?.active ?? 0),

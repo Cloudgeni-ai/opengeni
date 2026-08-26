@@ -66,6 +66,7 @@ import {
   applySessionPinProjection,
   notifySessionPinChanged,
   reconcileFailedSessionPin,
+  SessionChannelProjectionAuthority,
 } from "@/lib/session-pins";
 import {
   buildResources,
@@ -170,6 +171,8 @@ export type AppContextValue = {
   setInspectorOpen: Dispatch<SetStateAction<boolean>>;
   session: Session | null;
   setSession: Dispatch<SetStateAction<Session | null>>;
+  /** Browser-only ownership of list/point-read channel projections. */
+  sessionChannelProjectionAuthority: SessionChannelProjectionAuthority;
   /**
    * Exact successful create result carried across the index -> session route.
    * It keeps the accepted first prompt visible while the durable event tail
@@ -466,6 +469,9 @@ export function workspaceLabel(workspace: Workspace, workspaces: Workspace[]): s
 
 export function RootRouteComponent() {
   const [session, setSessionState] = useState<Session | null>(null);
+  const [sessionChannelProjectionAuthority] = useState(
+    () => new SessionChannelProjectionAuthority(),
+  );
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
@@ -599,8 +605,8 @@ export function RootRouteComponent() {
     // The version is an explicit identity fence: credentials are read lazily,
     // but consumers need a new client object to reconnect hooks and streams.
     void accessKeyVersion;
-    return createOpenGeniClient();
-  }, [accessKeyVersion]);
+    return createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
+  }, [accessKeyVersion, sessionChannelProjectionAuthority]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =
@@ -630,6 +636,7 @@ export function RootRouteComponent() {
 
   const resetWorkspaceState = useCallback(
     (workspaceId: string | null, force: boolean) => {
+      const previousWorkspaceId = workspaceTransitionIdentity.current.workspaceId;
       const transition =
         workspaceId === null
           ? {
@@ -641,6 +648,9 @@ export function RootRouteComponent() {
         return;
       }
       workspaceTransitionIdentity.current = transition.identity;
+      if (previousWorkspaceId && (force || previousWorkspaceId !== workspaceId)) {
+        sessionChannelProjectionAuthority.clearWorkspace(previousWorkspaceId);
+      }
       activeCreateOperation.current = null;
       activeGitHubManifestOperation.current = null;
       activeGitHubDisconnectOperation.current = null;
@@ -667,7 +677,7 @@ export function RootRouteComponent() {
       resetWorkspaceIntegrations();
       setWorkspaceStateOwnerId(workspaceId);
     },
-    [resetSessionView, resetWorkspaceIntegrations],
+    [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
   );
 
   const prepareWorkspaceTransition = useCallback(
@@ -1874,6 +1884,7 @@ export function RootRouteComponent() {
           setInspectorOpen,
           session,
           setSession,
+          sessionChannelProjectionAuthority,
           sessionCreationHandoff,
           connectionState,
           setConnectionState,
@@ -1992,6 +2003,7 @@ export function RootRouteComponent() {
     selectedRepoIds,
     selectedRepoRefs,
     session,
+    sessionChannelProjectionAuthority,
     sessionCreationHandoff,
     sessionEventFeedStore,
     setSession,

@@ -102,7 +102,7 @@ export function RigSetupSection({
           </pre>
         ) : (
           <p className="text-xs text-fg-subtle">
-            No setup script — sandboxes boot straight from the image.
+            No setup script — sandboxes use the deployment-managed platform image unchanged.
           </p>
         )}
       </Section>
@@ -126,7 +126,6 @@ function DefinitionEditor({
   onSubmit: (request: ProposeRigChangeRequest) => Promise<unknown>;
 }) {
   const [draft, setDraft] = useState<RigDefinitionDraft>({
-    image: activeVersion.image ?? "",
     setupScript: activeVersion.setupScript ?? "",
     checks: activeVersion.checks.map((check) => ({ ...check })),
     defaultVariableSetIds: [...activeVersion.defaultVariableSetIds],
@@ -137,7 +136,6 @@ function DefinitionEditor({
     await onSubmit({
       kind: "definition_edit",
       payload: {
-        image: draft.image.trim() ? draft.image.trim() : null,
         setupScript: draft.setupScript.trim() ? draft.setupScript : null,
         checks: cleanRigChecks(draft.checks),
         defaultVariableSetIds: draft.defaultVariableSetIds,

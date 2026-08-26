@@ -26,7 +26,6 @@ import {
   resolveWorkspacePackRuntime,
   resolveWorkspaceInstalledSkillRuntime,
   settingsWithPackSandboxImage,
-  settingsWithRigImage,
 } from "../packs";
 import { createModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -263,14 +262,15 @@ export async function prepareGovernanceAndModel(
   } catch {
     // Contribution telemetry must never change model execution semantics.
   }
-  const logicalSandboxSettings = settingsWithRigImage(
-    settingsWithPackSandboxImage(
-      capabilitySettings,
-      packRuntime.sandboxImage,
-      packRuntime.sandboxProviderImages,
-    ),
-    rigVersion?.image ?? null,
-  );
+  // A Rig is always a setup/check layer over the deployment platform sandbox.
+  // The pre-v2 Pack image path remains only for rig-less compatibility sessions.
+  const logicalSandboxSettings = rigVersion
+    ? capabilitySettings
+    : settingsWithPackSandboxImage(
+        capabilitySettings,
+        packRuntime.sandboxImage,
+        packRuntime.sandboxProviderImages,
+      );
   const providerImageSelection = await resolveRigProviderImageForRun(
     logicalSandboxSettings,
     rigVersion,
@@ -282,12 +282,10 @@ export async function prepareGovernanceAndModel(
       ? (providerImageSelection.imageId ?? undefined)
       : undefined;
   const baseRunSettings = {
-    // IMAGE PRECEDENCE: rig > pre-V2 Pack compatibility > deployment.
-    // resolveWorkspacePackRuntime returns no image for V2 Pack rows, so
-    // settingsWithRigImage runs outermost over only the intentionally
-    // retained legacy fallback. A matching verified provider-native ID is
-    // then applied only to fresh creation without changing the logical
-    // lease image.
+    // IMAGE PRECEDENCE: a Rig uses the deployment platform base; a rig-less
+    // pre-v2 Pack may retain its compatibility image. A matching verified
+    // provider-native ID is then applied only to fresh creation without
+    // changing the logical lease image.
     ...providerImageSettings,
     openaiModel: turn.model,
     openaiReasoningEffort: turn.reasoningEffort,

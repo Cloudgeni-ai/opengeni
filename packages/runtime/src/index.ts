@@ -1525,9 +1525,16 @@ export type BuildAgentOptions = {
   /**
    * Exact-attempt tool preparation fence. When present, progressive disclosure
    * may issue the first provider request with only eager tools plus tool_search;
-   * only a search, deferred invocation, or catalog-dependent runtime joins it.
+   * search, deferred invocation, and catalog-dependent runtime join it. A host
+   * may separately exempt an exact attempt-local tool below.
    */
   toolPreparationReady?: Promise<void>;
+  /**
+   * Exact attempt-local function names that remain visible and executable while
+   * deferred catalog preparation is pending. This is a per-tool exception; it
+   * must never be used to make a whole MCP carrier eager.
+   */
+  preparationIndependentToolNames?: readonly string[];
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
@@ -1644,10 +1651,16 @@ export type BuildAgentOptions = {
    * because their bearer is delivered per exec rather than through a token file.
    */
   codemodeAvailable?: boolean;
-  // Genesis turn only: inject a one-shot instruction into the FIRST model
-  // call telling it to title the session via opengeni__set_session_title.
+  // Sessions without a semantic title only: inject a one-shot instruction into
+  // the FIRST model call telling it to title the session via
+  // opengeni__set_session_title.
   // Keeping this out of the persistent Agent.instructions prevents every
-  // tool-follow-up model call in a long first turn from re-running setup.
+  // tool-follow-up model call in the turn from re-running setup. The worker
+  // enables this only while the durable title is absent or still the automatic
+  // fallback and the tool is usable, so older sessions can self-heal on their
+  // next model turn.
+  missingSessionTitleHint?: boolean;
+  /** @deprecated Use missingSessionTitleHint. */
   genesisTitleHint?: boolean;
   /**
    * @deprecated Retained as an input-compatibility shim. Persistent display
@@ -1925,15 +1938,12 @@ export function appendGitCredentialBindingInstructions(
 }
 
 /**
- * Appends the one-shot genesis title directive (genesis turn only), joined by
- * " " and always LAST so a white-label persona template or a per-session
- * instruction can't drop it. A no-op when the hint is absent.
+ * Appends the one-shot missing-title directive, joined by " " and always LAST
+ * so a white-label persona template or a per-session instruction can't drop it.
+ * Retained for compatibility; live execution uses the request-local filter.
  */
-export function appendGenesisTitleDirective(
-  instructions: string,
-  genesisTitleHint?: boolean,
-): string {
-  return genesisTitleHint ? `${instructions} ${GENESIS_TITLE_DIRECTIVE}` : instructions;
+export function appendGenesisTitleDirective(instructions: string, titleHint?: boolean): string {
+  return titleHint ? `${instructions} ${GENESIS_TITLE_DIRECTIVE}` : instructions;
 }
 
 const agentFileDownloads = new WeakMap<object, SandboxFileDownload[]>();
@@ -1948,7 +1958,7 @@ const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
-// A genesis directive is consumed by runAgentStream exactly once for the
+// A missing-title directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
@@ -2230,7 +2240,7 @@ export function buildOpenGeniAgent(
     //   6. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
     //   7. + host context for this exact turn, when supplied,
-    // The genesis title directive is deliberately NOT part of this persistent
+    // The missing-title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
     instructions: composedPersistentAgentInstructions(settings, options),
     modelSettings: {
@@ -2265,7 +2275,7 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
-    if (options.genesisTitleHint) {
+    if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
     agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
@@ -2345,7 +2355,7 @@ export function buildOpenGeniAgent(
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
-  if (options.genesisTitleHint) {
+  if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
   }
   agentSupportsImageInput.set(agent, options.supportsImageInput ?? true);
@@ -2459,6 +2469,7 @@ function maybeInstallLazyToolTransport(
     mcpServerIds,
     options.toolPreparationReady,
     deferredMcpServerIds,
+    new Set(options.preparationIndependentToolNames ?? []),
   );
 }
 
@@ -6243,26 +6254,27 @@ export type RunAgentStreamOptions = {
    */
   turnToolCancellationFence?: TurnToolCancellationFence;
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
-  // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
+  // Used by the missing-title injection to prepend a hidden, NON-PERSISTED
   // directive: a callModelInputFilter mutates only `modelData.input` for each
   // model call and never touches `state.history`/`originalInput`, so the
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
 };
 
-// One-shot directive injected into the FIRST model call on the genesis turn
-// (see buildOpenGeniAgent's genesisTitleHint). Delivered through the
-// authoritative instructions channel so the model reliably obeys; references
-// the prefixed tool name the agent actually sees (opengeni__set_session_title).
+// One-shot directive injected into the FIRST model call while the durable
+// session title is absent or still the automatic fallback. Delivered through
+// the authoritative instructions channel so the model reliably obeys;
+// references the prefixed tool name the agent actually sees
+// (opengeni__set_session_title).
 export const GENESIS_TITLE_DIRECTIVE =
-  "This is the first turn of a new session. Before responding to the user, call opengeni__set_session_title once with a concise 3-7 word topic label for the actual task or subject, then address the request normally. Write a stable noun phrase, not a quote or prefix of the user's message. Omit greetings, request boilerplate such as ‘I want you to’ or ‘please’, URLs, identifiers, credentials, tokens, and other sensitive values.";
+  "This session still needs a semantic display title. Before responding to the user, call opengeni__set_session_title once with a concise 3-7 word topic label for the actual task or subject, then address the request normally. Write a stable noun phrase, not a quote or prefix of the user's message. Omit greetings, request boilerplate such as ‘I want you to’ or ‘please’, URLs, identifiers, credentials, tokens, and other sensitive values.";
 
 /**
- * Inject the genesis-title directive into exactly one model request. Agent
+ * Inject the missing-title directive into exactly one model request. Agent
  * instructions are reused for every model call in a tool loop, so placing this
  * directive there turned a nominally one-shot setup action into repeated title
  * calls. The closure is intentionally consumed even when the first request
- * fails: a retry/recovery must continue the task, not restart setup.
+ * fails; if no title is persisted, a later attempt or turn will request it again.
  */
 export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
   let pending = true;

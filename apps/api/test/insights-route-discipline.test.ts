@@ -25,4 +25,22 @@ describe("insights route discipline", () => {
     expect(routesSrc.includes('"sessions:read"')).toBe(false);
     expect(routesSrc.includes('"workspace:read"')).toBe(false);
   });
+
+  test("records bounded route timing across success and failure without changing the response", () => {
+    const timerAt = routesSrc.indexOf("const startedAtMs = performance.now()");
+    const grantAt = routesSrc.indexOf(
+      'requireAccessGrant(c, deps, workspaceId, "workspace:admin")',
+    );
+    const responseAt = routesSrc.indexOf("WorkspaceInsightsResponse.parse(response)", grantAt);
+    const finallyAt = routesSrc.indexOf("} finally {", responseAt);
+    const observeAt = routesSrc.indexOf("observeRequest({", finallyAt);
+
+    expect(routesSrc).toContain("workspaceInsightsMetricObserver(deps.observability)");
+    expect(timerAt).toBeGreaterThanOrEqual(0);
+    expect(timerAt).toBeLessThan(grantAt);
+    expect(finallyAt).toBeGreaterThan(responseAt);
+    expect(observeAt).toBeGreaterThan(finallyAt);
+    expect(routesSrc).toContain("providerFiltered: provider !== null");
+    expect(routesSrc).toContain("modelFiltered: model !== null");
+  });
 });

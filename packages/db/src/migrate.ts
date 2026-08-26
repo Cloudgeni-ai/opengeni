@@ -7,15 +7,7 @@ const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/openge
 const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
 const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
 const DEFAULT_APPLICATION_DATABASE_ROLE = "opengeni_app";
-const GOAL_REVISION_CUTOVER_MIGRATION = "0257_goal_revision_decisions_and_root_constraints.sql";
-const ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION = "0306_atomic_personal_resource_attachments.sql";
-const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organization_invitations.sql";
-const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql";
-const NAMED_SIGNUP_CUTOVER_MIGRATION = "0348_named_signup_and_user_setup.sql";
-const SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION =
-  "0352_session_variable_set_attachments.sql";
-const AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION =
-  "0353_automatic_session_title_policy_fence.sql";
+const MIGRATION_APPLICATION_ROLES_SETTING = "opengeni.migration_application_roles";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
@@ -393,18 +385,25 @@ export async function migrate(
     );
     const appliedRows = await sql`SELECT "name" FROM "schema_migrations"`;
     const applied = new Set(appliedRows.map((row) => row.name as string));
+    const pendingMigrationSources = new Map<string, string>();
+    for (const file of files) {
+      if (!applied.has(file)) {
+        pendingMigrationSources.set(file, await readFile(join(migrationsDir, file), "utf8"));
+      }
+    }
+    // Initialize this session GUC for every pending migration that consumes it,
+    // instead of maintaining a second filename list that can silently lag the
+    // shipped migration chain. The conservative source marker is intentional:
+    // setting the bounded role list for a migration that only mentions the GUC
+    // is harmless, while omitting it makes an otherwise valid upgrade fail.
     if (
-      !applied.has(GOAL_REVISION_CUTOVER_MIGRATION) ||
-      !applied.has(ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION) ||
-      !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION) ||
-      !applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION) ||
-      !applied.has(NAMED_SIGNUP_CUTOVER_MIGRATION) ||
-      !applied.has(SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION) ||
-      !applied.has(AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION)
+      Array.from(pendingMigrationSources.values()).some((source) =>
+        source.includes(MIGRATION_APPLICATION_ROLES_SETTING),
+      )
     ) {
       const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);
       await sql`select set_config(
-        'opengeni.migration_application_roles',
+        ${MIGRATION_APPLICATION_ROLES_SETTING},
         ${JSON.stringify(applicationRoles)},
         false
       )`;
@@ -413,7 +412,10 @@ export async function migrate(
       if (applied.has(file)) {
         continue;
       }
-      const sqlText = await readFile(join(migrationsDir, file), "utf8");
+      const sqlText = pendingMigrationSources.get(file);
+      if (sqlText === undefined) {
+        throw new Error(`Pending migration source was not loaded: ${file}`);
+      }
       await executeMigrationFile(sql, file, sqlText);
       await sql`INSERT INTO "schema_migrations" ("name") VALUES (${file}) ON CONFLICT DO NOTHING`;
     }

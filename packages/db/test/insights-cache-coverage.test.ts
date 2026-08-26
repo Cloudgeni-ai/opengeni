@@ -7,11 +7,11 @@ describe("Insights cache coverage SQL", () => {
   test("counts only calls with both cache-read and input telemetry", async () => {
     const source = await readFile(sourcePath, "utf8");
     const completeTelemetryPredicate =
-      "cachedTokens} is not null and ${schema.modelCallFacts.inputTokens} is not null";
+      "cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null";
 
     expect(source.split(completeTelemetryPredicate)).toHaveLength(7);
     expect(source).not.toContain(
-      "cacheKnownCalls: sql<number>`count(${schema.modelCallFacts.cachedTokens})::int`",
+      "cacheKnownCalls: sql<number>`count(${modelCallFacts.cachedTokens})::int`",
     );
   });
 });
