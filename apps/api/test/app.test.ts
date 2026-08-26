@@ -2050,20 +2050,21 @@ describe("managed session-set route ownership", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
   });
 
-  test("clears wildcard provider cookies when a dual authority is unknown", async () => {
+  test("clears an unselected provider cookie for a database-absent dual authority", async () => {
+    const providerCookie = "better-auth.session_token=unadopted; Path=/";
     const clearCookie =
       "better-auth.session_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly";
     const app = boundaryApp(
       () =>
         Response.json(
           { token: "unadopted-token", user: { id: "unadopted-user" } },
-          { headers: { "set-cookie": "better-auth.session_token=unadopted; Path=/" } },
+          { headers: { "set-cookie": providerCookie } },
         ),
       {
         db: { execute: async () => [] } as never,
         adapter: {
-          createLegacySelectedSessionCookies: async (candidate) => {
-            expect(candidate).toBeNull();
+          createLegacySelectedSessionCookies: async (selected) => {
+            expect(selected).toBeNull();
             return [clearCookie];
           },
         } as never,

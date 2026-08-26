@@ -818,6 +818,7 @@ async function openAccountMenu(page: Page, displayName: string): Promise<Locator
     await trigger.click();
     try {
       await menu.waitFor({ timeout: 3_000 });
+      await menu.getByRole("menuitem").first().waitFor({ timeout: 3_000 });
       return menu;
     } catch (error) {
       lastError = error;
@@ -1115,6 +1116,15 @@ async function captureResponsiveEvidence(
       await evidencePage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
         waitUntil: "domcontentloaded",
       });
+      await evidencePage.evaluate((theme) => {
+        document.documentElement.setAttribute("data-og-theme", theme);
+      }, capture.scheme);
+      expect(
+        await evidencePage.evaluate(() => ({
+          attribute: document.documentElement.getAttribute("data-og-theme"),
+          computed: getComputedStyle(document.documentElement).colorScheme,
+        })),
+      ).toEqual({ attribute: capture.scheme, computed: capture.scheme });
       await waitForFiniteReadQuiescence(evidenceProblems);
       await openResponsiveAccountMenu(evidencePage, alpha.displayName, capture.width);
       await expectNoHorizontalOverflow(evidencePage);
@@ -1148,6 +1158,15 @@ async function captureResponsiveEvidence(
     await forcedColorsPage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
       waitUntil: "domcontentloaded",
     });
+    await forcedColorsPage.evaluate(() => {
+      document.documentElement.setAttribute("data-og-theme", "light");
+    });
+    const forcedColorsTheme = await forcedColorsPage.evaluate(() => ({
+      attribute: document.documentElement.getAttribute("data-og-theme"),
+      computed: getComputedStyle(document.documentElement).colorScheme,
+    }));
+    expect(forcedColorsTheme.attribute).toBe("light");
+    expect(forcedColorsTheme.computed.split(/\s+/u)).toContain("light");
     await waitForFiniteReadQuiescence(forcedColorsProblems);
     await openResponsiveAccountMenu(forcedColorsPage, alpha.displayName, 768);
     await expectNoHorizontalOverflow(forcedColorsPage);

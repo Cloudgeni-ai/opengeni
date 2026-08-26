@@ -46,11 +46,76 @@ function projection(selected: boolean): ManagedAuthSessionSetProjection {
   };
 }
 
+function emptyBrokerProjection(): ManagedAuthSessionSetProjection {
+  return {
+    mode: "broker",
+    generation: "1",
+    actorEpoch: "1",
+    csrfToken: "c".repeat(43),
+    selectedSlotId: null,
+    state: "ready",
+    slots: [],
+  };
+}
+
 async function flush(): Promise<void> {
   await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
 }
 
 describe("signed-out browser account recovery", () => {
+  test("offers broker-safe account creation without replacing isolated sign-in", async () => {
+    const current = emptyBrokerProjection();
+    const client: BrowserAccountsClientLike = {
+      getSessionSet: async () => current,
+      bootstrapSessionSet: async () => current,
+      beginLoginTransaction: async () => {
+        throw new Error("not used");
+      },
+      completeEmailPasswordTransaction: async () => {
+        throw new Error("not used");
+      },
+      cancelLoginTransaction: async () => current,
+      selectLoginSlot: async () => current,
+      logoutLoginSlot: async () => current,
+      logoutSessionSet: async () => ({ generation: "2", actorEpoch: "2", state: "logged_out" }),
+      resolveDeepLink: async () => ({ kind: "unavailable" }),
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <BrowserAccountsProvider
+            client={client}
+            broadcastChannelName={null}
+            onActorTransition={async () => undefined}
+          >
+            <BrowserAccountsSignedOutPanel
+              emptySetRegistrationPanel={<div data-registration="true">Sign up and resend</div>}
+            />
+          </BrowserAccountsProvider>,
+        ),
+      );
+      await flush();
+
+      expect(container.textContent).toContain("Continue with email");
+      expect(container.textContent).toContain("Create an account");
+      expect(container.querySelector('[data-registration="true"]')).toBeNull();
+      const createAccount = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Create an account",
+      );
+      expect(createAccount).not.toBeUndefined();
+      await act(async () => createAccount!.click());
+      expect(container.querySelector('[data-registration="true"]')).not.toBeNull();
+      expect(container.textContent).toContain("Back to sign in");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("requires an explicit slot choice after add leaves the sole slot unselected", async () => {
     let current = projection(false);
     const selections: SelectManagedAuthLoginSlotRequest[] = [];

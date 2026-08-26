@@ -50,6 +50,7 @@ import {
   ManagedAuthLoginSlotAlreadyExistsError,
   ManagedAuthLoginSlotUnavailableError,
   ManagedAuthActorMutationInFlightError,
+  ManagedAuthLoginTransactionRateLimitError,
   ManagedAuthSessionSetAuthorityError,
   ManagedAuthSessionSetGenerationConflictError,
   ManagedAuthSessionSetOperationReuseError,
@@ -212,6 +213,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         await beginManagedAuthLoginTransaction(deps.db, {
           authorityHash: managedAuthSha256(authority),
           csrfHash: managedAuthCsrfHash(authority),
+          rateScopeHash: loginTransactionClientScope(context, deps),
           operationId: body.operationId,
           requestDigest: digest(deps, body),
           expectedGeneration: body.expectedGeneration,
@@ -791,6 +793,15 @@ function digest(deps: ApiRouteDeps, value: unknown): string {
   return managedAuthSecretRequestDigest(requireSigningSecret(deps), value);
 }
 
+function loginTransactionClientScope(context: Context, deps: ApiRouteDeps): string {
+  const forwarded = context.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  const address = forwarded || context.req.header("x-real-ip")?.trim() || "unknown";
+  return digest(deps, {
+    purpose: "managed-auth-login-transaction-rate-limit",
+    client: address.slice(0, 128),
+  });
+}
+
 function allowedOrigins(deps: ApiRouteDeps): string[] {
   const origins = new Set<string>();
   for (const candidate of [
@@ -901,6 +912,12 @@ function throwHttp(error: unknown): never {
   if (error instanceof ManagedAuthActorMutationInFlightError) {
     throw managedAuthApiError(409, "actor_mutation_in_flight", { cause: error, retryable: true });
   }
+  if (error instanceof ManagedAuthLoginTransactionRateLimitError) {
+    throw managedAuthApiError(429, "login_transaction_rate_limited", {
+      cause: error,
+      retryable: true,
+    });
+  }
   if (error instanceof ManagedAuthSessionSetAuthorityError) {
     throw managedAuthApiError(401, "browser_session_set_required", { cause: error });
   }
@@ -915,7 +932,7 @@ function throwHttp(error: unknown): never {
 }
 
 function managedAuthApiError(
-  status: 401 | 403 | 404 | 409 | 422 | 503,
+  status: 401 | 403 | 404 | 409 | 422 | 429 | 503,
   code: ManagedAuthSessionSetErrorCodeType,
   options: {
     cause?: unknown;
@@ -933,11 +950,13 @@ function managedAuthApiError(
           ? "not_found"
           : status === 422
             ? "validation_failed"
-            : status === 503
-              ? "upstream_unavailable"
-              : code === "operation_reused"
-                ? "idempotency_conflict"
-                : "conflict";
+            : status === 429
+              ? "limit_exceeded"
+              : status === 503
+                ? "upstream_unavailable"
+                : code === "operation_reused"
+                  ? "idempotency_conflict"
+                  : "conflict";
   const error = new ApiHttpError(status, {
     code: outerCode,
     message: code,

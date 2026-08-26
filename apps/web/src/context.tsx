@@ -1824,6 +1824,25 @@ export function RootRouteComponent() {
     setAccessKeyVersion((version) => version + 1);
   }
 
+  async function handleManagedSessionSetSignup(input: {
+    name: string;
+    email: string;
+    password: string;
+  }) {
+    invalidatePrincipalWorkspaceState();
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    const signup = await runCurrentTransitionInvocation({
+      isCurrent: () =>
+        ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal),
+      request: async () => await signUpEmail(input),
+    });
+    if (signup.status === "stale") return;
+    captureProductAnalyticsEvent("signup_submitted", {
+      method: "email",
+      verification_required: managedEmailVerificationRequired,
+    });
+  }
+
   async function handleManagedSignOut() {
     invalidatePrincipalWorkspaceState();
     const acceptedPrincipal = principalTransitionIdentity.current;
@@ -2114,10 +2133,14 @@ export function RootRouteComponent() {
     <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
       {browserAccountsEnabled ? (
         <BrowserAccountsSignedOutPanel
-          dualEmptySetFallback={
+          emptySetRegistrationPanel={
+            clientConfig?.managedAuthSessionSetMode === "broker" ||
             clientConfig?.managedAuthSessionSetMode === "dual" ? (
               <ManagedAuthPanel
-                onSubmit={handleManagedAuth}
+                initialMode="signup"
+                allowedModes={["signup"]}
+                presentation="embedded"
+                onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                 emailVerificationRequired={managedEmailVerificationRequired}
               />
             ) : undefined

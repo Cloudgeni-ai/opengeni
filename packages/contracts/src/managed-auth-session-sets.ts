@@ -199,6 +199,7 @@ export const ManagedAuthSessionSetErrorCode = z.enum([
   "operation_outcome_unknown",
   "operation_reused",
   "origin_rejected",
+  "login_transaction_rate_limited",
   "provider_route_blocked",
   "slot_limit_reached",
   "slot_already_exists",

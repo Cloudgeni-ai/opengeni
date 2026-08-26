@@ -605,10 +605,19 @@ export function createAppComposition(deps: AppDependencies): {
             includeInternal: true,
             readOnly: true,
           });
-          replacementCookies = await managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
-            snapshot?.selected ?? null,
-            c.req.header("cookie") ?? null,
-          );
+          if (snapshot) {
+            replacementCookies =
+              await managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
+                snapshot.selected,
+                c.req.header("cookie") ?? null,
+              );
+          } else {
+            replacementCookies =
+              await managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
+                null,
+                c.req.header("cookie") ?? null,
+              );
+          }
         }
       }
       return await scrubManagedAuthProviderResponse(providerResponse, { replacementCookies });

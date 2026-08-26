@@ -472,6 +472,24 @@ CREATE TABLE "managed_auth_actor_mutation_leases" (
 CREATE INDEX "managed_auth_actor_mutation_leases_expiry_idx"
   ON "managed_auth_actor_mutation_leases" ("expires_at", "session_set_id");
 
+CREATE TABLE "managed_auth_login_transaction_rate_limits" (
+  "scope_kind" text NOT NULL,
+  "scope_hash" text NOT NULL,
+  "window_started_at" timestamptz NOT NULL,
+  "attempt_count" integer NOT NULL,
+  "expires_at" timestamptz NOT NULL,
+  PRIMARY KEY ("scope_kind", "scope_hash"),
+  CONSTRAINT "managed_auth_login_transaction_rate_limits_scope_check" CHECK (
+    "scope_kind" IN ('global', 'client', 'set')
+    AND "scope_hash" ~ '^[0-9a-f]{64}$'
+  ),
+  CONSTRAINT "managed_auth_login_transaction_rate_limits_count_check" CHECK (
+    "attempt_count" > 0 AND "expires_at" > "window_started_at"
+  )
+);
+CREATE INDEX "managed_auth_login_transaction_rate_limits_expiry_idx"
+  ON "managed_auth_login_transaction_rate_limits" ("expires_at", "scope_kind", "scope_hash");
+
 ALTER TABLE "managed_auth_browser_installations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "managed_auth_browser_installations" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "managed_auth_session_sets" ENABLE ROW LEVEL SECURITY;
@@ -486,6 +504,8 @@ ALTER TABLE "managed_auth_session_set_operations" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "managed_auth_session_set_operations" FORCE ROW LEVEL SECURITY;
 ALTER TABLE "managed_auth_actor_mutation_leases" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "managed_auth_actor_mutation_leases" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "managed_auth_login_transaction_rate_limits" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "managed_auth_login_transaction_rate_limits" FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY managed_auth_session_set_lifecycle ON "managed_auth_session_sets"
   USING (current_setting('opengeni.managed_auth_session_set_lifecycle', true) = 'active')
@@ -508,10 +528,22 @@ CREATE POLICY managed_auth_session_set_lifecycle ON "managed_auth_session_set_op
 CREATE POLICY managed_auth_session_set_lifecycle ON "managed_auth_actor_mutation_leases"
   USING (current_setting('opengeni.managed_auth_session_set_lifecycle', true) = 'active')
   WITH CHECK (current_setting('opengeni.managed_auth_session_set_lifecycle', true) = 'active');
+CREATE POLICY managed_auth_session_set_lifecycle ON "managed_auth_login_transaction_rate_limits"
+  USING (current_setting('opengeni.managed_auth_session_set_lifecycle', true) = 'active')
+  WITH CHECK (current_setting('opengeni.managed_auth_session_set_lifecycle', true) = 'active');
 
 CREATE OR REPLACE FUNCTION managed_auth_session_set_operations_append_only()
 RETURNS trigger LANGUAGE plpgsql AS $body$
 BEGIN
+  IF TG_OP = 'DELETE'
+    AND pg_catalog.current_setting('opengeni.managed_auth_session_set_purge', true) = 'active'
+    AND NOT EXISTS (
+      SELECT 1 FROM managed_auth_login_slots slot
+      WHERE slot.session_set_id = OLD.session_set_id
+    )
+  THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'managed auth session-set operations are append-only' USING ERRCODE = '42501';
 END
 $body$;
@@ -957,7 +989,6 @@ BEGIN
       previous_canonical_marker text := pg_catalog.current_setting(
         'opengeni.canonical_human_identity_lifecycle', true
       );
-      reclaimed_set_id uuid;
     BEGIN
       IF p_authority_hash !~ '^[0-9a-f]{64}$' OR p_csrf_hash !~ '^[0-9a-f]{64}$'
         OR p_request_digest !~ '^[0-9a-f]{64}$' OR p_operation_id IS NULL
@@ -967,6 +998,15 @@ BEGIN
       END IF;
       PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_lifecycle', 'active', true);
       PERFORM pg_catalog.set_config('opengeni.canonical_human_identity_lifecycle', 'active', true);
+      IF p_auth_session_id IS NOT NULL THEN
+        -- All first-adoption contenders for one provider session take the same
+        -- transaction-scoped fence before reading operation or slot ownership.
+        -- This leaves the ordinary session_set -> slot -> auth_session lock order
+        -- untouched while making a concurrent loser observe the winner's receipt.
+        PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+          'managed-auth-bootstrap:' || p_auth_session_id, 0
+        ));
+      END IF;
       SELECT * INTO prior_operation FROM managed_auth_session_set_operations
       WHERE operation_id = p_operation_id;
       IF FOUND THEN
@@ -986,33 +1026,12 @@ BEGIN
         PERFORM pg_catalog.set_config('opengeni.canonical_human_identity_lifecycle', CASE WHEN previous_canonical_marker IS NULL THEN '' ELSE previous_canonical_marker END, true);
         RETURN prior_operation.result;
       END IF;
-      IF p_auth_session_id IS NOT NULL THEN
-        SELECT session_set.id INTO reclaimed_set_id
-        FROM managed_auth_login_slots slot
-        INNER JOIN managed_auth_session_sets session_set ON session_set.id = slot.session_set_id
-        INNER JOIN managed_auth_browser_installations installation
-          ON installation.id = session_set.installation_id
-        WHERE slot.auth_session_id = p_auth_session_id AND slot.status = 'active'
-          AND session_set.revoked_at IS NULL AND installation.revoked_at IS NULL
-          AND session_set.idle_expires_at > pg_catalog.clock_timestamp()
-          AND session_set.absolute_expires_at > pg_catalog.clock_timestamp()
-          AND installation.idle_expires_at > pg_catalog.clock_timestamp()
-          AND installation.absolute_expires_at > pg_catalog.clock_timestamp()
-        FOR UPDATE OF slot, session_set, installation;
-        IF FOUND THEN
-          UPDATE managed_auth_browser_installations installation SET
-            authority_hash = p_authority_hash,
-            last_seen_at = pg_catalog.clock_timestamp()
-          FROM managed_auth_session_sets session_set
-          WHERE session_set.id = reclaimed_set_id
-            AND installation.id = session_set.installation_id
-            AND installation.authority_hash <> p_authority_hash;
-          UPDATE managed_auth_session_sets SET
-            authority_hash = p_authority_hash,
-            csrf_hash = p_csrf_hash,
-            updated_at = pg_catalog.clock_timestamp()
-          WHERE id = reclaimed_set_id AND authority_hash <> p_authority_hash;
-        END IF;
+      IF p_auth_session_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM managed_auth_login_slots slot
+        WHERE slot.auth_session_id = p_auth_session_id AND slot.status <> 'revoked'
+      ) THEN
+        RAISE EXCEPTION 'managed auth bootstrap session is already adopted'
+          USING ERRCODE = '42501';
       END IF;
       INSERT INTO managed_auth_browser_installations (authority_hash)
       VALUES (p_authority_hash)
@@ -1105,8 +1124,105 @@ BEGIN
   $ddl$, data_schema);
 
   EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION %1$I.managed_auth_login_transaction_rate_limit_take(
+      p_client_scope_hash text, p_set_scope_hash text
+    ) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I, pg_temp
+    AS $body$
+    DECLARE
+      rate_window timestamptz;
+      set_rate_window timestamptz;
+      global_attempts integer;
+      client_attempts integer;
+      set_attempts integer;
+      previous_marker text := pg_catalog.current_setting(
+        'opengeni.managed_auth_session_set_lifecycle', true
+      );
+    BEGIN
+      IF p_client_scope_hash !~ '^[0-9a-f]{64}$'
+        OR p_set_scope_hash !~ '^[0-9a-f]{64}$'
+      THEN
+        RAISE EXCEPTION 'managed auth login-transaction rate scope is invalid'
+          USING ERRCODE = '22023';
+      END IF;
+      PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_lifecycle', 'active', true);
+      rate_window := pg_catalog.date_bin(
+        interval '10 minutes', pg_catalog.clock_timestamp(),
+        timestamptz '2001-01-01 00:00:00+00'
+      );
+      set_rate_window := pg_catalog.date_bin(
+        interval '1 day', pg_catalog.clock_timestamp(),
+        timestamptz '2001-01-01 00:00:00+00'
+      );
+      INSERT INTO managed_auth_login_transaction_rate_limits (
+        scope_kind, scope_hash, window_started_at, attempt_count, expires_at
+      ) VALUES (
+        'global', pg_catalog.repeat('0', 64), rate_window, 1,
+        rate_window + interval '20 minutes'
+      )
+      ON CONFLICT (scope_kind, scope_hash) DO UPDATE SET
+        window_started_at = EXCLUDED.window_started_at,
+        attempt_count = CASE
+          WHEN managed_auth_login_transaction_rate_limits.window_started_at = EXCLUDED.window_started_at
+          THEN managed_auth_login_transaction_rate_limits.attempt_count + 1 ELSE 1 END,
+        expires_at = EXCLUDED.expires_at
+      RETURNING attempt_count INTO global_attempts;
+      IF global_attempts > 500 THEN
+        RAISE EXCEPTION 'managed auth global login-transaction rate limit exceeded'
+          USING ERRCODE = 'P0004';
+      END IF;
+
+      INSERT INTO managed_auth_login_transaction_rate_limits (
+        scope_kind, scope_hash, window_started_at, attempt_count, expires_at
+      ) VALUES (
+        'client', p_client_scope_hash, rate_window, 1, rate_window + interval '20 minutes'
+      )
+      ON CONFLICT (scope_kind, scope_hash) DO UPDATE SET
+        window_started_at = EXCLUDED.window_started_at,
+        attempt_count = CASE
+          WHEN managed_auth_login_transaction_rate_limits.window_started_at = EXCLUDED.window_started_at
+          THEN managed_auth_login_transaction_rate_limits.attempt_count + 1 ELSE 1 END,
+        expires_at = EXCLUDED.expires_at
+      RETURNING attempt_count INTO client_attempts;
+      IF client_attempts > 8 THEN
+        RAISE EXCEPTION 'managed auth client login-transaction rate limit exceeded'
+          USING ERRCODE = 'P0004';
+      END IF;
+
+      INSERT INTO managed_auth_login_transaction_rate_limits (
+        scope_kind, scope_hash, window_started_at, attempt_count, expires_at
+      ) VALUES (
+        'set', p_set_scope_hash, set_rate_window, 1, set_rate_window + interval '2 days'
+      )
+      ON CONFLICT (scope_kind, scope_hash) DO UPDATE SET
+        window_started_at = EXCLUDED.window_started_at,
+        attempt_count = CASE
+          WHEN managed_auth_login_transaction_rate_limits.window_started_at = EXCLUDED.window_started_at
+          THEN managed_auth_login_transaction_rate_limits.attempt_count + 1 ELSE 1 END,
+        expires_at = EXCLUDED.expires_at
+      RETURNING attempt_count INTO set_attempts;
+      IF set_attempts > 16 THEN
+        RAISE EXCEPTION 'managed auth session-set login-transaction rate limit exceeded'
+          USING ERRCODE = 'P0004';
+      END IF;
+      PERFORM pg_catalog.set_config(
+        'opengeni.managed_auth_session_set_lifecycle',
+        CASE WHEN previous_marker IS NULL THEN '' ELSE previous_marker END, true
+      );
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM pg_catalog.set_config(
+        'opengeni.managed_auth_session_set_lifecycle',
+        CASE WHEN previous_marker IS NULL THEN '' ELSE previous_marker END, true
+      );
+      RAISE;
+    END;
+    $body$;
+  $ddl$, data_schema);
+
+  EXECUTE format($ddl$
     CREATE OR REPLACE FUNCTION %1$I.managed_auth_session_set_begin_transaction(
-      p_authority_hash text, p_csrf_hash text, p_operation_id uuid,
+      p_authority_hash text, p_csrf_hash text, p_rate_scope_hash text, p_operation_id uuid,
       p_request_digest text, p_expected_generation bigint, p_transaction_id uuid,
       p_expected_actor_epoch bigint,
       p_transaction_secret_hash text, p_kind text, p_target_slot_id uuid,
@@ -1121,9 +1237,12 @@ BEGIN
       prior_operation managed_auth_session_set_operations%%ROWTYPE;
       installation_uuid uuid;
       result jsonb;
+      is_preauth boolean;
+      transaction_rate_taken boolean := false;
       previous_marker text := pg_catalog.current_setting('opengeni.managed_auth_session_set_lifecycle', true);
     BEGIN
       IF p_authority_hash !~ '^[0-9a-f]{64}$' OR p_csrf_hash !~ '^[0-9a-f]{64}$'
+        OR p_rate_scope_hash !~ '^[0-9a-f]{64}$'
         OR p_request_digest !~ '^[0-9a-f]{64}$' OR p_transaction_secret_hash !~ '^[0-9a-f]{64}$'
         OR p_operation_id IS NULL
         OR p_kind NOT IN ('add', 'reauth') OR p_expected_generation < 1 OR p_expected_actor_epoch < 1
@@ -1137,6 +1256,10 @@ BEGIN
       IF NOT FOUND THEN
         IF p_kind <> 'add' OR p_expected_generation <> 1 OR p_expected_actor_epoch <> 1
         THEN RAISE EXCEPTION 'managed auth session-set authority denied' USING ERRCODE = '42501'; END IF;
+        PERFORM managed_auth_login_transaction_rate_limit_take(
+          p_rate_scope_hash, p_authority_hash
+        );
+        transaction_rate_taken := true;
         INSERT INTO managed_auth_browser_installations (authority_hash)
         VALUES (p_authority_hash)
         ON CONFLICT (authority_hash) DO NOTHING;
@@ -1150,6 +1273,14 @@ BEGIN
         ON CONFLICT (authority_hash) DO NOTHING;
         SELECT * INTO set_row FROM managed_auth_session_sets
         WHERE authority_hash = p_authority_hash AND revoked_at IS NULL FOR UPDATE;
+        UPDATE managed_auth_browser_installations SET
+          idle_expires_at = least(p_expires_at, absolute_expires_at),
+          last_seen_at = pg_catalog.clock_timestamp()
+        WHERE id = set_row.installation_id;
+        UPDATE managed_auth_session_sets SET
+          idle_expires_at = least(p_expires_at, absolute_expires_at),
+          updated_at = pg_catalog.clock_timestamp()
+        WHERE id = set_row.id RETURNING * INTO set_row;
       END IF;
       IF NOT FOUND OR set_row.csrf_hash <> p_csrf_hash THEN
         RAISE EXCEPTION 'managed auth session-set authority denied' USING ERRCODE = '42501';
@@ -1162,8 +1293,42 @@ BEGIN
         PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_lifecycle', CASE WHEN previous_marker IS NULL THEN '' ELSE previous_marker END, true);
         RETURN prior_operation.result;
       END IF;
+      SELECT NOT EXISTS (
+        SELECT 1 FROM managed_auth_login_slots slot WHERE slot.session_set_id = set_row.id
+      ) INTO is_preauth;
+      IF NOT transaction_rate_taken THEN
+        PERFORM managed_auth_login_transaction_rate_limit_take(
+          p_rate_scope_hash, p_authority_hash
+        );
+      END IF;
+      UPDATE managed_auth_login_transactions SET
+        status = 'cancelled', consumed_at = pg_catalog.clock_timestamp()
+      WHERE session_set_id = set_row.id AND status = 'pending'
+        AND expires_at <= pg_catalog.clock_timestamp();
+      IF EXISTS (
+        SELECT 1 FROM managed_auth_login_transactions
+        WHERE session_set_id = set_row.id AND status = 'pending'
+          AND expires_at > pg_catalog.clock_timestamp()
+      ) THEN
+        RAISE EXCEPTION 'managed auth login transaction is already pending'
+          USING ERRCODE = 'P0004';
+      END IF;
+      IF is_preauth THEN
+        UPDATE managed_auth_browser_installations SET
+          idle_expires_at = least(
+            greatest(idle_expires_at, p_expires_at), absolute_expires_at
+          ), last_seen_at = pg_catalog.clock_timestamp()
+        WHERE id = set_row.installation_id;
+        UPDATE managed_auth_session_sets SET
+          idle_expires_at = least(
+            greatest(idle_expires_at, p_expires_at), absolute_expires_at
+          ), updated_at = pg_catalog.clock_timestamp()
+        WHERE id = set_row.id RETURNING * INTO set_row;
+      END IF;
       IF set_row.revoked_at IS NOT NULL
-        OR managed_auth_session_set_snapshot(p_authority_hash, 'dual', false, false) IS NULL
+        OR managed_auth_session_set_snapshot(
+          p_authority_hash, 'dual', false, false, is_preauth
+        ) IS NULL
       THEN RAISE EXCEPTION 'managed auth session-set authority expired' USING ERRCODE = '42501'; END IF;
       SELECT * INTO set_row FROM managed_auth_session_sets WHERE id = set_row.id FOR UPDATE;
       IF set_row.generation <> p_expected_generation OR set_row.actor_epoch <> p_expected_actor_epoch
@@ -2014,6 +2179,9 @@ BEGIN
       previous_canonical_marker text := pg_catalog.current_setting(
         'opengeni.canonical_human_identity_lifecycle', true
       );
+      previous_purge_marker text := pg_catalog.current_setting(
+        'opengeni.managed_auth_session_set_purge', true
+      );
     BEGIN
       IF p_limit NOT BETWEEN 1 AND 500 THEN
         RAISE EXCEPTION 'managed auth expired-set reap limit is invalid' USING ERRCODE = '22023';
@@ -2043,6 +2211,39 @@ BEGIN
           SELECT 1 FROM managed_auth_actor_mutation_leases lease
           WHERE lease.session_set_id = set_row.id AND lease.expires_at > pg_catalog.clock_timestamp()
         ) THEN CONTINUE; END IF;
+        IF NOT EXISTS (
+          SELECT 1 FROM managed_auth_login_slots slot WHERE slot.session_set_id = set_row.id
+        ) THEN
+          UPDATE managed_auth_login_transactions SET
+            status = 'cancelled', consumed_at = coalesce(
+              consumed_at, pg_catalog.clock_timestamp()
+            )
+          WHERE session_set_id = set_row.id AND status = 'pending'
+            AND expires_at <= pg_catalog.clock_timestamp();
+          IF NOT EXISTS (
+            SELECT 1 FROM managed_auth_login_transactions
+            WHERE session_set_id = set_row.id AND status = 'pending'
+          ) THEN
+            PERFORM pg_catalog.set_config(
+              'opengeni.managed_auth_session_set_purge', 'active', true
+            );
+            DELETE FROM auth_sessions auth_session
+            USING managed_auth_login_transactions login_transaction
+            WHERE login_transaction.session_set_id = set_row.id
+              AND auth_session.managed_auth_login_transaction_id = login_transaction.id;
+            DELETE FROM managed_auth_login_transactions WHERE session_set_id = set_row.id;
+            DELETE FROM managed_auth_login_return_intents WHERE session_set_id = set_row.id;
+            DELETE FROM managed_auth_session_set_operations WHERE session_set_id = set_row.id;
+            DELETE FROM managed_auth_session_sets WHERE id = set_row.id;
+            DELETE FROM managed_auth_browser_installations WHERE id = set_row.installation_id;
+            PERFORM pg_catalog.set_config(
+              'opengeni.managed_auth_session_set_purge',
+              CASE WHEN previous_purge_marker IS NULL THEN '' ELSE previous_purge_marker END, true
+            );
+            retired := retired + 1;
+            CONTINUE;
+          END IF;
+        END IF;
         DELETE FROM auth_sessions auth_session USING managed_auth_login_slots slot
         WHERE slot.session_set_id = set_row.id AND slot.status <> 'revoked'
           AND auth_session.id = slot.auth_session_id;
@@ -2062,12 +2263,26 @@ BEGIN
         WHERE id = set_row.installation_id;
         retired := retired + 1;
       END LOOP;
+      -- Begin-transaction locks a retained set before the global/client/set
+      -- admission rows. Keep reaping in that same direction: never retain a
+      -- rate-row lock while attempting to acquire a session-set lock.
+      WITH victims AS (
+        SELECT scope_kind, scope_hash FROM managed_auth_login_transaction_rate_limits
+        WHERE expires_at <= pg_catalog.clock_timestamp()
+        ORDER BY expires_at, scope_kind, scope_hash
+        FOR UPDATE SKIP LOCKED LIMIT p_limit
+      )
+      DELETE FROM managed_auth_login_transaction_rate_limits rate_limit USING victims
+      WHERE rate_limit.scope_kind = victims.scope_kind
+        AND rate_limit.scope_hash = victims.scope_hash;
       PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_lifecycle', CASE WHEN previous_marker IS NULL THEN '' ELSE previous_marker END, true);
       PERFORM pg_catalog.set_config('opengeni.canonical_human_identity_lifecycle', CASE WHEN previous_canonical_marker IS NULL THEN '' ELSE previous_canonical_marker END, true);
+      PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_purge', CASE WHEN previous_purge_marker IS NULL THEN '' ELSE previous_purge_marker END, true);
       RETURN retired;
     EXCEPTION WHEN OTHERS THEN
       PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_lifecycle', CASE WHEN previous_marker IS NULL THEN '' ELSE previous_marker END, true);
       PERFORM pg_catalog.set_config('opengeni.canonical_human_identity_lifecycle', CASE WHEN previous_canonical_marker IS NULL THEN '' ELSE previous_canonical_marker END, true);
+      PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_purge', CASE WHEN previous_purge_marker IS NULL THEN '' ELSE previous_purge_marker END, true);
       RAISE;
     END;
     $body$;
@@ -2078,7 +2293,8 @@ BEGIN
     EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_session_set_authority_state(text) FROM PUBLIC', data_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_session_set_snapshot(text,text,boolean,boolean,boolean) FROM PUBLIC', data_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_session_set_bootstrap(text,text,text,text,uuid,text,bigint,bigint) FROM PUBLIC', data_schema);
-    EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_session_set_begin_transaction(text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamptz) FROM PUBLIC', data_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_login_transaction_rate_limit_take(text,text) FROM PUBLIC', data_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_session_set_begin_transaction(text,text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamptz) FROM PUBLIC', data_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_session_set_complete_transaction(text,text,uuid,text,bigint,bigint,uuid,text,text,text) FROM PUBLIC', data_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_session_set_mutate(text,text,uuid,text,bigint,bigint,text,uuid,uuid,uuid,text,text) FROM PUBLIC', data_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.managed_auth_actor_mutation_fence(text,bigint,uuid) FROM PUBLIC', data_schema);
@@ -2094,7 +2310,7 @@ BEGIN
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_session_set_authority_state(text) TO opengeni_app', data_schema);
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_session_set_snapshot(text,text,boolean,boolean,boolean) TO opengeni_app', data_schema);
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_session_set_bootstrap(text,text,text,text,uuid,text,bigint,bigint) TO opengeni_app', data_schema);
-      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_session_set_begin_transaction(text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamptz) TO opengeni_app', data_schema);
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_session_set_begin_transaction(text,text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamptz) TO opengeni_app', data_schema);
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_session_set_complete_transaction(text,text,uuid,text,bigint,bigint,uuid,text,text,text) TO opengeni_app', data_schema);
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_session_set_mutate(text,text,uuid,text,bigint,bigint,text,uuid,uuid,uuid,text,text) TO opengeni_app', data_schema);
       EXECUTE format('GRANT EXECUTE ON FUNCTION %I.managed_auth_actor_mutation_fence(text,bigint,uuid) TO opengeni_app', data_schema);
@@ -2118,5 +2334,7 @@ COMMENT ON TABLE "managed_auth_login_slots" IS
   'Bounded provider-neutral login slots; references Better Auth sessions server-side and never duplicates their tokens.';
 COMMENT ON TABLE "managed_auth_login_transactions" IS
   'One-use isolated add/reauth transactions; only SHA-256 secret digests are durable.';
+COMMENT ON TABLE "managed_auth_login_transaction_rate_limits" IS
+  'Bounded multi-replica global, secret-hashed client, and session-set rate buckets for browser login transactions.';
 COMMENT ON TABLE "managed_auth_session_set_operations" IS
-  'Append-only, secret-free idempotency and security evidence for session-set mutations.';
+  'Append-only, secret-free idempotency and security evidence; expired slot-free pre-auth sets are physically purged.';

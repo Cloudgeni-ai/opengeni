@@ -110,6 +110,7 @@ const managedAuthSessionSetAuthorityTableNames = [
   "managed_auth_browser_installations",
   "managed_auth_login_return_intents",
   "managed_auth_login_slots",
+  "managed_auth_login_transaction_rate_limits",
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",

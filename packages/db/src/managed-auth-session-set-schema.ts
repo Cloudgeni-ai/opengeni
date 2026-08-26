@@ -1,6 +1,7 @@
 import {
   bigint,
   index,
+  integer,
   jsonb,
   pgTable,
   primaryKey,
@@ -62,6 +63,9 @@ export const managedAuthLoginSlots = pgTable(
     liveBinding: uniqueIndex("managed_auth_login_slots_live_binding_idx")
       .on(table.sessionSetId, table.loginBindingId)
       .where(sql`${table.status} <> 'revoked'`),
+    liveSession: uniqueIndex("managed_auth_login_slots_live_session_idx")
+      .on(table.authSessionId)
+      .where(sql`${table.authSessionId} is not null and ${table.status} <> 'revoked'`),
     setStatus: index("managed_auth_login_slots_set_status_idx").on(
       table.sessionSetId,
       table.status,
@@ -148,6 +152,25 @@ export const managedAuthActorMutationLeases = pgTable(
     expiry: index("managed_auth_actor_mutation_leases_expiry_idx").on(
       table.expiresAt,
       table.sessionSetId,
+    ),
+  }),
+);
+
+export const managedAuthLoginTransactionRateLimits = pgTable(
+  "managed_auth_login_transaction_rate_limits",
+  {
+    scopeKind: text("scope_kind").notNull(),
+    scopeHash: text("scope_hash").notNull(),
+    windowStartedAt: timestamp("window_started_at", { withTimezone: true }).notNull(),
+    attemptCount: integer("attempt_count").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    primaryKey: primaryKey({ columns: [table.scopeKind, table.scopeHash] }),
+    expiry: index("managed_auth_login_transaction_rate_limits_expiry_idx").on(
+      table.expiresAt,
+      table.scopeKind,
+      table.scopeHash,
     ),
   }),
 );

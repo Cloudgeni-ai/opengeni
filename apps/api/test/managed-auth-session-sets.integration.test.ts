@@ -81,16 +81,6 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     });
     const email = `managed-session-set-broker-${crypto.randomUUID()}@example.test`;
     const password = "password1234";
-    expect(
-      (
-        await app.request("/v1/auth/sign-up/email", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ name: "Broker Session Set User", email, password }),
-        })
-      ).status,
-    ).toBeLessThan(300);
-    await shared.admin`update auth_users set email_verified = true where email = ${email}`;
     const initialResponse = await app.request("/v1/auth/session-set");
     expect(initialResponse.status).toBe(200);
     const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
@@ -104,6 +94,21 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       slots: [],
     });
     expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("absent");
+
+    const signUp = await app.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: authorityCookie },
+      body: JSON.stringify({ name: "Broker Session Set User", email, password }),
+    });
+    expect(signUp.status).toBeLessThan(300);
+    expect(
+      signUp.headers
+        .getSetCookie()
+        .some((cookie) => cookie.startsWith("better-auth.session_token=")),
+    ).toBe(true);
+    expect(oneCookie(signUp, "better-auth.session_token")).toBe("better-auth.session_token=");
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("absent");
+    await shared.admin`update auth_users set email_verified = true where email = ${email}`;
 
     const body = JSON.stringify({
       operationId: crypto.randomUUID(),
@@ -242,7 +247,100 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(oneCookie(fresh, MANAGED_AUTH_SESSION_SET_COOKIE)).not.toBe(authorityCookie);
   });
 
-  test("converges two pre-bootstrap tabs, replays exactly, and exposes no provider token", async () => {
+  test("scrubs dual signup state and adopts the first account through isolated sign-in", async () => {
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        managedAuthSessionSetMode: "dual",
+        betterAuthSecret: "managed-session-set-integration-secret-32-bytes",
+        publicBaseUrl: "http://opengeni.test",
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+    const initialResponse = await app.request("/v1/auth/session-set");
+    const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
+    const authority = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
+    const email = `managed-session-set-dual-empty-${crypto.randomUUID()}@example.test`;
+    const password = "password1234";
+
+    const signUp = await app.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: authority },
+      body: JSON.stringify({ name: "Dual Empty User", email, password }),
+    });
+    expect(signUp.status).toBeLessThan(300);
+    expect(oneCookie(signUp, "better-auth.session_token")).toBe("better-auth.session_token=");
+    expect(
+      await getManagedAuthSessionSetAuthorityState(
+        client.db,
+        managedAuthSha256(authorityValue(authority)),
+      ),
+    ).toBe("absent");
+    await shared.admin`update auth_users set email_verified = true where email = ${email}`;
+
+    const begin = await app.request("/v1/auth/session-set/transactions", {
+      method: "POST",
+      headers: mutationHeaders(initial, authority),
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        expectedGeneration: initial.generation,
+        kind: "add",
+      }),
+    });
+    expect(begin.status).toBe(200);
+    const transaction = (await begin.json()) as { id: string };
+    const transactionCookie = oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
+    const completion = await app.request("/v1/auth/session-set/transactions/email-password", {
+      method: "POST",
+      headers: mutationHeaders(initial, `${authority}; ${transactionCookie}`),
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        expectedGeneration: initial.generation,
+        transactionId: transaction.id,
+        email,
+        password,
+      }),
+    });
+    expect(completion.status).toBe(200);
+    const completed = (await completion.json()) as {
+      projection: ManagedAuthSessionSetProjection;
+    };
+    expect(completed.projection).toMatchObject({
+      selectedSlotId: null,
+      slots: [{ verifiedClaim: { value: email }, state: "active" }],
+    });
+    expect(completion.headers.getSetCookie().join("\n")).not.toContain(
+      "better-auth.session_token=ey",
+    );
+
+    const select = await app.request("/v1/auth/session-set/select", {
+      method: "POST",
+      headers: mutationHeaders(completed.projection, authority),
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        expectedGeneration: completed.projection.generation,
+        slotId: completed.projection.slots[0]!.id,
+      }),
+    });
+    expect(select.status).toBe(200);
+    const projection = (await select.json()) as ManagedAuthSessionSetProjection;
+    expect(projection.selectedSlotId).not.toBeNull();
+    const selectedCookie = oneCookie(select, "better-auth.session_token");
+    expect(selectedCookie).not.toBe("better-auth.session_token=");
+    const selectedRead = await app.request("/v1/auth/get-session", {
+      headers: {
+        cookie: `${authority}; ${selectedCookie}`,
+        [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projection.actorEpoch,
+      },
+    });
+    expect(selectedRead.status).toBe(200);
+    expect(await selectedRead.json()).toMatchObject({ user: { email } });
+  });
+
+  test("denies stale-tab authority transfer, replays exactly, and exposes no provider token", async () => {
     const app = createApp({
       settings: testSettings({
         databaseUrl: shared.adminUrl,
@@ -287,12 +385,15 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(authorityA).not.toBe(authorityB);
 
     const operationA = crypto.randomUUID();
+    const bodyA = JSON.stringify({ operationId: operationA, expectedGeneration: tabA.generation });
     const bootstrapA = await app.request("/v1/auth/session-set/bootstrap", {
       method: "POST",
       headers: mutationHeaders(tabA, `${ambient}; ${authorityA}`),
-      body: JSON.stringify({ operationId: operationA, expectedGeneration: tabA.generation }),
+      body: bodyA,
     });
     expect(bootstrapA.status).toBe(200);
+    const projectionA = (await bootstrapA.json()) as ManagedAuthSessionSetProjection;
+    expect(projectionA.selectedSlotId).not.toBeNull();
 
     const operationB = crypto.randomUUID();
     const bodyB = JSON.stringify({ operationId: operationB, expectedGeneration: tabB.generation });
@@ -301,23 +402,36 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       headers: mutationHeaders(tabB, `${ambient}; ${authorityB}`),
       body: bodyB,
     });
-    expect(bootstrapB.status).toBe(200);
-    const projectionB = (await bootstrapB.json()) as ManagedAuthSessionSetProjection;
-    expect(projectionB.selectedSlotId).not.toBeNull();
+    expect(bootstrapB.status).toBe(401);
+    expect(await bootstrapB.json()).toMatchObject({
+      error: { details: { managedAuthCode: "browser_session_set_required" } },
+    });
     expect(
       await getManagedAuthSessionSetAuthorityState(
         client.db,
         managedAuthSha256(authorityValue(authorityA)),
       ),
-    ).not.toBe("active");
+    ).toBe("active");
+    expect(
+      await getManagedAuthSessionSetAuthorityState(
+        client.db,
+        managedAuthSha256(authorityValue(authorityB)),
+      ),
+    ).toBe("absent");
 
     const replay = await app.request("/v1/auth/session-set/bootstrap", {
       method: "POST",
-      headers: mutationHeaders(tabB, `${ambient}; ${authorityB}`),
-      body: bodyB,
+      headers: mutationHeaders(tabA, `${ambient}; ${authorityA}`),
+      body: bodyA,
     });
     expect(replay.status).toBe(200);
-    expect(await replay.json()).toEqual(projectionB);
+    expect(await replay.json()).toEqual(projectionA);
+
+    const legacyEpochOneRead = await app.request("/v1/auth/get-session", {
+      headers: { cookie: `${ambient}; ${authorityA}` },
+    });
+    expect(legacyEpochOneRead.status).toBe(200);
+    expect(await legacyEpochOneRead.json()).toMatchObject({ user: { email } });
 
     const [before] = await shared.admin<Array<{ id: string; updatedAt: Date; expiresAt: Date }>>`
       select id, updated_at as "updatedAt", expires_at as "expiresAt"
@@ -326,12 +440,12 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     `;
     const selectedRead = await app.request("/v1/auth/get-session", {
       headers: {
-        cookie: `${ambient}; ${authorityB}`,
-        [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projectionB.actorEpoch,
+        cookie: `${ambient}; ${authorityA}`,
+        [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projectionA.actorEpoch,
       },
     });
     expect(selectedRead.status).toBe(200);
-    expect(selectedRead.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER)).toBe(projectionB.actorEpoch);
+    expect(selectedRead.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER)).toBe(projectionA.actorEpoch);
     expect(selectedRead.headers.get("set-cookie")).toBeNull();
     const selectedBody = (await selectedRead.json()) as Record<string, unknown>;
     expect(JSON.stringify(selectedBody)).not.toContain("token");
@@ -346,20 +460,20 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       where id = ${before!.id}
     `;
     const expiredProjectionResponse = await app.request("/v1/auth/session-set", {
-      headers: { cookie: authorityB },
+      headers: { cookie: authorityA },
     });
     expect(expiredProjectionResponse.status).toBe(200);
     expect(await expiredProjectionResponse.json()).toMatchObject({
-      generation: projectionB.generation,
-      actorEpoch: projectionB.actorEpoch,
+      generation: projectionA.generation,
+      actorEpoch: projectionA.actorEpoch,
       selectedSlotId: null,
       state: "actor_change_required",
-      slots: [{ id: projectionB.selectedSlotId, state: "reauth_required" }],
+      slots: [{ id: projectionA.selectedSlotId, state: "reauth_required" }],
     });
     const expiredSelectedRead = await app.request("/v1/auth/get-session", {
       headers: {
-        cookie: `${ambient}; ${authorityB}`,
-        [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projectionB.actorEpoch,
+        cookie: `${ambient}; ${authorityA}`,
+        [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projectionA.actorEpoch,
       },
     });
     expect(expiredSelectedRead.status).toBe(409);
@@ -378,11 +492,11 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
         slot.status as "slotStatus", slot.auth_session_id as "authSessionId"
       from managed_auth_session_sets session_set
       inner join managed_auth_login_slots slot on slot.id = session_set.selected_slot_id
-      where session_set.authority_hash = ${managedAuthSha256(authorityValue(authorityB))}
+      where session_set.authority_hash = ${managedAuthSha256(authorityValue(authorityA))}
     `;
     expect(readOnlyState).toEqual({
-      generation: projectionB.generation,
-      actorEpoch: projectionB.actorEpoch,
+      generation: projectionA.generation,
+      actorEpoch: projectionA.actorEpoch,
       state: "ready",
       slotStatus: "active",
       authSessionId: before!.id,
@@ -390,10 +504,10 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
 
     await shared.admin`
       update managed_auth_session_sets set actor_epoch = actor_epoch + 1
-      where authority_hash = ${managedAuthSha256(authorityValue(authorityB))}
+      where authority_hash = ${managedAuthSha256(authorityValue(authorityA))}
     `;
     const staleHeaderless = await app.request("/v1/auth/get-session", {
-      headers: { cookie: `${ambient}; ${authorityB}` },
+      headers: { cookie: `${ambient}; ${authorityA}` },
     });
     expect(staleHeaderless.status).toBe(409);
     expect(staleHeaderless.headers.get("x-opengeni-actor-state")).toBe("changed");

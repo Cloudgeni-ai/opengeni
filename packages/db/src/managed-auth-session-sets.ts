@@ -70,6 +70,11 @@ export class ManagedAuthActorMutationInFlightError extends Error {
   readonly code = "actor_mutation_in_flight";
 }
 
+export class ManagedAuthLoginTransactionRateLimitError extends Error {
+  readonly name = "ManagedAuthLoginTransactionRateLimitError";
+  readonly code = "login_transaction_rate_limited";
+}
+
 function mapSqlError(error: unknown): never {
   const state = nestedPostgresSqlState(error);
   if (state === "40001") throw new ManagedAuthSessionSetGenerationConflictError();
@@ -78,6 +83,7 @@ function mapSqlError(error: unknown): never {
   if (state === "P0003") throw new ManagedAuthLoginSlotAlreadyExistsError();
   if (state === "54000") throw new ManagedAuthLoginSlotLimitError();
   if (state === "55P03") throw new ManagedAuthActorMutationInFlightError();
+  if (state === "P0004") throw new ManagedAuthLoginTransactionRateLimitError();
   if (state === "42501") {
     throw new ManagedAuthSessionSetAuthorityError(
       error instanceof Error ? error.message : "Browser session-set authority denied",
@@ -189,6 +195,7 @@ export async function beginManagedAuthLoginTransaction(
   input: {
     authorityHash: string;
     csrfHash: string;
+    rateScopeHash?: string;
     operationId: string;
     requestDigest: string;
     expectedGeneration: string;
@@ -206,7 +213,8 @@ export async function beginManagedAuthLoginTransaction(
     const value = (await oneJson(
       db,
       sql`select managed_auth_session_set_begin_transaction(
-          ${input.authorityHash}, ${input.csrfHash}, ${input.operationId}::uuid,
+          ${input.authorityHash}, ${input.csrfHash},
+          ${input.rateScopeHash ?? input.authorityHash}, ${input.operationId}::uuid,
           ${input.requestDigest}, ${input.expectedGeneration}::bigint,
           ${input.transactionId}::uuid, ${input.expectedActorEpoch}::bigint,
           ${input.transactionSecretHash}, ${input.kind},

@@ -36,7 +36,10 @@ binding and its revision, then adds:
 - `managed_auth_session_set_operations`: append-only, secret-free idempotency
   evidence keyed by operation UUID and exact request digest; and
 - `managed_auth_actor_mutation_leases`: short, renewable current-epoch leases
-  that fence tenant-bound writes through final settlement.
+  that fence tenant-bound writes through final settlement; and
+- `managed_auth_login_transaction_rate_limits`: global, secret-hashed client,
+  and per-set fixed-window buckets shared by every API replica for Add/re-auth
+  admission.
 
 The raw browser authority and transaction secret exist only in `HttpOnly` cookies.
 PostgreSQL stores their SHA-256 digests. Session-set authority uses `SameSite=Lax`,
@@ -45,7 +48,7 @@ both are `Secure` when the public base URL is HTTPS. Better Auth provider sessio
 tokens and provider session identifiers never enter the browser-safe session-set
 projection.
 
-All seven tables use FORCE RLS. The restricted runtime role has no direct table
+All eight tables use FORCE RLS. The restricted runtime role has no direct table
 DML; it reaches the lifecycle only through target-schema-local, PUBLIC-revoked,
 schema-pinned `SECURITY DEFINER` routines. The selected-slot foreign key includes
 the session-set id, operation evidence is append-only, and the migration/runtime
@@ -63,7 +66,8 @@ wildcard handler:
 - `GET /v1/auth/session-set` creates or reads a safe projection without durable
   renewal side effects;
 - `POST /v1/auth/session-set/bootstrap` adopts the exact ambient legacy session
-  during `dual` rollout;
+  once during `dual` rollout; competing first-adoption attempts serialize, and a
+  session already owned by any live slot cannot transfer or re-key set authority;
 - `POST /v1/auth/session-set/transactions`,
   `POST /v1/auth/session-set/transactions/email-password`, and
   `DELETE /v1/auth/session-set/transactions/:transactionId` own isolated add or
@@ -77,7 +81,13 @@ wildcard handler:
 An empty broker GET remains cookie-only and nondurable. Its first exact Add at
 generation/actor epoch `1/1` atomically creates the installation, empty set,
 transaction, and operation receipt. Re-auth or a noninitial fence cannot
-materialize authority, and exact replay cannot duplicate any of those rows.
+materialize authority, and exact replay cannot duplicate any of those rows. An
+empty set expires with that ten-minute transaction and is physically purged with
+its unauthenticated evidence. Every set admits at most one live transaction. A
+secret-hashed per-client bucket allows eight admissions per ten minutes, a
+deployment-global bucket allows 500, and each set allows sixteen per UTC day.
+Those durable bounds cover both unauthenticated authority rotation and repeated
+begin/cancel loops on an authenticated set, even with spoofed client keys.
 
 Every mutation requires the exact API-contract header, an allowed exact origin,
 valid Fetch Metadata, JSON content type, a session-bound CSRF proof, the current
@@ -93,6 +103,13 @@ attempt. The opener receives only the transaction UUID over an exact-origin,
 exact-window `postMessage`; it then rereads server authority. Add leaves the current
 slot selected. Re-auth proves the transaction's exact slot, human, login binding,
 and captured revisions before replacing that slot's provider session.
+
+The session-set-capable signed-out surface uses that isolated Add path for sign-in
+in both `dual` and `broker`. Account creation and verification resend remain
+available beside it. Those provider routes may create or recover an account, but
+when a session-set authority cookie is present the API scrubs any automatic
+provider session cookie; the new account must enter the set through isolated Add
+before it can become a selectable actor.
 
 Logout-one names both the removed slot and an active replacement slot or explicit
 `null`. Logout-all revokes only this browser set. If selection becomes invalid,
@@ -140,10 +157,12 @@ actor epoch so binding-private state cannot survive.
   resources are indistinguishable before switching.
 - Wildcard provider routes use a fixed method/path allowlist, strip ambient
   request cookies and authorization, and remove provider secrets from JSON
-  responses. Broker mode clears provider cookies; dual mode preserves an active
-  set's exact selected compatibility mirror instead of accepting an unadopted
-  wildcard credential. Selected product-session capabilities remain on the
-  fenced product routes.
+  responses. Broker mode clears provider cookies. With session-set authority,
+  dual mode preserves only an active set's exact selected compatibility mirror
+  and otherwise clears the provider cookie instead of accepting an unselected
+  wildcard credential. A legacy dual client without session-set authority keeps
+  ordinary Better Auth behavior until explicit bootstrap. Selected
+  product-session capabilities remain on the fenced product routes.
 - Session-set and provider-auth responses are `no-store`; secret material is
   excluded from operation evidence, errors, browser events, logs, and retained
   browser evidence.
@@ -160,9 +179,11 @@ actor epoch so binding-private state cannot survive.
 | `broker` | Session set is the only browser actor authority | Ambient legacy cookie is neither admitted nor minted | Final activation after dual acceptance |
 
 In `dual`, an existing legacy session may bootstrap exactly once into its
-installation set. Once an actor epoch has advanced, headerless requests fail
-closed: a stale pre-switch page and a fresh legacy page are otherwise
-indistinguishable. Old binaries can coexist while migration 0360 runs because its
+installation set. A stale tab holding the same provider cookie cannot bootstrap a
+second authority, rotate the original installation/set hashes, or inherit its
+other slots; it must reconcile from current browser authority. Once an actor epoch
+has advanced, headerless requests fail closed: a stale pre-switch page and a fresh
+legacy page are otherwise indistinguishable. Old binaries can coexist while migration 0360 runs because its
 insert trigger supplies the new non-null binding stamps, but all API replicas and
 the served web bundle must be on the session-set-capable release before selecting
 `dual` or `broker`.

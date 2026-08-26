@@ -538,7 +538,7 @@ async function grantAppRoleIfSchemaExists(
     "managed_auth_session_set_authority_state(text)",
     "managed_auth_session_set_snapshot(text,text,boolean,boolean,boolean)",
     "managed_auth_session_set_bootstrap(text,text,text,text,uuid,text,bigint,bigint)",
-    "managed_auth_session_set_begin_transaction(text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamp with time zone)",
+    "managed_auth_session_set_begin_transaction(text,text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamp with time zone)",
     "managed_auth_session_set_complete_transaction(text,text,uuid,text,bigint,bigint,uuid,text,text,text)",
     "managed_auth_session_set_mutate(text,text,uuid,text,bigint,bigint,text,uuid,uuid,uuid,text,text)",
     "managed_auth_actor_mutation_fence(text,bigint,uuid)",

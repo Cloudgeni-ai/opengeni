@@ -6,7 +6,7 @@ import {
 } from "@opengeni/react/accounts";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { Loader2Icon, UserRoundPlusIcon } from "lucide-react";
-import { useEffect, useMemo, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -110,19 +110,12 @@ function ExternalActorInvalidation() {
   return null;
 }
 
-export function BrowserAccountsSignedOutPanel(props: { dualEmptySetFallback?: ReactNode }) {
+export function BrowserAccountsSignedOutPanel(props: { emptySetRegistrationPanel?: ReactNode }) {
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
+  const [registrationOpen, setRegistrationOpen] = useState(false);
   const busy = accounts.phase === "committing" || accounts.phase === "loading";
   const slots = accounts.projection?.slots ?? [];
-
-  if (
-    accounts.projection?.mode === "dual" &&
-    accounts.projection.slots.length === 0 &&
-    props.dualEmptySetFallback
-  ) {
-    return props.dualEmptySetFallback;
-  }
 
   function authenticate(kind: "add" | "reauth", slotId?: string) {
     popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
@@ -210,6 +203,34 @@ export function BrowserAccountsSignedOutPanel(props: { dualEmptySetFallback?: Re
             ) : null}
             {slots.length > 0 ? "Use another account" : "Continue with email"}
           </Button>
+          {slots.length === 0 && props.emptySetRegistrationPanel ? (
+            <div className="mt-2 border-t border-border pt-4">
+              {registrationOpen ? (
+                <>
+                  {props.emptySetRegistrationPanel}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    className="mt-2 w-full"
+                    disabled={busy}
+                    onClick={() => setRegistrationOpen(false)}
+                  >
+                    Back to sign in
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  className="w-full"
+                  disabled={busy}
+                  onClick={() => setRegistrationOpen(true)}
+                >
+                  Create an account
+                </Button>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
