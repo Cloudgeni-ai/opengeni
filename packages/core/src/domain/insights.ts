@@ -6,7 +6,6 @@ import {
 } from "@opengeni/contracts";
 import {
   aggregateSessionDepth,
-  aggregateWarmSecondsByGroup,
   countOnlineMachines,
   countScheduledTaskFires,
   countSessionsAttachedToGroups,
@@ -16,15 +15,45 @@ import {
   listLiveWarmLeases,
   listScheduledTasks,
   readWorkspaceInsightsModelBundle,
+  readWorkspaceInsightsUsageBundle,
   requireWorkspace,
-  sumUsageQuantityByDay,
-  sumUsageQuantityByHour,
-  sumUsageQuantityInRange,
-  sumUsageQuantitySinceForInsights,
   type Database,
 } from "@opengeni/db";
 
 const MACHINE_HEARTBEAT_FRESH_MS = 120_000;
+export const WORKSPACE_INSIGHTS_PROVIDER_FILTER_MAX_UTF8_BYTES = 256;
+export const WORKSPACE_INSIGHTS_MODEL_FILTER_MAX_UTF8_BYTES = 512;
+
+export type WorkspaceInsightsFilterField = "provider" | "model";
+
+export class WorkspaceInsightsFilterValidationError extends Error {
+  readonly field: WorkspaceInsightsFilterField;
+  readonly maxUtf8Bytes: number;
+
+  constructor(field: WorkspaceInsightsFilterField, maxUtf8Bytes: number) {
+    super(`${field} must be at most ${maxUtf8Bytes} UTF-8 bytes`);
+    this.name = "WorkspaceInsightsFilterValidationError";
+    this.field = field;
+    this.maxUtf8Bytes = maxUtf8Bytes;
+  }
+}
+
+/** Normalize the public filter sentinel and enforce the database authority envelope. */
+export function normalizeWorkspaceInsightsFilter(
+  value: string | null | undefined,
+  field: WorkspaceInsightsFilterField,
+): string | null {
+  const normalized = value?.trim() || null;
+  if (normalized === null || normalized === "all") return null;
+  const maxUtf8Bytes =
+    field === "provider"
+      ? WORKSPACE_INSIGHTS_PROVIDER_FILTER_MAX_UTF8_BYTES
+      : WORKSPACE_INSIGHTS_MODEL_FILTER_MAX_UTF8_BYTES;
+  if (new TextEncoder().encode(normalized).byteLength > maxUtf8Bytes) {
+    throw new WorkspaceInsightsFilterValidationError(field, maxUtf8Bytes);
+  }
+  return normalized;
+}
 
 export type GetWorkspaceInsightsInput = {
   workspaceId: string;
@@ -182,102 +211,43 @@ export async function getWorkspaceInsights(
   settings: Settings,
   input: GetWorkspaceInsightsInput,
 ): Promise<WorkspaceInsightsResponse> {
+  const provider = normalizeWorkspaceInsightsFilter(input.provider, "provider");
+  const model = normalizeWorkspaceInsightsFilter(input.model, "model");
   await requireWorkspace(db, input.workspaceId);
   const now = input.now ?? new Date();
   const window = resolveRangeWindow(input.range, now);
-  const provider = input.provider?.trim() || null;
-  const model = input.model?.trim() || null;
   const modelFilterActive = Boolean(provider || model);
   const filter = { provider, model };
-  const sumUsageForSeries =
-    input.range === "today" ? sumUsageQuantityByHour : sumUsageQuantityByDay;
 
-  const [
-    workspaceCreditMicros,
-    priorWorkspaceCreditMicros,
-    warmSeconds,
-    priorWarmSeconds,
-    modelBundle,
-    warmDays,
-    costDays,
-    warmGroups,
-    liveWarm,
-    tasks,
-    depth,
-    floorRows,
-    machinesOnline,
-    billableTokensUsed,
-    agentRunsUsed,
-  ] = await Promise.all([
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      since: window.since,
-      until: window.until,
-    }),
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      since: window.priorSince,
-      until: window.priorUntil,
-    }),
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "sandbox.warm_seconds",
-      since: window.since,
-      until: window.until,
-    }),
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "sandbox.warm_seconds",
-      since: window.priorSince,
-      until: window.priorUntil,
-    }),
-    readWorkspaceInsightsModelBundle(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      priorSince: window.priorSince,
-      priorUntil: window.priorUntil,
-      granularity: input.range === "today" ? "hour" : "day",
-      ...filter,
-    }),
-    sumUsageForSeries(db, {
-      workspaceId: input.workspaceId,
-      eventType: "sandbox.warm_seconds",
-      since: window.since,
-      until: window.until,
-    }),
-    sumUsageForSeries(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      since: window.since,
-      until: window.until,
-    }),
-    aggregateWarmSecondsByGroup(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      limit: 24,
-    }),
-    listLiveWarmLeases(db, input.workspaceId),
-    listScheduledTasks(db, input.workspaceId, 100),
-    aggregateSessionDepth(db, input.workspaceId),
-    listFloorSessions(db, input.workspaceId, 24),
-    settings.sandboxSelfhostedEnabled
-      ? countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now)
-      : Promise.resolve(0),
-    sumUsageQuantitySinceForInsights(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.tokens",
-      since: startOfUtcMonth(now),
-    }),
-    sumUsageQuantitySinceForInsights(db, {
-      workspaceId: input.workspaceId,
-      eventType: "agent_run.created",
-      since: startOfUtcMonth(now),
-    }),
-  ]);
+  const [modelBundle, usageBundle, liveWarm, tasks, depth, floorRows, machinesOnline] =
+    await Promise.all([
+      readWorkspaceInsightsModelBundle(db, {
+        workspaceId: input.workspaceId,
+        since: window.since,
+        until: window.until,
+        priorSince: window.priorSince,
+        priorUntil: window.priorUntil,
+        granularity: input.range === "today" ? "hour" : "day",
+        ...filter,
+      }),
+      readWorkspaceInsightsUsageBundle(db, {
+        workspaceId: input.workspaceId,
+        since: window.since,
+        until: window.until,
+        priorSince: window.priorSince,
+        priorUntil: window.priorUntil,
+        monthSince: startOfUtcMonth(now),
+        granularity: input.range === "today" ? "hour" : "day",
+        warmGroupLimit: 24,
+      }),
+      listLiveWarmLeases(db, input.workspaceId),
+      listScheduledTasks(db, input.workspaceId, 100),
+      aggregateSessionDepth(db, input.workspaceId),
+      listFloorSessions(db, input.workspaceId, 24),
+      settings.sandboxSelfhostedEnabled
+        ? countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now)
+        : Promise.resolve(0),
+    ]);
 
   const {
     modelRows,
@@ -290,6 +260,16 @@ export async function getWorkspaceInsights(
     recentCalls,
     promptContributions,
   } = modelBundle;
+  const {
+    workspaceCreditMicros,
+    priorWorkspaceCreditMicros,
+    warmSeconds,
+    priorWarmSeconds,
+    buckets: usageBuckets,
+    warmGroups,
+    billableTokensUsed,
+    agentRunsUsed,
+  } = usageBundle;
   const [attached, fireCounts] = await Promise.all([
     countSessionsAttachedToGroups(
       db,
@@ -375,13 +355,13 @@ export async function getWorkspaceInsights(
     };
     const modelCostMicros = modelFilterActive
       ? facts.costMicros
-      : (costDays.get(bucket) ?? facts.costMicros);
+      : (usageBuckets.get(bucket)?.costMicros ?? facts.costMicros);
     return {
       label: input.range === "today" ? bucket.slice(11) : bucket.slice(5),
       modelCostUsd: microsToUsd(modelCostMicros),
       estimatedProviderUsd: microsToUsd(facts.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: facts.estimatedProviderCostKnownCalls,
-      warmSeconds: warmDays.get(bucket) ?? 0,
+      warmSeconds: usageBuckets.get(bucket)?.warmSeconds ?? 0,
       inputTokens: facts.inputTokens,
       outputTokens: facts.outputTokens,
       cachedTokens: facts.cachedTokens,

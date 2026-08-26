@@ -49,6 +49,7 @@ type Fixture = {
   accountId: string;
   workspaceId: string;
   ownerSubjectId: string;
+  sharedSessionId: string;
   input: WorkspaceInsightsModelBundleInput;
 };
 
@@ -187,6 +188,7 @@ async function fixture(): Promise<Fixture> {
     accountId: grant.accountId,
     workspaceId,
     ownerSubjectId,
+    sharedSessionId: sharedSession.id,
     input: {
       workspaceId,
       since,
@@ -281,20 +283,64 @@ function comparable(bundle: WorkspaceInsightsModelBundle) {
   };
 }
 
-function instrumentedDb(statements: string[]): { db: Database; close: () => Promise<void> } {
+type CapturedParameter = string | number | boolean | null;
+type CapturedStatement = { query: string; parameters: CapturedParameter[] };
+
+function capturedParameter(value: unknown): CapturedParameter {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  throw new Error("Unexpected captured Insights query parameter");
+}
+
+function instrumentedDb(statements: CapturedStatement[]): {
+  db: Database;
+  close: () => Promise<void>;
+} {
   if (!shared) throw new Error("PostgreSQL test database unavailable");
   const raw = postgres(shared.appUrl, {
     max: 8,
     prepare: false,
     connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
-    debug: (_connection, query) => statements.push(query),
+    debug: (_connection, query, parameters) =>
+      statements.push({ query, parameters: parameters.map(capturedParameter) }),
   });
   const db = drizzle(raw, { schema }) as unknown as Database;
   registerDbBinding(db, { rlsStrategy: "force" });
   return { db, close: () => raw.end() };
 }
 
+function sessionRelationLoops(value: unknown, loops: number[] = []): number[] {
+  if (Array.isArray(value)) {
+    for (const item of value) sessionRelationLoops(item, loops);
+    return loops;
+  }
+  if (value === null || typeof value !== "object") return loops;
+  const row = value as Record<string, unknown>;
+  if (row["Relation Name"] === "sessions" && typeof row["Actual Loops"] === "number") {
+    loops.push(row["Actual Loops"]);
+  }
+  for (const child of Object.values(row)) sessionRelationLoops(child, loops);
+  return loops;
+}
+
 describe("Workspace Insights model bundle", () => {
+  test("materializes only projected fact columns and centralizes session labels", async () => {
+    const source = await Bun.file(
+      new URL("../src/insights-model-bundle.ts", import.meta.url),
+    ).text();
+    expect(source).not.toContain("fact.*");
+    expect(source.match(/inner join sessions child/g)).toHaveLength(1);
+    expect(source.match(/left join sessions root/g)).toHaveLength(1);
+    expect(source).not.toContain("left join sessions session");
+    expect(source).toContain("selected_sessions as materialized");
+  });
+
   test("matches the legacy helpers for shared/private visibility, filters, and UTC buckets", async () => {
     if (!shared || !client) return;
     const seeded = await fixture();
@@ -321,13 +367,19 @@ describe("Workspace Insights model bundle", () => {
           ]),
       );
       expect(comparable(bundled)).toEqual(comparable(legacy));
+      if (testCase.input.provider || testCase.input.model) {
+        expect(bundled.facets).toEqual([
+          { provider: "azure", model: "azure-bundle" },
+          { provider: "openai", model: "gpt-bundle" },
+        ]);
+      }
     }
   });
 
-  test("reduces audited visible model-fact source executions from nine to two", async () => {
+  test("reduces model sources from nine to two by default and three with filtered facets", async () => {
     if (!shared) return;
     const seeded = await fixture();
-    const legacyStatements: string[] = [];
+    const legacyStatements: CapturedStatement[] = [];
     const legacyDb = instrumentedDb(legacyStatements);
     try {
       await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
@@ -336,7 +388,7 @@ describe("Workspace Insights model bundle", () => {
     } finally {
       await legacyDb.close();
     }
-    const bundledStatements: string[] = [];
+    const bundledStatements: CapturedStatement[] = [];
     const bundledDb = instrumentedDb(bundledStatements);
     try {
       await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
@@ -348,16 +400,107 @@ describe("Workspace Insights model bundle", () => {
 
     const source = "visible_workspace_insights_model_call_facts";
     const legacyInvocations = legacyStatements.reduce(
-      (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
+      (total, statement) => total + (statement.query.match(new RegExp(source, "g"))?.length ?? 0),
       0,
     );
-    const bundleQueries = bundledStatements.filter((statement) => statement.includes(source));
+    const bundleQueries = bundledStatements.filter((statement) => statement.query.includes(source));
     const bundledInvocations = bundleQueries.reduce(
-      (total, statement) => total + (statement.match(new RegExp(source, "g"))?.length ?? 0),
+      (total, statement) => total + (statement.query.match(new RegExp(source, "g"))?.length ?? 0),
       0,
     );
     expect(legacyInvocations).toBe(9);
     expect(bundleQueries).toHaveLength(1);
     expect(bundledInvocations).toBe(2);
+
+    const filteredStatements: CapturedStatement[] = [];
+    const filteredDb = instrumentedDb(filteredStatements);
+    try {
+      await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        readWorkspaceInsightsModelBundle(filteredDb.db, {
+          ...seeded.input,
+          provider: "openai",
+          model: "gpt-bundle",
+        }),
+      );
+    } finally {
+      await filteredDb.close();
+    }
+    const filteredQueries = filteredStatements.filter((statement) =>
+      statement.query.includes(source),
+    );
+    const filteredInvocations = filteredQueries.reduce(
+      (total, statement) => total + (statement.query.match(new RegExp(source, "g"))?.length ?? 0),
+      0,
+    );
+    expect(filteredQueries).toHaveLength(1);
+    expect(filteredInvocations).toBe(3);
+    expect(filteredQueries[0]?.query).toContain("null::text");
+  });
+
+  test("bounds outer session-table lookup loops by distinct sessions, not fact rows", async () => {
+    if (!shared) return;
+    const seeded = await fixture();
+    const sourcePrefix = `insights-session-map-${crypto.randomUUID()}-`;
+    const factsPerWindow = 512;
+    await shared.admin`
+      insert into model_call_facts (
+        account_id, workspace_id, session_id, turn_id, source_key, provider,
+        provider_api, model, billing_path, input_tokens, output_tokens,
+        cached_tokens, total_tokens, priced_cost_micros, occurred_at
+      )
+      select
+        ${seeded.accountId}, ${seeded.workspaceId}, ${seeded.sharedSessionId},
+        gen_random_uuid(), ${sourcePrefix} || generated.window_name || '-' || generated.n::text,
+        'openai', 'responses', 'gpt-bundle', 'opengeni_credits', 10, 5, 2, 15, 1,
+        generated.occurred_at
+      from (
+        select 'current'::text as window_name, n,
+          ${seeded.input.since}::timestamp with time zone + interval '1 minute' as occurred_at
+        from generate_series(1, ${factsPerWindow}) generated(n)
+        union all
+        select 'prior'::text as window_name, n,
+          ${seeded.input.priorSince}::timestamp with time zone + interval '1 minute' as occurred_at
+        from generate_series(1, ${factsPerWindow}) generated(n)
+      ) generated`;
+
+    const statements: CapturedStatement[] = [];
+    const capturedDb = instrumentedDb(statements);
+    try {
+      await withSessionRlsActorContext({ subjectId: seeded.ownerSubjectId }, () =>
+        readWorkspaceInsightsModelBundle(capturedDb.db, seeded.input),
+      );
+    } finally {
+      await capturedDb.close();
+    }
+    const statement = statements.find((candidate) =>
+      candidate.query.includes("visible_workspace_insights_model_call_facts"),
+    );
+    expect(statement).toBeDefined();
+    if (!statement) return;
+
+    const app = postgres(shared.appUrl, {
+      max: 1,
+      prepare: false,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    try {
+      const plan = await app.begin(async (transaction) => {
+        await transaction`select set_config('opengeni.account_id', ${seeded.accountId}, true)`;
+        await transaction`select set_config('opengeni.workspace_id', ${seeded.workspaceId}, true)`;
+        await transaction`select set_config('opengeni.subject_id', ${seeded.ownerSubjectId}, true)`;
+        await transaction`select set_config('opengeni.initiating_human_subject_id', '', true)`;
+        const rows = await transaction.unsafe<Array<{ "QUERY PLAN": unknown }>>(
+          `explain (analyze, buffers, format json) ${statement.query}`,
+          statement.parameters,
+        );
+        return rows[0]?.["QUERY PLAN"];
+      });
+      const loops = sessionRelationLoops(plan);
+      expect(loops.length).toBeGreaterThan(0);
+      expect(loops.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(16);
+      expect(factsPerWindow * 2).toBeGreaterThan(1_000);
+    } finally {
+      await app.end();
+    }
   });
 });

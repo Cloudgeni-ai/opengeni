@@ -216,9 +216,10 @@ function mapBundle(value: unknown): WorkspaceInsightsModelBundle {
 }
 
 /**
- * One bounded model-fact read for the Workspace Insights response. The two
- * materialized inputs are the exact current/prior UTC windows; every model
- * projection reuses them without reopening the audited visibility seam.
+ * One bounded model-fact query for the Workspace Insights response. The two
+ * narrow materialized inputs are the exact filtered current/prior UTC windows.
+ * A filtered request adds one unfiltered current-window read because facets are
+ * deliberately workspace-wide; an unfiltered request reuses current_visible.
  */
 export async function readWorkspaceInsightsModelBundle(
   db: Database,
@@ -229,32 +230,91 @@ export async function readWorkspaceInsightsModelBundle(
     input.granularity === "hour"
       ? sql`to_char(date_trunc('hour', fact.occurred_at at time zone 'UTC'), 'YYYY-MM-DD"T"HH24:00')`
       : sql`to_char(date_trunc('day', fact.occurred_at at time zone 'UTC'), 'YYYY-MM-DD')`;
+  const facetSource =
+    input.provider != null || input.model != null
+      ? sql`opengeni_private.visible_workspace_insights_model_call_facts(
+          ${input.workspaceId},
+          ${input.since.toISOString()}::timestamp with time zone,
+          ${input.until.toISOString()}::timestamp with time zone,
+          null::text,
+          null::text
+        ) fact`
+      : sql`current_visible fact`;
   return await withRlsContext(db, context, async (scopedDb) => {
     const [row] = await scopedDb.execute<RawBundleRow>(sql`
       with current_visible as materialized (
         select
-          fact.*,
-          (
-            (${input.provider ?? null}::text is null or fact.provider = ${input.provider ?? null}::text)
-            and (${input.model ?? null}::text is null or fact.model = ${input.model ?? null}::text)
-          ) as selected
+          fact.id,
+          fact.workspace_id,
+          fact.session_id,
+          fact.turn_id,
+          fact.provider,
+          fact.provider_api,
+          fact.model,
+          fact.billing_path,
+          fact.scheduled_task_id,
+          fact.input_tokens,
+          fact.output_tokens,
+          fact.cached_tokens,
+          fact.cache_write_tokens,
+          fact.reasoning_tokens,
+          fact.total_tokens,
+          fact.priced_cost_micros,
+          fact.estimated_provider_cost_micros,
+          fact.pricing_source,
+          fact.context_contributions,
+          fact.occurred_at,
+          fact.recorded_at
         from opengeni_private.visible_workspace_insights_model_call_facts(
           ${input.workspaceId},
           ${input.since.toISOString()}::timestamp with time zone,
-          ${input.until.toISOString()}::timestamp with time zone
+          ${input.until.toISOString()}::timestamp with time zone,
+          ${input.provider ?? null}::text,
+          ${input.model ?? null}::text
         ) fact
       ), prior_visible as materialized (
         select
-          fact.*,
-          (
-            (${input.provider ?? null}::text is null or fact.provider = ${input.provider ?? null}::text)
-            and (${input.model ?? null}::text is null or fact.model = ${input.model ?? null}::text)
-          ) as selected
+          fact.workspace_id,
+          fact.session_id,
+          fact.provider,
+          fact.model,
+          fact.billing_path,
+          fact.input_tokens,
+          fact.output_tokens,
+          fact.cached_tokens,
+          fact.cache_write_tokens,
+          fact.reasoning_tokens,
+          fact.total_tokens,
+          fact.priced_cost_micros,
+          fact.estimated_provider_cost_micros
         from opengeni_private.visible_workspace_insights_model_call_facts(
           ${input.workspaceId},
           ${input.priorSince.toISOString()}::timestamp with time zone,
-          ${input.priorUntil.toISOString()}::timestamp with time zone
+          ${input.priorUntil.toISOString()}::timestamp with time zone,
+          ${input.provider ?? null}::text,
+          ${input.model ?? null}::text
         ) fact
+      ), selected_session_refs as (
+        select fact.workspace_id, fact.session_id
+        from current_visible fact
+        union
+        select fact.workspace_id, fact.session_id
+        from prior_visible fact
+      ), selected_sessions as materialized (
+        select
+          child.workspace_id,
+          child.id as session_id,
+          child.root_session_id,
+          child.title as session_title,
+          child.nested_agent_depth as session_depth,
+          root.title as root_title
+        from selected_session_refs fact_reference
+        inner join sessions child
+          on child.workspace_id = fact_reference.workspace_id
+          and child.id = fact_reference.session_id
+        left join sessions root
+          on root.workspace_id = child.workspace_id
+          and root.id = child.root_session_id
       ), current_model_rows as (
         select
           fact.provider,
@@ -282,7 +342,6 @@ export async function readWorkspaceInsightsModelBundle(
           count(fact.estimated_provider_cost_micros)::bigint
             as estimated_provider_cost_known_calls
         from current_visible fact
-        where fact.selected
         group by fact.provider, fact.model, fact.billing_path
       ), prior_model_rows as (
         select
@@ -311,7 +370,6 @@ export async function readWorkspaceInsightsModelBundle(
           count(fact.estimated_provider_cost_micros)::bigint
             as estimated_provider_cost_known_calls
         from prior_visible fact
-        where fact.selected
         group by fact.provider, fact.model, fact.billing_path
       ), current_series_rows as (
         select
@@ -338,12 +396,11 @@ export async function readWorkspaceInsightsModelBundle(
           )::bigint as cache_known_calls,
           count(*)::bigint as calls
         from current_visible fact
-        where fact.selected
         group by ${bucket}
       ), current_root_aggregates as (
         select
-          child.root_session_id,
-          root.title,
+          session.root_session_id,
+          session.root_title as title,
           coalesce(sum(fact.priced_cost_micros) filter (
             where fact.billing_path = 'opengeni_credits'
           ), 0)::bigint as priced_cost_micros,
@@ -357,12 +414,9 @@ export async function readWorkspaceInsightsModelBundle(
             where fact.cached_tokens is not null and fact.input_tokens is not null
           ), 0)::bigint as cache_input_tokens
         from current_visible fact
-        inner join sessions child
-          on child.workspace_id = fact.workspace_id and child.id = fact.session_id
-        left join sessions root
-          on root.workspace_id = child.workspace_id and root.id = child.root_session_id
-        where fact.selected
-        group by child.root_session_id, root.title
+        inner join selected_sessions session
+          on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
+        group by session.root_session_id, session.root_title
       ), current_root_rows as materialized (
         select *
         from current_root_aggregates
@@ -370,8 +424,8 @@ export async function readWorkspaceInsightsModelBundle(
         limit 8
       ), prior_root_rows as (
         select
-          child.root_session_id,
-          root.title,
+          session.root_session_id,
+          session.root_title as title,
           coalesce(sum(fact.priced_cost_micros) filter (
             where fact.billing_path = 'opengeni_credits'
           ), 0)::bigint as priced_cost_micros,
@@ -385,14 +439,11 @@ export async function readWorkspaceInsightsModelBundle(
             where fact.cached_tokens is not null and fact.input_tokens is not null
           ), 0)::bigint as cache_input_tokens
         from prior_visible fact
-        inner join sessions child
-          on child.workspace_id = fact.workspace_id and child.id = fact.session_id
-        left join sessions root
-          on root.workspace_id = child.workspace_id and root.id = child.root_session_id
+        inner join selected_sessions session
+          on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
         inner join current_root_rows selected_root
-          on selected_root.root_session_id = child.root_session_id
-        where fact.selected
-        group by child.root_session_id, root.title
+          on selected_root.root_session_id = session.root_session_id
+        group by session.root_session_id, session.root_title
       ), schedule_rows as (
         select
           fact.scheduled_task_id,
@@ -412,11 +463,11 @@ export async function readWorkspaceInsightsModelBundle(
           case when bool_or(fact.billing_path = 'opengeni_credits')
             then 'opengeni_credits' else 'external' end as billing_path
         from current_visible fact
-        where fact.selected and fact.scheduled_task_id is not null
+        where fact.scheduled_task_id is not null
         group by fact.scheduled_task_id
       ), facet_rows as (
         select distinct fact.provider, fact.model
-        from current_visible fact
+        from ${facetSource}
         order by fact.provider, fact.model
         limit 500
       ), recent_rows as (
@@ -425,8 +476,8 @@ export async function readWorkspaceInsightsModelBundle(
           fact.occurred_at,
           fact.recorded_at,
           fact.session_id,
-          session.title as session_title,
-          session.nested_agent_depth as session_depth,
+          session.session_title,
+          session.session_depth,
           fact.turn_id,
           fact.provider,
           fact.provider_api,
@@ -442,9 +493,8 @@ export async function readWorkspaceInsightsModelBundle(
           fact.estimated_provider_cost_micros,
           fact.pricing_source
         from current_visible fact
-        left join sessions session
-          on session.workspace_id = fact.workspace_id and session.id = fact.session_id
-        where fact.selected
+        left join selected_sessions session
+          on session.workspace_id = fact.workspace_id and session.session_id = fact.session_id
         order by fact.occurred_at desc, fact.id desc
         limit 50
       ), contribution_coverage as (
@@ -452,7 +502,6 @@ export async function readWorkspaceInsightsModelBundle(
           count(*)::bigint as total_calls,
           count(fact.context_contributions)::bigint as covered_calls
         from current_visible fact
-        where fact.selected
       ), contribution_source_rows as (
         select
           fact.id,
@@ -462,7 +511,6 @@ export async function readWorkspaceInsightsModelBundle(
           (contribution->>'estimatedTokens')::bigint as estimated_tokens
         from current_visible fact
         cross join lateral jsonb_array_elements(fact.context_contributions) contribution
-        where fact.selected
       ), contribution_rows as (
         select
           source,
