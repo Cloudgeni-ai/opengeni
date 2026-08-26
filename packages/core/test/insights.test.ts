@@ -311,7 +311,7 @@ describe("getWorkspaceInsights", () => {
 
   test("uses durable titles and factual identifiers for untitled historical sessions", async () => {
     const { drivers, depth, floor, recent } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(0);
+    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
     restores.push(() => capSpy.mockRestore());
     drivers.mockResolvedValue([
       {
