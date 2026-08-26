@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  accountAuthPopupAcknowledgement,
   accountAuthPopupMessage,
   accountAuthPopupPath,
+  postAccountAuthPopupAcknowledgement,
   postAccountAuthPopupMessage,
 } from "./browser-account-popup";
 
@@ -22,7 +24,10 @@ describe("browser account popup protocol", () => {
       transactionId: TRANSACTION,
     };
     const valid = {
-      data: { type: "opengeni-account-auth-complete" as const, transactionId: TRANSACTION },
+      data: {
+        type: "opengeni-account-auth-complete" as const,
+        transactionId: TRANSACTION,
+      },
       origin: expected.origin,
       source: popup,
     };
@@ -48,5 +53,45 @@ describe("browser account popup protocol", () => {
     };
     expect(postAccountAuthPopupMessage(opener, "https://app.example.test", message)).toBe(true);
     expect(calls).toEqual([[message, "https://app.example.test"]]);
+  });
+
+  test("accepts and posts only an exact same-origin popup acknowledgement", () => {
+    const calls: unknown[][] = [];
+    const opener = {} as Window;
+    const popup = {
+      postMessage: (...args: unknown[]) => calls.push(args),
+    } as unknown as Window;
+    const acknowledgement = {
+      data: {
+        type: "opengeni-account-auth-ack" as const,
+        transactionId: TRANSACTION,
+      },
+      origin: "https://app.example.test",
+      source: opener,
+    };
+    expect(
+      accountAuthPopupAcknowledgement(acknowledgement, {
+        origin: acknowledgement.origin,
+        opener,
+        transactionId: TRANSACTION,
+      }),
+    ).toBe(true);
+    expect(
+      accountAuthPopupAcknowledgement(
+        {
+          ...acknowledgement,
+          data: { ...acknowledgement.data, token: "secret" },
+        },
+        {
+          origin: acknowledgement.origin,
+          opener,
+          transactionId: TRANSACTION,
+        },
+      ),
+    ).toBe(false);
+    expect(
+      postAccountAuthPopupAcknowledgement(popup, "https://app.example.test", TRANSACTION),
+    ).toBe(true);
+    expect(calls).toEqual([[acknowledgement.data, "https://app.example.test"]]);
   });
 });

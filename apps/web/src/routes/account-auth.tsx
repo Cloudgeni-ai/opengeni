@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
+  accountAuthPopupAcknowledgement,
   isAccountAuthTransactionId,
   postAccountAuthPopupMessage,
 } from "@/lib/browser-account-popup";
@@ -21,6 +22,7 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
     operationId: string;
     expectedGeneration: string;
   } | null>(null);
+  const finishInFlight = useRef(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -28,16 +30,53 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
   const validTransactionId = isAccountAuthTransactionId(transactionId) ? transactionId : null;
 
   function finish(type: "opengeni-account-auth-complete" | "opengeni-account-auth-cancel") {
-    if (!validTransactionId) return;
-    const posted = postAccountAuthPopupMessage(window.opener, window.location.origin, {
+    if (!validTransactionId || finishInFlight.current) return;
+    const opener = window.opener;
+    if (!opener) {
+      window.location.replace("/");
+      return;
+    }
+    finishInFlight.current = true;
+    const message = {
       type,
       transactionId: validTransactionId,
-    });
-    if (posted) {
+    } as const;
+    let resendTimer: number | null = null;
+    let timeoutTimer: number | null = null;
+    const cleanup = () => {
+      window.removeEventListener("message", onAcknowledgement);
+      if (resendTimer !== null) window.clearInterval(resendTimer);
+      if (timeoutTimer !== null) window.clearTimeout(timeoutTimer);
+    };
+    const onAcknowledgement = (event: MessageEvent<unknown>) => {
+      if (
+        !accountAuthPopupAcknowledgement(event, {
+          origin: window.location.origin,
+          opener,
+          transactionId: validTransactionId,
+        })
+      ) {
+        return;
+      }
+      cleanup();
       window.close();
-    } else {
+    };
+    const post = () => postAccountAuthPopupMessage(opener, window.location.origin, message);
+    window.addEventListener("message", onAcknowledgement);
+    if (!post()) {
+      cleanup();
       window.location.replace("/");
+      return;
     }
+    // Keep the isolated popup alive until the exact opener acknowledges the
+    // non-secret receipt. WebKit can discard a queued postMessage when its
+    // sender closes immediately; bounded replay is safe because settlement is
+    // authority-reread and transaction-idempotent.
+    resendTimer = window.setInterval(post, 100);
+    timeoutTimer = window.setTimeout(() => {
+      cleanup();
+      window.location.replace("/");
+    }, 3_000);
   }
 
   async function submit() {

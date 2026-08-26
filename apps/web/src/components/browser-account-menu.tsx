@@ -57,6 +57,7 @@ export function BrowserAccountMenu() {
   const [logoutTarget, setLogoutTarget] = useState<ManagedAuthLoginSlot | null>(null);
   const [replacementSlotId, setReplacementSlotId] = useState<string | null>(null);
   const [logoutAllOpen, setLogoutAllOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [announcement, setAnnouncement] = useState("");
   const projection = accounts.projection;
   const selected = projection?.slots.find((slot) => slot.id === projection.selectedSlotId) ?? null;
@@ -138,7 +139,9 @@ export function BrowserAccountMenu() {
         restoreFocus();
       }
     } catch (error) {
-      toast.error("Couldn't sign out this account", { description: String(error) });
+      toast.error("Couldn't sign out this account", {
+        description: String(error),
+      });
     }
   }
 
@@ -147,7 +150,9 @@ export function BrowserAccountMenu() {
       const settled = await accounts.logoutAll();
       if (settled) setLogoutAllOpen(false);
     } catch (error) {
-      toast.error("Couldn't sign out all browser accounts", { description: String(error) });
+      toast.error("Couldn't sign out all browser accounts", {
+        description: String(error),
+      });
     }
   }
 
@@ -156,12 +161,19 @@ export function BrowserAccountMenu() {
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
-      <DropdownMenu modal={false}>
+      <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button
             ref={triggerRef}
             type="button"
             aria-label={`Account menu. ${displayName} is active.`}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              // Own the Enter transition so native button activation cannot
+              // immediately toggle Radix closed on Firefox or WebKit.
+              event.preventDefault();
+              setMenuOpen(true);
+            }}
             className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none forced-colors:border forced-colors:border-transparent forced-colors:focus:border-[Highlight]"
           >
             <Avatar size="sm">
@@ -413,11 +425,11 @@ export function BrowserAccountMenu() {
             <Button
               className="min-h-11"
               onClick={() =>
-                void accounts
-                  .continueTransition()
-                  .catch((error) =>
-                    toast.error("Couldn't change accounts", { description: String(error) }),
-                  )
+                void accounts.continueTransition().catch((error) =>
+                  toast.error("Couldn't change accounts", {
+                    description: String(error),
+                  }),
+                )
               }
             >
               Continue and clear

@@ -7,6 +7,7 @@ import {
   accountAuthPopupFeatures,
   accountAuthPopupMessage,
   accountAuthPopupPath,
+  postAccountAuthPopupAcknowledgement,
 } from "@/lib/browser-account-popup";
 
 type PendingPopup = {
@@ -52,6 +53,11 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
         transactionId: pending.transactionId,
       });
       if (!message) return;
+      postAccountAuthPopupAcknowledgement(
+        pending.popup,
+        window.location.origin,
+        message.transactionId,
+      );
       const onSettled = settledCallbackRef.current;
       clearPending();
       const settle =
@@ -61,7 +67,9 @@ export function useBrowserAccountPopup(): BrowserAccountPopupController {
       void settle
         .then(() => onSettled?.())
         .catch((error) =>
-          toast.error("Account authentication did not settle", { description: String(error) }),
+          toast.error("Account authentication did not settle", {
+            description: String(error),
+          }),
         );
     };
     window.addEventListener("message", onMessage);

@@ -8,6 +8,11 @@ export type AccountAuthPopupMessage = {
   transactionId: string;
 };
 
+export type AccountAuthPopupAcknowledgement = {
+  type: "opengeni-account-auth-ack";
+  transactionId: string;
+};
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 export function isAccountAuthTransactionId(value: unknown): value is string {
@@ -60,5 +65,33 @@ export function postAccountAuthPopupMessage(
 ): boolean {
   if (!target || !isAccountAuthTransactionId(message.transactionId)) return false;
   target.postMessage(message, origin);
+  return true;
+}
+
+export function accountAuthPopupAcknowledgement(
+  event: Pick<MessageEvent<unknown>, "data" | "origin" | "source">,
+  expected: { origin: string; opener: Window; transactionId: string },
+): boolean {
+  if (event.origin !== expected.origin || event.source !== expected.opener) return false;
+  if (!event.data || typeof event.data !== "object" || Array.isArray(event.data)) return false;
+  const value = event.data as Record<string, unknown>;
+  return (
+    Object.keys(value).sort().join("\u0000") === "transactionId\u0000type" &&
+    value.type === "opengeni-account-auth-ack" &&
+    value.transactionId === expected.transactionId
+  );
+}
+
+export function postAccountAuthPopupAcknowledgement(
+  target: Window | null,
+  origin: string,
+  transactionId: string,
+): boolean {
+  if (!target || !isAccountAuthTransactionId(transactionId)) return false;
+  const acknowledgement: AccountAuthPopupAcknowledgement = {
+    type: "opengeni-account-auth-ack",
+    transactionId,
+  };
+  target.postMessage(acknowledgement, origin);
   return true;
 }
