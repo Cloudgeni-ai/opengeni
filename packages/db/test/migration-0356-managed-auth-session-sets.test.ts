@@ -172,6 +172,82 @@ describe("migration 0356 managed browser session sets", () => {
     expect(await getManagedAuthSessionSetAuthorityState(client!.db, hex("absent"))).toBe("absent");
   });
 
+  test("materializes an empty broker set only on the first fenced add transaction", async () => {
+    if (!owned || !client) return;
+    const authority = `authority-${crypto.randomUUID()}`;
+    const authorityHash = hex(authority);
+    const operationId = crypto.randomUUID();
+    const transactionId = crypto.randomUUID();
+    const input = {
+      authorityHash,
+      csrfHash: hex(`csrf:${authority}`),
+      operationId,
+      requestDigest: hex("begin-greenfield-broker-add"),
+      expectedGeneration: "1",
+      expectedActorEpoch: "1",
+      transactionId,
+      transactionSecretHash: hex(`secret:${transactionId}`),
+      kind: "add" as const,
+      targetSlotId: null,
+      returnIntentId: null,
+      returnPath: null,
+      expiresAt: new Date(Date.now() + 300_000),
+    };
+
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("absent");
+    const begun = await beginManagedAuthLoginTransaction(client.db, input);
+    expect(begun).toMatchObject({ id: transactionId, kind: "add", returnIntentId: null });
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("active");
+    expect(
+      (
+        await getManagedAuthSessionSetSnapshot(client.db, {
+          authorityHash,
+          mode: "broker",
+          readOnly: true,
+        })
+      )?.projection,
+    ).toMatchObject({
+      generation: "1",
+      actorEpoch: "1",
+      selectedSlotId: null,
+      state: "ready",
+      slots: [],
+    });
+
+    const replay = await beginManagedAuthLoginTransaction(client.db, {
+      ...input,
+      transactionId: crypto.randomUUID(),
+    });
+    expect(replay).toEqual(begun);
+    const [counts] = await owned.admin<
+      Array<{ sets: string; transactions: string; operations: string }>
+    >`
+      select
+        (select count(*)::text from managed_auth_session_sets
+          where authority_hash = ${authorityHash}) as sets,
+        (select count(*)::text from managed_auth_login_transactions
+          where session_set_id = (select id from managed_auth_session_sets
+            where authority_hash = ${authorityHash})) as transactions,
+        (select count(*)::text from managed_auth_session_set_operations
+          where operation_id = ${operationId}::uuid) as operations
+    `;
+    expect(counts).toEqual({ sets: "1", transactions: "1", operations: "1" });
+
+    const reauthAuthority = hex(`reauth-authority-${crypto.randomUUID()}`);
+    await expect(
+      beginManagedAuthLoginTransaction(client.db, {
+        ...input,
+        authorityHash: reauthAuthority,
+        operationId: crypto.randomUUID(),
+        transactionId: crypto.randomUUID(),
+        requestDigest: hex("begin-greenfield-broker-reauth"),
+        kind: "reauth",
+        targetSlotId: crypto.randomUUID(),
+      }),
+    ).rejects.toBeTruthy();
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, reauthAuthority)).toBe("absent");
+  });
+
   test("keeps same-human exact login bindings in independent slots without changing selection", async () => {
     if (!owned || !client) return;
     const first = await createLogin({ label: "Shared Human A" });

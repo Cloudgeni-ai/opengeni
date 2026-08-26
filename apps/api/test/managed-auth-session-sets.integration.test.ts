@@ -9,6 +9,7 @@ import {
 } from "@opengeni/contracts/managed-auth-session-sets";
 import {
   MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+  MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE,
   MANAGED_AUTH_SESSION_SET_COOKIE,
   managedAuthSha256,
 } from "@opengeni/core/managed-auth-session-sets";
@@ -65,6 +66,61 @@ function mutationHeaders(
 }
 
 describe("managed session-set API with Better Auth and PostgreSQL", () => {
+  test("starts the first isolated Add from a read-only empty broker projection", async () => {
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        managedAuthSessionSetMode: "broker",
+        betterAuthSecret: "managed-session-set-integration-secret-32-bytes",
+        publicBaseUrl: "http://opengeni.test",
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+    const initialResponse = await app.request("/v1/auth/session-set");
+    expect(initialResponse.status).toBe(200);
+    const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
+    const authorityCookie = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
+    const authorityHash = managedAuthSha256(authorityValue(authorityCookie));
+    expect(initial).toMatchObject({
+      mode: "broker",
+      generation: "1",
+      actorEpoch: "1",
+      selectedSlotId: null,
+      slots: [],
+    });
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("absent");
+
+    const body = JSON.stringify({
+      operationId: crypto.randomUUID(),
+      expectedGeneration: initial.generation,
+      kind: "add",
+    });
+    const begin = await app.request("/v1/auth/session-set/transactions", {
+      method: "POST",
+      headers: mutationHeaders(initial, authorityCookie),
+      body,
+    });
+    expect(begin.status).toBe(200);
+    const transaction = (await begin.json()) as Record<string, unknown>;
+    expect(transaction).toMatchObject({ kind: "add", returnIntentId: null });
+    expect(transaction.id).toBeString();
+    expect(oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE)).toContain(
+      String(transaction.id),
+    );
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("active");
+
+    const replay = await app.request("/v1/auth/session-set/transactions", {
+      method: "POST",
+      headers: mutationHeaders(initial, authorityCookie),
+      body,
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual(transaction);
+  });
+
   test("converges two pre-bootstrap tabs, replays exactly, and exposes no provider token", async () => {
     const app = createApp({
       settings: testSettings({

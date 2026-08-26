@@ -1080,10 +1080,13 @@ BEGIN
       set_row managed_auth_session_sets%%ROWTYPE;
       slot_row managed_auth_login_slots%%ROWTYPE;
       prior_operation managed_auth_session_set_operations%%ROWTYPE;
+      installation_uuid uuid;
       result jsonb;
       previous_marker text := pg_catalog.current_setting('opengeni.managed_auth_session_set_lifecycle', true);
     BEGIN
-      IF p_request_digest !~ '^[0-9a-f]{64}$' OR p_transaction_secret_hash !~ '^[0-9a-f]{64}$'
+      IF p_authority_hash !~ '^[0-9a-f]{64}$' OR p_csrf_hash !~ '^[0-9a-f]{64}$'
+        OR p_request_digest !~ '^[0-9a-f]{64}$' OR p_transaction_secret_hash !~ '^[0-9a-f]{64}$'
+        OR p_operation_id IS NULL
         OR p_kind NOT IN ('add', 'reauth') OR p_expected_generation < 1 OR p_expected_actor_epoch < 1
         OR p_expires_at <= pg_catalog.clock_timestamp() OR p_expires_at > pg_catalog.clock_timestamp() + interval '10 minutes'
         OR ((p_kind = 'reauth') <> (p_target_slot_id IS NOT NULL))
@@ -1092,7 +1095,26 @@ BEGIN
       PERFORM pg_catalog.set_config('opengeni.managed_auth_session_set_lifecycle', 'active', true);
       SELECT * INTO set_row FROM managed_auth_session_sets
       WHERE authority_hash = p_authority_hash FOR UPDATE;
-      IF NOT FOUND OR set_row.csrf_hash <> p_csrf_hash THEN RAISE EXCEPTION 'managed auth session-set authority denied' USING ERRCODE = '42501'; END IF;
+      IF NOT FOUND THEN
+        IF p_kind <> 'add' OR p_expected_generation <> 1 OR p_expected_actor_epoch <> 1
+        THEN RAISE EXCEPTION 'managed auth session-set authority denied' USING ERRCODE = '42501'; END IF;
+        INSERT INTO managed_auth_browser_installations (authority_hash)
+        VALUES (p_authority_hash)
+        ON CONFLICT (authority_hash) DO NOTHING;
+        SELECT id INTO installation_uuid FROM managed_auth_browser_installations
+        WHERE authority_hash = p_authority_hash AND revoked_at IS NULL FOR UPDATE;
+        IF NOT FOUND THEN
+          RAISE EXCEPTION 'managed auth browser installation is unavailable' USING ERRCODE = '42501';
+        END IF;
+        INSERT INTO managed_auth_session_sets (installation_id, authority_hash, csrf_hash)
+        VALUES (installation_uuid, p_authority_hash, p_csrf_hash)
+        ON CONFLICT (authority_hash) DO NOTHING;
+        SELECT * INTO set_row FROM managed_auth_session_sets
+        WHERE authority_hash = p_authority_hash AND revoked_at IS NULL FOR UPDATE;
+      END IF;
+      IF NOT FOUND OR set_row.csrf_hash <> p_csrf_hash THEN
+        RAISE EXCEPTION 'managed auth session-set authority denied' USING ERRCODE = '42501';
+      END IF;
       SELECT * INTO prior_operation FROM managed_auth_session_set_operations WHERE operation_id = p_operation_id;
       IF FOUND THEN
         IF prior_operation.session_set_id <> set_row.id OR prior_operation.request_digest <> p_request_digest
