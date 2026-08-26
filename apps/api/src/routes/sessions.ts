@@ -153,6 +153,7 @@ import {
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
+  SessionVariableSetSelectionUnavailableError,
   workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
   SessionTenancyConflictError,
@@ -4673,6 +4674,16 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
     // Covers the create-vs-channel-delete race the pre-validation cannot: the
     // insert's FK rejection surfaces as the same 422 an unknown id gets.
     return c.json({ code: "SESSION_CREATE_REJECTED", message: error.message }, 422);
+  }
+  if (error instanceof SessionVariableSetSelectionUnavailableError) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { variableSetIds: error.variableSetIds },
+      },
+      422,
+    );
   }
   if (error instanceof SessionSpawnDeniedError) {
     return c.json(

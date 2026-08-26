@@ -244,6 +244,83 @@ async function variableSetControlAuthorization(value: Awaited<ReturnType<typeof 
   })}`;
 }
 
+async function variableSetCreateAuthorization(value: Awaited<ReturnType<typeof fixture>>) {
+  return `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: value.grant.subjectId,
+    permissions: ["sessions:create", "sessions:read", "variable-sets:attach", "variable-sets:use"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3_600,
+  })}`;
+}
+
+async function sessionCreateFootprint(
+  workspaceId: string,
+  sessionId: string,
+  createIdempotencyKey: string,
+) {
+  if (!shared) throw new Error("database unavailable");
+  const [state] = await shared.admin<
+    Array<{
+      sessionCount: number;
+      selectionCount: number;
+      attachmentCount: number;
+      eventCount: number;
+      auditCount: number;
+      turnCount: number;
+      historyCount: number;
+      wakeCount: number;
+      leaseCount: number;
+      runtimeMutationCount: number;
+      usageCount: number;
+      spawnDenialCount: number;
+    }>
+  >`
+    select
+      (select count(*)::int from sessions session_value
+        where session_value.workspace_id = ${workspaceId}
+          and session_value.id = ${sessionId}) as "sessionCount",
+      (select count(*)::int from sessions session_value
+        where session_value.workspace_id = ${workspaceId}
+          and session_value.id = ${sessionId}
+          and (session_value.variable_set_id is not null
+            or session_value.variable_set_ids <> '[]'::jsonb)) as "selectionCount",
+      (select count(*)::int from session_variable_set_attachments attachment
+        where attachment.workspace_id = ${workspaceId}
+          and attachment.session_id = ${sessionId}) as "attachmentCount",
+      (select count(*)::int from session_events event_value
+        where event_value.workspace_id = ${workspaceId}
+          and event_value.session_id = ${sessionId}) as "eventCount",
+      (select count(*)::int from audit_events audit_value
+        where audit_value.workspace_id = ${workspaceId}
+          and audit_value.target_id = ${sessionId}) as "auditCount",
+      (select count(*)::int from session_turns turn_value
+        where turn_value.workspace_id = ${workspaceId}
+          and turn_value.session_id = ${sessionId}) as "turnCount",
+      (select count(*)::int from session_history_items history_value
+        where history_value.workspace_id = ${workspaceId}
+          and history_value.session_id = ${sessionId}) as "historyCount",
+      (select count(*)::int from session_workflow_wake_outbox wake_value
+        where wake_value.workspace_id = ${workspaceId}
+          and wake_value.session_id = ${sessionId}) as "wakeCount",
+      (select count(*)::int from sandbox_leases lease_value
+        where lease_value.workspace_id = ${workspaceId}
+          and lease_value.sandbox_group_id = ${sessionId}) as "leaseCount",
+      (select count(*)::int from sandbox_workspace_mutation_admissions admission_value
+        where admission_value.workspace_id = ${workspaceId}
+          and admission_value.session_id = ${sessionId}) as "runtimeMutationCount",
+      (select count(*)::int from usage_events usage_value
+        where usage_value.workspace_id = ${workspaceId}
+          and usage_value.session_id = ${sessionId}) as "usageCount",
+      (select count(*)::int from session_spawn_denials denial_value
+        where denial_value.workspace_id = ${workspaceId}
+          and denial_value.idempotency_key = ${createIdempotencyKey}) as "spawnDenialCount"
+  `;
+  if (!state) throw new Error("session create footprint is unavailable");
+  return state;
+}
+
 async function sessionVariableSetMutationState(value: Awaited<ReturnType<typeof fixture>>) {
   if (!shared) throw new Error("database unavailable");
   const [state] = await shared.admin<
@@ -386,6 +463,120 @@ async function expectControlledVariableSetRemovalRace(removal: "revoke" | "delet
     expect(response.status).toBe(422);
     expect(await response.text()).toContain("no longer available");
     expect(await sessionVariableSetMutationState(value)).toEqual(before);
+  } finally {
+    releaseBlocker.resolve();
+    await Promise.allSettled([...(blocker ? [blocker] : []), ...(request ? [request] : [])]);
+    await routeClient.close();
+    await removalClient.close();
+  }
+}
+
+async function expectControlledVariableSetCreateRemovalRace(
+  removal: "revoke" | "delete",
+): Promise<void> {
+  if (!shared) throw new Error("database unavailable");
+  const value = await fixture();
+  const retainedVariableSet = await createVariableSet(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: `session-create-${removal}-retained-${crypto.randomUUID()}`,
+  });
+  const variableSet = await createVariableSet(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: `session-create-${removal}-race-${crypto.randomUUID()}`,
+  });
+  const requestedSessionId = crypto.randomUUID();
+  const createIdempotencyKey = `session-create-${removal}-${crypto.randomUUID()}`;
+  const routeClient = createDb(shared.appUrl, { max: 1 });
+  const removalClient = createDb(shared.appUrl, { max: 1 });
+  const blockerReady = deferred<number>();
+  const releaseBlocker = deferred();
+  let blocker: Promise<unknown> | null = null;
+  let request: Promise<Response> | null = null;
+  try {
+    blocker = shared.admin.begin(async (tx) => {
+      const [backend] = await tx<{ pid: number }[]>`select pg_backend_pid()::int as pid`;
+      if (!backend) throw new Error("session create blocker backend is unavailable");
+      await tx`select pg_advisory_xact_lock(
+        hashtextextended(${`workspace-control:${value.grant.workspaceId}`}, 0)
+      )`;
+      await tx`select workspace_id from workspace_inference_controls
+        where workspace_id = ${value.grant.workspaceId}
+        for update`;
+      blockerReady.resolve(backend.pid);
+      await releaseBlocker.promise;
+    });
+    const blockerPid = await blockerReady.promise;
+    const app = appWith(undefined, routeClient.db);
+    request = app.request(`/v1/workspaces/${value.grant.workspaceId}/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: await variableSetCreateAuthorization(value),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        requestedSessionId,
+        initialMessage: `Variable Set create ${removal} race`,
+        ...(removal === "revoke" ? { idempotencyKey: createIdempotencyKey } : {}),
+        variableSetIds:
+          removal === "revoke"
+            ? [variableSet.id, retainedVariableSet.id]
+            : [retainedVariableSet.id, variableSet.id],
+      }),
+    });
+    expect(
+      await waitForBlockedBackend(blockerPid, `Variable Set create ${removal} race request`),
+    ).toBeGreaterThan(0);
+
+    if (removal === "revoke") {
+      expect(
+        await deleteVariableSet(
+          removalClient.db,
+          {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId,
+            subjectId: value.grant.subjectId,
+          },
+          variableSet.id,
+        ),
+      ).toBe(true);
+    } else {
+      await shared.admin`
+        delete from workspace_variable_sets
+        where account_id = ${value.grant.accountId}
+          and id = ${variableSet.id}
+      `;
+    }
+    releaseBlocker.resolve();
+
+    const response = await request;
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({
+      code: "SESSION_CREATE_REJECTED",
+      message: "One or more selected Variable Sets are no longer available.",
+      details: { variableSetIds: [variableSet.id] },
+    });
+    expect(
+      await sessionCreateFootprint(
+        value.grant.workspaceId,
+        requestedSessionId,
+        createIdempotencyKey,
+      ),
+    ).toEqual({
+      sessionCount: 0,
+      selectionCount: 0,
+      attachmentCount: 0,
+      eventCount: 0,
+      auditCount: 0,
+      turnCount: 0,
+      historyCount: 0,
+      wakeCount: 0,
+      leaseCount: 0,
+      runtimeMutationCount: 0,
+      usageCount: 0,
+      spawnDenialCount: 0,
+    });
   } finally {
     releaseBlocker.resolve();
     await Promise.allSettled([...(blocker ? [blocker] : []), ...(request ? [request] : [])]);
@@ -637,6 +828,70 @@ describe("embedding host session authorization routes", () => {
   test("returns 422 without session mutation when Variable Set delete wins after validation", async () => {
     if (!available || !shared) return;
     await expectControlledVariableSetRemovalRace("delete");
+  });
+
+  test("returns structured 422 with no partial create when Variable Set revoke wins after validation", async () => {
+    if (!available || !shared) return;
+    await expectControlledVariableSetCreateRemovalRace("revoke");
+  });
+
+  test("returns structured 422 with no partial create when Variable Set delete wins after validation", async () => {
+    if (!available || !shared) return;
+    await expectControlledVariableSetCreateRemovalRace("delete");
+  });
+
+  test("preserves unrelated create-time foreign key failures", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    const variableSet = await createVariableSet(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      name: `session-create-unrelated-fk-${crypto.randomUUID()}`,
+    });
+    let failure: unknown;
+    try {
+      await createSession(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        initialMessage: "unrelated create FK",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "modal",
+        variableSetIds: [variableSet.id],
+        variableSetId: variableSet.id,
+        createdBy: { kind: "subject", subjectId: value.grant.subjectId, label: "Test owner" },
+        createdByContext: {},
+        subjectId: value.grant.subjectId,
+        beforeCreateCommit: async () => {
+          await shared.admin`
+            insert into session_variable_set_attachments (
+              account_id,
+              workspace_id,
+              session_id,
+              variable_set_id,
+              position,
+              session_status
+            ) values (
+              ${value.grant.accountId},
+              ${value.grant.workspaceId},
+              ${crypto.randomUUID()},
+              ${variableSet.id},
+              0,
+              'queued'
+            )
+          `;
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect((failure as { code?: string } | undefined)?.code).toBe("23503");
+    expect((failure as { constraint_name?: string } | undefined)?.constraint_name).toBe(
+      "session_variable_set_attachments_session_fk",
+    );
   });
 
   test("rejects Variable Set replacement after a prompt has been accepted but not claimed", async () => {

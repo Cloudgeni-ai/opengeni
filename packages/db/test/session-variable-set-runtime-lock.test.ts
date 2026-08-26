@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 const repoRoot = join(import.meta.dir, "../../..");
 
-describe("post-start session Variable Set runtime fence", () => {
+describe("session Variable Set runtime fence", () => {
   test("serializes replacement with first lease creation and holder publication", () => {
     const source = readFileSync(join(repoRoot, "packages/db/src/index.ts"), "utf8");
     const updateStart = source.indexOf("export async function updateSessionVariableSets(");
@@ -29,8 +29,6 @@ describe("post-start session Variable Set runtime fence", () => {
     expect(updateSource).toContain("from ${schema.sessionSystemUpdates} update_row");
     expect(updateSource).toContain("from ${schema.sessionGoals} goal_row");
     expect(updateSource).toContain("isSessionVariableSetSelectionFkViolation(error)");
-    expect(source).toContain('"sessions_environment_id_fkey"');
-    expect(source).toContain('"session_variable_set_attachments_variable_set_id_fkey"');
     expect(updateSource).toContain("const current = await getVariableSet(");
     expect(updateSource).toContain('status: "invalid_variable_sets"');
     expect(updateSource.indexOf("lockSessionEventWriteRows")).toBeLessThan(
@@ -55,5 +53,46 @@ describe("post-start session Variable Set runtime fence", () => {
     );
     expect(dependencyReadSource).toContain("schema.sessions.variableSetIds");
     expect(dependencyReadSource).not.toContain("schema.sessionVariableSetAttachments");
+  });
+
+  test("translates only exact create selection foreign keys after rollback", () => {
+    const source = readFileSync(join(repoRoot, "packages/db/src/index.ts"), "utf8");
+    const routeSource = readFileSync(join(repoRoot, "apps/api/src/routes/sessions.ts"), "utf8");
+    const classifierStart = source.indexOf("const sessionVariableSetSelectionFkConstraints");
+    const classifierEnd = source.indexOf("function mapChannel(", classifierStart);
+    const createStart = source.indexOf("export async function createSession(");
+    const createEnd = source.indexOf(
+      "export async function createSessionWithIdempotencyKeyResult(",
+      createStart,
+    );
+    const keyedCreateStart = createEnd;
+    const keyedCreateEnd = source.indexOf(
+      "export async function createSessionWithIdempotencyKey(",
+      keyedCreateStart,
+    );
+    const classifierSource = source.slice(classifierStart, classifierEnd);
+    const constraintSetSource = classifierSource.slice(
+      classifierSource.indexOf("["),
+      classifierSource.indexOf("]);") + 2,
+    );
+    const createSource = source.slice(createStart, createEnd);
+    const keyedCreateSource = source.slice(keyedCreateStart, keyedCreateEnd);
+
+    expect(constraintSetSource.match(/"[^"]+"/g)).toEqual([
+      '"sessions_environment_id_fkey"',
+      '"session_variable_set_attachments_variable_set_id_fkey"',
+    ]);
+    expect(classifierSource).toContain('nestedPostgresSqlState(error) === "23503"');
+    expect(classifierSource).toContain("sessionVariableSetSelectionFkConstraints.has(");
+    expect(classifierSource).toContain("translateSessionVariableSetSelectionCreateError(");
+    expect(classifierSource).toContain("subjectId: input.subjectId");
+    expect(classifierSource).toContain("const current = await getVariableSet(");
+    expect(classifierSource).toContain(
+      "throw new SessionVariableSetSelectionUnavailableError(unavailableVariableSetIds, error)",
+    );
+    expect(createSource).toContain("translateSessionVariableSetSelectionCreateError(");
+    expect(keyedCreateSource).toContain("translateSessionVariableSetSelectionCreateError(");
+    expect(routeSource).toContain("error instanceof SessionVariableSetSelectionUnavailableError");
+    expect(routeSource).toContain("details: { variableSetIds: error.variableSetIds }");
   });
 });

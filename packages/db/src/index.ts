@@ -17240,7 +17240,7 @@ function isSessionChannelFkViolation(error: unknown): boolean {
 const sessionVariableSetSelectionFkConstraints = new Set([
   // Legacy final-entry mirror on sessions.variable_set_id.
   "sessions_environment_id_fkey",
-  // Ordered attachment projection populated by the session UPDATE trigger.
+  // Ordered attachment projection populated by the session INSERT/UPDATE trigger.
   "session_variable_set_attachments_variable_set_id_fkey",
 ]);
 
@@ -17250,6 +17250,51 @@ function isSessionVariableSetSelectionFkViolation(error: unknown): boolean {
     nestedPostgresSqlState(error) === "23503" &&
     sessionVariableSetSelectionFkConstraints.has(safeDatabaseErrorFacts(error).constraint ?? "")
   );
+}
+
+export class SessionVariableSetSelectionUnavailableError extends Error {
+  readonly variableSetIds: string[];
+
+  constructor(variableSetIds: string[], cause?: unknown) {
+    super(
+      "One or more selected Variable Sets are no longer available.",
+      cause === undefined ? undefined : { cause },
+    );
+    this.name = "SessionVariableSetSelectionUnavailableError";
+    this.variableSetIds = variableSetIds;
+  }
+}
+
+async function translateSessionVariableSetSelectionCreateError(
+  db: Database,
+  input: SessionCreateInput,
+  error: unknown,
+): Promise<never> {
+  if (!isSessionVariableSetSelectionFkViolation(error) || !input.subjectId) throw error;
+
+  // The failed create transaction, including its session row and projection
+  // trigger, has rolled back. Resolve the exact requested identities under the
+  // original account/workspace/subject RLS scope before translating the known
+  // FK race. If every identity is still available, preserve the original
+  // integrity failure so an unrelated defect cannot be hidden.
+  const variableSetIds = [
+    ...new Set(input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : [])),
+  ];
+  const unavailableVariableSetIds: string[] = [];
+  for (const variableSetId of variableSetIds) {
+    const current = await getVariableSet(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+      },
+      variableSetId,
+    );
+    if (!current) unavailableVariableSetIds.push(variableSetId);
+  }
+  if (unavailableVariableSetIds.length === 0) throw error;
+  throw new SessionVariableSetSelectionUnavailableError(unavailableVariableSetIds, error);
 }
 
 function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
@@ -27984,15 +28029,20 @@ export async function createSession(db: Database, input: SessionCreateInput): Pr
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
   const id = input.requestedSessionId ?? crypto.randomUUID();
-  const result = await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await withSessionActivitySavepoint(
-        scopedDb,
-        async (tx) => await createSessionInTransaction(tx, input, id),
-      ),
-  );
+  let result: SessionCreateResult;
+  try {
+    result = await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await withSessionActivitySavepoint(
+          scopedDb,
+          async (tx) => await createSessionInTransaction(tx, input, id),
+        ),
+    );
+  } catch (error) {
+    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+  }
   if (result.denied) {
     // Throw only after withRlsContext's outer transaction commits the denial.
     throw new SessionSpawnDeniedDbError(result.denial);
@@ -28017,15 +28067,19 @@ export async function createSessionWithIdempotencyKeyResult(
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
   const id = input.requestedSessionId ?? crypto.randomUUID();
-  return await withSessionActivityRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await withSessionActivitySavepoint(
-        scopedDb,
-        async (tx) => await createSessionInTransaction(tx, input, id),
-      ),
-  );
+  try {
+    return await withSessionActivityRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) =>
+        await withSessionActivitySavepoint(
+          scopedDb,
+          async (tx) => await createSessionInTransaction(tx, input, id),
+        ),
+    );
+  } catch (error) {
+    return await translateSessionVariableSetSelectionCreateError(db, input, error);
+  }
 }
 
 /**
