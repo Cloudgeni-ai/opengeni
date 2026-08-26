@@ -3,7 +3,11 @@ import * as opengeniDb from "@opengeni/db";
 import type { Database, WorkspaceInsightsModelBundle } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 
-import { getWorkspaceInsights } from "../src/domain/insights";
+import {
+  getWorkspaceInsights,
+  normalizeWorkspaceInsightsFilter,
+  WorkspaceInsightsFilterValidationError,
+} from "../src/domain/insights";
 
 const WORKSPACE = "33333333-3333-4333-8333-333333333333";
 const db = {} as Database;
@@ -28,6 +32,19 @@ function emptyModelBundle(): WorkspaceInsightsModelBundle {
   };
 }
 
+function emptyUsageBundle(): opengeniDb.WorkspaceInsightsUsageBundle {
+  return {
+    workspaceCreditMicros: 0,
+    priorWorkspaceCreditMicros: 0,
+    warmSeconds: 0,
+    priorWarmSeconds: 0,
+    buckets: new Map(),
+    warmGroups: [],
+    billableTokensUsed: 0,
+    agentRunsUsed: 0,
+  };
+}
+
 describe("getWorkspaceInsights", () => {
   const restores: Array<() => void> = [];
   afterEach(() => {
@@ -46,6 +63,10 @@ describe("getWorkspaceInsights", () => {
       emptyModelBundle(),
     );
     restores.push(() => modelBundle.mockRestore());
+    const usageBundle = spyOn(opengeniDb, "readWorkspaceInsightsUsageBundle").mockResolvedValue(
+      emptyUsageBundle(),
+    );
+    restores.push(() => usageBundle.mockRestore());
     const usage = spyOn(opengeniDb, "sumUsageQuantityInRange").mockResolvedValue(0);
     restores.push(() => usage.mockRestore());
     const usageDay = spyOn(opengeniDb, "sumUsageQuantityByDay").mockResolvedValue(new Map());
@@ -80,19 +101,69 @@ describe("getWorkspaceInsights", () => {
     restores.push(() => attached.mockRestore());
     const machines = spyOn(opengeniDb, "countOnlineMachines").mockResolvedValue(0);
     restores.push(() => machines.mockRestore());
-    return { machines, modelBundle, usageDay, usageHour, depth, floor };
+    return {
+      requireWorkspace,
+      machines,
+      modelBundle,
+      usageBundle,
+      usageDay,
+      usageHour,
+      depth,
+      floor,
+    };
   }
 
+  test("normalizes empty and valid boundary filters before analytical reads", async () => {
+    const { modelBundle } = stubEmptyWorkspace();
+    const provider = "p".repeat(256);
+    const model = "m".repeat(512);
+
+    await getWorkspaceInsights(db, testSettings({ sandboxSelfhostedEnabled: false }), {
+      workspaceId: WORKSPACE,
+      range: "week",
+      provider: ` ${provider} `,
+      model: `\n${model}\t`,
+      now: new Date("2026-07-15T12:00:00.000Z"),
+    });
+    expect(modelBundle.mock.calls[0]?.[1]).toMatchObject({ provider, model });
+
+    await getWorkspaceInsights(db, testSettings({ sandboxSelfhostedEnabled: false }), {
+      workspaceId: WORKSPACE,
+      range: "week",
+      provider: " \t\n ",
+      model: " all ",
+      now: new Date("2026-07-15T12:00:00.000Z"),
+    });
+    expect(modelBundle.mock.calls[1]?.[1]).toMatchObject({ provider: null, model: null });
+  });
+
+  test("rejects provider and model UTF-8 overflow before storage", async () => {
+    const { requireWorkspace } = stubEmptyWorkspace();
+
+    await expect(
+      getWorkspaceInsights(db, testSettings({ sandboxSelfhostedEnabled: false }), {
+        workspaceId: WORKSPACE,
+        range: "week",
+        provider: "p".repeat(257),
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceInsightsFilterValidationError);
+    await expect(
+      getWorkspaceInsights(db, testSettings({ sandboxSelfhostedEnabled: false }), {
+        workspaceId: WORKSPACE,
+        range: "week",
+        model: "m".repeat(513),
+      }),
+    ).rejects.toBeInstanceOf(WorkspaceInsightsFilterValidationError);
+    expect(requireWorkspace).not.toHaveBeenCalled();
+  });
+
   test("uses UTC-month model.tokens and agent_run.created for caps", async () => {
-    stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockImplementation(
-      async (_db, input) => {
-        if (input.eventType === "model.tokens") return 1_234;
-        if (input.eventType === "agent_run.created") return 7;
-        throw new Error(`unexpected cap meter ${input.eventType}`);
-      },
-    );
-    restores.push(() => capSpy.mockRestore());
+    const { usageBundle } = stubEmptyWorkspace();
+    usageBundle.mockResolvedValue({
+      ...emptyUsageBundle(),
+      billableTokensUsed: 1_234,
+      agentRunsUsed: 7,
+    });
 
     const now = new Date("2026-07-15T12:00:00.000Z");
     const settings = testSettings({
@@ -116,24 +187,12 @@ describe("getWorkspaceInsights", () => {
     expect(snapshot.agentRunCap).toBe(100);
     expect(snapshot.selfhostedEnabled).toBe(false);
     expect(snapshot.machinesOnline).toBe(0);
-    expect(
-      capSpy.mock.calls.every(([, input]) => {
-        const since = input.since as Date;
-        return (
-          since.getUTCFullYear() === 2026 &&
-          since.getUTCMonth() === 6 &&
-          since.getUTCDate() === 1 &&
-          since.getUTCHours() === 0
-        );
-      }),
-    ).toBe(true);
+    const monthSince = usageBundle.mock.calls[0]?.[1].monthSince;
+    expect(monthSince?.toISOString()).toBe("2026-07-01T00:00:00.000Z");
   });
 
   test("does not invent machines when selfhosted is disabled", async () => {
     const { machines } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
-    restores.push(() => capSpy.mockRestore());
-
     const { snapshot } = await getWorkspaceInsights(
       db,
       testSettings({ sandboxSelfhostedEnabled: false }),
@@ -144,9 +203,7 @@ describe("getWorkspaceInsights", () => {
   });
 
   test("uses elapsed UTC-hour buckets for today and daily buckets for longer ranges", async () => {
-    const { modelBundle, usageDay, usageHour } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
-    restores.push(() => capSpy.mockRestore());
+    const { modelBundle, usageBundle, usageDay, usageHour } = stubEmptyWorkspace();
 
     const { snapshot: today } = await getWorkspaceInsights(
       db,
@@ -172,7 +229,8 @@ describe("getWorkspaceInsights", () => {
     ]);
     expect(today.seriesLabel).toBe("Credit $ / UTC hour");
     expect(modelBundle.mock.calls[0]?.[1].granularity).toBe("hour");
-    expect(usageHour).toHaveBeenCalledTimes(2);
+    expect(usageBundle.mock.calls[0]?.[1].granularity).toBe("hour");
+    expect(usageHour).not.toHaveBeenCalled();
     expect(usageDay).not.toHaveBeenCalled();
 
     const { snapshot: week } = await getWorkspaceInsights(
@@ -185,13 +243,45 @@ describe("getWorkspaceInsights", () => {
     expect(week.series[0]?.label).toBe("07-09");
     expect(week.series.at(-1)?.label).toBe("07-15");
     expect(modelBundle.mock.calls[1]?.[1].granularity).toBe("day");
-    expect(usageDay).toHaveBeenCalledTimes(2);
+    expect(usageBundle.mock.calls[1]?.[1].granularity).toBe("day");
+    expect(usageDay).not.toHaveBeenCalled();
+  });
+
+  test("returns an empty public snapshot at exact UTC today, month, and year boundaries", async () => {
+    const { modelBundle, usageBundle, usageDay, usageHour } = stubEmptyWorkspace();
+
+    const cases = [
+      { range: "today" as const, now: new Date("2026-07-15T00:00:00.000Z") },
+      { range: "month" as const, now: new Date("2026-07-01T00:00:00.000Z") },
+      { range: "ytd" as const, now: new Date("2026-01-01T00:00:00.000Z") },
+    ];
+    for (const { range, now } of cases) {
+      const { snapshot } = await getWorkspaceInsights(
+        db,
+        testSettings({ sandboxSelfhostedEnabled: false }),
+        { workspaceId: WORKSPACE, range, now },
+      );
+
+      expect(snapshot.windowStart).toBe(now.toISOString());
+      expect(snapshot.windowEnd).toBe(now.toISOString());
+      expect(snapshot.series).toEqual([]);
+      expect(snapshot.models).toEqual([]);
+      expect(snapshot.recentCalls).toEqual([]);
+      expect(snapshot.workspaceCreditUsd).toBe(0);
+      expect(snapshot.creditUsd).toBe(0);
+
+      const bundleInput = modelBundle.mock.calls.at(-1)?.[1];
+      expect(bundleInput?.since.toISOString()).toBe(now.toISOString());
+      expect(bundleInput?.until.toISOString()).toBe(now.toISOString());
+    }
+
+    expect(usageBundle).toHaveBeenCalledTimes(3);
+    expect(usageHour).not.toHaveBeenCalled();
+    expect(usageDay).not.toHaveBeenCalled();
   });
 
   test("keeps token/cache coverage and hypothetical provider cost separate from credits", async () => {
     const { modelBundle } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
-    restores.push(() => capSpy.mockRestore());
     modelBundle.mockResolvedValue({
       ...emptyModelBundle(),
       modelRows: [
@@ -293,8 +383,6 @@ describe("getWorkspaceInsights", () => {
 
   test("uses durable titles and factual identifiers for untitled historical sessions", async () => {
     const { modelBundle, depth, floor } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
-    restores.push(() => capSpy.mockRestore());
     modelBundle.mockResolvedValue({
       ...emptyModelBundle(),
       rootDrivers: [
@@ -368,5 +456,39 @@ describe("getWorkspaceInsights", () => {
     expect(snapshot.floor[0]?.title).toBe("Agent 22222222");
     expect(snapshot.recentCalls[0]?.sessionTitle).toBe("Agent 22222222");
     expect(snapshot.deepestSessionTitle).toBe("Agent 22222222");
+  });
+});
+
+describe("normalizeWorkspaceInsightsFilter", () => {
+  const utf8 = new TextEncoder();
+  const providerMultibyteAtLimit = `${"é".repeat(127)}aa`;
+  const modelMultibyteAtLimit = `${"é".repeat(255)}aa`;
+
+  test("uses the exact 256/512 UTF-8 byte envelopes", () => {
+    expect(utf8.encode(providerMultibyteAtLimit).byteLength).toBe(256);
+    expect(utf8.encode(modelMultibyteAtLimit).byteLength).toBe(512);
+    expect(normalizeWorkspaceInsightsFilter("p".repeat(256), "provider")).toBe("p".repeat(256));
+    expect(normalizeWorkspaceInsightsFilter("m".repeat(512), "model")).toBe("m".repeat(512));
+    expect(normalizeWorkspaceInsightsFilter(providerMultibyteAtLimit, "provider")).toBe(
+      providerMultibyteAtLimit,
+    );
+    expect(normalizeWorkspaceInsightsFilter(modelMultibyteAtLimit, "model")).toBe(
+      modelMultibyteAtLimit,
+    );
+  });
+
+  test("rejects the exact ASCII and multibyte overflow boundaries", () => {
+    expect(() => normalizeWorkspaceInsightsFilter("p".repeat(257), "provider")).toThrow(
+      WorkspaceInsightsFilterValidationError,
+    );
+    expect(() => normalizeWorkspaceInsightsFilter("m".repeat(513), "model")).toThrow(
+      WorkspaceInsightsFilterValidationError,
+    );
+    expect(() =>
+      normalizeWorkspaceInsightsFilter(`${providerMultibyteAtLimit}a`, "provider"),
+    ).toThrow("provider must be at most 256 UTF-8 bytes");
+    expect(() => normalizeWorkspaceInsightsFilter(`${modelMultibyteAtLimit}a`, "model")).toThrow(
+      "model must be at most 512 UTF-8 bytes",
+    );
   });
 });
