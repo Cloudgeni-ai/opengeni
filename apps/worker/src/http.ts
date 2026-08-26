@@ -5,7 +5,7 @@ import {
   type Database,
   type RuntimeDatabasePostureOptions,
 } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
+import { requireSessionEventDurableFanoutCapability, type EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 
 export type ReadinessCheckName = "db" | "nats" | "temporal";
@@ -139,6 +139,7 @@ export function dbReadyCheck(
 
 export function natsReadyCheck(bus: EventBus): () => void {
   return () => {
+    requireSessionEventDurableFanoutCapability(bus);
     if (bus.isConnected && !bus.isConnected()) {
       throw new Error("NATS is not connected");
     }

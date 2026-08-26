@@ -13,6 +13,7 @@ import {
   coalesceSessionEventDeltas,
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
+  requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
   sessionEventResumeSequence,
   type EventBus,
@@ -269,12 +270,14 @@ export async function sseSessionStream(
   signal: AbortSignal,
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  const durableFanout = requireSessionEventDurableFanoutCapability(bus);
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: SessionEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<SessionEvent> | null = null;
+  let stopReconnectObservation = () => {};
   let stopReauthorization = () => {};
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
@@ -282,6 +285,8 @@ export async function sseSessionStream(
   const stopUpstream = () => {
     closeMetrics();
     detachAbortListener();
+    stopReconnectObservation();
+    stopReconnectObservation = () => {};
     stopReauthorization();
     if (heartbeatTimer) {
       clearTimeout(heartbeatTimer);
@@ -315,17 +320,6 @@ export async function sseSessionStream(
     });
     writeTail = write.catch(() => {});
     return write;
-  };
-  const scheduleHeartbeat = () => {
-    if (channel.stopped()) return;
-    heartbeatTimer = setTimeout(() => {
-      heartbeatTimer = null;
-      void writeFrame(": heartbeat\n\n")
-        .then(scheduleHeartbeat)
-        .catch((error) => {
-          if (!(error instanceof SseStreamStoppedError)) fail(error);
-        });
-    }, heartbeatIntervalMs);
   };
   const deliverDurableThrough = async (targetSequence?: number) => {
     while (true) {
@@ -364,12 +358,66 @@ export async function sseSessionStream(
       if (targetSequence === undefined && page.length < limit) return;
     }
   };
+  let durableDeliveryTail = Promise.resolve();
+  const reconcileDurableThrough = (targetSequence?: number): Promise<void> => {
+    const deliveryRun = durableDeliveryTail.then(() => deliverDurableThrough(targetSequence));
+    durableDeliveryTail = deliveryRun.catch(() => {});
+    return deliveryRun;
+  };
+  let newestReconnectGeneration = 0;
+  let reconnectReconcilePending = false;
+  let reconnectReconcileRunning = false;
+  const drainReconnectReconciliation = () => {
+    if (
+      bootstrapping ||
+      reconnectReconcileRunning ||
+      !reconnectReconcilePending ||
+      channel.stopped()
+    ) {
+      return;
+    }
+    reconnectReconcileRunning = true;
+    void (async () => {
+      while (reconnectReconcilePending && !channel.stopped()) {
+        // Multiple reconnects during one durable read collapse into one newest
+        // catch-up. Postgres is authoritative, so that later read covers every
+        // disconnect window without one query per heartbeat or buffered event.
+        reconnectReconcilePending = false;
+        await reconcileDurableThrough();
+      }
+    })()
+      .catch((error) => {
+        if (!(error instanceof SseStreamStoppedError)) fail(error);
+      })
+      .finally(() => {
+        reconnectReconcileRunning = false;
+        drainReconnectReconciliation();
+      });
+  };
+  const scheduleReconnectReconciliation = (generation: number) => {
+    if (generation <= newestReconnectGeneration || channel.stopped()) return;
+    newestReconnectGeneration = generation;
+    reconnectReconcilePending = true;
+    drainReconnectReconciliation();
+  };
   const send = async (event: SessionEvent) => {
     const targetSequence = sessionEventResumeSequence(event);
     if (targetSequence <= lastSent) return;
-    await deliverDurableThrough(targetSequence);
+    await reconcileDurableThrough(targetSequence);
+  };
+  const scheduleHeartbeat = () => {
+    if (channel.stopped()) return;
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null;
+      void writeFrame(": heartbeat\n\n")
+        .then(scheduleHeartbeat)
+        .catch((error) => {
+          if (!(error instanceof SseStreamStoppedError)) fail(error);
+        });
+    }, heartbeatIntervalMs);
   };
   delivery = createLatestWinsDelivery(send, fail);
+  stopReconnectObservation = durableFanout.subscribeRecovery(scheduleReconnectReconciliation);
 
   void (async () => {
     const release = await bus.subscribe(workspaceId, sessionId, (events) => {
@@ -389,10 +437,11 @@ export async function sseSessionStream(
     }
     unsubscribe = release;
 
-    await deliverDurableThrough();
+    await reconcileDurableThrough();
     await writeFrame(": connected\n\n");
     scheduleHeartbeat();
     bootstrapping = false;
+    drainReconnectReconciliation();
     const buffered = newestBuffered;
     newestBuffered = null;
     if (buffered) delivery.publish([buffered]);

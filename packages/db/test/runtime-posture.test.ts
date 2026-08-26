@@ -609,6 +609,153 @@ describe("runtime database posture evaluator", () => {
     expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
   });
 
+  test("enforces the automatic session title fanout capability boundary", () => {
+    const posture = safePosture();
+    posture.privateTables.push({
+      name: "automatic_session_title_fanout_outbox_v1",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+    posture.privateRoutines.push(
+      {
+        name: "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+      {
+        name: "claim_automatic_session_title_fanout_v1(integer)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      },
+      {
+        name: "enforce_automatic_session_title_policy_v1()",
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: false,
+      },
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+
+    const enqueue = posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("enqueue_automatic_session_title_fanout_v1("),
+    )!;
+    const claim = posture.privateRoutines.find((routine) =>
+      routine.name.startsWith("claim_automatic_session_title_fanout_v1("),
+    )!;
+    const policyTrigger = posture.privateRoutines.find(
+      (routine) => routine.name === "enforce_automatic_session_title_policy_v1()",
+    )!;
+    enqueue.execute = false;
+    enqueue.publicExecute = true;
+    enqueue.securityDefiner = true;
+    claim.execute = false;
+    claim.publicExecute = true;
+    claim.securityDefiner = false;
+    policyTrigger.execute = false;
+    policyTrigger.publicExecute = true;
+    policyTrigger.securityDefiner = true;
+
+    posture.privateTables.at(-1)!.insert = true;
+    posture.privateTables.at(-1)!.rlsForced = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("does not FORCE RLS"),
+        expect.stringContaining("forbidden direct privileges on private table"),
+        expect.stringContaining(
+          "runtime role lacks rolling-compatible automatic session title fanout migration helper",
+        ),
+        expect.stringContaining(
+          "PUBLIC has forbidden automatic session title fanout migration helper",
+        ),
+        expect.stringContaining("must be SECURITY INVOKER"),
+        expect.stringContaining("runtime role lacks automatic session title fanout capability"),
+        expect.stringContaining("PUBLIC has forbidden automatic session title fanout capability"),
+        expect.stringContaining("is not SECURITY DEFINER"),
+        expect.stringContaining(
+          "runtime role lacks rolling-compatible automatic session title policy trigger",
+        ),
+        expect.stringContaining("PUBLIC has forbidden automatic session title policy trigger"),
+        expect.stringContaining("must be SECURITY INVOKER"),
+      ]),
+    );
+  });
+
+  test("keeps pre-policy binaries ready against the post-policy-migration private routine catalog", () => {
+    const postPolicyMigrationRoutines = [
+      {
+        name: "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "claim_automatic_session_title_fanout_v1(integer)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+      {
+        name: "enforce_automatic_session_title_policy_v1()",
+        owner: "opengeni_migrator",
+        execute: true,
+      },
+    ];
+    const evaluatePrePolicyPrivateRoutinePosture = () =>
+      postPolicyMigrationRoutines.flatMap((routine) => {
+        const violations: string[] = [];
+        if (routine.owner === options.expectedRole) {
+          violations.push(`runtime role owns private routine ${routine.name}`);
+        }
+        // These title routines are not in the pre-policy binary's narrow
+        // artifact-helper exception, so every one must remain executable.
+        if (!routine.execute) {
+          violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
+        }
+        return violations;
+      });
+
+    expect(evaluatePrePolicyPrivateRoutinePosture()).toEqual([]);
+    postPolicyMigrationRoutines.at(-1)!.execute = false;
+    expect(evaluatePrePolicyPrivateRoutinePosture()).toEqual([
+      "runtime role lacks EXECUTE on private routine enforce_automatic_session_title_policy_v1()",
+    ]);
+  });
+
   test("enforces the exact personal-resource private capability boundary", () => {
     const posture = safePosture();
     const capabilityTable = posture.privateTables[0]!;

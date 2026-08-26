@@ -18,9 +18,11 @@ import {
   OrganizationMember,
   WorkspaceMember as WorkspaceMemberContract,
   SessionGoalSnapshot,
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
   ScheduledTaskRunAcceptedExecution,
   SessionGoalRootConstraintsWrite,
   normalizeSessionGoalRootConstraints,
+  normalizeAutomaticSessionTitle,
   sessionVisibilityToPublic,
   sessionGoalUtf8Bytes,
 } from "@opengeni/contracts";
@@ -27492,6 +27494,8 @@ async function createSessionInTransaction(
             workspaceId: input.workspaceId,
             initialMessage: input.initialMessage,
             initialModelContext: input.initialModelContext ?? null,
+            title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+            titleSource: "agent",
             resources: input.resources,
             skills: input.skills ?? [],
             tools: input.tools ?? [],
@@ -52812,10 +52816,21 @@ export async function recordSessionGoalProgressWithEvent(
 }
 
 /**
- * Sets a session's display title. The clobber guard lives entirely in this
- * single atomic UPDATE: a user-set title is permanent, so agent/auto writes
- * carry an `AND title_source IS DISTINCT FROM 'user'` guard (NULL-safe in
- * Postgres) while user writes are unconditional. Never read-modify-write.
+ * Low-level row-only session-title update used by database-specific callers and
+ * tests. Public product writers should use `updateSessionTitleWithEvent` so the
+ * observable event commits atomically with this state transition. The clobber
+ * guard lives entirely in this single atomic UPDATE: a user-set title is
+ * permanent, so agent/auto writes
+ * are first normalized through the shared short/sensitive-safe automatic-title
+ * policy, then carry an `AND title_source IS DISTINCT FROM 'user'` guard
+ * (NULL-safe in Postgres) while user writes are unconditional. Automatic
+ * writes also bind the exact normalized candidate to a transaction-local
+ * database capability, so a pre-policy binary cannot bypass normalization
+ * during a rolling deployment. Never read-modify-write.
+ *
+ * `expectedCurrent`, when supplied, is an additional NULL-safe compare-and-set
+ * fence. It is used by stale/retry-prone producers such as scheduled dispatch:
+ * the write succeeds only if both the durable title and source still match.
  * Re-applying the exact title is also a no-op so a confused agent cannot churn
  * `updated_at` every turn. Returns `{ updated, title }`: `updated` is false when
  * the value was unchanged or an agent write was skipped because a user title
@@ -52829,13 +52844,37 @@ export async function updateSessionTitle(
     sessionId: string;
     title: string;
     source: "user" | "agent";
+    expectedCurrent?: {
+      title: string | null;
+      source: "user" | "agent" | null;
+    };
   },
 ): Promise<{ updated: boolean; title: string | null }> {
   return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    const title =
+      input.source === "agent" ? normalizeAutomaticSessionTitle(input.title) : input.title;
+    if (title === null) {
+      const [existing] = await scopedDb
+        .select({ title: schema.sessions.title })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      return { updated: false, title: existing?.title ?? null };
+    }
+    if (input.source === "agent") {
+      await scopedDb.execute(
+        sql`select pg_catalog.set_config('opengeni.automatic_session_title_v1_candidate', ${title}, true)`,
+      );
+    }
     const [row] = await scopedDb
       .update(schema.sessions)
       .set({
-        title: input.title,
+        title,
         titleSource: input.source,
         updatedAt: new Date(),
       })
@@ -52843,9 +52882,15 @@ export async function updateSessionTitle(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),
           eq(schema.sessions.id, input.sessionId),
-          sql`${schema.sessions.title} is distinct from ${input.title}`,
+          sql`${schema.sessions.title} is distinct from ${title}`,
           ...(input.source === "agent"
             ? [sql`${schema.sessions.titleSource} is distinct from 'user'`]
+            : []),
+          ...(input.expectedCurrent
+            ? [
+                sql`${schema.sessions.title} is not distinct from ${input.expectedCurrent.title}`,
+                sql`${schema.sessions.titleSource} is not distinct from ${input.expectedCurrent.source}`,
+              ]
             : []),
         ),
       )
@@ -52865,6 +52910,113 @@ export async function updateSessionTitle(
       .limit(1);
     return { updated: false, title: existing?.title ?? null };
   });
+}
+
+/**
+ * Atomically set a session title and append its public `session.title_set`
+ * event under the canonical workspace/session event-write lock. The row CAS,
+ * durable sequence, and event either all commit or all roll back, so a newer
+ * title writer can never commit between the authoritative update and an older
+ * event append.
+ *
+ * Exact retries are naturally idempotent: the unchanged-title predicate (and,
+ * for stale producers, `expectedCurrent`) makes a committed retry a no-op with
+ * no duplicate event. Automatic titles retain the rolling-deployment trigger's
+ * exact transaction-local candidate capability.
+ */
+export async function updateSessionTitleWithEvent(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    title: string;
+    source: "user" | "agent";
+    expectedCurrent?: {
+      title: string | null;
+      source: "user" | "agent" | null;
+    };
+  },
+): Promise<{ updated: boolean; title: string | null; events: SessionEvent[] }> {
+  const title =
+    input.source === "agent" ? normalizeAutomaticSessionTitle(input.title) : input.title;
+  return await retryWorkspaceSessionEventActivityPersistence(
+    db,
+    input.workspaceId,
+    true,
+    {
+      stage: "session_title.update_with_event",
+      eventTypes: ["session.title_set"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "none",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) return { updated: false, title: null, events: [] };
+        if (title === null) {
+          return { updated: false, title: session.title, events: [] };
+        }
+        if (input.source === "agent") {
+          await tx.execute(
+            sql`select pg_catalog.set_config('opengeni.automatic_session_title_v1_candidate', ${title}, true)`,
+          );
+        }
+        const now = new Date();
+        const sequence = session.lastSequence + 1;
+        const [updated] = await tx
+          .update(schema.sessions)
+          .set({
+            title,
+            titleSource: input.source,
+            lastSequence: sequence,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              sql`${schema.sessions.title} is distinct from ${title}`,
+              ...(input.source === "agent"
+                ? [sql`${schema.sessions.titleSource} is distinct from 'user'`]
+                : []),
+              ...(input.expectedCurrent
+                ? [
+                    sql`${schema.sessions.title} is not distinct from ${input.expectedCurrent.title}`,
+                    sql`${schema.sessions.titleSource} is not distinct from ${input.expectedCurrent.source}`,
+                  ]
+                : []),
+            ),
+          )
+          .returning({ title: schema.sessions.title });
+        if (!updated) {
+          return { updated: false, title: session.title, events: [] };
+        }
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                sequence,
+                type: "session.title_set",
+                payload: { title: updated.title ?? title, source: input.source },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) throw new Error("Failed to append session.title_set event");
+        return { updated: true, title: updated.title, events: [mapEvent(event)] };
+      }),
+  );
 }
 
 /**
@@ -63390,6 +63542,93 @@ export async function claimPendingSessionSystemUpdateOutbox(
     }
   }
   return deliveries;
+}
+
+export type AutomaticSessionTitleFanoutDelivery = {
+  outboxId: string;
+  event: SessionEvent;
+};
+
+/**
+ * Claim migration-created title events for deployment-wide NATS fanout. The
+ * function is SECURITY DEFINER because one control worker drains obligations
+ * across workspaces; callers receive only the exact already-public event
+ * projection, never arbitrary session rows.
+ */
+export async function claimAutomaticSessionTitleFanout(
+  db: Database,
+  limit = 100,
+): Promise<AutomaticSessionTitleFanoutDelivery[]> {
+  const rows = await rawRows<{
+    outbox_id: string;
+    workspace_id: string;
+    session_id: string;
+    event_id: string;
+    sequence: number;
+    type: string;
+    payload: unknown;
+    payload_codec_version: number | null;
+    occurred_at: Date | string;
+    client_event_id: string | null;
+    turn_id: string | null;
+    turn_generation: number | null;
+    turn_attempt_id: string | null;
+    turn_association: string | null;
+    duplicate_of_event_id: string | null;
+    duplicate_reason: string | null;
+  }>(db, sql`select * from opengeni_private.claim_automatic_session_title_fanout_v1(${limit})`);
+  return rows.map((row) => ({
+    outboxId: row.outbox_id,
+    event: {
+      id: row.event_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      sequence: row.sequence,
+      type: row.type as SessionEventType,
+      payload: fromPostgresLosslessJson(row.payload, row.payload_codec_version),
+      occurredAt:
+        row.occurred_at instanceof Date
+          ? row.occurred_at.toISOString()
+          : new Date(row.occurred_at).toISOString(),
+      clientEventId: row.client_event_id,
+      turnId: row.turn_id,
+      turnGeneration: row.turn_generation,
+      turnAttemptId: row.turn_attempt_id,
+      turnAssociation: row.turn_association as SessionEvent["turnAssociation"],
+      duplicateOfEventId: row.duplicate_of_event_id,
+      duplicateReason: row.duplicate_reason,
+    },
+  }));
+}
+
+export async function markAutomaticSessionTitleFanoutDelivered(
+  db: Database,
+  delivery: AutomaticSessionTitleFanoutDelivery,
+): Promise<boolean> {
+  const [row] = await rawRows<{ changed: boolean }>(
+    db,
+    sql`select opengeni_private.mark_automatic_session_title_fanout_delivered_v1(
+      ${delivery.outboxId}::uuid,
+      ${delivery.event.id}::uuid
+    ) as changed`,
+  );
+  return row?.changed === true;
+}
+
+export async function markAutomaticSessionTitleFanoutFailed(
+  db: Database,
+  delivery: AutomaticSessionTitleFanoutDelivery,
+  error: string,
+): Promise<boolean> {
+  const [row] = await rawRows<{ changed: boolean }>(
+    db,
+    sql`select opengeni_private.mark_automatic_session_title_fanout_failed_v1(
+      ${delivery.outboxId}::uuid,
+      ${delivery.event.id}::uuid,
+      ${error}
+    ) as changed`,
+  );
+  return row?.changed === true;
 }
 
 export type SessionWorkflowWake = {

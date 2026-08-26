@@ -755,7 +755,7 @@ export function buildOpenGeniMcpServer(
       "set_session_title",
       {
         description:
-          "Set this session's display title to a concise 3-7 word summary. The title persists across turns: call once on a new untitled session, then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.",
+          "Set this session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. Call once on a new session, then only when the topic materially changes. Never call it as routine setup after a continuation, resume, or interruption, or merely to reassert the same title. A human-set title cannot be replaced.",
         inputSchema: { title: z4.string().min(1).max(200) },
       },
       async ({ title }) => {
@@ -4744,7 +4744,7 @@ function registerWorkspaceOrchestrationTools(
       "set_other_session_title",
       {
         description:
-          "Set another session's display title to a concise 3-7 word summary. The target session must belong to this workspace. Replaces an existing title unless a human has manually set it.",
+          "Set another session's display title to a concise 3-7 word topic label. Use a stable noun phrase about the actual task or subject, never a quote/prefix of a prompt, greeting, request boilerplate, URL, identifier, credential, token, or other sensitive value. The target session must belong to this workspace. Replaces an existing automatic title unless a human has manually set it.",
         inputSchema: {
           session_id: z4.string().uuid(),
           title: z4.string().min(1).max(200),
