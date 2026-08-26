@@ -106,6 +106,31 @@ describe("principal transition contract", () => {
     );
   });
 
+  test("browser actor changes unmount the old routed tree before transport rotation", () => {
+    const transition = sourceBetween(
+      "async function handleBrowserActorTransition(",
+      "// Context actions keep one identity",
+    );
+    expect(transition).toContain("flushSync(() => {");
+    expect(transition.indexOf("flushSync(() => {")).toBeLessThan(
+      transition.indexOf("configureManagedActorEpoch("),
+    );
+    for (const requiredClear of [
+      "invalidatePrincipalWorkspaceState();",
+      "setAuthSession(undefined);",
+      "setAccessContext(null);",
+      "setWorkspaces([]);",
+      "setAccessKeyVersion((version) => version + 1);",
+    ]) {
+      expect(transition.indexOf(requiredClear)).toBeGreaterThan(
+        transition.indexOf("flushSync(() => {"),
+      );
+      expect(transition.indexOf(requiredClear)).toBeLessThan(
+        transition.indexOf("configureManagedActorEpoch("),
+      );
+    }
+  });
+
   test("all remaining root workspace and session mutations use the invocation fence", () => {
     const sections = [
       sourceBetween("async function createWorkspace(", "async function renameWorkspace("),

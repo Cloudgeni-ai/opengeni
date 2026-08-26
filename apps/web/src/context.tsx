@@ -27,6 +27,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { Toaster, toast } from "sonner";
 
 import {
@@ -1857,21 +1858,26 @@ export function RootRouteComponent() {
   }
 
   async function handleBrowserActorTransition(transition: BrowserAccountTransition) {
-    // Rotate transport provenance first: this aborts every old finite request
-    // before any new principal can be projected into the application tree.
+    // Commit the neutral auth/access surface before rotating transport
+    // provenance. Aborting old requests while their routed tree is still
+    // mounted lets rejection handlers/effects dispatch fresh work under the
+    // next epoch. The synchronous commit removes those consumers first; the
+    // immediately following rotation then aborts every remaining old request.
+    flushSync(() => {
+      invalidatePrincipalWorkspaceState();
+      setAuthSession(undefined);
+      setAccessContext(null);
+      setWorkspaces([]);
+      setAccessError(null);
+      // Recreate SDK clients and reconnect streams even for two login bindings
+      // that resolve to the same canonical human.
+      setAccessKeyVersion((version) => version + 1);
+    });
     configureManagedActorEpoch(transition.to?.actorEpoch ?? null);
-    invalidatePrincipalWorkspaceState();
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       !transition.signal.aborted &&
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
-    setAuthSession(undefined);
-    setAccessContext(null);
-    setWorkspaces([]);
-    setAccessError(null);
-    // Recreate SDK clients and reconnect streams even for two login bindings
-    // that resolve to the same canonical human.
-    setAccessKeyVersion((version) => version + 1);
     try {
       const sessionRead = await runCurrentTransitionInvocation({
         isCurrent: ownsInvocation,

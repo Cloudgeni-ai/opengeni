@@ -9,7 +9,10 @@ import type {
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { BrowserAccountsSignedOutPanel } from "./browser-accounts-runtime";
+import {
+  BrowserAccountsLoadingGate,
+  BrowserAccountsSignedOutPanel,
+} from "./browser-accounts-runtime";
 
 const SLOT_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -108,6 +111,76 @@ describe("signed-out browser account recovery", () => {
       expect(selectionTransition?.from?.selectedSlotId).toBeNull();
       expect(selectionTransition?.to?.selectedSlotId).toBe(SLOT_ID);
     } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("hides the prior tenant surface while an accepted actor change settles", async () => {
+    let current = projection(false);
+    let releaseSelection!: () => void;
+    const selectionSettled = new Promise<void>((resolve) => {
+      releaseSelection = resolve;
+    });
+    const client: BrowserAccountsClientLike = {
+      getSessionSet: async () => current,
+      bootstrapSessionSet: async () => current,
+      beginLoginTransaction: async () => {
+        throw new Error("not used");
+      },
+      completeEmailPasswordTransaction: async () => {
+        throw new Error("not used");
+      },
+      cancelLoginTransaction: async () => current,
+      selectLoginSlot: async () => {
+        current = projection(true);
+        return current;
+      },
+      logoutLoginSlot: async () => current,
+      logoutSessionSet: async () => ({ generation: "4", actorEpoch: "3", state: "logged_out" }),
+      resolveDeepLink: async () => ({ kind: "unavailable" }),
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <BrowserAccountsProvider
+            client={client}
+            broadcastChannelName={null}
+            onActorTransition={async (transition) => {
+              if (transition.from?.selectedSlotId === null && transition.to?.selectedSlotId) {
+                await selectionSettled;
+              }
+            }}
+          >
+            <BrowserAccountsSignedOutPanel />
+            <BrowserAccountsLoadingGate>
+              <div data-tenant-surface="true">Prior tenant surface</div>
+            </BrowserAccountsLoadingGate>
+          </BrowserAccountsProvider>,
+        ),
+      );
+      await flush();
+
+      expect(container.querySelector('[data-tenant-surface="true"]')).not.toBeNull();
+      const select = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Continue as Account Beta"]',
+      );
+      expect(select).not.toBeNull();
+      await act(async () => select!.click());
+      await flush();
+
+      expect(container.querySelector('[data-tenant-surface="true"]')).toBeNull();
+      expect(container.textContent).toContain("Loading browser accounts");
+
+      await act(async () => releaseSelection());
+      await flush();
+      expect(container.querySelector('[data-tenant-surface="true"]')).not.toBeNull();
+    } finally {
+      releaseSelection();
       await act(async () => root.unmount());
       container.remove();
     }

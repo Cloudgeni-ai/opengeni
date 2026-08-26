@@ -218,23 +218,25 @@ export function BrowserAccountsSignedOutPanel(props: { dualEmptySetFallback?: Re
 
 export function BrowserAccountsLoadingGate({ children }: { children?: ReactNode }) {
   const accounts = useBrowserAccounts();
-  if (accounts.projection !== null) return children;
-  if (accounts.phase !== "recoverable_error") {
+  if (accounts.phase === "recoverable_error") {
+    return (
+      <ProblemPanel
+        title="Browser accounts unavailable"
+        description="OpenGeni couldn't verify the active browser account. No tenant data was shown."
+        action={
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => void accounts.refresh().catch(() => undefined)}
+          >
+            Try again
+          </Button>
+        }
+      />
+    );
+  }
+  if (accounts.phase === "loading" || accounts.projection === null) {
     return <LoadingPanel label="Loading browser accounts" />;
   }
-  return (
-    <ProblemPanel
-      title="Browser accounts unavailable"
-      description="OpenGeni couldn't verify the active browser account. No tenant data was shown."
-      action={
-        <Button
-          type="button"
-          variant="secondary"
-          onClick={() => void accounts.refresh().catch(() => undefined)}
-        >
-          Try again
-        </Button>
-      }
-    />
-  );
+  return children;
 }
