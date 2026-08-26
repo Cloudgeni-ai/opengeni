@@ -133,16 +133,6 @@ function sameSelectedActor(
   );
 }
 
-function isEmptyAuthorityReset(projection: ManagedAuthSessionSetProjection | null): boolean {
-  return (
-    projection?.generation === "1" &&
-    projection.actorEpoch === "1" &&
-    projection.selectedSlotId === null &&
-    projection.state === "ready" &&
-    projection.slots.length === 0
-  );
-}
-
 function compareCounter(left: string, right: string): number {
   const leftValue = BigInt(left);
   const rightValue = BigInt(right);
@@ -256,20 +246,13 @@ export function BrowserAccountsProvider({
       accepted: ManagedAuthSessionSetProjection | null,
       sequence: number,
       publish: boolean,
+      authorityResetConfirmed = false,
     ): Promise<ManagedAuthSessionSetProjection | null> => {
       let target = accepted;
-      if (from && target && isOlderProjection(target, from)) {
-        const first = target;
+      if (!authorityResetConfirmed && from && target && isOlderProjection(target, from)) {
         target = await client.getSessionSet();
         if (sequenceRef.current !== sequence) return null;
-        if (
-          isOlderProjection(target, from) &&
-          !(
-            isEmptyAuthorityReset(first) &&
-            isEmptyAuthorityReset(target) &&
-            sameActor(first, target)
-          )
-        ) {
+        if (isOlderProjection(target, from)) {
           throw new Error("Browser account response regressed the accepted actor epoch");
         }
       }
@@ -313,7 +296,7 @@ export function BrowserAccountsProvider({
       const sequence = ++sequenceRef.current;
       const before = projectionRef.current;
       setPhase("loading");
-      let first = await client.getSessionSet();
+      let first = await client.reconcileSessionSetAuthority();
       if (sequenceRef.current !== sequence) return null;
       if (
         bootstrapLegacySession &&
@@ -355,7 +338,7 @@ export function BrowserAccountsProvider({
         setError(null);
         return first;
       }
-      return await settleActorTransition(kind, before, first, sequence, publish);
+      return await settleActorTransition(kind, before, first, sequence, publish, true);
     },
     [bootstrapLegacySession, client, settleActorTransition],
   );
@@ -417,17 +400,29 @@ export function BrowserAccountsProvider({
           accepted = await pending.execute(expectedGeneration);
         }
         if (sequenceRef.current !== sequence) return false;
+        // A successful logout-all response is itself an authority-rotation
+        // receipt; every other lower-clock adoption must come from the SDK's
+        // explicit two-probe reconciliation path below.
+        let authorityResetConfirmed = pending.kind === "logout_all";
         if (invalidatedDuringPendingCommitRef.current) {
-          accepted = await client.getSessionSet();
+          accepted = await client.reconcileSessionSetAuthority();
+          authorityResetConfirmed = true;
           if (sequenceRef.current !== sequence) return false;
         }
         pendingRef.current = null;
-        if (sameSelectedActor(current, accepted)) {
+        if (!authorityResetConfirmed && sameSelectedActor(current, accepted)) {
           setProjection(accepted);
           setPhase("ready");
           setError(null);
         } else {
-          await settleActorTransition(pending.kind, current, accepted, sequence, true);
+          await settleActorTransition(
+            pending.kind,
+            current,
+            accepted,
+            sequence,
+            true,
+            authorityResetConfirmed,
+          );
         }
         return true;
       } catch (caught) {
@@ -490,7 +485,7 @@ export function BrowserAccountsProvider({
       if (neutral.signal.aborted || sequenceRef.current !== sequence) return null;
       const accepted = await client.reconcileSessionSetAuthority();
       if (sequenceRef.current !== sequence) return null;
-      return await settleActorTransition("cross_tab", before, accepted, sequence, false);
+      return await settleActorTransition("cross_tab", before, accepted, sequence, false, true);
     } catch (caught) {
       if (sequenceRef.current !== sequence) return null;
       const nextError = accountError(caught);
@@ -724,7 +719,10 @@ export function BrowserAccountsProvider({
       kind: "logout_all",
       operationId: id,
       expectedGeneration: null,
-      changesActor: (current) => current.selectedSlotId !== null,
+      // Logout-all always rotates the browser-set authority, even when the set
+      // is neutral but still contains slots. Peers must therefore enter the
+      // same precommit hold and reconciliation boundary unconditionally.
+      changesActor: () => true,
       execute: async (expectedGeneration) => {
         await client.logoutSessionSet({ operationId: id, expectedGeneration });
         return await client.getSessionSet();

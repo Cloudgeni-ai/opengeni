@@ -2,7 +2,11 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
 import type { SessionWorkflowClient } from "@opengeni/core";
-import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
+import {
+  MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+  MANAGED_AUTH_SESSION_SET_COOKIE,
+  managedAuthSha256,
+} from "@opengeni/core/managed-auth-session-sets";
 import {
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER,
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
@@ -74,6 +78,7 @@ type BrowserProblems = {
   pageErrors: string[];
   failedRequests: string[];
   pendingFiniteReads: Map<object, string>;
+  pendingRequestFailureChecks: Set<Promise<void>>;
 };
 
 type CompletionResponseLoss = {
@@ -215,6 +220,7 @@ type ActorMutationAcceptance = {
   acceptedAt: number;
   actorEpoch: string | null;
   path: string;
+  sessionSetAuthorityHash: string | null;
 };
 
 type BrowserRequestFailureInput = {
@@ -225,6 +231,7 @@ type BrowserRequestFailureInput = {
   failure: string;
   method: string;
   responsePhase: string;
+  sessionSetAuthorityHash: string | null;
   startedAt?: number;
   url: string;
 };
@@ -240,6 +247,14 @@ function isExpectedHttpConsoleError(rendered: string, phase: string): boolean {
   return EXPECTED_HTTP_CONSOLE_ERRORS.some(
     (expected) => expected.phases.has(phase) && expected.pattern.test(rendered),
   );
+}
+
+function sessionSetAuthorityHash(cookieHeader: string | null): string | null {
+  const authority = cookieHeader
+    ?.split(";")
+    .map((cookie) => cookie.trim().split("=", 2))
+    .find(([name]) => name === MANAGED_AUTH_SESSION_SET_COOKIE)?.[1];
+  return authority && /^[A-Za-z0-9_-]{43}$/u.test(authority) ? managedAuthSha256(authority) : null;
 }
 
 function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
@@ -274,6 +289,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
         ACTOR_CHANGING_ACCEPTANCE_PATHS.has(transition.path) &&
         transition.actorEpoch !== null &&
         transition.actorEpoch !== input.actorEpoch &&
+        transition.sessionSetAuthorityHash === input.sessionSetAuthorityHash &&
         transition.acceptedAt >= startedAt &&
         transition.acceptedAt <= failedAt,
     ) === true;
@@ -391,10 +407,16 @@ function observeBrowser(page: Page): BrowserProblems {
     pageErrors: [],
     failedRequests: [],
     pendingFiniteReads: new Map(),
+    pendingRequestFailureChecks: new Set(),
   };
   const requestPhases = new WeakMap<
     object,
-    { actorEpoch: string | null; phase: string; startedAt: number }
+    {
+      actorEpoch: string | null;
+      phase: string;
+      sessionSetAuthorityHash: Promise<string | null>;
+      startedAt: number;
+    }
   >();
   page.on("request", (request) => {
     const pathname = new URL(request.url()).pathname;
@@ -412,6 +434,9 @@ function observeBrowser(page: Page): BrowserProblems {
     requestPhases.set(request, {
       actorEpoch: request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null,
       phase: problems.phase,
+      sessionSetAuthorityHash: request
+        .headerValue("cookie")
+        .then(sessionSetAuthorityHash, () => null),
       startedAt: performance.now(),
     });
   });
@@ -467,22 +492,27 @@ function observeBrowser(page: Page): BrowserProblems {
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
-    const problem = requestFailureProblem({
-      acceptedActorTransitions: actorMutationAcceptances,
-      actorEpoch: dispatch?.actorEpoch ?? null,
-      dispatchPhase: dispatch?.phase ?? "unknown",
-      failedAt,
-      failure,
-      method: request.method(),
-      responsePhase: problems.phase,
-      startedAt: dispatch?.startedAt,
-      url: request.url(),
-    });
     // A failed finite read is terminal whether expected or not. Remove it from
     // quiescence tracking, but keep every non-transition failure in the strict
     // final ledger—including canceled product mutations.
     problems.pendingFiniteReads.delete(request);
-    if (problem !== null) problems.failedRequests.push(problem);
+    const check = (async () => {
+      const problem = requestFailureProblem({
+        acceptedActorTransitions: actorMutationAcceptances,
+        actorEpoch: dispatch?.actorEpoch ?? null,
+        dispatchPhase: dispatch?.phase ?? "unknown",
+        failedAt,
+        failure,
+        method: request.method(),
+        responsePhase: problems.phase,
+        sessionSetAuthorityHash: dispatch ? await dispatch.sessionSetAuthorityHash : null,
+        startedAt: dispatch?.startedAt,
+        url: request.url(),
+      });
+      if (problem !== null) problems.failedRequests.push(problem);
+    })();
+    problems.pendingRequestFailureChecks.add(check);
+    void check.finally(() => problems.pendingRequestFailureChecks.delete(check));
   });
   return problems;
 }
@@ -495,10 +525,17 @@ async function waitForFiniteReadQuiescence(
   problems: BrowserProblems,
   timeout = 30_000,
 ): Promise<void> {
+  await waitForFiniteReadQuiescenceAcross([problems], timeout);
+}
+
+async function waitForFiniteReadQuiescenceAcross(
+  ledgers: readonly BrowserProblems[],
+  timeout = 30_000,
+): Promise<void> {
   const deadline = Date.now() + timeout;
   let quietSince: number | null = null;
   while (Date.now() < deadline) {
-    if (problems.pendingFiniteReads.size === 0) {
+    if (ledgers.every((problems) => problems.pendingFiniteReads.size === 0)) {
       quietSince ??= Date.now();
       if (Date.now() - quietSince >= 250) return;
     } else {
@@ -508,24 +545,29 @@ async function waitForFiniteReadQuiescence(
   }
   throw new Error(
     `finite browser reads did not settle: ${JSON.stringify(
-      [...problems.pendingFiniteReads.values()].sort(),
+      ledgers.map((problems) => [...problems.pendingFiniteReads.values()].sort()),
     )}`,
   );
 }
 
-function expectNoBrowserProblems(problems: BrowserProblems): void {
+async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
+  while (problems.pendingRequestFailureChecks.size > 0) {
+    await Promise.all([...problems.pendingRequestFailureChecks]);
+  }
   expect({
     actorFenceResponses: problems.actorFenceResponses,
     actorTransitionResponses: problems.actorTransitionResponses,
     consoleErrors: problems.consoleErrors,
     failedRequests: problems.failedRequests,
     pageErrors: problems.pageErrors,
+    pendingFiniteReads: [...problems.pendingFiniteReads.values()].sort(),
   }).toEqual({
     actorFenceResponses: [],
     actorTransitionResponses: [],
     consoleErrors: [],
     pageErrors: [],
     failedRequests: [],
+    pendingFiniteReads: [],
   });
 }
 
@@ -1196,7 +1238,7 @@ async function captureResponsiveEvidence(
       });
       expect(screenshot.readUInt32BE(16)).toBe(capture.width);
       await closeResponsiveAccountMenu(evidencePage, capture.width);
-      expectNoBrowserProblems(evidenceProblems);
+      await expectNoBrowserProblems(evidenceProblems);
     } finally {
       await evidenceContext.close();
     }
@@ -1238,7 +1280,7 @@ async function captureResponsiveEvidence(
     });
     expect(forcedColorsScreenshot.readUInt32BE(16)).toBe(768);
     await closeResponsiveAccountMenu(forcedColorsPage, 768);
-    expectNoBrowserProblems(forcedColorsProblems);
+    await expectNoBrowserProblems(forcedColorsProblems);
   } finally {
     await forcedColors.close();
   }
@@ -1267,7 +1309,7 @@ async function captureResponsiveEvidence(
     fullPage: true,
   });
   expect(zoomScreenshot.readUInt32BE(16)).toBe(768);
-  expectNoBrowserProblems(zoomProblems);
+  await expectNoBrowserProblems(zoomProblems);
   await zoom.close();
 
   const touch = await browser.newContext({
@@ -1310,7 +1352,7 @@ async function captureResponsiveEvidence(
     fullPage: true,
   });
   expect(touchScreenshot.readUInt32BE(16)).toBe(320);
-  expectNoBrowserProblems(touchProblems);
+  await expectNoBrowserProblems(touchProblems);
   await touch.close();
 }
 
@@ -1445,6 +1487,7 @@ beforeAll(async () => {
               acceptedAt: completionResponseLoss.acceptedAt,
               actorEpoch: response.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
               path: url.pathname,
+              sessionSetAuthorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
             });
           }
           if (!completionResponseLoss.dropped && response.ok) {
@@ -1493,6 +1536,7 @@ beforeAll(async () => {
             acceptedAt: performance.now(),
             actorEpoch: response.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
             path: url.pathname,
+            sessionSetAuthorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
           });
         }
         return response;
@@ -1532,6 +1576,7 @@ describe("provider-neutral browser account acceptance", () => {
       failure: "net::ERR_ABORTED",
       method: "GET",
       responsePhase: "late-old-epoch-primary-settled-before-old-release",
+      sessionSetAuthorityHash: "a".repeat(64),
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
@@ -1574,6 +1619,7 @@ describe("provider-neutral browser account acceptance", () => {
           acceptedAt: 200,
           actorEpoch: "new-actor-epoch",
           path: "/v1/auth/session-set/logout-all",
+          sessionSetAuthorityHash: "a".repeat(64),
         },
       ],
       dispatchPhase: "late-old-epoch-primary-settled-before-old-release",
@@ -1591,6 +1637,7 @@ describe("provider-neutral browser account acceptance", () => {
             acceptedAt: 200,
             actorEpoch: longLivedOldActorStream.actorEpoch,
             path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "a".repeat(64),
           },
         ],
       }),
@@ -1603,6 +1650,20 @@ describe("provider-neutral browser account acceptance", () => {
             acceptedAt: 99,
             actorEpoch: "new-actor-epoch",
             path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "new-actor-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "b".repeat(64),
           },
         ],
       }),
@@ -1754,11 +1815,11 @@ describe("provider-neutral browser account acceptance", () => {
       // reads. Prove each sequential bootstrap independently before starting
       // the next browser set, without exempting any cancellation or failure.
       await waitForFiniteReadQuiescence(otherProblems);
-      expectNoBrowserProblems(otherProblems);
+      await expectNoBrowserProblems(otherProblems);
       setBrowserPhase(pageProblems, "primary-set-sign-in");
       await signIn(page, alpha);
       await waitForFiniteReadQuiescence(pageProblems);
-      expectNoBrowserProblems(pageProblems);
+      await expectNoBrowserProblems(pageProblems);
       await expectActiveAccountAnnouncement(page, alpha);
       setBrowserPhase(secondTabProblems, "second-tab-bootstrap");
       await secondTab.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
@@ -1768,12 +1829,9 @@ describe("provider-neutral browser account acceptance", () => {
       // Loading a full document in the shared browser set is a distinct
       // bootstrap boundary. Both tabs must be finite-read quiescent and clean
       // before the deliberate cross-tab actor races begin below.
-      await Promise.all([
-        waitForFiniteReadQuiescence(pageProblems),
-        waitForFiniteReadQuiescence(secondTabProblems),
-      ]);
-      expectNoBrowserProblems(pageProblems);
-      expectNoBrowserProblems(secondTabProblems);
+      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
+      await expectNoBrowserProblems(pageProblems);
+      await expectNoBrowserProblems(secondTabProblems);
 
       setBrowserPhase(pageProblems, "add-response-loss-replay");
       const betaProviderSessionsBeforeReplay = await authSessionCount(beta.email);
@@ -2121,11 +2179,19 @@ describe("provider-neutral browser account acceptance", () => {
           state: "ready",
         }),
       );
-      expect(secondTab.url()).not.toContain(beta.workspaceId);
+      const signedOutSecondTabUrl = new URL(secondTab.url());
+      expect({
+        hash: signedOutSecondTabUrl.hash,
+        origin: signedOutSecondTabUrl.origin,
+        pathname: signedOutSecondTabUrl.pathname,
+        search: signedOutSecondTabUrl.search,
+      }).toEqual({ hash: "", origin: publicOrigin, pathname: "/", search: "" });
       const signedOutSecondTabBody = await secondTab.locator("body").innerText();
       for (const tenantValue of [
         alpha.displayName,
         beta.displayName,
+        alpha.email,
+        beta.email,
         alpha.organizationName,
         beta.organizationName,
         alpha.workspaceId,
@@ -2192,9 +2258,10 @@ describe("provider-neutral browser account acceptance", () => {
         providerTokenColumns: 0,
       });
 
-      expectNoBrowserProblems(pageProblems);
-      expectNoBrowserProblems(secondTabProblems);
-      expectNoBrowserProblems(otherProblems);
+      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems, otherProblems]);
+      await expectNoBrowserProblems(pageProblems);
+      await expectNoBrowserProblems(secondTabProblems);
+      await expectNoBrowserProblems(otherProblems);
       await writeFile(
         `${EVIDENCE_DIR}/${engine}-account-acceptance.json`,
         `${JSON.stringify(

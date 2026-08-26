@@ -92,6 +92,7 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
   >();
   #projection: ManagedAuthSessionSetProjectionType | null = null;
   #authorityReadEpoch = 0;
+  #authorityResetPending = false;
   #authorityReconciliation: Promise<ManagedAuthSessionSetProjectionType> | null = null;
 
   constructor(options: BrowserAccountsClientOptions) {
@@ -100,8 +101,9 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
   }
 
   async getSessionSet(): Promise<ManagedAuthSessionSetProjectionType> {
-    const activeReconciliation = this.#authorityReconciliation;
-    if (activeReconciliation) return await activeReconciliation;
+    if (this.#authorityResetPending || this.#authorityReconciliation) {
+      return await this.reconcileSessionSetAuthority();
+    }
     const readEpoch = this.#authorityReadEpoch;
     const received = await this.#readSessionSet();
     if (readEpoch !== this.#authorityReadEpoch) {
@@ -116,10 +118,17 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
     if (this.#authorityReconciliation) return await this.#authorityReconciliation;
     const previous = this.#projection;
     const readEpoch = ++this.#authorityReadEpoch;
+    // Explicit reconciliation is an authority-invalidation boundary, not an
+    // ordinary monotonic refresh. Old operation admissions must never cross it,
+    // and mutations stay closed until two sequential reads reach a decision.
+    this.#authorityResetPending = true;
+    this.#mutationAdmissions.clear();
     const reconciliation = this.#reconcileSessionSetAuthority(previous, readEpoch);
     this.#authorityReconciliation = reconciliation;
     try {
-      return await reconciliation;
+      const accepted = await reconciliation;
+      if (readEpoch === this.#authorityReadEpoch) this.#authorityResetPending = false;
+      return accepted;
     } finally {
       if (this.#authorityReconciliation === reconciliation) {
         this.#authorityReconciliation = null;
@@ -206,6 +215,7 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
       ),
     );
     this.#authorityReadEpoch += 1;
+    this.#authorityResetPending = false;
     this.#projection = null;
     this.#mutationAdmissions.clear();
     return receipt;
@@ -246,6 +256,9 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
     schema: S,
     request: z.infer<S>,
   ): Promise<unknown> {
+    if (this.#authorityResetPending) {
+      throw new BrowserAccountsApiError(409, "actor_change_required");
+    }
     const body = schema.parse(request);
     const projection = this.#projection;
     if (!projection) throw new BrowserAccountsApiError(409, "session_set_projection_required");

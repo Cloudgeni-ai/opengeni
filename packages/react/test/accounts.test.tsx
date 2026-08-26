@@ -471,12 +471,120 @@ describe("BrowserAccountsProvider", () => {
     current = empty;
 
     expect(await actRun(() => accounts.current.invalidateActor())).toEqual(empty);
-    expect(reads - initialReads).toBe(3);
+    expect(reads - initialReads).toBe(2);
     expect(accounts.current.phase).toBe("ready");
     expect(accounts.current.projection?.slots).toEqual([]);
     expect(accounts.current.projection?.actorEpoch).toBe("1");
     expect(transitions.at(-1)?.kind).toBe("cross_tab");
     expect(transitions.at(-1)?.from?.actorEpoch).toBe("5");
+    await accounts.unmount();
+  });
+
+  test("adopts a double-confirmed lower authority that already selected a slot", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
+    const replacement = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_A });
+    let current = before;
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+      }),
+      async (transition) => {
+        transitions.push(transition);
+      },
+    );
+    current = replacement;
+
+    expect(await actRun(() => accounts.current.invalidateActor())).toEqual(replacement);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection).toEqual(replacement);
+    expect(transitions.at(-1)).toMatchObject({
+      kind: "cross_tab",
+      from: { actorEpoch: "5", selectedSlotId: SLOT_B },
+      to: { actorEpoch: "2", selectedSlotId: SLOT_A },
+    });
+    await accounts.unmount();
+  });
+
+  test("retries explicit authority reconciliation after a failed invalidation probe", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
+    const replacement = projection({ selectedSlotId: null, slotIds: [] });
+    let current = before;
+    let failNextReconciliation = false;
+    const client = scriptedClient({
+      getSessionSet: async () => current,
+      reconcileSessionSetAuthority: async () => {
+        if (failNextReconciliation) {
+          failNextReconciliation = false;
+          throw new TypeError("authority probe failed");
+        }
+        return current;
+      },
+    });
+    const accounts = await renderAccounts(client);
+    current = replacement;
+    failNextReconciliation = true;
+
+    await expect(actRun(() => accounts.current.invalidateActor())).rejects.toThrow(
+      "authority probe failed",
+    );
+    await flush();
+    expect(accounts.current.phase).toBe("recoverable_error");
+    expect(accounts.current.projection).toBeNull();
+
+    expect(await actRun(() => accounts.current.refresh())).toEqual(replacement);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection).toEqual(replacement);
+    await accounts.unmount();
+  });
+
+  test("reconciles a lower authority after a pending mutation settles", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5" });
+    const staleAccepted = projection({ generation: "8", actorEpoch: "6", selectedSlotId: SLOT_B });
+    const replacement = projection({ selectedSlotId: null, slotIds: [] });
+    let current = before;
+    let announceMutation!: () => void;
+    let releaseMutation!: () => void;
+    const mutationStarted = new Promise<void>((resolve) => {
+      announceMutation = resolve;
+    });
+    const mutationRelease = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    let reconciliationCount = 0;
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => {
+          reconciliationCount += 1;
+          return current;
+        },
+        selectLoginSlot: async () => {
+          announceMutation();
+          await mutationRelease;
+          return staleAccepted;
+        },
+      }),
+    );
+
+    let selection!: Promise<boolean>;
+    await act(async () => {
+      selection = accounts.current.selectSlot(SLOT_B);
+      await mutationStarted;
+    });
+    await act(async () => {
+      expect(await accounts.current.invalidateActor()).toBeNull();
+    });
+    current = replacement;
+    await act(async () => {
+      releaseMutation();
+      expect(await selection).toBe(true);
+    });
+
+    expect(reconciliationCount).toBe(2);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection).toEqual(replacement);
     await accounts.unmount();
   });
 
@@ -673,6 +781,78 @@ describe("BrowserAccountsProvider", () => {
       expect(peerTransitions[0]?.to).toBeNull();
       expect(peer.current.projection?.selectedSlotId).toBe(SLOT_B);
       expect(peer.current.projection?.actorEpoch).toBe("2");
+    } finally {
+      await initiator?.unmount();
+      await peer?.unmount();
+      Object.defineProperty(globalThis, "BroadcastChannel", {
+        configurable: true,
+        value: originalBroadcastChannel,
+      });
+    }
+  });
+
+  test("revokes neutral peer slot metadata when logout-all rotates the authority", async () => {
+    const originalBroadcastChannel = globalThis.BroadcastChannel;
+    class FakeBroadcastChannel {
+      static readonly instances = new Set<FakeBroadcastChannel>();
+      onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+
+      constructor(readonly name: string) {
+        FakeBroadcastChannel.instances.add(this);
+      }
+
+      postMessage(value: unknown): void {
+        for (const peer of FakeBroadcastChannel.instances) {
+          if (peer !== this && peer.name === this.name) {
+            peer.onmessage?.(new MessageEvent("message", { data: value }));
+          }
+        }
+      }
+
+      close(): void {
+        FakeBroadcastChannel.instances.delete(this);
+      }
+    }
+    Object.defineProperty(globalThis, "BroadcastChannel", {
+      configurable: true,
+      value: FakeBroadcastChannel,
+    });
+
+    let current = projection({ selectedSlotId: null });
+    const empty = projection({ selectedSlotId: null, slotIds: [] });
+    let peer: Awaited<ReturnType<typeof renderAccounts>> | null = null;
+    let initiator: Awaited<ReturnType<typeof renderAccounts>> | null = null;
+    try {
+      peer = await renderAccounts(
+        scriptedClient({
+          getSessionSet: async () => current,
+          reconcileSessionSetAuthority: async () => current,
+        }),
+        async () => undefined,
+        "accounts-neutral-logout-all-test",
+      );
+      initiator = await renderAccounts(
+        scriptedClient({
+          getSessionSet: async () => current,
+          reconcileSessionSetAuthority: async () => current,
+          logoutSessionSet: async () => {
+            current = empty;
+            return { generation: "2", actorEpoch: "2", state: "logged_out" };
+          },
+        }),
+        async () => undefined,
+        "accounts-neutral-logout-all-test",
+      );
+
+      expect(peer.current.projection?.slots.map((slot) => slot.verifiedClaim.value)).toEqual([
+        "person-1@example.test",
+        "person-2@example.test",
+      ]);
+      expect(await actRun(() => initiator!.current.logoutAll())).toBe(true);
+      await flush();
+      expect(peer.current.projection?.slots).toEqual([]);
+      expect(JSON.stringify(peer.current.projection)).not.toContain("person-1@example.test");
+      expect(JSON.stringify(peer.current.projection)).not.toContain("person-2@example.test");
     } finally {
       await initiator?.unmount();
       await peer?.unmount();

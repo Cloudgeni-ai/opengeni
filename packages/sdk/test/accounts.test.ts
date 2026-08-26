@@ -124,6 +124,112 @@ describe("BrowserAccountsClient", () => {
     expect(mutation?.headers.get("x-opengeni-actor-epoch")).toBe(resetSecond.actorEpoch);
   });
 
+  test("drops retained mutation admissions when explicit reconciliation rotates an equal clock", async () => {
+    const before = { ...projection, csrfToken: "b".repeat(43) };
+    const rotated = { ...projection, csrfToken: "r".repeat(43) };
+    const requests: Request[] = [];
+    let reads = 0;
+    let mutations = 0;
+    const client = new BrowserAccountsClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (request.method === "GET") {
+          reads += 1;
+          return Response.json(reads === 1 ? before : rotated);
+        }
+        mutations += 1;
+        if (mutations === 1) throw new TypeError("connection closed after request write");
+        return Response.json(rotated);
+      },
+    });
+    const command = {
+      operationId: "11111111-1111-4111-8111-111111111111",
+      expectedGeneration: "1",
+      slotId: "22222222-2222-4222-8222-222222222222",
+    };
+
+    expect(await client.getSessionSet()).toEqual(before);
+    await expect(client.selectLoginSlot(command)).rejects.toMatchObject({
+      code: "operation_outcome_unknown",
+    });
+    expect(await client.reconcileSessionSetAuthority()).toEqual(rotated);
+    expect(await client.selectLoginSlot(command)).toEqual(rotated);
+
+    const mutationRequests = requests.filter((request) => request.method === "POST");
+    expect(mutationRequests).toHaveLength(2);
+    expect(mutationRequests[0]?.headers.get("x-opengeni-session-csrf")).toBe(before.csrfToken);
+    expect(mutationRequests[1]?.headers.get("x-opengeni-session-csrf")).toBe(rotated.csrfToken);
+    expect(mutationRequests[1]?.headers.get("x-opengeni-actor-epoch")).toBe(rotated.actorEpoch);
+  });
+
+  test("keeps mutations closed after either reconciliation probe fails and retries both reads", async () => {
+    for (const failedProbe of [1, 2] as const) {
+      const before = {
+        ...projection,
+        generation: "7",
+        actorEpoch: "5",
+        csrfToken: "b".repeat(43),
+      };
+      const reset = { ...projection, csrfToken: "r".repeat(43) };
+      const requests: Request[] = [];
+      let initialRead = true;
+      let recovery = false;
+      let reconciliationProbe = 0;
+      const client = new BrowserAccountsClient({
+        baseUrl: "https://api.example.test",
+        fetch: async (input, init) => {
+          const request = new Request(input, init);
+          requests.push(request);
+          if (request.method !== "GET") return Response.json(reset);
+          if (initialRead) {
+            initialRead = false;
+            return Response.json(before);
+          }
+          if (!recovery) {
+            reconciliationProbe += 1;
+            if (reconciliationProbe === failedProbe) {
+              throw new TypeError(`reconciliation probe ${failedProbe} failed`);
+            }
+          }
+          return Response.json(reset);
+        },
+      });
+
+      expect(await client.getSessionSet()).toEqual(before);
+      await expect(client.reconcileSessionSetAuthority()).rejects.toThrow(
+        `reconciliation probe ${failedProbe} failed`,
+      );
+      const mutationCountBeforeBlockedAttempt = requests.filter(
+        (request) => request.method !== "GET",
+      ).length;
+      await expect(
+        client.selectLoginSlot({
+          operationId: `11111111-1111-4111-8111-11111111111${failedProbe}`,
+          expectedGeneration: before.generation,
+          slotId: "22222222-2222-4222-8222-222222222222",
+        }),
+      ).rejects.toMatchObject({ status: 409, code: "actor_change_required" });
+      expect(requests.filter((request) => request.method !== "GET")).toHaveLength(
+        mutationCountBeforeBlockedAttempt,
+      );
+
+      recovery = true;
+      const readsBeforeRecovery = requests.filter((request) => request.method === "GET").length;
+      expect(await client.getSessionSet()).toEqual(reset);
+      expect(requests.filter((request) => request.method === "GET")).toHaveLength(
+        readsBeforeRecovery + 2,
+      );
+      await client.selectLoginSlot({
+        operationId: `22222222-2222-4222-8222-22222222222${failedProbe}`,
+        expectedGeneration: reset.generation,
+        slotId: "22222222-2222-4222-8222-222222222222",
+      });
+      expect(requests.at(-1)?.headers.get("x-opengeni-session-csrf")).toBe(reset.csrfToken);
+    }
+  });
+
   test("keeps the current actor when a reconciliation probe catches back up", async () => {
     const before = { ...projection, generation: "7", actorEpoch: "5" };
     const stale = { ...projection, generation: "6", actorEpoch: "4" };
