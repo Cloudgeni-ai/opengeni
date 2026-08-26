@@ -1299,6 +1299,7 @@ describe("OpenGeniClient documents", () => {
     const knowledgeSearch = await client.searchKnowledge(WORKSPACE_ID, {
       query: "decision",
       mode: "keyword",
+      authorityKinds: ["organization"],
       limit: 2,
     });
     await client.listKnowledgeMemories(WORKSPACE_ID, {
@@ -1388,6 +1389,7 @@ describe("OpenGeniClient documents", () => {
     expect(JSON.parse(requests[10]!.body!)).toEqual({
       query: "decision",
       mode: "keyword",
+      authorityKinds: ["organization"],
       limit: 2,
     });
     expect(new URL(requests[11]!.url).searchParams.get("status")).toBe("approved");

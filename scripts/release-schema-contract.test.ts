@@ -133,10 +133,10 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0357_rig_platform_base_only.sql",
     );
     const organizationIdentityConfirmationPrompt = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0359_organization_identity_confirmation_prompt.sql",
+      (migration) => migration.path === "0360_organization_identity_confirmation_prompt.sql",
     );
     const rememberKnowledgeMemoryMaterialization = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0360_remember_knowledge_memory_materialization.sql",
+      (migration) => migration.path === "0361_remember_knowledge_memory_materialization.sql",
     );
     expect(
       completeSourceContract.migrations.find(
@@ -150,8 +150,8 @@ describe("release schema contract", () => {
       "0356_set_based_insights_session_visibility.sql",
       "0357_rig_platform_base_only.sql",
       "0358_pr_review_managed_github_app.sql",
-      "0359_organization_identity_confirmation_prompt.sql",
-      "0360_remember_knowledge_memory_materialization.sql",
+      "0360_organization_identity_confirmation_prompt.sql",
+      "0361_remember_knowledge_memory_materialization.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -169,9 +169,9 @@ describe("release schema contract", () => {
         (organizationIdentityConfirmationPrompt ? 1 : 0) +
         (rememberKnowledgeMemoryMaterialization ? 1 : 0),
       latestMigration: rememberKnowledgeMemoryMaterialization
-        ? "0360_remember_knowledge_memory_materialization.sql"
+        ? "0361_remember_knowledge_memory_materialization.sql"
         : organizationIdentityConfirmationPrompt
-          ? "0359_organization_identity_confirmation_prompt.sql"
+          ? "0360_organization_identity_confirmation_prompt.sql"
           : prReviewManagedGithubApp
             ? "0358_pr_review_managed_github_app.sql"
             : rigPlatformBaseOnly
@@ -198,8 +198,8 @@ describe("release schema contract", () => {
       "0356_set_based_insights_session_visibility.sql",
       "0357_rig_platform_base_only.sql",
       "0358_pr_review_managed_github_app.sql",
-      "0359_organization_identity_confirmation_prompt.sql",
-      "0360_remember_knowledge_memory_materialization.sql",
+      "0360_organization_identity_confirmation_prompt.sql",
+      "0361_remember_knowledge_memory_materialization.sql",
     ]);
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
@@ -294,8 +294,8 @@ describe("release schema contract", () => {
       "0356_set_based_insights_session_visibility.sql",
       "0357_rig_platform_base_only.sql",
       "0358_pr_review_managed_github_app.sql",
-      "0359_organization_identity_confirmation_prompt.sql",
-      "0360_remember_knowledge_memory_materialization.sql",
+      "0360_organization_identity_confirmation_prompt.sql",
+      "0361_remember_knowledge_memory_materialization.sql",
     );
     // Each appended migration moves both of these, and two candidates can be in
     // flight at once, so derive them from what is actually on disk rather than

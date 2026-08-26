@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 const migrationUrl = new URL(
-  "../drizzle/0359_organization_identity_confirmation_prompt.sql",
+  "../drizzle/0360_organization_identity_confirmation_prompt.sql",
   import.meta.url,
 );
 const migration = await Bun.file(migrationUrl).text();
 
-describe("migration 0359 organization identity confirmation prompt", () => {
+describe("migration 0360 organization identity confirmation prompt", () => {
   test("narrows new confirmations while disclosing rolling legacy content", () => {
     expect(migration).toContain(
       "CREATE OR REPLACE FUNCTION company_profile_agent_confirmation_summary",

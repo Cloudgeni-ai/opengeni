@@ -7,12 +7,12 @@ import {
 } from "../src/runtime-posture";
 
 const migrationUrl = new URL(
-  "../drizzle/0360_remember_knowledge_memory_materialization.sql",
+  "../drizzle/0361_remember_knowledge_memory_materialization.sql",
   import.meta.url,
 );
 const migration = await Bun.file(migrationUrl).text();
 
-describe("migration 0360 remember Knowledge Memory materialization", () => {
+describe("migration 0361 remember Knowledge Memory materialization", () => {
   test("owns exact, idempotent confirmation-to-Memory materialization", () => {
     expect(migration).toContain("CREATE TABLE remember_knowledge_memory_materializations");
     expect(migration).toContain("confirmation_receipt_id uuid PRIMARY KEY");

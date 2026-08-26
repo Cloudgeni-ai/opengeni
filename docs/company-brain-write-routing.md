@@ -256,7 +256,7 @@ appends an `approved` service review through the guarded
 retained; since migration 0284 the reason-carrying overload records a truthful
 human-confirmed reason instead of the automatic wording) and records an
 immutable content-free `remember_knowledge_confirmation_receipts` row. Migration
-0360's dedicated materialization capability resolves the exact
+0361's dedicated materialization capability resolves the exact
 claim/fact/evidence/review tuple named by that receipt, verifies the Task-note
 text hash, and inserts exact text in a receipt-specific Memory namespace inside
 the same outer transaction as approval. Its immutable

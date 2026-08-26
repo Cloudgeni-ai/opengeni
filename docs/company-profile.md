@@ -258,7 +258,7 @@ instruction, so "write one imperative rule" would be the wrong shape.
 
 The returned question's `helpText` binds the revision number and content
 SHA-256 and renders a readable summary of the proposed identity and mission
-(bounded to the human-input contract), never raw JSON. Migration `0359` narrows
+(bounded to the human-input contract), never raw JSON. Migration `0360` narrows
 new confirmation copy while preserving immutable prompts on older proposals;
 during a rolling deploy it still discloses any nonempty legacy lists submitted
 by an older API instance before the human can activate them.
