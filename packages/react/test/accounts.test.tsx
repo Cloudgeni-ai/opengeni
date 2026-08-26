@@ -266,7 +266,7 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
-  test("replays an outcome-unknown switch with the exact original request", async () => {
+  test("automatically replays an outcome-unknown switch with the exact original request", async () => {
     let selected = projection();
     let attempts = 0;
     const requests: Array<{ operationId: string; expectedGeneration: string }> = [];
@@ -287,14 +287,11 @@ describe("BrowserAccountsProvider", () => {
     });
     const accounts = await renderAccounts(client);
 
-    await expect(actRun(() => accounts.current.selectSlot(SLOT_B))).rejects.toThrow("unknown");
-    await flush();
-    expect(accounts.current.phase).toBe("recoverable_error");
-    expect(accounts.current.hasPendingTransition).toBe(true);
-    expect(await actRun(() => accounts.current.continueTransition())).toBe(true);
+    expect(await actRun(() => accounts.current.selectSlot(SLOT_B))).toBe(true);
     expect(requests).toHaveLength(2);
     expect(requests[1]).toEqual(requests[0]);
     expect(requests[0]?.expectedGeneration).toBe("1");
+    expect(accounts.current.phase).toBe("ready");
     expect(accounts.current.hasPendingTransition).toBe(false);
     await accounts.unmount();
   });
@@ -334,7 +331,7 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
-  test("replays response-lost logout-all with its original generation", async () => {
+  test("automatically replays response-lost logout-all with its original generation", async () => {
     const before = projection();
     const empty = projection({ selectedSlotId: null, slotIds: [] });
     let current = before;
@@ -354,18 +351,45 @@ describe("BrowserAccountsProvider", () => {
     });
     const accounts = await renderAccounts(client);
 
-    await expect(actRun(() => accounts.current.logoutAll())).rejects.toThrow("unknown");
-    await flush();
-    expect(accounts.current.phase).toBe("recoverable_error");
-    expect(accounts.current.projection?.slots).toEqual([]);
-    expect(accounts.current.hasPendingTransition).toBe(true);
-
-    expect(await actRun(() => accounts.current.continueTransition())).toBe(true);
+    expect(await actRun(() => accounts.current.logoutAll())).toBe(true);
     expect(requests).toHaveLength(2);
     expect(requests[1]).toEqual(requests[0]);
     expect(requests[0]?.expectedGeneration).toBe("1");
     expect(accounts.current.phase).toBe("ready");
     expect(accounts.current.projection?.slots).toEqual([]);
+    expect(accounts.current.hasPendingTransition).toBe(false);
+    await accounts.unmount();
+  });
+
+  test("bounds automatic outcome-unknown replay and preserves the pending command", async () => {
+    const before = projection();
+    const selected = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+    let attempts = 0;
+    const requests: Array<{ operationId: string; expectedGeneration: string }> = [];
+    const client = scriptedClient({
+      getSessionSet: async () => (attempts >= 2 ? selected : before),
+      selectLoginSlot: async (request) => {
+        attempts += 1;
+        requests.push(request);
+        if (attempts <= 2) {
+          throw Object.assign(new Error("unknown"), { code: "operation_outcome_unknown" });
+        }
+        return selected;
+      },
+    });
+    const accounts = await renderAccounts(client);
+
+    await expect(actRun(() => accounts.current.selectSlot(SLOT_B))).rejects.toThrow("unknown");
+    await flush();
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    expect(accounts.current.phase).toBe("recoverable_error");
+    expect(accounts.current.hasPendingTransition).toBe(true);
+
+    expect(await actRun(() => accounts.current.continueTransition())).toBe(true);
+    expect(requests).toHaveLength(3);
+    expect(requests[2]).toEqual(requests[0]);
+    expect(accounts.current.phase).toBe("ready");
     expect(accounts.current.hasPendingTransition).toBe(false);
     await accounts.unmount();
   });

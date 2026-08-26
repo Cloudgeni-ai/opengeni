@@ -364,7 +364,16 @@ export function BrowserAccountsProvider({
       setPhase("committing");
       setError(null);
       try {
-        let accepted = await pending.execute(expectedGeneration);
+        let accepted: ManagedAuthSessionSetProjection;
+        try {
+          accepted = await pending.execute(expectedGeneration);
+        } catch (caught) {
+          if (errorCode(caught) !== "operation_outcome_unknown") throw caught;
+          // The command may already be durable. Replay exactly once before a
+          // generic authority read so a response-lost terminal mutation can
+          // recover its receipt with the frozen operation and admission data.
+          accepted = await pending.execute(expectedGeneration);
+        }
         if (sequenceRef.current !== sequence) return false;
         if (invalidatedDuringPendingCommitRef.current) {
           accepted = await client.getSessionSet();
