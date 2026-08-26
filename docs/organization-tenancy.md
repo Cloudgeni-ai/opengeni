@@ -684,6 +684,33 @@ product mutations are also API-contract fenced, and the web sends the exact
 release contract revision, so a stale client cannot cross the cutover after
 service resumes.
 
+The canonical repository acceptance for this lifecycle is
+`test/e2e/organization-onboarding-acceptance.e2e.ts`. It composes the real
+Better Auth handler and Hono API, migrates PostgreSQL through a dedicated
+`NOSUPERUSER NOBYPASSRLS` owner, provisions and connects through
+`opengeni_app`, drives public operations through the SDK, and completes the
+human paths in a production-built web bundle under Chromium. Its process-local
+mail capture is count- and TTL-bounded, one-time readable, and never persists a
+bearer or rendered body. The lane proves ordinary named signup, the exact
+Personal-only owner graph, immediate private-session creation, unregistered
+setup, registered invitation choice, shared grant/revoke, stale and
+cross-organization rejection, password reset, delivery refusal/ambiguity, RLS
+posture, accessibility, responsive layout, and browser-error cleanliness.
+
+Run the same fail-closed boundary locally with:
+
+```bash
+OPENGENI_REQUIRE_REAL_DB=1 \
+OPENGENI_ONBOARDING_EVIDENCE_DIR=/tmp/opengeni-onboarding-evidence \
+bun scripts/run-browser-e2e.ts \
+  ./test/e2e/organization-onboarding-acceptance.e2e.ts
+```
+
+The curated `onboarding` CI lane retains a machine-readable evidence file plus
+1440 px, 390 px, and 320 px screenshots. Missing Docker/PostgreSQL, Chromium,
+an evidence file, or any expected capture fails the lane rather than producing
+a skipped green result.
+
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
 and Billing sections. Overview projects the canonical organization name plus
