@@ -430,6 +430,17 @@ workspace graph. The public setup route rate-limits before work and proves the
 non-consuming token authority before password hashing; its final lifecycle
 still revalidates and consumes atomically. Product-owned onboarding mutations
 are API-contract fenced and the web sends the exact release revision.
+Migration 0356 adds a provider-neutral browser installation/session-set authority
+with up to eight independently revocable login slots and exactly one explicit
+selected actor. Raw installation and transaction authority is hash-only at rest;
+every table is FORCE-RLS and runtime lifecycle access is restricted to
+schema-pinned capabilities. Generation CAS, durable operation receipts, exact
+login-binding revision stamps, and renewable actor-mutation leases fence add,
+re-auth, selection, scoped logout, deep-link recovery, ordinary writes, and SSE
+through final settlement. `legacy` remains the repository default; `dual` mirrors
+only the selected legacy cookie for rolling coexistence, and `broker` activation
+is a later deployment decision. Canonical architecture, security, compatibility,
+and rollout: [`browser-login-session-sets.md`](browser-login-session-sets.md).
 The four tenancy tables remain FORCE-RLS with no direct `opengeni_app` table
 DML; the only runtime write path is the target-schema-local,
 PUBLIC-revoked `ensure_managed_human_personal_workspace` SECURITY DEFINER
@@ -1674,6 +1685,7 @@ workspaces never enter that projection.
 
 - **Workspace scoping.** Canonical protected routes carry the `workspaceId` in the URL; every request resolves to an access grant + permission before route code touches workspace data. The workspace filter (RLS) is the boundary, not the resource id. No operational `/v1` route may be unscoped (a static guard enforces this).
 - **Three product access modes.** `local` (auto-bootstrap; dev), `configured` (delegated HMAC token or bootstrap; `x-opengeni-subject` carries the subject), `managed` (Better Auth cookie session, delegated token, or hashed API key; SaaS).
+- **Managed browser actors are explicit session-set selections.** In nonlegacy managed mode, one hash-only browser installation authority owns bounded independently revocable Better Auth login slots and one selected actor. Every actor change advances a server epoch, fences or aborts old requests and streams, clears tenant-bound client state, and never derives selection from tenant URLs, local storage, or provider callbacks. See [`browser-login-session-sets.md`](browser-login-session-sets.md).
 - **Principal model: membership authorizes people; credentials authorize themselves.** Ordinary workspace grants resolve from two independent sources: `workspace_memberships` rows (subjects `user:*` — the authorization source for people on ordinary workspaces, so a missing row means revoked) and self-carried grants (a workspace-scoped `api_keys` row → subject `api_key:<id>`; a signed delegated token → its payload grants). There is one narrow managed-personal owner exception: only a canonical managed-cookie (Better Auth) session may receive its own personal workspace as a lifecycle-derived `AccessContext.workspaceGrants` entry, and only after the exact active organization membership and its exact personal-workspace pointer converge. That personal workspace deliberately has no durable `workspace_memberships` row; bearer/delegated principals, API keys, other users, and account or organization administrators receive no ambient or delegable access through the exception. A non-user subject _may_ also hold a membership row (roster surface + per-member personal state such as session pins), but its absence must never deny it — **never use "has a membership row" as an authorization or liveness check for arbitrary subjects** (doing so 403'd every workspace-scoped API key in production, 2026-07-13). Per-subject personal state is membership-locked and removal-cleaned for members. Pins remain durable; legacy session-list snapshots are TTL-bounded for non-members, while current keyset cursors create no personal database row.
 - **The deployment shared-key boundary.** `x-opengeni-access-key` admits ordinary callers and gates deployment-only surfaces (with an exempt-path allow-list: `config/client`, auth, Stripe webhook, GitHub callbacks, install). A cryptographically valid first-party delegated bearer may enter `/v1`; route-level grants and attempt fences remain the authority. This is a _different credential and header_ from product/delegated `Authorization: Bearer`.
 - **Billing/entitlements surface.** Usage limits and entitlements are governed by `UsageLimitsMode`/`EntitlementsMode` (§5.7); Stripe is confined to `routes/billing.ts` and the Stripe webhook is on the access-key exempt-path allow-list. The `check-workspace-billing-static.ts` guard enforces both confinement and route-scoping.

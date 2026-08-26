@@ -453,6 +453,24 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
+### Browser login session-set rollout (0356)
+
+`0356_managed_auth_session_sets.sql` is rolling and deliberately activation-free.
+It backfills exact Better Auth login-binding stamps, installs hash-only/FORCE-RLS
+browser session-set authority, and leaves
+`OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply it with the owner migration
+job and provision the restricted runtime routines before deploying the matching
+API/web generation. Do not change the mode as part of migration or PR merge.
+
+`dual` and `broker` require a fresh deployment authorization, one canonical HTTPS
+web/API origin, consistent Better Auth signing/origin/cookie configuration, the
+same mode on every API replica, and the complete real PostgreSQL/Better Auth plus
+Chromium/Firefox/WebKit `accounts` acceptance lane. `dual` is the measured
+coexistence state; `broker` is a later all-replica cutover. Never mix modes or
+restart an arbitrary old image after broker activation. The complete rollout,
+rollback, self-hosting, header/proxy, and security contract is
+[`browser-login-session-sets.md`](browser-login-session-sets.md).
+
 ### Durable invited-user email delivery (0351)
 
 Migration 0351 is rolling and additive. Before inviting users, configure
