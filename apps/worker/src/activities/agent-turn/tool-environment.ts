@@ -176,11 +176,13 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     workspaceId: input.workspaceId,
   };
   const rigDefaultVariableSetIds = rigVersion?.defaultVariableSetIds ?? [];
+  const sessionVariableSetIds = session.variableSetIds;
   let workspaceVariableSet: Awaited<
     ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>
   > = null;
+  const explicitEnvironmentValues: Record<string, string> = {};
   const rigDefaultEnvironmentValues: Record<string, string> = {};
-  if (session.variableSetId !== null || rigDefaultVariableSetIds.length > 0) {
+  if (sessionVariableSetIds.length > 0 || rigDefaultVariableSetIds.length > 0) {
     const variableSetAuthority = {
       sessionId: input.sessionId,
       turnId: turn.id,
@@ -205,22 +207,30 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
         executionGeneration: turn.executionGeneration,
         variableSetId: candidateVariableSetId,
       });
-    workspaceVariableSet = await waitForTurnOperation(
-      (async () =>
-        loadWorkspaceEnvironmentForRunWithCredentials(
-          db,
-          runSettings,
-          connectionScope,
-          session.variableSetId,
-          variableSetAuthority,
-          connectionCredentials?.sandboxSecrets,
-          session.variableSetId && connectionCredentials?.sandboxSecrets
-            ? { expectedGeneration: await expectedVariableSetGeneration(session.variableSetId) }
-            : {},
-        ))(),
-      cancellationSignal,
-      undefined,
-    );
+    for (const variableSetId of sessionVariableSetIds) {
+      const selected = await waitForTurnOperation(
+        (async () =>
+          loadWorkspaceEnvironmentForRunWithCredentials(
+            db,
+            runSettings,
+            connectionScope,
+            variableSetId,
+            variableSetAuthority,
+            connectionCredentials?.sandboxSecrets,
+            connectionCredentials?.sandboxSecrets
+              ? { expectedGeneration: await expectedVariableSetGeneration(variableSetId) }
+              : {},
+          ))(),
+        cancellationSignal,
+        undefined,
+      );
+      if (!selected) continue;
+      Object.assign(explicitEnvironmentValues, selected.values);
+      // Preserve the legacy single-set metadata view as the final,
+      // highest-precedence explicit selection while its values represent the
+      // complete ordered explicit layer.
+      workspaceVariableSet = { ...selected, values: { ...explicitEnvironmentValues } };
+    }
     // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
     // variable sets and layer them BELOW the session's own set — the session's
     // values WIN on any key collision. Loaded through the SAME host-secrets
@@ -262,7 +272,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
   // Session set wins collisions with the rig defaults (explicit precedence).
   const sandboxWorkspaceEnvironmentValues = mergeRigDefaultVariableSetEnvironment(
     rigDefaultEnvironmentValues,
-    workspaceVariableSet?.values ?? {},
+    explicitEnvironmentValues,
   );
   return {
     turnResources,

@@ -763,6 +763,7 @@ describe("retained screenshot lifecycle fences", () => {
     ]);
 
     const visible = await appSql.begin(async (sql) => {
+      await sql`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
       await sql`select set_config('opengeni.account_id', ${first.accountId}, true)`;
       await sql`select set_config('opengeni.workspace_id', ${first.workspaceId}, true)`;
       return await sql<{ artifactId: string }[]>`

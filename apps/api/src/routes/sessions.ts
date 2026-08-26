@@ -61,6 +61,7 @@ import {
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
+  UpdateSessionVariableSetsRequest,
   UpdateSessionVisibilityRequest,
   UpdateSessionToolPolicyRequest,
   ViewerHeartbeatRequest,
@@ -79,6 +80,7 @@ import {
   type TerminalPtyExitedPayload,
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
+  type VariableSet,
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
@@ -121,6 +123,7 @@ import {
   setSessionCodexPinInTransaction,
   withSessionCodexCapacityMutation,
   setSessionChannel,
+  updateSessionVariableSets,
   ChannelNotFoundError,
   setSessionAttention,
   setSessionArchive,
@@ -150,6 +153,7 @@ import {
   SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
+  SessionVariableSetSelectionUnavailableError,
   workspaceControlRequestLockTimeoutMs,
   SessionTenancyAccessError,
   SessionTenancyConflictError,
@@ -264,6 +268,7 @@ import {
   workspaceSessionToolPolicyDefaultServerIds,
   workspaceSessionToolPolicyServerIds,
   relayConfigFromSettings,
+  validateVariableSetAttachment,
 } from "@opengeni/core";
 import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
@@ -1755,6 +1760,91 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(422, { message: error.message });
       }
       throw error;
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  // Replace the complete ordered Variable Set selection. The DB mutation
+  // serializes with turn claim, rejects live/shared sandbox use, and requests a
+  // cold rotation before the new environment can be materialized.
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/variable-sets", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    try {
+      await requireSessionAuthorization(deps, grant, {
+        sessionId,
+        operation: "session.variable_sets.write",
+        surface: "http",
+      });
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
+    // Detach still requires attach authority: it changes which protected
+    // resources the session may materialize. Non-empty selections additionally
+    // require use authority through validateVariableSetAttachment.
+    requirePermission(grant, "variable-sets:attach");
+    const parsed = UpdateSessionVariableSetsRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "Invalid session Variable Set request.",
+        retryable: false,
+        details: { fields: zodErrorFields(parsed.error) },
+      });
+    }
+    const variableSets: VariableSet[] = [];
+    for (const variableSetId of parsed.data.variableSetIds) {
+      variableSets.push(
+        await validateVariableSetAttachment({ settings, db }, grant, workspaceId, variableSetId),
+      );
+    }
+    const result = await updateSessionVariableSets(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId,
+      subjectId: grant.subjectId,
+      variableSets: variableSets.map((variableSet) => ({
+        id: variableSet.id,
+        name: variableSet.name,
+        scope: variableSet.scope,
+      })),
+    });
+    if (result.status === "not_found") {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (result.status === "invalid_variable_sets") {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "One or more selected Variable Sets are no longer available.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { variableSetIds: result.variableSetIds },
+      });
+    }
+    if (result.status === "blocked") {
+      const messages = {
+        turn_in_flight:
+          "Variable Sets can be changed only when the session has no accepted, queued, claimed, or pending work.",
+        shared_sandbox_group:
+          "Variable Sets cannot be changed while this session shares a sandbox; fork it into a separate session first.",
+        live_sandbox_holders:
+          "Close active terminal, desktop, and sandbox operations before changing Variable Sets.",
+      } as const;
+      throw new HTTPException(409, { message: messages[result.reason] });
+    }
+    if (result.status === "updated") {
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, [result.event]);
     }
     const session = await getSessionForSubject(
       db,
@@ -4125,6 +4215,7 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/visibility" && verb === "PUT") return "session.visibility.write";
   if (suffix === "/forks" && verb === "POST") return "session.fork.create";
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
+  if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
     return "session.mcp.approval_policy.write";
@@ -4583,6 +4674,16 @@ export function sessionCreateErrorResponse(c: Context, error: unknown): Response
     // Covers the create-vs-channel-delete race the pre-validation cannot: the
     // insert's FK rejection surfaces as the same 422 an unknown id gets.
     return c.json({ code: "SESSION_CREATE_REJECTED", message: error.message }, 422);
+  }
+  if (error instanceof SessionVariableSetSelectionUnavailableError) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+        details: { variableSetIds: error.variableSetIds },
+      },
+      422,
+    );
   }
   if (error instanceof SessionSpawnDeniedError) {
     return c.json(

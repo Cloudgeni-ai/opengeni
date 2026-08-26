@@ -98,6 +98,8 @@ export type SessionDraft = {
   compute: ComputeTarget;
   // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
   // (a connected machine uses its own variable set & git credentials — D2).
+  variableSetIds: string[];
+  /** @deprecated local compatibility alias for older saved drafts/tests. */
   variableSetId: string;
   // The rig the session materializes (managed sandbox only; a connected machine
   // is the user's own box, so it never rides a rig). "" ⇒ the workspace default
@@ -117,6 +119,7 @@ export function emptySessionDraft(
   return {
     visibility: "workspace",
     compute: { kind: "sandbox", backend: "" },
+    variableSetIds: [],
     variableSetId: "",
     rigId: "",
     goalText: "",
@@ -268,7 +271,14 @@ export function buildCreateSessionRequest(
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
     ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
-    ...(input.submission.variableSetId ? { variableSetId: input.submission.variableSetId } : {}),
+    ...(input.submission.variableSetIds?.length
+      ? {
+          variableSetIds: input.submission.variableSetIds,
+          variableSetId: input.submission.variableSetIds.at(-1),
+        }
+      : input.submission.variableSetId
+        ? { variableSetId: input.submission.variableSetId }
+        : {}),
     ...(input.submission.rigId ? { rigId: input.submission.rigId } : {}),
     ...(input.submission.goal ? { goal: input.submission.goal } : {}),
     ...(input.submission.firstPartyMcpPermissions
@@ -372,7 +382,14 @@ export function submissionFromSessionDraft(
   return {
     extras: {
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-      ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
+      ...(draft.variableSetIds.length
+        ? {
+            variableSetIds: draft.variableSetIds,
+            variableSetId: draft.variableSetIds.at(-1),
+          }
+        : draft.variableSetId
+          ? { variableSetId: draft.variableSetId }
+          : {}),
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
       ...(goal ? { goal } : {}),
@@ -422,7 +439,14 @@ export function newSessionDraftOptionsFromSessionDraft(
   return {
     visibility: draft.visibility,
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-    ...(draft.variableSetId ? { variableSetId: draft.variableSetId } : {}),
+    ...(draft.variableSetIds.length
+      ? {
+          variableSetIds: draft.variableSetIds,
+          variableSetId: draft.variableSetIds.at(-1),
+        }
+      : draft.variableSetId
+        ? { variableSetId: draft.variableSetId }
+        : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
     ...(goal ? { goal } : {}),
     ...permissions,
@@ -456,7 +480,9 @@ export function sessionDraftFromNewSessionDraftOptions(
           // offers that control; always use the deployment default.
           backend: "",
         },
-    variableSetId: options.variableSetId ?? "",
+    variableSetIds:
+      options.variableSetIds ?? (options.variableSetId ? [options.variableSetId] : []),
+    variableSetId: options.variableSetId ?? options.variableSetIds?.at(-1) ?? "",
     rigId: options.rigId ?? "",
     goalText: options.goal?.text ?? "",
     goalSuccessCriteria: options.goal?.successCriteria ?? "",

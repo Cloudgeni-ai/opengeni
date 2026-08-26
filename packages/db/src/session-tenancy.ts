@@ -121,6 +121,17 @@ export type ForkSessionContentInput = {
   destinationVisibility: SessionTenancyVisibility;
   workspaceSharedAcknowledged: boolean;
   operationKey: string;
+  runtimeRequest?: ForkSessionRuntimeRequest;
+  runtimeConfiguration?: ForkSessionRuntimeConfiguration;
+};
+
+export type ForkSessionRuntimeRequest = {
+  variableSetIds: string[];
+  rigId: string | null;
+};
+
+export type ForkSessionRuntimeConfiguration = ForkSessionRuntimeRequest & {
+  rigVersionId: string | null;
 };
 
 export type ForkSessionContentResult = {
@@ -133,6 +144,8 @@ export type ForkSessionContentResult = {
   authorityEpoch: number;
   copiedHistoryItemCount: number;
   replay: boolean;
+  runtimeEventId: string | null;
+  runtimeEventSequence: number | null;
 };
 
 export async function sessionTenancyProductActivated(
@@ -332,8 +345,23 @@ export function canonicalSessionForkHash(
     | "destinationWorkspaceId"
     | "destinationVisibility"
     | "workspaceSharedAcknowledged"
+    | "runtimeRequest"
   >,
 ): string {
+  if (input.runtimeRequest) {
+    return createHash("sha256")
+      .update(
+        JSON.stringify({
+          version: 3,
+          sourceSessionId: input.sourceSessionId,
+          destinationWorkspaceId: input.destinationWorkspaceId,
+          destinationVisibility: input.destinationVisibility,
+          workspaceSharedAcknowledged: input.workspaceSharedAcknowledged,
+          runtime: input.runtimeRequest,
+        }),
+      )
+      .digest("hex");
+  }
   const legacyCompatiblePrivateRequest =
     input.destinationVisibility === "user_private" && !input.workspaceSharedAcknowledged;
   return createHash("sha256")
@@ -355,6 +383,12 @@ export function canonicalSessionForkHash(
             },
       ),
     )
+    .digest("hex");
+}
+
+function canonicalForkRuntimeConfigurationDigest(input: ForkSessionRuntimeRequest): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ version: 1, ...input }))
     .digest("hex");
 }
 
@@ -437,6 +471,17 @@ export async function forkSessionContent(
   if (input.destinationWorkspaceId !== input.sourceWorkspaceId) {
     throw new Error("The first session fork contract is same-workspace only");
   }
+  if (Boolean(input.runtimeRequest) !== Boolean(input.runtimeConfiguration)) {
+    throw new Error("A fresh session fork runtime request requires its resolved configuration");
+  }
+  if (
+    input.runtimeRequest &&
+    (input.runtimeRequest.rigId !== input.runtimeConfiguration?.rigId ||
+      JSON.stringify(input.runtimeRequest.variableSetIds) !==
+        JSON.stringify(input.runtimeConfiguration?.variableSetIds))
+  ) {
+    throw new Error("Resolved session fork runtime configuration does not match its request");
+  }
   const { accountId } = await rlsContextForWorkspace(db, input.sourceWorkspaceId);
   await assertSessionTenancyProductActivated(db, input.sourceWorkspaceId);
   const requestHash = canonicalSessionForkHash(input);
@@ -446,6 +491,43 @@ export async function forkSessionContent(
       input.sourceWorkspaceId,
       input.actorSubjectId,
       async (scopedDb) => {
+        if (input.runtimeRequest && input.runtimeConfiguration) {
+          const runtimeDigest = canonicalForkRuntimeConfigurationDigest(input.runtimeRequest);
+          const rows = await rawRows<ForkSessionContentResult>(
+            scopedDb,
+            sql`select
+            operation_id as "operationId",
+            event_id as "eventId",
+            event_sequence as "eventSequence",
+            session_id as "sessionId",
+            workspace_id as "workspaceId",
+            visibility,
+            authority_epoch as "authorityEpoch",
+            copied_history_item_count as "copiedHistoryItemCount",
+            replay,
+            runtime_event_id as "runtimeEventId",
+            runtime_event_sequence as "runtimeEventSequence"
+          from fork_session_content_with_runtime(
+            ${accountId}::uuid,
+            ${input.sourceWorkspaceId}::uuid,
+            ${input.sourceSessionId}::uuid,
+            ${input.actorSubjectId},
+            ${input.destinationWorkspaceId}::uuid,
+            ${input.destinationVisibility},
+            ${input.workspaceSharedAcknowledged},
+            ${input.operationKey},
+            ${requestHash},
+            ${SESSION_TENANCY_ACTIVATION_VERSION},
+            ${JSON.stringify(input.runtimeConfiguration.variableSetIds)}::jsonb,
+            ${input.runtimeConfiguration.rigId}::uuid,
+            ${input.runtimeConfiguration.rigVersionId}::uuid,
+            ${runtimeDigest}
+          )`,
+          );
+          const result = rows[0];
+          if (!result) throw new Error("Session fork returned no result");
+          return result;
+        }
         const rows = await rawRows<ForkSessionContentResult>(
           scopedDb,
           sql`select
@@ -457,7 +539,9 @@ export async function forkSessionContent(
           visibility,
           authority_epoch as "authorityEpoch",
           copied_history_item_count as "copiedHistoryItemCount",
-          replay
+          replay,
+          null::uuid as "runtimeEventId",
+          null::integer as "runtimeEventSequence"
         from fork_session_content(
           ${accountId}::uuid,
           ${input.sourceWorkspaceId}::uuid,
@@ -515,6 +599,38 @@ export async function replayAppliedSessionFork(
       input.sourceWorkspaceId,
       input.actorSubjectId,
       async (scopedDb) => {
+        if (input.runtimeRequest) {
+          const runtimeDigest = canonicalForkRuntimeConfigurationDigest(input.runtimeRequest);
+          const rows = await rawRows<ForkSessionContentResult>(
+            scopedDb,
+            sql`select
+            operation_id as "operationId",
+            event_id as "eventId",
+            event_sequence as "eventSequence",
+            session_id as "sessionId",
+            workspace_id as "workspaceId",
+            visibility,
+            authority_epoch as "authorityEpoch",
+            copied_history_item_count as "copiedHistoryItemCount",
+            replay,
+            runtime_event_id as "runtimeEventId",
+            runtime_event_sequence as "runtimeEventSequence"
+          from replay_applied_session_fork_with_runtime(
+            ${accountId}::uuid,
+            ${input.sourceWorkspaceId}::uuid,
+            ${input.sourceSessionId}::uuid,
+            ${input.actorSubjectId},
+            ${input.destinationWorkspaceId}::uuid,
+            ${input.destinationVisibility},
+            ${input.workspaceSharedAcknowledged},
+            ${input.operationKey},
+            ${requestHash},
+            ${SESSION_TENANCY_ACTIVATION_VERSION},
+            ${runtimeDigest}
+          )`,
+          );
+          return rows[0] ?? null;
+        }
         const rows = await rawRows<ForkSessionContentResult>(
           scopedDb,
           sql`select
@@ -526,7 +642,9 @@ export async function replayAppliedSessionFork(
           visibility,
           authority_epoch as "authorityEpoch",
           copied_history_item_count as "copiedHistoryItemCount",
-          replay
+          replay,
+          null::uuid as "runtimeEventId",
+          null::integer as "runtimeEventSequence"
         from replay_applied_session_fork(
           ${accountId}::uuid,
           ${input.sourceWorkspaceId}::uuid,

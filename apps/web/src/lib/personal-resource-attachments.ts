@@ -39,6 +39,9 @@ export type PersonalResourceCatalog = Readonly<{
 }>;
 
 export type FixedPersonalResources = Readonly<{
+  variableSetIds?: readonly string[] | undefined;
+  variableSetScopes?: readonly (ResourceAuthorityScope | null)[] | undefined;
+  /** @deprecated compatibility alias for one selected set. */
   variableSetId: string | null;
   variableSetScope?: ResourceAuthorityScope | null | undefined;
   rigId: string | null;
@@ -102,7 +105,10 @@ async function listAuthorityPages(
   client: OpenGeniCoreClient,
   workspaceId: string,
   resourceKind: "variable_set" | "rig" | "connected_machine",
-): Promise<{ authorities: UserResourceAuthoritySummary[]; truncated: boolean }> {
+): Promise<{
+  authorities: UserResourceAuthoritySummary[];
+  truncated: boolean;
+}> {
   const authorities: UserResourceAuthoritySummary[] = [];
   let cursor: string | undefined;
   for (let pageNumber = 0; pageNumber < AUTHORITY_MAX_PAGES; pageNumber += 1) {
@@ -182,16 +188,21 @@ export function personalSelection(
   personalResourceCount: number;
   closureUnverified: boolean;
 } {
-  const personalVariableSets = fixed.variableSetId
-    ? (catalog?.personalVariableSets.filter((resource) => resource.id === fixed.variableSetId) ??
-      [])
-    : [];
+  const variableSetIds =
+    fixed.variableSetIds ?? (fixed.variableSetId === null ? [] : [fixed.variableSetId]);
+  const selectedVariableSetIds = new Set(variableSetIds);
+  const expectedPersonalVariableSetIds = new Set(
+    variableSetIds.filter((_variableSetId, index) => fixed.variableSetScopes?.[index] === "user"),
+  );
+  const personalVariableSets =
+    catalog?.personalVariableSets.filter((resource) => selectedVariableSetIds.has(resource.id)) ??
+    [];
+  for (const resource of personalVariableSets) expectedPersonalVariableSetIds.add(resource.id);
   const personalRigs = fixed.rigId
     ? (catalog?.personalRigs.filter((resource) => resource.id === fixed.rigId) ?? [])
     : [];
-  const variableSets = fixed.variableSetId
-    ? (catalog?.variableSets.filter((resource) => resource.id === fixed.variableSetId) ?? [])
-    : [];
+  const variableSets =
+    catalog?.variableSets.filter((resource) => selectedVariableSetIds.has(resource.id)) ?? [];
   const rigs = fixed.rigId
     ? (catalog?.rigs.filter((resource) => resource.id === fixed.rigId) ?? [])
     : [];
@@ -206,9 +217,13 @@ export function personalSelection(
   const personalResourceCount =
     personalVariableSets.length + personalRigs.length + personalConnectedMachines.length;
   const closureUnverified = Boolean(
-    (personalVariableSets.length > 0 &&
+    (expectedPersonalVariableSetIds.size > 0 &&
       (catalog?.variableSetAuthoritiesTruncated ||
-        variableSets.length !== personalVariableSets.length)) ||
+        [...expectedPersonalVariableSetIds].some(
+          (variableSetId) =>
+            !personalVariableSets.some((resource) => resource.id === variableSetId) ||
+            !variableSets.some((resource) => resource.id === variableSetId),
+        ))) ||
     (personalRigs.length > 0 &&
       (catalog?.rigAuthoritiesTruncated || rigs.length !== personalRigs.length)) ||
     (personalConnectedMachines.length > 0 &&

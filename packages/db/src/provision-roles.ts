@@ -1314,6 +1314,38 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format(
+        '%I.fork_session_content_with_runtime(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,jsonb,uuid,uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, jsonb, uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, jsonb, uuid, uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.replay_applied_session_fork_with_runtime(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.replay_applied_session_fork_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.replay_applied_session_fork_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format('%I.session_tenancy_product_activated(uuid,integer)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format(
@@ -1933,6 +1965,15 @@ BEGIN
       );
       EXECUTE format(
         'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.variable_set_authority_capabilities FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.session_variable_set_attachments_protocol_v1_active()') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.session_variable_set_attachments_protocol_v1_active()
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active() TO %I',
         ${literal(role)}
       );
     END IF;

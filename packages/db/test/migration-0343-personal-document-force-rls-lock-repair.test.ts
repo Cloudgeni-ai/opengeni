@@ -54,6 +54,13 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     if (!owned) return;
     const { admin, adminUrl, ownerUrl, ownerRole, appPassword } = owned;
     await applyBelow(ownerUrl, REPAIR);
+    // Current session adapters select the complete current sessions row while
+    // this fixture intentionally holds the database below 0343. Supply only
+    // the later column they need, then remove it before the real deferred
+    // migration chain runs so 0348 still owns creation and backfill.
+    await admin`
+      alter table sessions
+      add column variable_set_ids jsonb not null default '[]'::jsonb`;
     await provisionRoles(adminUrl, { appPassword, rlsStrategy: "force" });
 
     const [posture] = await admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
@@ -141,6 +148,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     const prepare = async () =>
       await runtimeOwner.begin(async (tx) => {
         await tx`select
+          set_config('opengeni.session_variable_set_attachments_v1', '1', true),
           set_config('opengeni.account_id', ${accountId}, true),
           set_config('opengeni.workspace_id', ${sharedWorkspaceId}, true),
           set_config('opengeni.subject_id', ${subjectId}, true)`;
@@ -192,6 +200,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // the required application-writer drain instead of weakening its fail-closed guard.
     await app.end({ timeout: 5 });
     expect(await applicationSessionCount()).toBe(0);
+    await admin`alter table sessions drop column variable_set_ids`;
     await migrate(ownerUrl);
     app = openApp();
 

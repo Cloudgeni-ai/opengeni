@@ -980,6 +980,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
       const crossTenantRows = await appProbe.begin(async (tx) => {
         await tx`
           select
+            set_config('opengeni.session_variable_set_attachments_v1', '1', true),
             set_config('opengeni.account_id', ${otherTenant.accountId}, true),
             set_config('opengeni.workspace_id', ${otherTenant.workspaceId}, true)`;
         return await tx<{ id: string }[]>`

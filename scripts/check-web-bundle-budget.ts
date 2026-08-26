@@ -241,13 +241,19 @@ const budgets = {
   // KiB gzip, preserving one KiB of raw headroom and the 1.5-KiB Linux/x64
   // platform-skew allowance. The measured 31,498-byte CSS asset and every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stay fixed.
+  // Ordered session Variable Set surfaces on protected main retain more methods
+  // on the same shared client graph. Before the request-start remediation is
+  // applied, that exact Bun 1.4 Linux/x64 production graph measures 2,184,325
+  // raw / 608,446 gzip bytes and is covered by 2,138 KiB raw / 598 KiB gzip.
   // Shared lineage request-start identity relay, stable re-entry promises,
   // request-causal cleanup authority, and current main's causal older-history
   // receipt measure 2,190,732 raw / 612,758 gzip bytes in the exact Linux/x64
-  // Bun 1.4 production merge. Calibrate only these aggregates to the
-  // policy-derived 2,141-KiB raw envelope (1,652 bytes of headroom) and the next
-  // whole-KiB gzip envelope above the 1.5-KiB platform-skew allowance. Every
-  // file-count, initial, per-file, lazy-chunk, and CSS cap remains fixed.
+  // Bun 1.4 production merge before ordered session Variable Sets land. The
+  // final combined graph measures 2,192,748 raw / 611,534 gzip bytes. Calibrate
+  // only the raw aggregate to the policy-derived 2,143-KiB envelope (1,684
+  // bytes of headroom); the existing 600-KiB gzip envelope retains 2,866 bytes
+  // of headroom, above the 1.5-KiB platform-skew allowance. Every file-count,
+  // initial, per-file, lazy-chunk, and CSS cap remains fixed.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 600 * kib,
   directSessionFiles: 24,

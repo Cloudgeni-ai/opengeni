@@ -120,6 +120,9 @@ describe("release schema contract", () => {
     const automaticSessionTitleQuarantine = completeSourceContract.migrations.some(
       (migration) => migration.path === "0355_automatic_session_title_quarantine.sql",
     );
+    const sessionVariableSetAttachments = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0352_session_variable_set_attachments.sql",
+    );
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -141,7 +144,9 @@ describe("release schema contract", () => {
           ? "0354_automatic_session_title_quarantine_index.sql"
           : automaticSessionTitlePolicyFence
             ? "0353_automatic_session_title_policy_fence.sql"
-            : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
+            : sessionVariableSetAttachments
+              ? "0352_session_variable_set_attachments.sql"
+              : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
     });
   });
 
@@ -228,6 +233,7 @@ describe("release schema contract", () => {
       "0349_greenfield_session_tenancy_activation.sql",
       "0350_organization_shared_workspace_administration.sql",
       "0351_organization_user_setup_delivery.sql",
+      "0352_session_variable_set_attachments.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -285,6 +291,9 @@ describe("release schema contract", () => {
     const organizationSharedWorkspaceAdministration = completeSourceContract.migrations.some(
       (migration) => migration.path === "0350_organization_shared_workspace_administration.sql",
     );
+    const sessionVariableSetAttachments = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0352_session_variable_set_attachments.sql",
+    );
     const organizationUserSetupDelivery = completeSourceContract.migrations.some(
       (migration) => migration.path === "0351_organization_user_setup_delivery.sql",
     );
@@ -303,38 +312,41 @@ describe("release schema contract", () => {
         (namedSignupAndUserSetup ? 1 : 0) +
         (greenfieldSessionTenancyActivation ? 1 : 0) +
         (organizationSharedWorkspaceAdministration ? 1 : 0) +
-        (organizationUserSetupDelivery ? 1 : 0),
-      latestMigration: organizationUserSetupDelivery
-        ? "0351_organization_user_setup_delivery.sql"
-        : organizationSharedWorkspaceAdministration
-          ? "0350_organization_shared_workspace_administration.sql"
-          : greenfieldSessionTenancyActivation
-            ? "0349_greenfield_session_tenancy_activation.sql"
-            : namedSignupAndUserSetup
-              ? "0348_named_signup_and_user_setup.sql"
-              : connectionAuthorityConvergenceEvidence
-                ? "0347_connection_authority_convergence_evidence.sql"
-                : documentMigrationAuditSurface
-                  ? "0346_document_migration_audit_surface.sql"
-                  : tenantScopedSessionTenancyFence
-                    ? "0345_tenant_scoped_session_tenancy_fence.sql"
-                    : privateSessionVisibilityTransitionGate
-                      ? "0344_private_session_visibility_transition_gate.sql"
-                      : personalDocumentForceRlsRepair
-                        ? "0343_personal_document_force_rls_lock_repair.sql"
-                        : slackRoutePromptSinglePending
-                          ? "0342_slack_route_prompt_single_pending.sql"
-                          : slackRoutingProbeFence
-                            ? "0341_slack_routing_probe_organization_fence.sql"
-                            : tenancyBackfillActivationEvidence
-                              ? "0340_tenancy_backfill_activation_evidence.sql"
-                              : documentAuthorityReclassification
-                                ? "0339_document_authority_reclassification.sql"
-                                : atomicConnectedMachineAttachments
-                                  ? "0338_atomic_connected_machine_attachments.sql"
-                                  : routedSlackHandles
-                                    ? "0337_slack_routed_action_handles.sql"
-                                    : "0336_atomic_session_fork_visibility.sql",
+        (organizationUserSetupDelivery ? 1 : 0) +
+        (sessionVariableSetAttachments ? 1 : 0),
+      latestMigration: sessionVariableSetAttachments
+        ? "0352_session_variable_set_attachments.sql"
+        : organizationUserSetupDelivery
+          ? "0351_organization_user_setup_delivery.sql"
+          : organizationSharedWorkspaceAdministration
+            ? "0350_organization_shared_workspace_administration.sql"
+            : greenfieldSessionTenancyActivation
+              ? "0349_greenfield_session_tenancy_activation.sql"
+              : namedSignupAndUserSetup
+                ? "0348_named_signup_and_user_setup.sql"
+                : connectionAuthorityConvergenceEvidence
+                  ? "0347_connection_authority_convergence_evidence.sql"
+                  : documentMigrationAuditSurface
+                    ? "0346_document_migration_audit_surface.sql"
+                    : tenantScopedSessionTenancyFence
+                      ? "0345_tenant_scoped_session_tenancy_fence.sql"
+                      : privateSessionVisibilityTransitionGate
+                        ? "0344_private_session_visibility_transition_gate.sql"
+                        : personalDocumentForceRlsRepair
+                          ? "0343_personal_document_force_rls_lock_repair.sql"
+                          : slackRoutePromptSinglePending
+                            ? "0342_slack_route_prompt_single_pending.sql"
+                            : slackRoutingProbeFence
+                              ? "0341_slack_routing_probe_organization_fence.sql"
+                              : tenancyBackfillActivationEvidence
+                                ? "0340_tenancy_backfill_activation_evidence.sql"
+                                : documentAuthorityReclassification
+                                  ? "0339_document_authority_reclassification.sql"
+                                  : atomicConnectedMachineAttachments
+                                    ? "0338_atomic_connected_machine_attachments.sql"
+                                    : routedSlackHandles
+                                      ? "0337_slack_routed_action_handles.sql"
+                                      : "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -383,6 +395,11 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0350_organization_shared_workspace_administration.sql",
       ),
     ).toMatchObject({ deploymentMode: "rolling" });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0352_session_variable_set_attachments.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0351_organization_user_setup_delivery.sql",

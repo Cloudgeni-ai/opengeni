@@ -3,9 +3,9 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { VariableSetCard } from "./variable-sets";
+import { sessionUsesVariableSet, VariableSetCard } from "./variable-sets";
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
-import type { WorkspaceVariableSet } from "@/types";
+import type { Session, WorkspaceVariableSet } from "@/types";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -40,6 +40,78 @@ const VARIABLE_SET: WorkspaceVariableSet = {
 };
 
 describe("Variable Sets credential-autofill boundaries", () => {
+  test("uses the complete ordered session selection before the legacy singular fallback", () => {
+    const lowerPrecedenceId = "variable-set-low";
+    const higherPrecedenceId = "variable-set-high";
+
+    expect(
+      sessionUsesVariableSet(
+        {
+          variableSetIds: [lowerPrecedenceId, higherPrecedenceId],
+          variableSetId: higherPrecedenceId,
+        },
+        lowerPrecedenceId,
+      ),
+    ).toBeTrue();
+    expect(
+      sessionUsesVariableSet({ variableSetId: lowerPrecedenceId }, lowerPrecedenceId),
+    ).toBeTrue();
+    expect(
+      sessionUsesVariableSet(
+        { variableSetIds: [], variableSetId: lowerPrecedenceId },
+        lowerPrecedenceId,
+      ),
+    ).toBeFalse();
+  });
+
+  test("blocks deletion when the variable set is a lower-precedence session attachment", async () => {
+    const session = {
+      id: "session-1",
+      initialMessage: "Uses staging credentials",
+      variableSetIds: [VARIABLE_SET.id, "variable-set-higher"],
+      variableSetId: "variable-set-higher",
+    } as unknown as Session;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <VariableSetCard
+            workspaceId="workspace-1"
+            variableSet={VARIABLE_SET}
+            attachedSessions={[session].filter((candidate) =>
+              sessionUsesVariableSet(candidate, VARIABLE_SET.id),
+            )}
+            attachedTasks={[]}
+            attachmentsUnknown={false}
+            mutating={false}
+            canWriteSet={true}
+            canWriteSecrets={true}
+            canReadSecrets={true}
+            revealEpoch={0}
+            onUpdate={async () => VARIABLE_SET}
+            onDelete={async () => true}
+            onReadVariable={async () => null}
+            onSetVariable={async () => ({})}
+            onDeleteVariable={async () => true}
+          />,
+        );
+      });
+
+      const deleteButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Delete variable set"]',
+      );
+      expect(deleteButton).not.toBeNull();
+      expect(deleteButton!.disabled).toBeTrue();
+      expect(deleteButton!.title).toBe("Detach it from sessions and tasks first");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("uses neutral key/value semantics for add and rotate forms", async () => {
     const container = document.createElement("div");
     document.body.append(container);

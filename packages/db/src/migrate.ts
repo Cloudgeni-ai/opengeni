@@ -12,6 +12,8 @@ const ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION = "0306_atomic_personal_resourc
 const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organization_invitations.sql";
 const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql";
 const NAMED_SIGNUP_CUTOVER_MIGRATION = "0348_named_signup_and_user_setup.sql";
+const SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION =
+  "0352_session_variable_set_attachments.sql";
 const AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION =
   "0353_automatic_session_title_policy_fence.sql";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
@@ -179,7 +181,16 @@ async function executeMigrationFile(
     await sql`select set_config('statement_timeout', ${batchedBackfill.statementTimeout}, false)`;
     try {
       for (;;) {
-        const result = await sql.unsafe(batchedBackfill.statement);
+        const result = await sql.begin(async (transaction) => {
+          await transaction`select
+            pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+            pg_catalog.set_config(
+              'opengeni.session_variable_set_attachments_v1',
+              '1',
+              true
+            )`;
+          return await transaction.unsafe(batchedBackfill.statement);
+        });
         if (result.length === 0) break;
       }
     } finally {
@@ -195,9 +206,12 @@ async function executeMigrationFile(
     // query as the migration body: setting it in a prior statement would end
     // that implicit transaction and silently lose the LOCAL value. This also
     // makes a fresh database capable of applying maintenance migration 0138
+    // and later migrations capable of crossing the 0352 sessions policy
     // without a process-global PGOPTIONS escape hatch.
     await sql.unsafe(
-      `SELECT pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);\n${sqlText}`,
+      `SELECT
+  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${sqlText}`,
     );
     return;
   }
@@ -385,6 +399,7 @@ export async function migrate(
       !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION) ||
       !applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION) ||
       !applied.has(NAMED_SIGNUP_CUTOVER_MIGRATION) ||
+      !applied.has(SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION) ||
       !applied.has(AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION)
     ) {
       const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);
