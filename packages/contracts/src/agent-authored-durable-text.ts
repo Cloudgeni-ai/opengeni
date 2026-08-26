@@ -54,7 +54,7 @@ export const AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_TOO_LONG_MESSAGE =
   "imperative, no numbered procedure. Split unrelated rules into separate entries.";
 
 export const AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE =
-  "A workspace preference is durable Company Brain content that agents retrieve on demand, so its length is " +
+  "A Skill is durable Agent Knowledge that agents retrieve on demand, so its length is " +
   "retrieval cost rather than standing prompt cost: only its short title and description are composed into " +
   `every session prompt. Keep it under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters: state the ` +
   "preference plainly, no numbered procedure and no examples. Put procedure in a Document or Skill and " +

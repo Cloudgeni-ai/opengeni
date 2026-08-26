@@ -21,7 +21,7 @@ import { WorkspaceInstructionPolicyTarget } from "./workspace-instruction-polici
 /**
  * Explicit user-directed durable write ("remember X for this workspace").
  *
- * The lane is the Company Brain area the content belongs to:
+ * The lane is the Agent Knowledge area the content belongs to:
  * - `preference`: a Ways-of-working preference (how agents should act);
  * - `instruction_policy`: a mandatory workspace rule ("always"/"never");
  * - `knowledge`: a company/product/people fact.
@@ -84,7 +84,7 @@ export const RememberRequest = z.discriminatedUnion("lane", [
       lane: z.literal("instruction_policy"),
       // A mandatory rule is composed verbatim into the prompt of every session
       // it applies to, for as long as it stays active, so this is the tightest
-      // agent budget in the Company Brain.
+      // agent budget in Agent Knowledge.
       content: z
         .string()
         .trim()

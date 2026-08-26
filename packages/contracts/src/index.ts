@@ -3156,7 +3156,7 @@ export const ModelContextContributionSource = z.enum([
 ]);
 export type ModelContextContributionSource = z.infer<typeof ModelContextContributionSource>;
 
-/** Content-free per-call summary of model-visible Company Brain material. */
+/** Content-free per-call summary of model-visible Agent Knowledge material. */
 export const ModelContextContributionSummary = z
   .object({
     source: ModelContextContributionSource,
