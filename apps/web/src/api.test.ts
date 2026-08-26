@@ -105,6 +105,34 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("defers an actor-abort body error until a downstream reader observes it", async () => {
+    const originalFetch = globalThis.fetch;
+    const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      observed.signal = init?.signal ?? null;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          cancel(reason) {
+            observed.cancelledWith = reason;
+          },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("13");
+      const response = await managedActorFetch("https://api.example.test/v1/workspaces");
+      configureManagedActorEpoch("14");
+      expect(observed.signal?.aborted).toBe(true);
+      expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
+      await expect(response.json()).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("tracks actor-bound mutations through response-body settlement", async () => {
     const originalFetch = globalThis.fetch;
     const snapshots: boolean[] = [];

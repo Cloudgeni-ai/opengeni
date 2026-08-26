@@ -200,7 +200,7 @@ function managedActorTrackedResponse(
 ): Response {
   const reader = response.body!.getReader();
   let settled = false;
-  let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let actorAbortReason: unknown | null = null;
   const settle = () => {
     if (settled) return false;
     settled = true;
@@ -209,38 +209,57 @@ function managedActorTrackedResponse(
     return true;
   };
   const abortBody = () => {
-    if (!settle()) return;
+    if (settled) return;
     const reason = signal.reason ?? new DOMException("The browser account changed", "AbortError");
+    actorAbortReason = reason;
+    settle();
     void reader.cancel(reason).catch(() => undefined);
-    streamController?.error(reason);
   };
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      streamController = controller;
-      signal.addEventListener("abort", abortBody, { once: true });
-      if (signal.aborted) abortBody();
-    },
-    async pull(controller) {
-      if (settled) return;
-      try {
-        const next = await reader.read();
-        if (next.done) {
-          if (settle()) controller.close();
+  // Keep actor-abort rejection consumer-owned. WebKit can report a stream
+  // error raised directly inside the abort event as an unhandled page error
+  // before the SDK has attached its body reader. Zero buffering also prevents
+  // the wrapper from pulling an old response merely to fill an internal queue.
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start() {
+        signal.addEventListener("abort", abortBody, { once: true });
+        if (signal.aborted) abortBody();
+      },
+      async pull(controller) {
+        if (actorAbortReason !== null) {
+          controller.error(actorAbortReason);
           return;
         }
-        controller.enqueue(next.value);
-      } catch (error) {
-        if (settle()) controller.error(error);
-      }
+        if (settled) return;
+        try {
+          const next = await reader.read();
+          if (actorAbortReason !== null) {
+            controller.error(actorAbortReason);
+            return;
+          }
+          if (next.done) {
+            if (settle()) controller.close();
+            return;
+          }
+          controller.enqueue(next.value);
+        } catch (error) {
+          if (actorAbortReason !== null) {
+            controller.error(actorAbortReason);
+          } else if (settle()) {
+            controller.error(error);
+          }
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          settle();
+        }
+      },
     },
-    async cancel(reason) {
-      try {
-        await reader.cancel(reason);
-      } finally {
-        settle();
-      }
-    },
-  });
+    { highWaterMark: 0 },
+  );
   return new Response(body, {
     status: response.status,
     statusText: response.statusText,
