@@ -1,13 +1,50 @@
 import { describe, expect, test } from "bun:test";
 import type { SendMessageInput, SessionEvent } from "@opengeni/sdk";
+import { startTransition, useState } from "react";
+import { flushSync } from "react-dom";
 
 import { useComposer } from "../src/hooks/use-composer";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { actRun, flush, registerDom, renderHook } from "./render-hook";
+import { actRun, flush, registerDom, renderComponent, renderHook } from "./render-hook";
 
 registerDom();
 
 describe("useComposer embedding policy", () => {
+  test("a synchronous host render cannot project an older composer state lane", async () => {
+    const projectedValues: string[] = [];
+    let setComposerValue!: (value: string) => void;
+    let forceHostRender!: () => void;
+
+    function Harness() {
+      const [, setHostRevision] = useState(0);
+      const composer = useComposer(SESSION_ID, {
+        client: fakeClient({}),
+        workspaceId: WORKSPACE_ID,
+        draftPersistence: "disabled",
+        initialPolicy: {
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+        },
+      });
+      projectedValues.push(composer.value);
+      setComposerValue = composer.setValue;
+      forceHostRender = () => setHostRevision((revision) => revision + 1);
+      return null;
+    }
+
+    const rendered = await renderComponent(<Harness />);
+    projectedValues.length = 0;
+    await actRun(() => {
+      startTransition(() => setComposerValue("alpha Xbeta gamma"));
+      flushSync(forceHostRender);
+    });
+
+    expect(projectedValues).not.toContain("");
+    expect(projectedValues.at(-1)).toBe("alpha Xbeta gamma");
+    await rendered.unmount();
+  });
+
   test("ordinary Send clears the draft immediately and preserves rapid messages through handoff", async () => {
     const sessionId = crypto.randomUUID();
     const attempts: SendMessageInput[] = [];
