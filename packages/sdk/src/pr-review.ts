@@ -7,6 +7,8 @@ export type {
   PrReviewAppRegistration,
   PrReviewCredentialKind,
   PrReviewProvider,
+  PrReviewManagedGitHubInstallation,
+  PrReviewManagedGitHubSetup,
   PrReviewRepositoryBinding,
   PrReviewWebhookAuthKind,
   ListPrReviewConfigurationResponse,

@@ -10437,6 +10437,14 @@ export const prReviewAppRegistrations = pgTable(
     provider: text("provider").notNull(),
     providerBaseUrl: text("provider_base_url").notNull(),
     appId: text("app_id"),
+    installationId: text("installation_id"),
+    providerAccountLogin: text("provider_account_login"),
+    providerAccountType: text("provider_account_type"),
+    githubActorId: text("github_actor_id"),
+    authorityKind: text("authority_kind"),
+    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true }),
+    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }),
+    authorityNonce: text("authority_nonce"),
     credentialKind: text("credential_kind").notNull(),
     credentialEncrypted: text("credential_encrypted"),
     accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
@@ -10464,6 +10472,12 @@ export const prReviewAppRegistrations = pgTable(
       table.workspaceId,
       table.status,
     ),
+    managedGithubInstallation: uniqueIndex("pr_review_managed_github_workspace_installation_uq")
+      .on(table.workspaceId, table.installationId)
+      .where(sql`${table.credentialKind} = 'managed_github_app'`),
+    managedGithubAuthorityNonce: uniqueIndex("pr_review_managed_github_authority_nonce_uq")
+      .on(table.authorityNonce)
+      .where(sql`${table.authorityNonce} is not null`),
     providerCheck: check(
       "pr_review_app_registrations_provider_chk",
       sql`${table.provider} in ('github', 'gitlab', 'azure_devops')`,
@@ -10471,9 +10485,11 @@ export const prReviewAppRegistrations = pgTable(
     credentialCheck: check(
       "pr_review_app_registrations_credential_chk",
       sql`(
-        (${table.provider} = 'github' and ${table.credentialKind} = 'github_app' and ${table.credentialEncrypted} is not null and ${table.appId} is not null)
+        (${table.provider} = 'github' and ${table.credentialKind} = 'github_app' and ${table.credentialEncrypted} is not null and ${table.appId} is not null and ${table.installationId} is null)
         or
-        (${table.provider} in ('gitlab', 'azure_devops') and ${table.credentialKind} = 'provider_token' and ${table.credentialEncrypted} is not null)
+        (${table.provider} = 'github' and ${table.credentialKind} = 'managed_github_app' and ${table.credentialEncrypted} is null and ${table.appId} is not null and ${table.installationId} is not null and ${table.providerAccountType} in ('User', 'Organization') and ${table.githubActorId} ~ '^[1-9][0-9]*$' and ${table.authorityKind} in ('personal_owner', 'organization_owner') and ${table.authorityCheckedAt} is not null and ${table.authorityExpiresAt} is not null and ${table.authorityExpiresAt} > ${table.authorityCheckedAt} and octet_length(${table.authorityNonce}) between 16 and 256)
+        or
+        (${table.provider} in ('gitlab', 'azure_devops') and ${table.credentialKind} = 'provider_token' and ${table.credentialEncrypted} is not null and ${table.installationId} is null)
       )`,
     ),
     webhookAuthCheck: check(
@@ -10559,6 +10575,86 @@ export const prReviewRepositoryBindings = pgTable(
         prReviewAppRegistrations.provider,
       ],
       name: "pr_review_repository_bindings_registration_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Append-only successful OAuth-state consumption receipts. The latest receipt
+ * is also projected on the registration, but this ledger owns durable replay
+ * rejection across later reconnects. */
+export const prReviewManagedGithubAuthorityNonces = pgTable(
+  "pr_review_managed_github_authority_nonces",
+  {
+    authorityNonce: text("authority_nonce").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    installationId: text("installation_id").notNull(),
+    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    identityCheck: check(
+      "pr_review_managed_github_authority_nonces_identity_chk",
+      sql`octet_length(${table.authorityNonce}) between 16 and 256
+        and ${table.installationId} ~ '^[1-9][0-9]*$'
+        and ${table.authorityExpiresAt} > ${table.consumedAt}`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "pr_review_managed_github_authority_nonces_workspace_account_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/** Credential-free routing for the deployment-owned PR-review GitHub App.
+ * Signature verification happens before provider ids reach this table. */
+export const prReviewManagedGithubRoutes = pgTable(
+  "pr_review_managed_github_routes",
+  {
+    bindingId: uuid("binding_id")
+      .primaryKey()
+      .references(() => prReviewRepositoryBindings.id, { onDelete: "cascade" }),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    registrationId: uuid("registration_id").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    installationId: text("installation_id").notNull(),
+    providerRepositoryId: text("provider_repository_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    routeIdentity: uniqueIndex("pr_review_managed_github_route_identity_uq").on(
+      table.installationId,
+      table.providerRepositoryId,
+    ),
+    identityCheck: check(
+      "pr_review_managed_github_routes_identity_chk",
+      sql`${table.installationId} ~ '^[1-9][0-9]*$'
+        and ${table.providerRepositoryId} ~ '^[1-9][0-9]*$'`,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "pr_review_managed_github_routes_workspace_account_fk",
+    }).onDelete("cascade"),
+    registration: foreignKey({
+      columns: [table.workspaceId, table.registrationId],
+      foreignColumns: [prReviewAppRegistrations.workspaceId, prReviewAppRegistrations.id],
+      name: "pr_review_managed_github_routes_registration_fk",
+    }).onDelete("cascade"),
+    source: foreignKey({
+      columns: [table.workspaceId, table.sourceId],
+      foreignColumns: [automationSources.workspaceId, automationSources.id],
+      name: "pr_review_managed_github_routes_source_fk",
     }).onDelete("cascade"),
   }),
 );

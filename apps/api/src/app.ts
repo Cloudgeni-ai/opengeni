@@ -1654,6 +1654,22 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/github/app-manifest",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github$/,
+    label: "/v1/workspaces/:workspaceId/pr-review/github",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/connect$/,
+    label: "/v1/workspaces/:workspaceId/pr-review/github/connect",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/installations\/select$/,
+    label: "/v1/workspaces/:workspaceId/pr-review/github/installations/select",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/installations\/[^/]+\/configure$/,
+    label: "/v1/workspaces/:workspaceId/pr-review/github/installations/:installationId/configure",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/capabilities$/,
     label: "/v1/workspaces/:workspaceId/capabilities",
   },
@@ -1944,6 +1960,19 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/github\/oauth\/callback$/,
     label: "/v1/github/oauth/callback",
+  },
+  { pattern: /^\/v1\/pr-review\/github\/setup$/, label: "/v1/pr-review/github/setup" },
+  {
+    pattern: /^\/v1\/pr-review\/github\/install\/callback$/,
+    label: "/v1/pr-review/github/install/callback",
+  },
+  {
+    pattern: /^\/v1\/pr-review\/github\/oauth\/callback$/,
+    label: "/v1/pr-review/github/oauth/callback",
+  },
+  {
+    pattern: /^\/v1\/webhooks\/pr-review\/github$/,
+    label: "/v1/webhooks/pr-review/github",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+$/,

@@ -241,6 +241,32 @@ the lookup. Until that seam exists, the exact-global-key exemption is pinned in
 `NON_RLS_RUNTIME_TABLES` and `packages/db/test/non-rls-authority-tables.test.ts`
 so it cannot widen silently.
 
+### 2026-08-26 addendum: managed PR-review GitHub installation routes
+
+`pr_review_managed_github_routes` is another deliberate non-RLS routing table.
+The shared deployment-owned GitHub App webhook is authenticated with the
+deployment webhook secret before routing, but the signed payload supplies only
+the GitHub installation id and repository id needed to discover the owning
+organization, workspace, registration, and repository binding. Requiring a
+tenant GUC before that exact lookup would be circular.
+
+The table contains only the globally unique installation/repository route and
+its organization, workspace, registration, and binding attribution. It stores
+no private key, OAuth credential, webhook secret, event payload, review prompt,
+or agent output. After the deployment signature is verified, ingress performs
+one equality lookup, establishes the returned tenant scope, and rechecks the
+FORCE-RLS registration and binding before accepting the event through the
+generic trigger system. Registration lifecycle code alone synchronizes or
+removes these rows, and uniqueness prevents one signed provider event from
+routing to multiple workspaces.
+
+As with `automation_webhook_endpoints`, arbitrary runtime-role SQL could expose
+route attribution but not provider credentials or review content. A narrowly
+granted SECURITY DEFINER equality lookup remains a possible defence-in-depth
+follow-up. Until then, this exact-global-route exemption is pinned in
+`NON_RLS_RUNTIME_TABLES` and
+`packages/db/test/non-rls-authority-tables.test.ts`.
+
 **`api_keys` hash branch.** The FORCE-RLS policy on `api_keys` is
 `optional_workspace_rls_visible(account_id, workspace_id) OR key_hash =
 opengeni_private.current_api_key_hash()`. The second branch carries no account,

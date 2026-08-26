@@ -53,6 +53,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       "integration_oauth_clients",
       "managed_accounts",
       "nested_agent_depth_configuration",
+      "pr_review_managed_github_routes",
       "stripe_webhook_events",
       "workspace_memberships",
       "workspaces",

@@ -162,6 +162,8 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
+  /** Optional provider seam for the separately registered OpenGeni Lens App. */
+  prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
    * the MCP leg for Codemode/Code Mode; worker consumers bind the same port

@@ -543,6 +543,11 @@ describe("timeline scroll ownership browser regression", () => {
 
     expect(immediate.maxScroll - immediate.scrollTop).toBeLessThan(2);
     expect(immediate.liveTailGap).toBeLessThan(48);
+    expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("true");
+    // Pin intent changes synchronously, while AnimatePresence retains the
+    // exiting control for its 150 ms fade. Wait for that visual lifecycle
+    // instead of treating the retained exit node as stale scroll state.
+    await page.getByRole("button", { name: "Jump to latest" }).waitFor({ state: "detached" });
     expect(await page.getByRole("button", { name: "Jump to latest" }).count()).toBe(0);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
   }, 30_000);

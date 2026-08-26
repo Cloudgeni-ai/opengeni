@@ -5955,7 +5955,7 @@ export type PackInstallation = {
 // --- OpenGeni Review Bot ------------------------------------------------------------
 
 export type PrReviewProvider = GitCredentialProvider;
-export type PrReviewCredentialKind = "github_app" | "provider_token";
+export type PrReviewCredentialKind = "github_app" | "managed_github_app" | "provider_token";
 export type PrReviewWebhookAuthKind = "hmac_sha256" | "shared_token" | "basic";
 
 export type CreatePrReviewAppRegistrationRequest = {
@@ -5990,6 +5990,9 @@ export type PrReviewAppRegistration = {
   provider: PrReviewProvider;
   providerBaseUrl: string;
   appId: string | null;
+  installationId: string | null;
+  providerAccountLogin: string | null;
+  providerAccountType: "User" | "Organization" | null;
   credentialKind: PrReviewCredentialKind;
   hasCredential: boolean;
   accessTokenExpiresAt: string | null;
@@ -6044,6 +6047,23 @@ export type PrReviewRepositoryBinding = {
 export type ListPrReviewConfigurationResponse = {
   registrations: PrReviewAppRegistration[];
   repositories: PrReviewRepositoryBinding[];
+};
+
+export type PrReviewManagedGitHubInstallation = {
+  registrationId: string;
+  installationId: string;
+  accountLogin: string | null;
+  configureUrl: string | null;
+  repositoryCount: number;
+};
+
+export type PrReviewManagedGitHubSetup = {
+  configured: boolean;
+  status: "unavailable" | "not_connected" | "connected";
+  appName: "OpenGeni Lens";
+  connectUrl: string | null;
+  installations: PrReviewManagedGitHubInstallation[];
+  missing: string[];
 };
 
 export type EnablePackRequest = {

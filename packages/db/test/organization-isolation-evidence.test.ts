@@ -61,9 +61,12 @@ const ORGANIZATION_AUTHORITY_TABLES = [
  * row-level security is NOT enabled. These are reviewed, deliberate exceptions:
  * `workspaces` and `workspace_memberships` are the tenancy *directory* the
  * access resolver itself reads before an RLS context exists, and
- * `auth_identities` is the Better Auth subject mapping. Their organization
- * boundary is enforced above the database, by `@opengeni/core` access
- * resolution.
+ * `auth_identities` is the Better Auth subject mapping.
+ * `automation_webhook_endpoints` and `pr_review_managed_github_routes` are
+ * exact global ingress keys used to discover tenant context before loading the
+ * protected automation source or PR-review binding. Their organization
+ * boundary is enforced above the database, by authenticated ingress and
+ * `@opengeni/core` access resolution.
  *
  * This list is a review gate, not a target. Adding an organization-scoped
  * resource table without RLS must fail this file; removing an entry here
@@ -73,6 +76,7 @@ const ORGANIZATION_AUTHORITY_TABLES = [
 const REVIEWED_UNPROTECTED_ACCOUNT_TABLES = [
   "auth_identities",
   "automation_webhook_endpoints",
+  "pr_review_managed_github_routes",
   "workspace_memberships",
   "workspaces",
 ] as const;

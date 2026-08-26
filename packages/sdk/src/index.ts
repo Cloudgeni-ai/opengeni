@@ -649,6 +649,8 @@ export type {
   PrReviewCredentialKind,
   PrReviewWebhookAuthKind,
   PrReviewAppRegistration,
+  PrReviewManagedGitHubInstallation,
+  PrReviewManagedGitHubSetup,
   PrReviewRepositoryBinding,
   CreatePrReviewAppRegistrationRequest,
   UpdatePrReviewAppRegistrationRequest,
