@@ -76,9 +76,14 @@ export function useSessionLineage(
         readGeneration: 0,
       };
     }
-    const readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+    let readGeneration = 0;
+    const lineage = await client.getSessionLineage(workspaceId, sessionId, {
+      onRequestStart: () => {
+        readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+      },
+    });
     return {
-      lineage: await client.getSessionLineage(workspaceId, sessionId),
+      lineage,
       readGeneration,
     };
   }, [beginRead, client, workspaceId, sessionId]);

@@ -107,6 +107,7 @@ describe("session control surface architecture", () => {
     const list = await source("components/rail/session-list.tsx");
     const move = await source("lib/session-channel-move.ts");
     const route = await source("routes/session.tsx");
+    const lineageHook = await source("../../../packages/react/src/hooks/use-session-lineage.ts");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
     expect(list).toContain("const promise = readSessionChannelMovePoint(");
@@ -118,6 +119,8 @@ describe("session control surface architecture", () => {
     expect(list).toContain("lineageChannelProjectionOwner");
     expect(list).toContain("beginRead: context.sessionChannelProjectionAuthority.beginRead");
     expect(list).toContain("activeLineage.readGeneration");
+    expect(lineageHook).toContain("getSessionLineage(workspaceId, sessionId, {");
+    expect(lineageHook).toContain("onRequestStart: () => {");
     expect(list).toContain(
       "const lineageProjected = context.sessionChannelProjectionAuthority.project(",
     );

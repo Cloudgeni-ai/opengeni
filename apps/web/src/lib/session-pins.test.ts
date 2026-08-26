@@ -327,6 +327,25 @@ describe("session pin reconciliation", () => {
     expect(authority.owns(moved)).toBe(true);
   });
 
+  test("keeps persistent post-move authority over lineage without a request-start generation", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const moveOwner = {};
+    const lineageOwner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const { beginMoveRequest, finishMoveRequest, recordMoveResponse } =
+      portableMoveAuthority(authority);
+    const request = beginMoveRequest(moveOwner, beforeMove)!;
+
+    expect(recordMoveResponse(moveOwner, request, moved)).toBe("accepted");
+    finishMoveRequest(moveOwner, request);
+    authority.replace(lineageOwner, [beforeMove], 0, 0);
+
+    expect(authority.project(beforeMove, 0).channelId).toBe("channel-b");
+    expect(authority.owns(moved)).toBe(true);
+    expect(authority.owns(beforeMove)).toBe(false);
+  });
+
   test("requires a post-settlement read when newer evidence overlaps a move response", () => {
     const authority = new SessionChannelProjectionAuthority();
     const owner = {};

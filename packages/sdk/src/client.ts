@@ -575,19 +575,24 @@ export type OpenGeniRequestOptions = {
   timeoutMs?: number | undefined;
 };
 
-export type GetSessionOptions = {
+export type SharedSessionReadOptions = {
+  /**
+   * Invoked immediately before the selected shared network GET starts. A
+   * caller that joins an already-started request is not notified because that
+   * request's causal start precedes the caller.
+   */
+  onRequestStart?: (() => void) | undefined;
+};
+
+export type GetSessionOptions = SharedSessionReadOptions & {
   /**
    * Require a network read generation that starts no earlier than this call.
    * Concurrent callers targeting the same successor generation still share it.
    */
   fresh?: boolean;
-  /**
-   * Invoked immediately before the selected shared network GET starts. A
-   * fresh caller queued behind an active read is notified when its queued
-   * generation actually launches, not when it joins the queue.
-   */
-  onRequestStart?: (() => void) | undefined;
 };
+
+export type GetSessionLineageOptions = SharedSessionReadOptions;
 
 type SingleFlightReadEntry = {
   generation: number;
@@ -1207,10 +1212,16 @@ export class OpenGeniClient {
     );
   }
 
-  async getSessionLineage(workspaceId: string, sessionId: string): Promise<SessionLineageResponse> {
+  async getSessionLineage(
+    workspaceId: string,
+    sessionId: string,
+    options: GetSessionLineageOptions = {},
+  ): Promise<SessionLineageResponse> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
-    return await this.singleFlightRead(path, () =>
-      this.requestJson<SessionLineageResponse>("GET", path),
+    return await this.singleFlightRead(
+      path,
+      () => this.requestJson<SessionLineageResponse>("GET", path),
+      options,
     );
   }
 

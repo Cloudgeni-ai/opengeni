@@ -530,6 +530,50 @@ describe("OpenGeniClient", () => {
     expect(requests).toBe(4);
   });
 
+  test("reports lineage starts only to callers present when the shared GET launches", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const starts: string[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        if (request === 1) await initialGate;
+        return jsonResponse({
+          ancestors: [{ id: `ancestor-${request}` }],
+          children: [],
+          truncated: false,
+        });
+      },
+    });
+
+    const active = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: () => starts.push("active"),
+    });
+    await Bun.sleep(1);
+    const joined = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: () => starts.push("joined"),
+    });
+
+    expect(requests).toBe(1);
+    expect(starts).toEqual(["active"]);
+    releaseInitial();
+    expect((await active).ancestors[0]?.id).toBe("ancestor-1");
+    expect((await joined).ancestors[0]?.id).toBe("ancestor-1");
+    expect(starts).toEqual(["active"]);
+
+    const later = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: () => starts.push("later"),
+    });
+    expect((await later).ancestors[0]?.id).toBe("ancestor-2");
+    expect(requests).toBe(2);
+    expect(starts).toEqual(["active", "later"]);
+  });
+
   test("queues one fresh session read behind an existing projection read", async () => {
     let requests = 0;
     let release!: () => void;

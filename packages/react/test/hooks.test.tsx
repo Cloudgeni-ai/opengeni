@@ -27,7 +27,7 @@ import type {
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
@@ -1054,6 +1054,7 @@ describe("useSessionLineage", () => {
   test("captures a shared causal generation when each lineage request starts", async () => {
     let releaseInitial: (() => void) | null = null;
     let nextGeneration = 70;
+    let reads = 0;
     const started: number[] = [];
     const beginRead = () => {
       const generation = ++nextGeneration;
@@ -1061,14 +1062,16 @@ describe("useSessionLineage", () => {
       return generation;
     };
     const client = fakeClient({
-      getSessionLineage: async () => {
-        if (started.length === 1) {
+      getSessionLineage: async (_workspaceId, _sessionId, options) => {
+        options?.onRequestStart?.();
+        reads += 1;
+        if (reads === 1) {
           await new Promise<void>((resolve) => {
             releaseInitial = resolve;
           });
         }
         return {
-          ancestors: [{ id: `ancestor-${started.length}` }],
+          ancestors: [{ id: `ancestor-${reads}` }],
           children: [],
           truncated: false,
         } as never;
@@ -1098,6 +1101,89 @@ describe("useSessionLineage", () => {
     expect(started).toEqual([71, 72]);
     expect(hook.result.current.readGeneration).toBe(72);
     await hook.unmount();
+  });
+
+  test("does not assign a post-move generation when a remount joins a pre-move lineage GET", async () => {
+    let requests = 0;
+    let channelId = "channel-a";
+    let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        requests += 1;
+        const request = requests;
+        const snapshotChannelId = channelId;
+        if (request === 1) {
+          markInitialStarted();
+          await initialGate;
+        }
+        return new Response(
+          JSON.stringify({
+            ancestors: [
+              {
+                id: "ancestor",
+                workspaceId: WORKSPACE_ID,
+                channelId: snapshotChannelId,
+              },
+            ],
+            children: [],
+            truncated: false,
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    // A non-authority consumer keeps the pre-move shared lineage request alive
+    // while the authority-bearing rail is collapsed.
+    const collapsedRail = await renderHook(
+      () => useSessionLineage(null, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await collapsedRail.unmount();
+    const preMoveConsumer = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+
+    let causalGeneration = 0;
+    channelId = "channel-b";
+    const acceptedMoveGeneration = ++causalGeneration;
+    const beginRead = () => ++causalGeneration;
+    const remountedRail = await renderHook(
+      () =>
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(requests).toBe(1);
+    expect(causalGeneration).toBe(acceptedMoveGeneration);
+    releaseInitial();
+    await preMoveConsumer;
+    await flush();
+
+    expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-a");
+    expect(remountedRail.result.current.readGeneration).toBe(0);
+    expect(remountedRail.result.current.readGeneration).toBeLessThan(acceptedMoveGeneration);
+
+    await reactAct(async () => {
+      await remountedRail.result.current.refresh();
+    });
+    await flush();
+    expect(requests).toBe(2);
+    expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-b");
+    expect(remountedRail.result.current.readGeneration).toBeGreaterThan(acceptedMoveGeneration);
+    await remountedRail.unmount();
   });
 
   test("loads lineage and refreshes on session lineage events", async () => {
