@@ -61,7 +61,22 @@ type AccountFixture = {
   sessionId: string;
 };
 
+type PendingFiniteRead = {
+  actorEpoch: string | null;
+  description: string;
+  dispatchPhase: string;
+  method: string;
+  pathname: string;
+  responseSeen: boolean;
+  sessionSetAuthorityHashImmediate: string | null;
+  sessionSetAuthorityHash: Promise<string | null>;
+  startedAt: number;
+  url: string;
+};
+
 type BrowserProblems = {
+  activeStreams: Map<object, string>;
+  actorDispatches: Array<{ actorEpoch: string; startedAt: number }>;
   actorFenceResponses: string[];
   actorTransitionResponses: Array<{
     actorEpoch: string | null;
@@ -69,6 +84,7 @@ type BrowserProblems = {
     endedAt: number;
     method: string;
     pathname: string;
+    request: object;
     responsePhase: string;
     startedAt: number;
     status: number;
@@ -77,8 +93,10 @@ type BrowserProblems = {
   phase: string;
   pageErrors: string[];
   failedRequests: string[];
-  pendingFiniteReads: Map<object, string>;
+  pendingFiniteReads: Map<object, PendingFiniteRead>;
   pendingRequestFailureChecks: Set<Promise<void>>;
+  retirementChecks: string[];
+  retiredFiniteReads: string[];
 };
 
 type CompletionResponseLoss = {
@@ -236,6 +254,21 @@ type BrowserRequestFailureInput = {
   url: string;
 };
 
+type FiniteReadRetirementInput = {
+  acceptedActorTransitions: readonly ActorMutationAcceptance[];
+  actorEpoch: string | null;
+  confirmedActorEpoch: string;
+  confirmedAt: number;
+  currentSessionSetAuthorityHash: string | null;
+  dispatchPhase: string;
+  method: string;
+  oldWorkspaceId: string;
+  pathname: string;
+  requestSessionSetAuthorityHash: string | null;
+  responseSeen: boolean;
+  startedAt: number;
+};
+
 const ACTOR_CHANGING_ACCEPTANCE_PATHS = new Set([
   "/v1/auth/session-set/logout-all",
   "/v1/auth/session-set/logout-one",
@@ -259,7 +292,10 @@ function sessionSetAuthorityHash(cookieHeader: string | null): string | null {
 
 function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
   const pathname = new URL(input.url).pathname;
-  const isCancellation = /ERR_ABORTED|NS_BINDING_ABORTED|cancelled|canceled/iu.test(input.failure);
+  const isCancellation =
+    /ERR_ABORTED|NS_BINDING_ABORTED|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
+      input.failure,
+    );
   const isActorOwnedRead =
     input.method === "GET" &&
     (pathname === "/v1/auth/get-session" ||
@@ -316,6 +352,38 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   return `[dispatch=${input.dispatchPhase}; actor=${input.actorEpoch ?? "missing"}; response=${input.responsePhase}] ${input.method} ${input.url}: ${input.failure}`;
 }
 
+function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInput): boolean {
+  const exactOldWorkspacePrefix = `/v1/workspaces/${encodeURIComponent(input.oldWorkspaceId)}/`;
+  // Chromium can omit the HttpOnly Cookie header from both synchronous and
+  // asynchronous Playwright request inspection after an aborted document.
+  // That absence is accepted only for the exact second-tab bootstrap/direct
+  // select race: the request and positive new-actor dispatch belong to the
+  // same Page and BrowserContext, the accepted select carries the context's
+  // current authority hash, and no session-set replacement occurs in either
+  // phase.
+  const requestAuthorityMatches =
+    input.requestSessionSetAuthorityHash === input.currentSessionSetAuthorityHash ||
+    (input.requestSessionSetAuthorityHash === null &&
+      new Set(["second-tab-bootstrap", "cross-tab-select-race"]).has(input.dispatchPhase));
+  return (
+    new Set(["GET", "HEAD"]).has(input.method) &&
+    input.actorEpoch !== null &&
+    input.actorEpoch !== input.confirmedActorEpoch &&
+    !input.responseSeen &&
+    input.pathname.startsWith(exactOldWorkspacePrefix) &&
+    input.currentSessionSetAuthorityHash !== null &&
+    requestAuthorityMatches &&
+    input.acceptedActorTransitions.some(
+      (transition) =>
+        transition.path === "/v1/auth/session-set/select" &&
+        transition.actorEpoch === input.confirmedActorEpoch &&
+        transition.sessionSetAuthorityHash === input.currentSessionSetAuthorityHash &&
+        transition.acceptedAt >= input.startedAt &&
+        transition.acceptedAt <= input.confirmedAt,
+    )
+  );
+}
+
 let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
 let edge: ReturnType<typeof Bun.serve> | null = null;
@@ -323,6 +391,7 @@ let publicOrigin = "";
 let edgeCookieSummary = "not-observed";
 let completionResponseLoss: CompletionResponseLoss | null = null;
 const actorMutationAcceptances: ActorMutationAcceptance[] = [];
+const observedBrowserProblems = new WeakMap<Page, BrowserProblems>();
 let alpha: AccountFixture;
 let beta: AccountFixture;
 
@@ -400,6 +469,8 @@ async function authSessionCount(email: string): Promise<number> {
 
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
+    activeStreams: new Map(),
+    actorDispatches: [],
     actorFenceResponses: [],
     actorTransitionResponses: [],
     consoleErrors: [],
@@ -408,7 +479,10 @@ function observeBrowser(page: Page): BrowserProblems {
     failedRequests: [],
     pendingFiniteReads: new Map(),
     pendingRequestFailureChecks: new Set(),
+    retirementChecks: [],
+    retiredFiniteReads: [],
   };
+  observedBrowserProblems.set(page, problems);
   const requestPhases = new WeakMap<
     object,
     {
@@ -420,6 +494,18 @@ function observeBrowser(page: Page): BrowserProblems {
   >();
   page.on("request", (request) => {
     const pathname = new URL(request.url()).pathname;
+    const actorEpoch = request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null;
+    const startedAt = performance.now();
+    const requestSessionSetAuthorityHash = request
+      .headerValue("cookie")
+      .then(sessionSetAuthorityHash, () => null);
+    if (actorEpoch !== null) problems.actorDispatches.push({ actorEpoch, startedAt });
+    if (pathname.endsWith("/stream") || pathname.includes("/live-events/stream")) {
+      problems.activeStreams.set(
+        request,
+        `[dispatch=${problems.phase}; actor=${actorEpoch ?? "missing"}] ${request.method()} ${request.url()}`,
+      );
+    }
     // Product mutation helpers are awaited explicitly and remain covered by
     // the strict failure ledger. This tracker prevents a full-document goto
     // from tearing down background finite reads from the just-selected actor.
@@ -429,20 +515,36 @@ function observeBrowser(page: Page): BrowserProblems {
       !pathname.endsWith("/stream") &&
       !pathname.includes("/live-events/stream");
     if (isFiniteApiRead) {
-      problems.pendingFiniteReads.set(request, `${request.method()} ${request.url()}`);
+      problems.pendingFiniteReads.set(request, {
+        actorEpoch,
+        description: `[dispatch=${problems.phase}; actor=${actorEpoch ?? "missing"}; start=${startedAt.toFixed(1)}] ${request.method()} ${request.url()}`,
+        dispatchPhase: problems.phase,
+        method: request.method(),
+        pathname,
+        responseSeen: false,
+        sessionSetAuthorityHashImmediate: sessionSetAuthorityHash(
+          request.headers()["cookie"] ?? null,
+        ),
+        sessionSetAuthorityHash: requestSessionSetAuthorityHash,
+        startedAt,
+        url: request.url(),
+      });
     }
     requestPhases.set(request, {
-      actorEpoch: request.headers()[MANAGED_AUTH_ACTOR_EPOCH_HEADER] ?? null,
+      actorEpoch,
       phase: problems.phase,
-      sessionSetAuthorityHash: request
-        .headerValue("cookie")
-        .then(sessionSetAuthorityHash, () => null),
-      startedAt: performance.now(),
+      sessionSetAuthorityHash: requestSessionSetAuthorityHash,
+      startedAt,
     });
   });
   page.on("response", (response) => {
     const request = response.request();
     const pathname = new URL(response.url()).pathname;
+    const pendingFiniteRead = problems.pendingFiniteReads.get(request);
+    if (pendingFiniteRead !== undefined) {
+      pendingFiniteRead.description = `${pendingFiniteRead.description} [response=${response.status()}; end=${performance.now().toFixed(1)}]`;
+      pendingFiniteRead.responseSeen = true;
+    }
     if (response.status() === 401 && pathname.startsWith("/v1/workspaces/")) {
       const dispatch = requestPhases.get(request);
       problems.actorFenceResponses.push(
@@ -454,7 +556,8 @@ function observeBrowser(page: Page): BrowserProblems {
         pathname.endsWith("/attention") &&
         new Set(["logout-one", "logout-all-response-loss-replay"]).has(problems.phase)) ||
       (response.status() === 409 &&
-        pathname.endsWith("/live-events/stream") &&
+        request.method() === "GET" &&
+        pathname.startsWith("/v1/workspaces/") &&
         problems.phase === "cross-tab-select-race");
     if (recordsActorTransition) {
       const dispatch = requestPhases.get(request);
@@ -464,6 +567,7 @@ function observeBrowser(page: Page): BrowserProblems {
         endedAt: performance.now(),
         method: request.method(),
         pathname,
+        request,
         responsePhase: problems.phase,
         startedAt: dispatch?.startedAt ?? Number.NaN,
         status: response.status(),
@@ -471,6 +575,7 @@ function observeBrowser(page: Page): BrowserProblems {
     }
   });
   page.on("requestfinished", (request) => {
+    problems.activeStreams.delete(request);
     problems.pendingFiniteReads.delete(request);
   });
   page.on("console", (message) => {
@@ -492,6 +597,7 @@ function observeBrowser(page: Page): BrowserProblems {
     const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
+    problems.activeStreams.delete(request);
     // A failed finite read is terminal whether expected or not. Remove it from
     // quiescence tracking, but keep every non-transition failure in the strict
     // final ledger—including canceled product mutations.
@@ -545,9 +651,125 @@ async function waitForFiniteReadQuiescenceAcross(
   }
   throw new Error(
     `finite browser reads did not settle: ${JSON.stringify(
-      ledgers.map((problems) => [...problems.pendingFiniteReads.values()].sort()),
+      ledgers.map((problems) => ({
+        pending: [...problems.pendingFiniteReads.values()]
+          .map(({ description }) => description)
+          .sort(),
+        activeStreams: [...problems.activeStreams.values()].sort(),
+        actorDispatches: problems.actorDispatches.slice(-20),
+        retirementChecks: problems.retirementChecks.slice(-20),
+        retiredFiniteReads: problems.retiredFiniteReads.slice(-20),
+      })),
+    )}; acceptances=${JSON.stringify(actorMutationAcceptances.slice(-20))}`,
+  );
+}
+
+async function waitForCompanionFiniteReadQuiescence(
+  problems: BrowserProblems,
+  intentionallyHeldRequest: object,
+  timeout = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeout;
+  let quietSince: number | null = null;
+  while (Date.now() < deadline) {
+    const companions = [...problems.pendingFiniteReads.keys()].filter(
+      (request) => request !== intentionallyHeldRequest,
+    );
+    if (companions.length === 0) {
+      quietSince ??= Date.now();
+      if (Date.now() - quietSince >= 250) return;
+    } else {
+      quietSince = null;
+    }
+    await Bun.sleep(25);
+  }
+  throw new Error(
+    `companion browser reads did not settle around the intentional hold: ${JSON.stringify(
+      [...problems.pendingFiniteReads.entries()]
+        .filter(([request]) => request !== intentionallyHeldRequest)
+        .map(([, pending]) => pending.description)
+        .sort(),
     )}`,
   );
+}
+
+async function retirePendingReadsAfterConfirmedActorTransition(
+  page: Page,
+  problems: BrowserProblems,
+  input: {
+    confirmedActorEpoch: string;
+    confirmedAt: number;
+    oldWorkspaceId: string;
+  },
+): Promise<void> {
+  const samePageProcessedAcceptedActor = problems.actorDispatches.some(
+    (dispatch) =>
+      dispatch.actorEpoch === input.confirmedActorEpoch &&
+      actorMutationAcceptances.some(
+        (transition) =>
+          ACTOR_CHANGING_ACCEPTANCE_PATHS.has(transition.path) &&
+          transition.actorEpoch === input.confirmedActorEpoch &&
+          dispatch.startedAt >= transition.acceptedAt &&
+          dispatch.startedAt <= input.confirmedAt,
+      ),
+  );
+  if (!samePageProcessedAcceptedActor) {
+    problems.retirementChecks.push(
+      JSON.stringify({
+        confirmedActorEpoch: input.confirmedActorEpoch,
+        confirmedAt: input.confirmedAt,
+        oldWorkspaceId: input.oldWorkspaceId,
+        result: "no-same-page-accepted-actor-dispatch",
+      }),
+    );
+    return;
+  }
+  const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
+    await browserCookieHeader(page.context()),
+  );
+  for (const [request, pending] of [...problems.pendingFiniteReads.entries()]) {
+    const requestSessionSetAuthorityHash =
+      pending.sessionSetAuthorityHashImmediate ??
+      (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
+    const retirementInput = {
+      acceptedActorTransitions: actorMutationAcceptances,
+      actorEpoch: pending.actorEpoch,
+      confirmedActorEpoch: input.confirmedActorEpoch,
+      confirmedAt: input.confirmedAt,
+      currentSessionSetAuthorityHash,
+      dispatchPhase: pending.dispatchPhase,
+      method: pending.method,
+      oldWorkspaceId: input.oldWorkspaceId,
+      pathname: pending.pathname,
+      requestSessionSetAuthorityHash,
+      responseSeen: pending.responseSeen,
+      startedAt: pending.startedAt,
+    } satisfies FiniteReadRetirementInput;
+    const mayRetire = finiteReadMayRetireAfterActorTransition(retirementInput);
+    problems.retirementChecks.push(
+      JSON.stringify({
+        actorEpoch: pending.actorEpoch,
+        confirmedActorEpoch: input.confirmedActorEpoch,
+        currentSessionSetAuthorityPresent: currentSessionSetAuthorityHash !== null,
+        dispatchPhase: pending.dispatchPhase,
+        method: pending.method,
+        pathname: pending.pathname,
+        requestSessionSetAuthorityMatches:
+          requestSessionSetAuthorityHash === currentSessionSetAuthorityHash,
+        requestSessionSetAuthorityPresent: requestSessionSetAuthorityHash !== null,
+        responseSeen: pending.responseSeen,
+        result: mayRetire ? "retired" : "kept",
+        startedAt: pending.startedAt,
+      }),
+    );
+    if (!mayRetire) {
+      continue;
+    }
+    problems.retiredFiniteReads.push(
+      `${pending.description} [retired=confirmed-actor-${input.confirmedActorEpoch}]`,
+    );
+    problems.pendingFiniteReads.delete(request);
+  }
 }
 
 async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void> {
@@ -560,7 +782,9 @@ async function expectNoBrowserProblems(problems: BrowserProblems): Promise<void>
     consoleErrors: problems.consoleErrors,
     failedRequests: problems.failedRequests,
     pageErrors: problems.pageErrors,
-    pendingFiniteReads: [...problems.pendingFiniteReads.values()].sort(),
+    pendingFiniteReads: [...problems.pendingFiniteReads.values()]
+      .map(({ description }) => description)
+      .sort(),
   }).toEqual({
     actorFenceResponses: [],
     actorTransitionResponses: [],
@@ -613,24 +837,36 @@ async function expectAndConsumeActorTransitionResponse(
     phase: string;
     status: number;
     statusLabel: string;
+    workspaceId?: string;
     timing?: { kind: "direct-race-fence"; settledAt: number };
   },
 ): Promise<void> {
-  // The request may already be in flight when authority accepts the actor
-  // mutation. Consume only that exact old-epoch response, with monotonic
-  // dispatch <= acceptance <= response evidence; a later dispatch stays red.
+  // Requests may already be in flight when authority accepts the actor
+  // mutation. Consume only exact old-epoch fail-closed responses from the
+  // prior workspace, with monotonic acceptance evidence; a new-workspace,
+  // wrong-epoch, late, or third response stays red.
   await page.waitForTimeout(1_000);
   for (const response of problems.actorTransitionResponses) {
-    expect(response).toEqual(
+    const { request, ...responseEvidence } = response;
+    expect(responseEvidence).toEqual(
       expect.objectContaining({
         actorEpoch: input.actorEpoch,
         dispatchPhase: input.phase,
         method: input.method,
-        pathname: input.pathname,
         responsePhase: input.phase,
         status: input.status,
       }),
     );
+    const pathnameValid =
+      response.pathname === input.pathname ||
+      (input.timing?.kind === "direct-race-fence" &&
+        input.workspaceId !== undefined &&
+        response.pathname.startsWith(`/v1/workspaces/${encodeURIComponent(input.workspaceId)}/`));
+    if (!pathnameValid) {
+      throw new Error(
+        `actor transition response did not target its exact old workspace: ${JSON.stringify({ input, response: responseEvidence })}`,
+      );
+    }
     const responseSpansAcceptance =
       response.startedAt <= input.acceptedAt && response.endedAt >= input.acceptedAt;
     const responseIsBoundedAfterDirectAcceptance =
@@ -643,14 +879,21 @@ async function expectAndConsumeActorTransitionResponse(
       : responseSpansAcceptance;
     if (!timingValid) {
       throw new Error(
-        `actor transition response did not satisfy its exact timing fence: ${JSON.stringify({ acceptances: actorMutationAcceptances.slice(-12), input, response })}`,
+        `actor transition response did not satisfy its exact timing fence: ${JSON.stringify({ acceptances: actorMutationAcceptances.slice(-12), input, response: responseEvidence })}`,
       );
+    }
+    const pending = problems.pendingFiniteReads.get(request);
+    if (pending) {
+      problems.retiredFiniteReads.push(
+        `${pending.description} [retired=validated-actor-transition-response]`,
+      );
+      problems.pendingFiniteReads.delete(request);
     }
   }
   expect(problems.actorTransitionResponses.length).toBeLessThanOrEqual(2);
   const exactConsoleErrors = problems.actorTransitionResponses.map(
-    () =>
-      `[${input.phase}] Failed to load resource: the server responded with a status of ${input.status} (${input.statusLabel}) @ ${input.pathname}`,
+    (response) =>
+      `[${input.phase}] Failed to load resource: the server responded with a status of ${input.status} (${input.statusLabel}) @ ${response.pathname}`,
   );
   await expectAndConsumeConsoleErrors(
     page,
@@ -1134,20 +1377,47 @@ async function selectAccount(
 }
 
 async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> {
-  return await page.evaluate(
-    async ({ contractHeader, contractRevision }) => {
-      const response = await fetch("/v1/auth/session-set", {
-        credentials: "include",
-        headers: { [contractHeader]: contractRevision },
-      });
+  const acceptanceProbeId = crypto.randomUUID();
+  const startedAt = performance.now();
+  const projection = await page.evaluate(
+    async ({ acceptanceProbeId: probeId, contractHeader, contractRevision }) => {
+      const response = await fetch(
+        `/v1/auth/session-set?acceptance_probe=${encodeURIComponent(probeId)}`,
+        {
+          credentials: "include",
+          headers: { [contractHeader]: contractRevision },
+        },
+      );
       if (!response.ok) throw new Error(`session set read failed: ${response.status}`);
       return (await response.json()) as ManagedAuthSessionSetProjection;
     },
     {
+      acceptanceProbeId,
       contractHeader: MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER,
       contractRevision: MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
     },
   );
+  const completedAt = performance.now();
+  const problems = observedBrowserProblems.get(page);
+  if (problems) {
+    const completedDirectProbes = [...problems.pendingFiniteReads.entries()].filter(
+      ([, pending]) =>
+        pending.actorEpoch === null &&
+        pending.method === "GET" &&
+        pending.pathname === "/v1/auth/session-set" &&
+        new URL(pending.url).searchParams.get("acceptance_probe") === acceptanceProbeId &&
+        pending.startedAt >= startedAt &&
+        pending.startedAt <= completedAt,
+    );
+    if (completedDirectProbes.length > 1) {
+      throw new Error("session-set acceptance probe overlapped another unowned session-set read");
+    }
+    for (const [request, pending] of completedDirectProbes) {
+      problems.retiredFiniteReads.push(`${pending.description} [retired=awaited-json-probe]`);
+      problems.pendingFiniteReads.delete(request);
+    }
+  }
+  return projection;
 }
 
 async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjection, slotId: string) {
@@ -1358,11 +1628,11 @@ async function captureResponsiveEvidence(
 
 async function delayedWorkspaceResponse(page: Page, oldActorEpoch: string) {
   let release!: () => void;
-  let observed!: () => void;
+  let observed!: (request: object) => void;
   const released = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const intercepted = new Promise<void>((resolve) => {
+  const intercepted = new Promise<object>((resolve) => {
     observed = resolve;
   });
   let delayed = false;
@@ -1374,7 +1644,7 @@ async function delayedWorkspaceResponse(page: Page, oldActorEpoch: string) {
     ) {
       delayed = true;
       const response = await route.fetch();
-      observed();
+      observed(route.request());
       await released;
       await route.fulfill({ response });
       return;
@@ -1630,6 +1900,16 @@ describe("provider-neutral browser account acceptance", () => {
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(longLivedOldActorStream)).toBeNull();
     expect(
+      requestFailureProblem({ ...longLivedOldActorStream, failure: "NS_ERROR_NET_RESET" }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [],
+        failure: "NS_ERROR_NET_RESET",
+      }),
+    ).toContain("/live-events/stream");
+    expect(
       requestFailureProblem({
         ...longLivedOldActorStream,
         acceptedActorTransitions: [
@@ -1765,6 +2045,72 @@ describe("provider-neutral browser account acceptance", () => {
         url: `${publicOrigin}/v1/auth/get-session`,
       }),
     ).toBeNull();
+
+    const retirement = {
+      acceptedActorTransitions: [
+        {
+          acceptedAt: 200,
+          actorEpoch: "new-actor-epoch",
+          path: "/v1/auth/session-set/select",
+          sessionSetAuthorityHash: "a".repeat(64),
+        },
+      ],
+      actorEpoch: "old-actor-epoch",
+      confirmedActorEpoch: "new-actor-epoch",
+      confirmedAt: 300,
+      currentSessionSetAuthorityHash: "a".repeat(64),
+      dispatchPhase: "second-tab-bootstrap",
+      method: "GET",
+      oldWorkspaceId: "00000000-0000-0000-0000-000000000001",
+      pathname: "/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions",
+      requestSessionSetAuthorityHash: "a".repeat(64),
+      responseSeen: false,
+      startedAt: 100,
+    } satisfies FiniteReadRetirementInput;
+    expect(finiteReadMayRetireAfterActorTransition(retirement)).toBe(true);
+    expect(
+      finiteReadMayRetireAfterActorTransition({
+        ...retirement,
+        requestSessionSetAuthorityHash: null,
+      }),
+    ).toBe(true);
+    expect(
+      finiteReadMayRetireAfterActorTransition({
+        ...retirement,
+        dispatchPhase: "cross-tab-select-race",
+        requestSessionSetAuthorityHash: null,
+      }),
+    ).toBe(true);
+    for (const invalid of [
+      { ...retirement, method: "POST" },
+      { ...retirement, actorEpoch: "new-actor-epoch" },
+      { ...retirement, actorEpoch: null },
+      { ...retirement, pathname: "/v1/workspaces/another-workspace/sessions" },
+      { ...retirement, pathname: "/v1/workspaces" },
+      { ...retirement, requestSessionSetAuthorityHash: "b".repeat(64) },
+      {
+        ...retirement,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+        requestSessionSetAuthorityHash: null,
+      },
+      {
+        ...retirement,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: "new-actor-epoch",
+            path: "/v1/auth/session-set/logout-all",
+            sessionSetAuthorityHash: "a".repeat(64),
+          },
+        ],
+        requestSessionSetAuthorityHash: null,
+      },
+      { ...retirement, responseSeen: true },
+      { ...retirement, startedAt: 201 },
+      { ...retirement, confirmedAt: 199 },
+    ]) {
+      expect(finiteReadMayRetireAfterActorTransition(invalid)).toBe(false);
+    }
 
     const expectedRaceConsole =
       "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/session-set/select";
@@ -1937,12 +2283,31 @@ describe("provider-neutral browser account acceptance", () => {
           phase: "cross-tab-select-race",
           status: 409,
           statusLabel: "Conflict",
+          workspaceId: alpha.workspaceId,
           timing: {
             kind: "direct-race-fence",
             settledAt: racedSelectionSettledAt,
           },
         });
       }
+      const racedSelectionAcceptance = actorMutationAcceptances
+        .filter(({ path }) => path === "/v1/auth/session-set/select")
+        .at(-1);
+      if (!racedSelectionAcceptance?.actorEpoch) {
+        throw new Error("raced selection did not expose its accepted actor epoch");
+      }
+      await Promise.all([
+        retirePendingReadsAfterConfirmedActorTransition(page, pageProblems, {
+          confirmedActorEpoch: racedSelectionAcceptance.actorEpoch,
+          confirmedAt: racedSelectionSettledAt,
+          oldWorkspaceId: alpha.workspaceId,
+        }),
+        retirePendingReadsAfterConfirmedActorTransition(secondTab, secondTabProblems, {
+          confirmedActorEpoch: racedSelectionAcceptance.actorEpoch,
+          confirmedAt: racedSelectionSettledAt,
+          oldWorkspaceId: alpha.workspaceId,
+        }),
+      ]);
 
       setBrowserPhase(pageProblems, "late-old-epoch-setup-beta-to-alpha");
       setBrowserPhase(secondTabProblems, "late-old-epoch-setup-beta-to-alpha");
@@ -1950,10 +2315,31 @@ describe("provider-neutral browser account acceptance", () => {
       await accountMenuTrigger(secondTab, alpha.displayName).waitFor({
         timeout: 30_000,
       });
+      const confirmedAlphaAt = performance.now();
+      const alphaSelectionAcceptance = actorMutationAcceptances
+        .filter(({ path }) => path === "/v1/auth/session-set/select")
+        .at(-1);
+      if (!alphaSelectionAcceptance?.actorEpoch) {
+        throw new Error("alpha selection did not expose its accepted actor epoch");
+      }
+      await Promise.all([
+        retirePendingReadsAfterConfirmedActorTransition(page, pageProblems, {
+          confirmedActorEpoch: alphaSelectionAcceptance.actorEpoch,
+          confirmedAt: confirmedAlphaAt,
+          oldWorkspaceId: beta.workspaceId,
+        }),
+        retirePendingReadsAfterConfirmedActorTransition(secondTab, secondTabProblems, {
+          confirmedActorEpoch: alphaSelectionAcceptance.actorEpoch,
+          confirmedAt: confirmedAlphaAt,
+          oldWorkspaceId: beta.workspaceId,
+        }),
+      ]);
+      await waitForFiniteReadQuiescenceAcross([pageProblems, secondTabProblems]);
       const oldProjection = await sessionSet(secondTab);
       const delay = await delayedWorkspaceResponse(secondTab, oldProjection.actorEpoch);
       const reload = secondTab.reload({ waitUntil: "domcontentloaded" }).catch(() => null);
-      await delay.intercepted;
+      const intentionallyHeldRequest = await delay.intercepted;
+      await waitForCompanionFiniteReadQuiescence(secondTabProblems, intentionallyHeldRequest);
       setBrowserPhase(pageProblems, "late-old-epoch-alpha-to-beta");
       setBrowserPhase(secondTabProblems, "late-old-epoch-alpha-to-beta");
       await selectAccount(page, alpha, beta);
@@ -1964,6 +2350,18 @@ describe("provider-neutral browser account acceptance", () => {
       await delay.dispose();
       await accountMenuTrigger(secondTab, beta.displayName).waitFor({
         timeout: 30_000,
+      });
+      const confirmedTabBetaAfterDelayAt = performance.now();
+      const betaSelectionAcceptance = actorMutationAcceptances
+        .filter(({ path }) => path === "/v1/auth/session-set/select")
+        .at(-1);
+      if (!betaSelectionAcceptance?.actorEpoch) {
+        throw new Error("beta selection did not expose its accepted actor epoch");
+      }
+      await retirePendingReadsAfterConfirmedActorTransition(secondTab, secondTabProblems, {
+        confirmedActorEpoch: betaSelectionAcceptance.actorEpoch,
+        confirmedAt: confirmedTabBetaAfterDelayAt,
+        oldWorkspaceId: alpha.workspaceId,
       });
       expect(secondTab.url()).toContain(beta.workspaceId);
       expect(secondTab.url()).not.toContain(alpha.workspaceId);
@@ -2274,6 +2672,11 @@ describe("provider-neutral browser account acceptance", () => {
             restrictedRuntimeRole: "opengeni_app",
             actualBetterAuthUsers: 2,
             tabsInOneBrowserSet: 2,
+            finiteReadRetirements: {
+              primary: pageProblems.retiredFiniteReads.length,
+              secondTab: secondTabProblems.retiredFiniteReads.length,
+              independentSet: otherProblems.retiredFiniteReads.length,
+            },
             sameSetSecondTabNeutralizedAfterLogoutAll: true,
             anotherBrowserSetSurvivedLogoutAll: true,
             screenshots:

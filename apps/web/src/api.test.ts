@@ -54,6 +54,41 @@ describe("web API auth helpers", () => {
     }
   });
 
+  test("aborts every concurrent pre-header request when the actor rotates", async () => {
+    const originalFetch = globalThis.fetch;
+    const observedSignals: AbortSignal[] = [];
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) throw new Error("managed request did not receive an abort signal");
+      observedSignals.push(signal);
+      return await new Promise<Response>((_resolve, reject) => {
+        const rejectAbort = () => reject(signal.reason);
+        if (signal.aborted) rejectAbort();
+        else signal.addEventListener("abort", rejectAbort, { once: true });
+      });
+    }) as unknown as typeof fetch;
+
+    try {
+      configureManagedActorEpoch("concurrent-old");
+      const pending = Array.from({ length: 50 }, (_, index) =>
+        managedActorFetch(`https://api.example.test/v1/workspaces/${index}`),
+      );
+      await Promise.resolve();
+      expect(observedSignals).toHaveLength(50);
+      configureManagedActorEpoch("concurrent-new");
+      expect(observedSignals.every((signal) => signal.aborted)).toBe(true);
+      const settled = await Promise.allSettled(pending);
+      expect(
+        settled.every(
+          (result) => result.status === "rejected" && result.reason?.name === "AbortError",
+        ),
+      ).toBe(true);
+    } finally {
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("rejects mismatched server provenance even before a local rotation hint", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
@@ -565,6 +600,38 @@ describe("createOpenGeniClient", () => {
     }
 
     expect(seenKeys).toEqual(["first-key", "second-key"]);
+  });
+
+  test("permanently invalidates an old actor client before another native request", async () => {
+    const restoreLocalStorage = installTestLocalStorage();
+    const originalFetch = globalThis.fetch;
+    const actorEpochs: Array<string | null> = [];
+    globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      actorEpochs.push(new Headers(init?.headers).get("x-opengeni-actor-epoch"));
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+    configureClientAuth({ mode: "managedSession", session: "cookie" });
+
+    try {
+      configureManagedActorEpoch("same-human-binding-a");
+      const oldClient = createOpenGeniClient();
+      await expect(oldClient.listSessions("workspace-id")).resolves.toEqual([]);
+
+      configureManagedActorEpoch("same-human-binding-b");
+      await expect(oldClient.listSessions("workspace-id")).rejects.toMatchObject({
+        name: "AbortError",
+      });
+      expect(actorEpochs).toEqual(["same-human-binding-a"]);
+
+      const nextClient = createOpenGeniClient();
+      await expect(nextClient.listSessions("workspace-id")).resolves.toEqual([]);
+      expect(actorEpochs).toEqual(["same-human-binding-a", "same-human-binding-b"]);
+    } finally {
+      configureManagedActorEpoch(null);
+      configureClientAuth({ mode: "none" });
+      globalThis.fetch = originalFetch;
+      restoreLocalStorage();
+    }
   });
 
   test("preserves credential-free signed object-storage uploads", async () => {

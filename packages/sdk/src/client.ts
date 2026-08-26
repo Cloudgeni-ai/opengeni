@@ -950,10 +950,16 @@ export class OpenGeniClient {
     );
   }
 
-  async getNewSessionDraft(workspaceId: string): Promise<NewSessionDraft> {
+  async getNewSessionDraft(
+    workspaceId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<NewSessionDraft> {
     return await this.requestJson<NewSessionDraft>(
       "GET",
       `/v1/workspaces/${workspaceId}/new-session-draft`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -5227,10 +5233,17 @@ export class OpenGeniClient {
     );
   }
 
-  async getFile(workspaceId: string, fileId: string): Promise<FileAsset> {
+  async getFile(
+    workspaceId: string,
+    fileId: string,
+    options: OpenGeniRequestOptions = {},
+  ): Promise<FileAsset> {
     return await this.requestJson<FileAsset>(
       "GET",
       `/v1/workspaces/${workspaceId}/files/${fileId}`,
+      undefined,
+      {},
+      options,
     );
   }
 

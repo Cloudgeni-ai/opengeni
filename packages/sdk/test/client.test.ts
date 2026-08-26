@@ -434,6 +434,46 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("actor-private draft and file reads forward AbortSignal cancellation", async () => {
+    const fileId = "00000000-0000-4000-8000-000000000011";
+    const received: Array<{ path: string; signal: AbortSignal | undefined }> = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const signal = init?.signal ?? undefined;
+        received.push({ path: new URL(String(input)).pathname, signal });
+        return await new Promise<Response>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const settled = Promise.allSettled([
+      client.getNewSessionDraft(WORKSPACE_ID, { signal: abort.signal }),
+      client.getFile(WORKSPACE_ID, fileId, { signal: abort.signal }),
+    ]);
+    abort.abort();
+
+    expect(received).toEqual([
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/new-session-draft`,
+        signal: abort.signal,
+      },
+      {
+        path: `/v1/workspaces/${WORKSPACE_ID}/files/${fileId}`,
+        signal: abort.signal,
+      },
+    ]);
+    expect(await settled).toEqual([
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+      expect.objectContaining({ status: "rejected", reason: expect.any(DOMException) }),
+    ]);
+  });
+
   test("submits one exact revision-fenced established-session draft", async () => {
     const response = {
       accepted: makeEvent(9),

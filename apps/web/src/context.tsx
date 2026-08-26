@@ -1888,11 +1888,14 @@ export function RootRouteComponent() {
       setAccessContext(null);
       setWorkspaces([]);
       setAccessError(null);
-      // Recreate SDK clients and reconnect streams even for two login bindings
-      // that resolve to the same canonical human.
-      setAccessKeyVersion((version) => version + 1);
     });
     configureManagedActorEpoch(transition.to?.actorEpoch ?? null);
+    // Create the next client only after the old actor's client lease has been
+    // invalidated. This also reconnects streams for two login bindings that
+    // resolve to the same canonical human but carry distinct actor epochs.
+    flushSync(() => {
+      setAccessKeyVersion((version) => version + 1);
+    });
     // A cross-tab/server hint first requests only the neutral fence. Do not
     // install or load any principal until the controller has reread authority
     // and invokes us again with the accepted projection.

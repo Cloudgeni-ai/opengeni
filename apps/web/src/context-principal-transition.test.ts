@@ -132,7 +132,6 @@ describe("principal transition contract", () => {
       "setAuthSession(undefined);",
       "setAccessContext(null);",
       "setWorkspaces([]);",
-      "setAccessKeyVersion((version) => version + 1);",
     ]) {
       expect(transition.indexOf(requiredClear)).toBeGreaterThan(
         transition.indexOf("flushSync(() => {"),
@@ -141,6 +140,9 @@ describe("principal transition contract", () => {
         transition.indexOf("configureManagedActorEpoch("),
       );
     }
+    expect(transition.indexOf("setAccessKeyVersion((version) => version + 1);")).toBeGreaterThan(
+      transition.indexOf("configureManagedActorEpoch("),
+    );
   });
 
   test("all remaining root workspace and session mutations use the invocation fence", () => {
