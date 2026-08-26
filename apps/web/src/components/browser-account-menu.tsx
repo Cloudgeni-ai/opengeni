@@ -156,7 +156,7 @@ export function BrowserAccountMenu() {
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
-      <DropdownMenu>
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <button
             ref={triggerRef}
@@ -195,7 +195,7 @@ export function BrowserAccountMenu() {
             <UsersIcon className="size-4" />
             Browser accounts
             {projection ? (
-              <span className="ml-auto text-xs font-normal text-fg-subtle">
+              <span className="ml-auto text-xs font-normal text-popover-foreground">
                 {projection.slots.length}/8
               </span>
             ) : null}
@@ -211,7 +211,7 @@ export function BrowserAccountMenu() {
                     ) : null}
                     <span className="truncate">{slot.displayName}</span>
                   </span>
-                  <span className="truncate text-xs text-fg-subtle">
+                  <span className="truncate text-xs text-popover-foreground">
                     {slot.verifiedClaim.value}
                     {slot.state === "reauth_required" ? " · Re-authentication required" : ""}
                   </span>
