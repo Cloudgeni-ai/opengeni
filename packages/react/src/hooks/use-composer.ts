@@ -2529,9 +2529,17 @@ export function useComposer(
     setError(null);
     setDraftConflict(null);
   }, [targetKey]);
+  // `valueRef` is the synchronous composer authority. React state exists to
+  // schedule renders, but a concurrent autosave settlement can render the
+  // previous state lane after a newer input event has already updated the ref.
+  // Projecting that stale state into a controlled textarea rewrites the old
+  // draft for one commit, which moves the caret and can briefly resurrect a
+  // submitted message. Never let an incidental render outrank the latest
+  // local lifecycle decision.
+  const visibleValue = identityMatches ? valueRef.current : "";
 
   return {
-    value: identityMatches ? value : "",
+    value: visibleValue,
     setValue: updateValue,
     annotations: identityMatches ? annotations : [],
     addAnnotation,
@@ -2561,7 +2569,7 @@ export function useComposer(
       sendBlockedRef.current?.() !== true &&
       annotationsComplete &&
       (hasPendingOperation ||
-        value.trim().length > 0 ||
+        visibleValue.trim().length > 0 ||
         hasReadyResources ||
         annotations.length > 0),
     pause,
