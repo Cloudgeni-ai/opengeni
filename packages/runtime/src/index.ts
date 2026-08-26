@@ -1525,9 +1525,16 @@ export type BuildAgentOptions = {
   /**
    * Exact-attempt tool preparation fence. When present, progressive disclosure
    * may issue the first provider request with only eager tools plus tool_search;
-   * only a search, deferred invocation, or catalog-dependent runtime joins it.
+   * search, deferred invocation, and catalog-dependent runtime join it. A host
+   * may separately exempt an exact attempt-local tool below.
    */
   toolPreparationReady?: Promise<void>;
+  /**
+   * Exact attempt-local function names that remain visible and executable while
+   * deferred catalog preparation is pending. This is a per-tool exception; it
+   * must never be used to make a whole MCP carrier eager.
+   */
+  preparationIndependentToolNames?: readonly string[];
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
@@ -2461,6 +2468,7 @@ function maybeInstallLazyToolTransport(
     mcpServerIds,
     options.toolPreparationReady,
     deferredMcpServerIds,
+    new Set(options.preparationIndependentToolNames ?? []),
   );
 }
 

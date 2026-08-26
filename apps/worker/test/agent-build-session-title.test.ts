@@ -5,8 +5,10 @@ import {
 } from "@opengeni/contracts";
 
 import {
+  createSessionTitleAttemptToolDefinition,
+  SESSION_TITLE_MODEL_TOOL_NAME,
+  sessionTitleToolPlan,
   shouldRequestMissingSessionTitle,
-  withEagerSessionTitleTool,
 } from "../src/activities/agent-turn/session-title";
 
 describe("shouldRequestMissingSessionTitle", () => {
@@ -73,27 +75,86 @@ describe("shouldRequestMissingSessionTitle", () => {
   });
 });
 
-describe("withEagerSessionTitleTool", () => {
-  test("makes an already-selected first-party server visible on title-needing first requests", () => {
+describe("sessionTitleToolPlan", () => {
+  test("promotes only the title tool while keeping the first-party carrier deferred", () => {
+    const tools = [
+      { kind: "mcp" as const, id: "opengeni" },
+      { kind: "mcp" as const, id: "connector", optional: true },
+    ];
     expect(
-      withEagerSessionTitleTool(
-        [
-          { kind: "mcp", id: "opengeni" },
-          { kind: "mcp", id: "connector", optional: true },
-        ],
-        true,
-      ),
-    ).toEqual([
-      { kind: "mcp", id: "opengeni", eager: true },
+      sessionTitleToolPlan({
+        tools,
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: true,
+      }),
+    ).toEqual({
+      promoteTitleTool: true,
+      remoteFirstPartyMcpTools: ["goal_set"],
+      preparationIndependentToolNames: [SESSION_TITLE_MODEL_TOOL_NAME],
+    });
+    expect(tools).toEqual([
+      { kind: "mcp", id: "opengeni" },
       { kind: "mcp", id: "connector", optional: true },
     ]);
   });
 
-  test("does not grant the server or make semantic-title turns eager", () => {
-    const withoutFirstParty = [{ kind: "mcp" as const, id: "connector" }];
-    expect(withEagerSessionTitleTool(withoutFirstParty, true)).toBe(withoutFirstParty);
+  test("does not grant a missing carrier or change titled-session disclosure", () => {
+    expect(
+      sessionTitleToolPlan({
+        tools: [{ kind: "mcp", id: "connector" }],
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: true,
+      }),
+    ).toEqual({
+      promoteTitleTool: false,
+      remoteFirstPartyMcpTools: ["set_session_title", "goal_set"],
+      preparationIndependentToolNames: [],
+    });
 
-    const titled = [{ kind: "mcp" as const, id: "opengeni" }];
-    expect(withEagerSessionTitleTool(titled, false)).toBe(titled);
+    expect(
+      sessionTitleToolPlan({
+        tools: [{ kind: "mcp", id: "opengeni" }],
+        selectedFirstPartyMcpTools: ["set_session_title", "goal_set"],
+        shouldRequestTitle: false,
+      }),
+    ).toEqual({
+      promoteTitleTool: false,
+      remoteFirstPartyMcpTools: ["set_session_title", "goal_set"],
+      preparationIndependentToolNames: [],
+    });
+  });
+});
+
+describe("createSessionTitleAttemptToolDefinition", () => {
+  test("exposes the canonical identity and returns the durable normalized result", async () => {
+    const updates: string[] = [];
+    const definition = createSessionTitleAttemptToolDefinition({
+      updateTitle: async (title) => {
+        updates.push(title);
+        return { updated: true, title: "Normalized topic" };
+      },
+    });
+
+    expect(definition.identity).toEqual({
+      serverId: "opengeni",
+      toolName: "set_session_title",
+    });
+    expect(definition.modelName).toBe(SESSION_TITLE_MODEL_TOOL_NAME);
+    expect(definition.approval).toBe("none");
+
+    const result = await definition.execute(
+      { title: "  Normalized topic  " },
+      {
+        operationId: "00000000-0000-4000-8000-000000000001",
+        caller: { kind: "model", subjectId: "worker:first-party-mcp" },
+      },
+    );
+
+    expect(updates).toEqual(["  Normalized topic  "]);
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      updated: true,
+      title: "Normalized topic",
+    });
   });
 });

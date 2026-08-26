@@ -2,8 +2,10 @@ import {
   getScheduledVariableSetExpectedGenerationForAttempt,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
+  updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
 } from "@opengeni/db";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   type OpenGeniRuntime,
   type AttemptConnectorActionBinding,
@@ -57,7 +59,11 @@ import type {
   SandboxRuntimeState,
   WorkspaceRefState,
 } from "./turn-context";
-import { shouldRequestMissingSessionTitle, withEagerSessionTitleTool } from "./session-title";
+import {
+  createSessionTitleAttemptToolDefinition,
+  sessionTitleToolPlan,
+  shouldRequestMissingSessionTitle,
+} from "./session-title";
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -166,19 +172,7 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
   });
   const effectivePolicyTools = resolvedToolPolicy.toolRefs;
-  const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
-    runSettings,
-    session.firstPartyMcpTools,
-  );
-  const turnTools = withEagerSessionTitleTool(
-    withFirstPartyTools(runSettings, effectivePolicyTools),
-    shouldRequestMissingSessionTitle({
-      title: session.title,
-      titleSource: session.titleSource,
-      firstPartyMcpTools: selectedFirstPartyMcpTools,
-      firstPartyMcpPermissions: session.firstPartyMcpPermissions,
-    }),
-  );
+  const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
   // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
   // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
   // legacy null-attachment fast path: turns with neither a session set nor rig defaults perform
@@ -474,6 +468,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     runSettings,
     session.firstPartyMcpTools,
   );
+  const titleToolPlan = sessionTitleToolPlan({
+    tools: turnTools,
+    selectedFirstPartyMcpTools,
+    shouldRequestTitle: shouldRequestMissingSessionTitle({
+      title: session.title,
+      titleSource: session.titleSource,
+      firstPartyMcpTools: selectedFirstPartyMcpTools,
+      firstPartyMcpPermissions: session.firstPartyMcpPermissions,
+    }),
+  });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
     selectedFirstPartyMcpTools.includes("editable_artifact_export_status") &&
@@ -495,6 +499,27 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]
       : [];
   const attemptToolDefinitions = [
+    ...(titleToolPlan.promoteTitleTool
+      ? [
+          createSessionTitleAttemptToolDefinition({
+            updateTitle: async (title) => {
+              const result = await updateSessionTitleWithEvent(db, {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                title,
+                source: "agent",
+              });
+              await publishDurableSessionEvents(
+                bus,
+                input.workspaceId,
+                input.sessionId,
+                result.events,
+              );
+              return result;
+            },
+          }),
+        ]
+      : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
       settings: runSettings,
       scope: {
@@ -625,7 +650,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(session.firstPartyMcpPermissions?.length
           ? { firstPartyPermissions: session.firstPartyMcpPermissions }
           : {}),
-        firstPartyTools: selectedFirstPartyMcpTools,
+        firstPartyTools: titleToolPlan.remoteFirstPartyMcpTools,
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
@@ -735,6 +760,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ],
     connectorActionIdentity,
     postToolPreparationStartedAt,
+    preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
   };
 }
 

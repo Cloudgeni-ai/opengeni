@@ -1410,32 +1410,84 @@ describe("OpenAI/Azure native client tool search", () => {
     }
   });
 
-  test("keeps an eager MCP session-title tool callable on the first request for every transport", async () => {
+  test("executes only the promoted title tool before the deferred first-party catalog settles", async () => {
     for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
-      const title = firstPartyTool(
-        "opengeni__set_session_title",
-        "Set the durable semantic session title",
-      );
-      const agent = agentWith(title);
+      let releasePreparation!: () => void;
+      let preparationSettled = false;
+      const preparation = new Promise<void>((resolve) => {
+        releasePreparation = () => {
+          preparationSettled = true;
+          resolve();
+        };
+      });
+      let titleExecutions = 0;
+      const titleTool = tool({
+        name: "opengeni__set_session_title",
+        description: "Set the durable semantic session title",
+        parameters: {
+          type: "object",
+          properties: { title: { type: "string" } },
+          required: ["title"],
+          additionalProperties: false,
+        },
+        strict: false,
+        execute: ({ title: requestedTitle }: { title: string }) => {
+          titleExecutions += 1;
+          return JSON.stringify({ ok: true, updated: true, title: requestedTitle });
+        },
+      }) as unknown as Tool;
+      const goal = firstPartyTool("opengeni__goal_set", "Set a durable session goal");
+      const agent = new Agent({
+        name: "title-promotion-test",
+        instructions: "Title the session.",
+        model: "scripted",
+        tools: [titleTool, goal],
+      });
+      const loadAllTools = agent.getAllTools.bind(agent);
+      agent.getAllTools = async (runContext) =>
+        preparationSettled ? await loadAllTools(runContext) : [titleTool];
       const runtime = installLazyToolRuntime(
         agent,
         transport,
         new Set(["opengeni"]),
-        undefined,
-        new Set(),
+        preparation,
+        new Set(["opengeni"]),
+        new Set(["opengeni__set_session_title"]),
       );
-      const visible = await agent.getAllTools(undefined as never);
-      const inner = new CapturingModel();
-      const wrapped = await new LazyToolModelProvider(providerFor(inner), runtime).getModel("test");
+      const model = new ScriptedStreamingModel([
+        [
+          {
+            type: "function_call",
+            callId: `set-title-${transport}`,
+            name: "opengeni__set_session_title",
+            arguments: JSON.stringify({ title: "Progressive disclosure repair" }),
+          },
+        ],
+        [finalMessage("done")],
+      ]);
 
-      await wrapped.getResponse(baseRequest(visible.map(serializedFunction)));
+      const running = runStreamed(agent, model, runtime);
+      const outcome = await Promise.race([
+        running.then(() => "completed" as const),
+        Bun.sleep(500).then(() => "waited_for_catalog" as const),
+      ]);
+      releasePreparation();
+      await running;
+      await runtime.ensurePrepared();
 
-      expect(inner.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
+      expect(outcome).toBe("completed");
+      expect(titleExecutions).toBe(1);
+      expect(model.requests[0]!.tools.map((candidate) => candidate.name)).toEqual(
         transport === "generic_dispatch"
           ? ["opengeni__set_session_title", "tool_search", "tool_invoke"]
           : ["opengeni__set_session_title", "tool_search"],
       );
-      expect(runtime.search({ query: "set the session title" })).toEqual([]);
+      expect(
+        runtime.search({ query: "set the session title" }).map((candidate) => candidate.name),
+      ).not.toContain("opengeni__set_session_title");
+      expect(
+        runtime.search({ query: "set a durable session goal" }).map((candidate) => candidate.name),
+      ).toEqual(["opengeni__goal_set"]);
     }
   });
 

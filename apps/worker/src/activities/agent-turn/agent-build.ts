@@ -19,7 +19,6 @@ import {
 } from "@opengeni/runtime";
 import {
   serviceTierForLatencyMode,
-  allowedFirstPartyMcpToolsForSession,
   environmentsEncryptionKeyBytes,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   resolveModelProvider,
@@ -74,7 +73,7 @@ import type {
   RecordingState,
   SandboxRuntimeState,
 } from "./turn-context";
-import { shouldRequestMissingSessionTitle } from "./session-title";
+import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 
 export type BuildTurnAgentDeps = {
   input: RunAgentTurnInput;
@@ -138,6 +137,7 @@ export type BuildTurnAgentDeps = {
     executionGeneration: number;
     initiator: Pick<ClaimTurnOk["turn"]["initiator"], "kind" | "subjectId">;
   };
+  preparationIndependentToolNames: readonly string[];
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -197,6 +197,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     fileResourceDownloads,
     attemptConnectorActionBindings,
     connectorActionIdentity,
+    preparationIndependentToolNames,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -205,15 +206,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   } = deps;
   const preparedTools = eventing.preparedTools!;
 
-  const missingSessionTitleHint = shouldRequestMissingSessionTitle({
-    title: session.title,
-    titleSource: session.titleSource,
-    firstPartyMcpTools: allowedFirstPartyMcpToolsForSession(
-      runSettings,
-      session.firstPartyMcpTools,
-    ),
-    firstPartyMcpPermissions: session.firstPartyMcpPermissions,
-  });
+  const missingSessionTitleHint = preparationIndependentToolNames.includes(
+    SESSION_TITLE_MODEL_TOOL_NAME,
+  );
   // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
   // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
   // may have been swapped to a connected machine (active_sandbox_id → a
@@ -687,6 +682,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(eventing.toolPreparationReady
           ? { toolPreparationReady: eventing.toolPreparationReady }
           : {}),
+        preparationIndependentToolNames,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
         ...(resolvedModel
