@@ -3694,6 +3694,16 @@ export type RevokeUserResourceGrantResponse = {
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
 export type WorkspaceMemberRole = "viewer" | "member" | "admin" | "custom";
 export type AssignableWorkspaceMemberRole = "viewer" | "member" | "admin";
+export type OrganizationUserSetupDelivery = {
+  id: string;
+  state: "pending" | "sent" | "failed" | "outcome_unknown" | "revoked";
+  attemptCount: number;
+  revision: number;
+  errorClass: string | null;
+  retryState: "available" | "reconciliation_required" | "unavailable";
+  sentAt: string | null;
+  updatedAt: string;
+};
 export type OrganizationInvitation = {
   id: string;
   organizationId: string;
@@ -3708,6 +3718,7 @@ export type OrganizationInvitation = {
   acceptedMembershipId: string | null;
   createdAt: string;
   updatedAt: string;
+  delivery: OrganizationUserSetupDelivery | null;
 };
 export type OrganizationMember = {
   id: string;
@@ -3853,6 +3864,24 @@ export type AcceptOrganizationInvitationRequest = {
   operationId: string;
 };
 export type RevokeOrganizationInvitationRequest = AcceptOrganizationInvitationRequest;
+export type PreviewOrganizationUserSetupRequest = { token: string };
+export type OrganizationUserSetupPreview =
+  | { state: "unavailable" | "expired" | "revoked" | "completed" }
+  | {
+      state: "pending";
+      organizationId: string;
+      organizationName: string;
+      targetEmail: string;
+      targetName: string | null;
+      organizationRole: OrganizationMembershipRole;
+      sharedWorkspaceAccess: Array<{
+        workspaceId: string;
+        workspaceName: string;
+        role: AssignableWorkspaceMemberRole;
+      }>;
+      expiresAt: string;
+    };
+export type RetryOrganizationUserSetupDeliveryRequest = { operationId: string };
 export type UpdateOrganizationMemberRequest = {
   kind: "change_role" | "suspend" | "reactivate" | "offboard";
   role?: OrganizationMembershipRole;
@@ -3871,6 +3900,9 @@ export type ListOrganizationInvitationsPageResponse = {
   nextCursor: string | null;
 };
 export type ListOrganizationMembersResponse = { members: OrganizationAdministrationMember[] };
+export type ListOrganizationAdministrationMembersResponse = {
+  members: OrganizationAdministrationMember[];
+};
 export type AcceptOrganizationInvitationResponse = {
   invitation: OrganizationInvitation;
   membership: OrganizationMember;

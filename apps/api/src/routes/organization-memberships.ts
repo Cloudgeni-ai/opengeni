@@ -10,6 +10,7 @@ import {
   ListOrganizationAdministrationMembersResponse,
   OrganizationAdministrationOverview,
   OrganizationInvitation,
+  OrganizationUserSetupDelivery,
   OrganizationMember,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
@@ -18,6 +19,7 @@ import {
   OrganizationWorkspaceAccessMember,
   PutOrganizationWorkspaceMemberRequest,
   RevokeOrganizationInvitationRequest,
+  RetryOrganizationUserSetupDeliveryRequest,
   RevokeOrganizationWorkspaceMemberRequest,
   RevokeOrganizationWorkspaceMemberResponse,
   UpdateOrganizationMemberRequest,
@@ -36,12 +38,13 @@ import {
 import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
+  claimOrganizationUserSetupDelivery,
   createManagedOrganization,
   createOrganizationWorkspace,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
-  ensureOrganizationUserSetupIntent,
   getOrganizationAdministrationOverview,
+  getOrganizationInvitationForAdministration,
   getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getOrganizationRetentionPolicy,
@@ -49,7 +52,9 @@ import {
   listOrganizationInvitations,
   listSelfOrganizationInvitations,
   nestedPostgresSqlState,
+  prepareOrganizationUserSetupDelivery,
   revokeOrganizationInvitation,
+  settleOrganizationUserSetupDelivery,
   putOrganizationWorkspaceMember,
   revokeOrganizationWorkspaceMember,
   updateOrganizationWorkspace,
@@ -63,10 +68,11 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-import { sendManagedAuthEmail } from "../auth/managed-auth";
 import {
   assertOrganizationUserSetupDeliveryConfigured,
   deriveOrganizationUserSetupToken,
+  organizationUserSetupPayloadDigest,
+  renderOrganizationUserSetupEmail,
 } from "../auth/organization-user-setup";
 
 const OrganizationId = z.string().uuid();
@@ -454,10 +460,10 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
-    // Fail before the invitation commits, never after: a 500 raised once the
-    // row exists is an outcome-unknown state for the administrator.
+    // Bearer construction configuration must fail before the invitation
+    // commits. Provider outcomes are journaled durably after this boundary.
     try {
-      assertOrganizationUserSetupDeliveryConfigured(deps.settings);
+      assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);
     } catch {
       throw new HTTPException(503, {
         message: "invited-user account setup delivery is not configured on this deployment",
@@ -477,25 +483,23 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           expiresAt: payload.expiresAt,
         }),
       );
-      const setup = await deriveOrganizationUserSetupToken(deps.settings, {
-        invitationId: invitation.id,
-        operationId: payload.operationId,
-      });
-      await ensureOrganizationUserSetupIntent(deps.db, {
+      await deliverOrganizationUserSetup(deps, {
         organizationId,
         actorSubjectId: subjectId,
         invitationId: invitation.id,
-        tokenDigest: setup.digest,
-        expiresAt: invitation.expiresAt,
+        invitationOperationId: payload.operationId,
+        operationId: payload.operationId,
       });
-      await sendManagedAuthEmail(deps.settings, {
-        to: invitation.targetEmail,
-        subject: "Join your OpenGeni organization",
-        text: `You have been invited to an OpenGeni organization. If you need a new account, set it up here: ${setup.url}\n\nIf you already have an account, sign in at ${deps.settings.publicBaseUrl ?? "OpenGeni"} and accept the invitation.`,
-        html: `<p>You have been invited to an OpenGeni organization.</p><p><a href="${escapeHtml(setup.url)}">Set up your account</a></p><p>If you already have an account, sign in to OpenGeni and accept the invitation.</p>`,
-        idempotencyKey: `opengeni-organization-setup-${payload.operationId}`,
-      });
-      return context.json(invitation, 201);
+      return context.json(
+        OrganizationInvitation.parse(
+          await getOrganizationInvitationForAdministration(deps.db, {
+            organizationId,
+            actorSubjectId: subjectId,
+            invitationId: invitation.id,
+          }),
+        ),
+        201,
+      );
     } catch (error) {
       if (error instanceof HTTPException) throw error;
       rethrowMembershipError(error);
@@ -530,6 +534,45 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       rethrowMembershipError(error);
     }
   });
+
+  app.post(
+    "/v1/organizations/:organizationId/invitations/:invitationId/delivery/retry",
+    async (context) => {
+      const { subjectId } = await requireManagedHuman(context, deps);
+      const organizationId = parseId(
+        OrganizationId,
+        context.req.param("organizationId"),
+        "organization id",
+      );
+      const invitationId = parseId(
+        InvitationId,
+        context.req.param("invitationId"),
+        "invitation id",
+      );
+      const payload = await parseBody(context, RetryOrganizationUserSetupDeliveryRequest);
+      try {
+        assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);
+      } catch {
+        throw new HTTPException(503, {
+          message: "invited-user account setup delivery is not configured on this deployment",
+        });
+      }
+      try {
+        return context.json(
+          OrganizationUserSetupDelivery.parse(
+            await deliverOrganizationUserSetup(deps, {
+              organizationId,
+              actorSubjectId: subjectId,
+              invitationId,
+              operationId: payload.operationId,
+            }),
+          ),
+        );
+      } catch (error) {
+        rethrowMembershipError(error);
+      }
+    },
+  );
 
   app.post("/v1/organization-invitations/:invitationId/accept", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
@@ -691,10 +734,66 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+async function deliverOrganizationUserSetup(
+  deps: ApiRouteDeps,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    invitationId: string;
+    invitationOperationId?: string;
+    operationId: string;
+  },
+) {
+  const claim = await claimOrganizationUserSetupDelivery(deps.db, input);
+  if (!claim.claimed) return claim.delivery;
+  const setup = await deriveOrganizationUserSetupToken(deps.settings, {
+    invitationId: claim.invitationId,
+    deliveryId: claim.delivery.id,
+  });
+  const message = renderOrganizationUserSetupEmail({
+    senderEmail: deps.managedEmailTransport.sender,
+    recipientEmail: claim.recipientEmail,
+    recipientName: claim.recipientName,
+    organizationName: claim.organizationName,
+    organizationRole: claim.organizationRole,
+    sharedWorkspaceAccess: claim.sharedWorkspaceAccess,
+    setupUrl: setup.url,
+  });
+  await prepareOrganizationUserSetupDelivery(deps.db, {
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+    deliveryId: claim.delivery.id,
+    attemptId: claim.attemptId,
+    claimHolderId: claim.claimHolderId,
+    tokenDigest: setup.digest,
+    payloadDigest: await organizationUserSetupPayloadDigest({
+      ...message,
+      providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    }),
+    providerIdempotencyScope: deps.managedEmailTransport.idempotency.scope,
+    providerIdempotencyRetentionSeconds: deps.managedEmailTransport.idempotency.retentionSeconds,
+  });
+  let outcome:
+    | { status: "sent"; providerMessageId: string | null }
+    | { status: "failed" | "outcome_unknown"; errorClass: string };
+  try {
+    outcome = await deps.managedEmailTransport.send({
+      kind: "organization_user_setup",
+      ...message,
+      idempotencyKey: claim.providerKey,
+    });
+  } catch {
+    outcome = { status: "outcome_unknown", errorClass: "transport_threw" };
+  }
+  return await settleOrganizationUserSetupDelivery(deps.db, {
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+    deliveryId: claim.delivery.id,
+    attemptId: claim.attemptId,
+    claimHolderId: claim.claimHolderId,
+    outcome: outcome.status,
+    ...(outcome.status === "sent"
+      ? { providerMessageId: outcome.providerMessageId }
+      : { errorClass: outcome.errorClass }),
+  });
 }

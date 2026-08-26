@@ -3,6 +3,7 @@ import {
   getOrganizationPrivateSessionSettings,
   updateOrganizationPrivateSessionSettings,
 } from "@opengeni/sdk/organization-private-session-settings";
+import { retryOrganizationUserSetupDelivery } from "@opengeni/sdk/organization-user-setup";
 import {
   Building2Icon,
   CheckIcon,
@@ -81,6 +82,48 @@ function organizationMemberStatusLabel(status: OrganizationMember["status"]): st
   if (status === "revoked") return "Removed";
   if (status === "provisioning") return "Joining";
   return "Active";
+}
+
+function invitationDeliveryOutcome(invitation: OrganizationInvitation): string {
+  switch (invitation.delivery?.state) {
+    case "sent":
+      return `Invitation sent to ${invitation.targetEmail}.`;
+    case "failed":
+      return `Invitation recorded for ${invitation.targetEmail}, but delivery failed. Retry is available.`;
+    case "outcome_unknown":
+      return invitation.delivery.retryState === "reconciliation_required"
+        ? `Invitation recorded for ${invitation.targetEmail}; the provider outcome must be reconciled before any new invitation is sent.`
+        : `Invitation recorded for ${invitation.targetEmail}; the provider outcome is unknown. A safe retry is available.`;
+    case "pending":
+      return `Invitation recorded for ${invitation.targetEmail}; delivery is still pending.`;
+    case "revoked":
+      return `Invitation for ${invitation.targetEmail} is revoked.`;
+    default:
+      return `Invitation recorded for ${invitation.targetEmail}; delivery has not started.`;
+  }
+}
+
+function InvitationDeliveryStatus({ invitation }: { invitation: OrganizationInvitation }) {
+  const delivery = invitation.delivery;
+  if (!delivery) return <p className="mt-0.5 text-fg-subtle">Delivery not started</p>;
+  const label =
+    invitation.status !== "pending" &&
+    (delivery.state === "failed" || delivery.state === "outcome_unknown")
+      ? `Delivery ${delivery.state === "failed" ? "failed" : "outcome unknown"} — invitation ${invitation.status}`
+      : delivery.retryState === "reconciliation_required"
+        ? "Provider outcome requires reconciliation — do not resend"
+        : {
+            pending: "Delivery pending",
+            sent: "Email sent",
+            failed: "Delivery failed — retry available",
+            outcome_unknown: "Provider outcome unknown — safe retry available",
+            revoked: "Delivery revoked",
+          }[delivery.state];
+  return (
+    <p className="mt-0.5 text-fg-subtle">
+      {label} · {delivery.attemptCount} {delivery.attemptCount === 1 ? "attempt" : "attempts"}
+    </p>
+  );
 }
 
 function memberActionTitle(action: MemberAction, target: string): string {
@@ -431,7 +474,7 @@ export function OrganizationOverviewSection(props: {
     try {
       const [overview, memberPage] = await Promise.all([
         props.client.getOrganizationAdministrationOverview(props.identity.organizationId),
-        props.client.listOrganizationMembers(props.identity.organizationId),
+        props.client.listOrganizationAdministrationMembers(props.identity.organizationId),
       ]);
       if (!owns(operation)) return;
       const pendingRename = pendingRenameRef.current;
@@ -1348,6 +1391,7 @@ export function OrganizationPeopleSection(props: {
     error: null,
   });
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteName, setInviteName] = useState("");
   const [inviteRole, setInviteRole] = useState<OrganizationMembershipRole>("member");
   const [inviteWorkspaces, setInviteWorkspaces] = useState<OrganizationWorkspaceAccess[]>([]);
   const [inviteWorkspaceIds, setInviteWorkspaceIds] = useState<string[]>([]);
@@ -1427,7 +1471,7 @@ export function OrganizationPeopleSection(props: {
     try {
       const [membersOutcome, overviewOutcome] = await Promise.allSettled([
         Promise.resolve().then(() =>
-          props.client.listOrganizationMembers(props.identity.organizationId),
+          props.client.listOrganizationAdministrationMembers(props.identity.organizationId),
         ),
         Promise.resolve().then(() =>
           props.client.getOrganizationAdministrationOverview(props.identity.organizationId),
@@ -1628,6 +1672,7 @@ export function OrganizationPeopleSection(props: {
 
   async function createInvitation() {
     const email = inviteEmail.trim().toLowerCase();
+    const name = inviteName.trim();
     if (
       !email ||
       !canInviteOrganizationRole(props.actorRole, inviteRole) ||
@@ -1643,6 +1688,7 @@ export function OrganizationPeopleSection(props: {
         props.identity.organizationId,
         {
           email,
+          ...(name ? { name } : {}),
           role: inviteRole,
           initialWorkspaceIds: inviteWorkspaceIds,
           expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
@@ -1663,11 +1709,14 @@ export function OrganizationPeopleSection(props: {
         error: null,
       }));
       setInviteEmail("");
+      setInviteName("");
       setInviteWorkspaceIds([]);
-      setLiveOutcome(
-        `Invitation created for ${invitation.targetEmail}. It is available in OpenGeni.`,
+      setLiveOutcome(invitationDeliveryOutcome(invitation));
+      toast.success(
+        invitation.delivery?.state === "sent"
+          ? "Invitation sent"
+          : "Organization invitation recorded",
       );
-      toast.success("Organization invitation created");
     } catch (error) {
       if (!owns(operation)) return;
       if (isOrganizationConflict(error)) {
@@ -1685,6 +1734,47 @@ export function OrganizationPeopleSection(props: {
               : String(error),
         },
       );
+    } finally {
+      if (owns(operation)) setBusyResource(null);
+    }
+  }
+
+  async function retryInvitationDelivery(invitation: OrganizationInvitation) {
+    if (visibleBusyResource || adminInvites.loading || invitation.status !== "pending") return;
+    const operation = claim("admin-invitations", "mutation");
+    setBusyOwnerKey(identityKey);
+    setBusyResource("admin-invitations");
+    try {
+      const delivery = await retryOrganizationUserSetupDelivery(
+        props.client,
+        props.identity.organizationId,
+        invitation.id,
+        { operationId: crypto.randomUUID() },
+      );
+      if (!owns(operation)) return;
+      setAdminInvitesState((current) => ({
+        ...current,
+        ownerKey: identityKey,
+        value: {
+          ...current.value,
+          invitations: current.value.invitations.map((candidate) =>
+            candidate.id === invitation.id ? { ...candidate, delivery } : candidate,
+          ),
+        },
+      }));
+      const updated = { ...invitation, delivery };
+      setLiveOutcome(invitationDeliveryOutcome(updated));
+      if (delivery.state === "sent") toast.success("Invitation sent");
+      else toast.error("Invitation delivery still needs attention");
+    } catch (error) {
+      if (!owns(operation)) return;
+      toast.error(isOrganizationConflict(error) ? "Invitation state changed" : "Retry failed", {
+        description: isOrganizationConflict(error)
+          ? "Refresh the invitation list before trying again."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      });
     } finally {
       if (owns(operation)) setBusyResource(null);
     }
@@ -1973,6 +2063,9 @@ export function OrganizationPeopleSection(props: {
               );
               const label = organizationMemberLabel(member, props.identity.subjectId);
               const roleDraft = roleDrafts[member.id] ?? member.role;
+              const soleActiveOwner =
+                member.role === "owner" && member.status === "active" && activeOwnerCount <= 1;
+              const soleOwnerReasonId = `sole-owner-reason-${member.id}`;
               return (
                 <article
                   key={member.id}
@@ -1991,9 +2084,33 @@ export function OrganizationPeopleSection(props: {
                         {organizationMemberStatusLabel(member.status)}
                       </span>
                     </div>
+                    {member.sharedWorkspaceAccess.length > 0 ? (
+                      <p className="mt-2 text-xs text-fg-subtle">
+                        Shared access:{" "}
+                        {member.sharedWorkspaceAccess
+                          .map((access) => `${access.workspaceName} (${access.role})`)
+                          .join(", ")}
+                      </p>
+                    ) : (
+                      <p className="mt-2 text-xs text-fg-subtle">No shared workspace access</p>
+                    )}
                   </div>
                   <div className="grid min-w-48 content-start gap-2 sm:justify-items-end">
-                    {capability.canChangeRole ? (
+                    {soleActiveOwner ? (
+                      <label className="grid w-full gap-1 text-xs text-fg-muted sm:w-48">
+                        Organization role
+                        <Select
+                          aria-label={`Organization role for ${label}`}
+                          aria-describedby={soleOwnerReasonId}
+                          value={member.role}
+                          disabled
+                        >
+                          <option value={member.role}>
+                            {ORGANIZATION_ROLE_LABELS[member.role]}
+                          </option>
+                        </Select>
+                      </label>
+                    ) : capability.canChangeRole ? (
                       <label className="grid w-full gap-1 text-xs text-fg-muted sm:w-48">
                         Organization role
                         <Select
@@ -2081,7 +2198,36 @@ export function OrganizationPeopleSection(props: {
                           Remove
                         </Button>
                       ) : null}
+                      {soleActiveOwner ? (
+                        <>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            disabled
+                            aria-describedby={soleOwnerReasonId}
+                          >
+                            Pause access
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="destructive"
+                            size="sm"
+                            disabled
+                            aria-describedby={soleOwnerReasonId}
+                          >
+                            <UserMinusIcon className="size-3.5" />
+                            Remove
+                          </Button>
+                        </>
+                      ) : null}
                     </div>
+                    {soleActiveOwner ? (
+                      <p id={soleOwnerReasonId} className="max-w-60 text-xs text-fg-subtle">
+                        Assign another active owner before changing, pausing, or removing the sole
+                        owner.
+                      </p>
+                    ) : null}
                   </div>
                 </article>
               );
@@ -2104,14 +2250,14 @@ export function OrganizationPeopleSection(props: {
               People &amp; invitations
             </h2>
             <p className="mt-1 text-xs text-fg-muted">
-              Invite someone by email. OpenGeni records the invitation here; invitation-email
-              delivery is not connected yet. If they do not have an account, ask them to sign up
-              with the same address. Invitations expire after seven days.
+              Invite someone by email with an organization role and explicit shared workspace
+              access. OpenGeni records every delivery attempt and invitations expire after seven
+              days.
             </p>
           </div>
           <fieldset
             disabled={visibleBusyResource === "admin-invitations" || adminInvites.loading}
-            className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto_auto]"
+            className="grid gap-2 sm:grid-cols-2"
           >
             <legend className="sr-only">Invite someone to the organization</legend>
             <div className="grid gap-1">
@@ -2122,6 +2268,16 @@ export function OrganizationPeopleSection(props: {
                 autoComplete="email"
                 value={inviteEmail}
                 onChange={(event) => setInviteEmail(event.target.value)}
+              />
+            </div>
+            <div className="grid gap-1">
+              <Label htmlFor="organization-invite-name">Name</Label>
+              <Input
+                id="organization-invite-name"
+                autoComplete="name"
+                value={inviteName}
+                onChange={(event) => setInviteName(event.target.value)}
+                placeholder="Optional"
               />
             </div>
             <label className="grid min-w-44 gap-1 text-sm">
@@ -2154,7 +2310,7 @@ export function OrganizationPeopleSection(props: {
             >
               Invite
             </Button>
-            <div className="grid gap-2 sm:col-span-3">
+            <div className="grid gap-2 sm:col-span-2">
               <span className="text-sm">Initial shared workspace access</span>
               {inviteWorkspaces.length === 0 ? (
                 <p className="text-xs text-fg-muted">
@@ -2197,6 +2353,10 @@ export function OrganizationPeopleSection(props: {
             <p role="status" className="text-xs text-fg-muted">
               Loading invitations…
             </p>
+          ) : adminInvites.value.invitations.length === 0 ? (
+            <p className="text-xs text-fg-muted">
+              No organization invitations yet. Invite someone above when you are ready.
+            </p>
           ) : (
             <div className="grid gap-2">
               {adminInvites.value.invitations.map((invite) => (
@@ -2205,30 +2365,62 @@ export function OrganizationPeopleSection(props: {
                   className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2 text-xs"
                 >
                   <div>
-                    <span className="font-medium">{invite.targetEmail}</span>
+                    <span className="font-medium">
+                      {invite.targetName ? `${invite.targetName} · ` : ""}
+                      {invite.targetEmail}
+                    </span>
                     <span className="ml-2 text-fg-muted">
                       {ORGANIZATION_ROLE_LABELS[invite.role]} · {invite.status}
                     </span>
                     <div className="mt-0.5 text-fg-subtle">
                       Expires {formatTimestamp(invite.expiresAt)}
                     </div>
+                    <div className="mt-0.5 text-fg-subtle">
+                      Shared access:{" "}
+                      {invite.initialWorkspaceIds.length === 0
+                        ? "none"
+                        : invite.initialWorkspaceIds
+                            .map(
+                              (workspaceId) =>
+                                inviteWorkspaces.find((workspace) => workspace.id === workspaceId)
+                                  ?.name ?? "Unavailable workspace",
+                            )
+                            .join(", ")}
+                    </div>
+                    <InvitationDeliveryStatus invitation={invite} />
                   </div>
-                  {invite.status === "pending" &&
-                  canRevokeOrganizationInvitation(props.actorRole, invite.role) ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="max-w-full whitespace-normal text-right"
-                      disabled={visibleBusyResource !== null || adminInvites.loading}
-                      onClick={(event) => {
-                        actionTriggerRef.current = event.currentTarget;
-                        setRevokeConfirmation(invite);
-                      }}
-                    >
-                      Revoke invitation for {invite.targetEmail}
-                    </Button>
-                  ) : null}
+                  <div className="flex flex-wrap justify-end gap-2">
+                    {invite.status === "pending" &&
+                    (!invite.delivery || invite.delivery.retryState === "available") ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        aria-label={`${invite.delivery ? "Retry delivery" : "Send invitation"} to ${invite.targetEmail}`}
+                        disabled={visibleBusyResource !== null || adminInvites.loading}
+                        onClick={() => void retryInvitationDelivery(invite)}
+                      >
+                        <RefreshCwIcon className="size-3.5" />
+                        {invite.delivery ? "Retry delivery" : "Send invitation"}
+                      </Button>
+                    ) : null}
+                    {invite.status === "pending" &&
+                    canRevokeOrganizationInvitation(props.actorRole, invite.role) ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="max-w-full whitespace-normal text-right"
+                        disabled={visibleBusyResource !== null || adminInvites.loading}
+                        onClick={(event) => {
+                          actionTriggerRef.current = event.currentTarget;
+                          setRevokeConfirmation(invite);
+                        }}
+                      >
+                        Revoke invitation for {invite.targetEmail}
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
               ))}
             </div>

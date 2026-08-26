@@ -13,7 +13,7 @@ const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organizatio
 const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql";
 const NAMED_SIGNUP_CUTOVER_MIGRATION = "0348_named_signup_and_user_setup.sql";
 const SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION =
-  "0351_session_variable_set_attachments.sql";
+  "0352_session_variable_set_attachments.sql";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;

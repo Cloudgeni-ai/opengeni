@@ -7,6 +7,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
 } from "@opengeni/sdk/core";
+import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 
 import type { AuthSession, ClientConfig } from "./types";
 
@@ -234,6 +235,15 @@ export async function completeOrganizationUserSetup(input: {
   operationId: string;
 }): Promise<{ status: "complete" }> {
   return await authRequest<{ status: "complete" }>("/organization-setup", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function previewOrganizationUserSetup(input: {
+  token: string;
+}): Promise<OrganizationUserSetupPreview> {
+  return await authRequest<OrganizationUserSetupPreview>("/organization-setup/preview", {
     method: "POST",
     body: JSON.stringify(input),
   });

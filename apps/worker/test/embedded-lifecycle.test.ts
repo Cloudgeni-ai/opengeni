@@ -434,6 +434,8 @@ describe("embedded worker lifecycle contract", () => {
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
           "canonical_human_identity_operations",
+          "organization_user_setup_deliveries",
+          "organization_user_setup_delivery_attempts",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -583,6 +585,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
       tablePrivileges: {},
       protectedNoDirectDmlTables: [
@@ -590,6 +594,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
     })();
     expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
@@ -654,7 +660,7 @@ describe("embedded worker lifecycle contract", () => {
     ).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false), options)()).resolves.toBeUndefined();
     await expect(dbReadyCheck(embeddedDb(false, false), options)()).rejects.toThrow(
-      /missing the 0351 session Variable Set attachment runtime receipt/,
+      /missing the 0352 session Variable Set attachment runtime receipt/,
     );
   });
 

@@ -18,17 +18,17 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0351 ordered session Variable Set attachments", () => {
+describe("migration 0352 ordered session Variable Set attachments", () => {
   test("declares one drained FK-backed cutover with authority and rotation fences", async () => {
     const source = await Bun.file(
-      new URL("../drizzle/0351_session_variable_set_attachments.sql", import.meta.url),
+      new URL("../drizzle/0352_session_variable_set_attachments.sql", import.meta.url),
     ).text();
     const provisionRolesSource = await Bun.file(
       new URL("../src/provision-roles.ts", import.meta.url),
     ).text();
 
     expect(source).toStartWith("-- deployment-mode: maintenance");
-    expect(source).toContain("no pre-0351 image may");
+    expect(source).toContain("no pre-0352 image may");
     expect(source).not.toContain("no pre-0348 image may");
     expect(source).toContain(
       "opengeni_private.session_variable_set_attachments_protocol_v1_active()",
@@ -42,7 +42,7 @@ describe("migration 0351 ordered session Variable Set attachments", () => {
     );
     expect(source).toContain("CREATE POLICY sessions_variable_set_attachments_protocol_v1");
     expect(source).toContain("AS RESTRICTIVE");
-    expect(source).toContain("0351-or-newer runtime");
+    expect(source).toContain("0352-or-newer runtime");
     expect(source).toMatch(
       /DO \$session_variable_set_protocol_grants\$[\s\S]*?JOIN pg_catalog\.pg_roles role_value[\s\S]*?role_value\.rolname = configured\.value/u,
     );
@@ -132,7 +132,7 @@ describe("migration 0351 ordered session Variable Set attachments", () => {
     expect(source).not.toContain("value_encrypted");
   });
 
-  test("rejects a pre-0351 transaction and admits the current runtime receipt", async () => {
+  test("rejects a pre-0352 transaction and admits the current runtime receipt", async () => {
     if (!available) return;
     await expect(
       shared!.admin.begin(async (tx) => {
@@ -142,7 +142,7 @@ describe("migration 0351 ordered session Variable Set attachments", () => {
           select opengeni_private.session_variable_set_attachments_protocol_v1_active()
         `;
       }),
-    ).rejects.toThrow("0351-or-newer runtime");
+    ).rejects.toThrow("0352-or-newer runtime");
 
     const currentReceipt = await shared!.admin.begin(async (tx) => {
       await tx.unsafe('SET LOCAL ROLE "opengeni_app"');

@@ -63,6 +63,8 @@ import {
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
+import { createManagedEmailTransport } from "./auth/managed-email";
+import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
@@ -194,7 +196,11 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
-  const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
+  const managedEmailTransport =
+    deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
+  assertManagedEmailTransportMetadata(managedEmailTransport);
+  const managedAuth =
+    deps.managedAuth ?? createManagedAuth(deps.settings, deps.db, managedEmailTransport);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -297,6 +303,7 @@ export function createAppComposition(deps: AppDependencies): {
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
     managedAuth,
+    managedEmailTransport,
     objectStorage,
     documentIndexer,
     getDocumentServices,

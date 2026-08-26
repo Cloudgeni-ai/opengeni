@@ -96,6 +96,36 @@ export type DocumentIndexClient = {
   }) => Promise<Document | void>;
 };
 
+export type ManagedEmailMessage = {
+  kind: "email_verification" | "password_reset" | "organization_user_setup";
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+  idempotencyKey?: string;
+};
+
+export type ManagedEmailDeliveryResult =
+  | { status: "sent"; providerMessageId: string | null }
+  | { status: "failed"; errorClass: string }
+  | { status: "outcome_unknown"; errorClass: string };
+
+/** Provider-neutral, injectable boundary for every managed-auth email. */
+export type ManagedEmailTransport = {
+  /** Effective provider sender; frozen into any idempotent payload digest. */
+  readonly sender: string;
+  /**
+   * Stable non-secret provider/account/policy namespace plus the provider's
+   * guaranteed key-retention window. Both are durably fenced before I/O.
+   */
+  readonly idempotency: {
+    readonly scope: string;
+    readonly retentionSeconds: number;
+  };
+  send(message: ManagedEmailMessage): Promise<ManagedEmailDeliveryResult>;
+};
+
 export type AppDependencies = {
   settings: Settings;
   db: Database;
@@ -145,6 +175,8 @@ export type AppDependencies = {
    */
   sessionAuthorization?: SessionAuthorizationPort | null;
   managedAuth?: ManagedAuth | null;
+  /** Injectable managed-email transport; standalone API defaults to Resend or local capture. */
+  managedEmailTransport?: ManagedEmailTransport;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
   /** Injectable GitHub transport for deterministic personal-OAuth tests. */
@@ -188,6 +220,7 @@ export type AppDependencies = {
 export type ObjectStorageDependency = ReturnType<typeof createObjectStorage>;
 
 export type ApiRouteDeps = AppDependencies & {
+  managedEmailTransport: ManagedEmailTransport;
   objectStorage: ObjectStorageDependency;
   githubStateSecret: string;
   documentIndexer: DocumentIndexClient;

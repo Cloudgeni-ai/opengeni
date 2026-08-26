@@ -176,6 +176,8 @@ function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[]
     "organization_memberships",
     "organization_profile_events",
     "organization_shared_workspace_administration_capabilities",
+    "organization_user_setup_deliveries",
+    "organization_user_setup_delivery_attempts",
     "organization_workspace_lifecycle_events",
     "organization_workspace_operation_receipts",
     "organization_user_resource_authorities",
@@ -424,12 +426,12 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
-  test("requires the 0351 session Variable Set runtime receipt", () => {
+  test("requires the 0352 session Variable Set runtime receipt", () => {
     const posture = safePosture();
     posture.sessionVariableSetAttachmentsCutoverPresent = false;
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "database is missing the 0351 session Variable Set attachment runtime receipt",
+      "database is missing the 0352 session Variable Set attachment runtime receipt",
     );
   });
 
@@ -474,14 +476,14 @@ describe("runtime database posture evaluator", () => {
       ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 296],
+            [FORCE_RLS_TABLES, 298],
             [NON_RLS_RUNTIME_TABLES, 12],
             [RUNTIME_FULL_DML_TABLES, 149],
             [RUNTIME_READ_ONLY_TABLES, 20],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 45],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
-            [PROTECTED_NO_DIRECT_DML_TABLES, 61],
+            [PROTECTED_NO_DIRECT_DML_TABLES, 63],
             [RUNTIME_DML_TABLES, 247],
           ] as const)
         : ([
@@ -506,7 +508,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 308 : 211;
+      const tableCount = hasCurrentMainActivityLedger ? 310 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount + personalResourceProtectedTableCount,
       );
@@ -869,6 +871,26 @@ describe("runtime database posture evaluator", () => {
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("session_variable_set_attachments");
     expect(RUNTIME_FULL_DML_TABLES).not.toContain("session_variable_set_attachments");
     expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toBeUndefined();
+  });
+
+  test("classifies organization setup delivery journals as capability-only FORCE-RLS state", () => {
+    for (const table of [
+      "organization_user_setup_deliveries",
+      "organization_user_setup_delivery_attempts",
+    ] as const) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    for (const routine of [
+      "claim_organization_user_setup_delivery(jsonb)",
+      "prepare_organization_user_setup_delivery(jsonb)",
+      "settle_organization_user_setup_delivery(jsonb)",
+      "preview_organization_user_setup(text)",
+      "get_organization_invitation_for_administration(uuid, text, uuid)",
+    ] as const) {
+      expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(routine);
+    }
   });
 
   test("keeps tenancy backfill activation evidence owner-only", () => {

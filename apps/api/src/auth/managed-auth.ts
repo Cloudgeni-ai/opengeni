@@ -1,5 +1,9 @@
 import type { Settings } from "@opengeni/config";
-import { type ManagedAuth } from "@opengeni/core";
+import {
+  type ManagedAuth,
+  type ManagedEmailMessage,
+  type ManagedEmailTransport,
+} from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { ensureManagedAccessForUser } from "@opengeni/db";
 import {
@@ -11,7 +15,6 @@ import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
 import { hashPassword } from "better-auth/crypto";
 import { Pool } from "pg";
-import { Resend } from "resend";
 
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
 
@@ -40,7 +43,11 @@ export async function hashManagedAuthPassword(password: string): Promise<string>
   return await hashPassword(password);
 }
 
-export function createManagedAuth(settings: Settings, db: Database): ManagedAuth | null {
+export function createManagedAuth(
+  settings: Settings,
+  db: Database,
+  managedEmailTransport: ManagedEmailTransport,
+): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
     return null;
   }
@@ -153,7 +160,8 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
       onExistingUserSignUp: async ({ user }) => {
         if (requireEmailVerification && !user.emailVerified) {
           const url = await verificationUrl(settings, user.email);
-          await sendManagedAuthEmail(settings, {
+          await sendManagedAuthEmail(managedEmailTransport, {
+            kind: "email_verification",
             to: user.email,
             subject: "Verify your OpenGeni email",
             text: `Verify your OpenGeni email: ${url}`,
@@ -162,7 +170,8 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
         }
       },
       sendResetPassword: async ({ user, url }) => {
-        await sendManagedAuthEmail(settings, {
+        await sendManagedAuthEmail(managedEmailTransport, {
+          kind: "password_reset",
           to: user.email,
           subject: "Reset your OpenGeni password",
           text: `Reset your OpenGeni password: ${url}`,
@@ -173,7 +182,8 @@ export function createManagedAuth(settings: Settings, db: Database): ManagedAuth
     emailVerification: {
       sendOnSignUp: requireEmailVerification,
       sendVerificationEmail: async ({ user, url }) => {
-        await sendManagedAuthEmail(settings, {
+        await sendManagedAuthEmail(managedEmailTransport, {
+          kind: "email_verification",
           to: user.email,
           subject: "Verify your OpenGeni email",
           text: `Verify your OpenGeni email: ${url}`,
@@ -306,38 +316,11 @@ function betterAuthTrustedOrigins(settings: Settings): string[] {
 }
 
 export async function sendManagedAuthEmail(
-  settings: Settings,
-  input: {
-    to: string;
-    subject: string;
-    text: string;
-    html: string;
-    idempotencyKey?: string;
-  },
+  transport: ManagedEmailTransport,
+  input: Omit<ManagedEmailMessage, "from">,
 ): Promise<void> {
-  if (!settings.resendApiKey) {
-    if (settings.environment === "local" || settings.environment === "test") {
-      console.warn(
-        `[opengeni] Skipping email to ${input.to}: OPENGENI_RESEND_API_KEY is not configured`,
-      );
-      return;
-    }
-    throw new Error("OPENGENI_RESEND_API_KEY is required to send managed auth email");
-  }
-  const resend = new Resend(settings.resendApiKey);
-  const result = await resend.emails.send(
-    {
-      from: settings.emailFrom,
-      to: input.to,
-      subject: input.subject,
-      text: input.text,
-      html: input.html,
-    },
-    input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : undefined,
-  );
-  if (result.error) {
-    throw new Error(result.error.message);
-  }
+  const result = await transport.send({ ...input, from: transport.sender });
+  if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
 }
 
 async function verificationUrl(settings: Settings, email: string): Promise<string> {

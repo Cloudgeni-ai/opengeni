@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { ApiRouteDeps } from "@opengeni/core";
+import type { ApiRouteDeps, ManagedEmailDeliveryResult, ManagedEmailMessage } from "@opengeni/core";
 import {
+  claimOrganizationUserSetupDelivery,
   createDb,
+  createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getSelfServiceOrganizationOnboardingState,
   type DbClient,
@@ -13,6 +15,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { registerManagedOnboardingRoutes } from "../src/routes/managed-onboarding";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 
 let shared: SharedTestDatabase | null = null;
@@ -22,6 +25,24 @@ let userId = "";
 let subjectId = "";
 let accountId = "";
 let authSessionId = "";
+const managedEmailMessages: ManagedEmailMessage[] = [];
+let managedEmailOutcome: ManagedEmailDeliveryResult = {
+  status: "sent",
+  providerMessageId: "test-message",
+};
+let managedEmailSendHook: ((message: ManagedEmailMessage) => Promise<void>) | null = null;
+const managedEmailTransport = {
+  sender: "OpenGeni <auth@mail.opengeni.ai>",
+  idempotency: {
+    scope: "test-provider-v1:organization-memberships-routes",
+    retentionSeconds: 86_400,
+  },
+  send: async (message: ManagedEmailMessage): Promise<ManagedEmailDeliveryResult> => {
+    managedEmailMessages.push(structuredClone(message));
+    await managedEmailSendHook?.(message);
+    return managedEmailOutcome;
+  },
+};
 
 const managedSettings = testSettings({
   productAccessMode: "managed",
@@ -76,6 +97,7 @@ beforeAll(async () => {
         }),
       },
     } as never,
+    managedEmailTransport,
   } as ApiRouteDeps);
 }, 180_000);
 
@@ -159,6 +181,7 @@ describe("organization membership routes", () => {
           }),
         },
       } as never,
+      managedEmailTransport,
     } as ApiRouteDeps);
     const operationId = crypto.randomUUID();
     let createdOrganizationId = "";
@@ -284,6 +307,7 @@ describe("organization membership routes", () => {
           }),
         },
       } as never,
+      managedEmailTransport,
     } as ApiRouteDeps);
 
     const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
@@ -487,6 +511,285 @@ describe("organization membership routes", () => {
     });
     expect(invitation).not.toHaveProperty("targetRegistrationStatus");
   });
+
+  test("journals failed delivery, previews the frozen invitation, and retries with one stable provider key", async () => {
+    if (!app || !client) return;
+    const membershipResponse = await app.request("http://x/v1/organization-memberships", {
+      headers: { cookie: "session=present" },
+    });
+    const membershipBody = (await membershipResponse.json()) as {
+      memberships: Array<{ organizationId: string }>;
+    };
+    accountId = membershipBody.memberships[0]!.organizationId;
+    managedEmailMessages.splice(0);
+    managedEmailOutcome = { status: "failed", errorClass: "provider_refused" };
+    try {
+      const targetEmail = `delivery-retry-${crypto.randomUUID()}@example.test`;
+      const createResponse = await app.request(
+        `http://x/v1/organizations/${accountId}/invitations`,
+        {
+          method: "POST",
+          headers: { cookie: "session=present", "content-type": "application/json" },
+          body: JSON.stringify({
+            email: targetEmail,
+            name: "Delivery teammate",
+            initialWorkspaceIds: [],
+            role: "admin",
+            expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+            operationId: crypto.randomUUID(),
+          }),
+        },
+      );
+      expect(createResponse.status).toBe(201);
+      const invitation = (await createResponse.json()) as {
+        id: string;
+        delivery: {
+          id: string;
+          state: string;
+          attemptCount: number;
+          errorClass: string | null;
+        };
+      };
+      expect(invitation.delivery).toMatchObject({
+        state: "failed",
+        attemptCount: 1,
+        errorClass: "provider_refused",
+      });
+      expect(managedEmailMessages).toHaveLength(1);
+      const failedMessage = managedEmailMessages[0]!;
+      expect(failedMessage.kind).toBe("organization_user_setup");
+      expect(failedMessage.to).toBe(targetEmail);
+      expect(failedMessage.text).toContain("Hi Delivery teammate,");
+      expect(failedMessage.text).toContain("as Admin");
+      expect(failedMessage.text).toContain("never shares anyone's Personal workspace");
+      expect(failedMessage.idempotencyKey).toBeTruthy();
+
+      const setupUrl = failedMessage.text.match(/Set up your account: (\S+)/)?.[1];
+      expect(setupUrl).toBeTruthy();
+      const token = new URL(setupUrl!).hash.slice("#token=".length);
+      const previewApp = new Hono();
+      registerManagedOnboardingRoutes(previewApp, {
+        settings: managedSettings,
+        db: client.db,
+        managedAuth: {},
+      } as never);
+      const previewResponse = await previewApp.request(
+        "http://x/v1/auth/organization-setup/preview",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: decodeURIComponent(token) }),
+        },
+      );
+      expect(previewResponse.status).toBe(200);
+      expect(await previewResponse.json()).toMatchObject({
+        state: "pending",
+        organizationId: accountId,
+        targetEmail,
+        targetName: "Delivery teammate",
+        organizationRole: "admin",
+        sharedWorkspaceAccess: [],
+      });
+
+      managedEmailOutcome = { status: "sent", providerMessageId: "retry-message" };
+      const retryOperationId = crypto.randomUUID();
+      const retryResponse = await app.request(
+        `http://x/v1/organizations/${accountId}/invitations/${invitation.id}/delivery/retry`,
+        {
+          method: "POST",
+          headers: { cookie: "session=present", "content-type": "application/json" },
+          body: JSON.stringify({ operationId: retryOperationId }),
+        },
+      );
+      expect(retryResponse.status).toBe(200);
+      expect(await retryResponse.json()).toMatchObject({
+        id: invitation.delivery.id,
+        state: "sent",
+        attemptCount: 2,
+        errorClass: null,
+      });
+      expect(managedEmailMessages).toHaveLength(2);
+      const retriedMessage = managedEmailMessages[1]!;
+      expect(retriedMessage).toEqual(failedMessage);
+
+      const exactReplay = await app.request(
+        `http://x/v1/organizations/${accountId}/invitations/${invitation.id}/delivery/retry`,
+        {
+          method: "POST",
+          headers: { cookie: "session=present", "content-type": "application/json" },
+          body: JSON.stringify({ operationId: retryOperationId }),
+        },
+      );
+      expect(exactReplay.status).toBe(200);
+      expect(await exactReplay.json()).toMatchObject({ state: "sent", attemptCount: 2 });
+      expect(managedEmailMessages).toHaveLength(2);
+    } finally {
+      managedEmailOutcome = { status: "sent", providerMessageId: "test-message" };
+      managedEmailMessages.splice(0);
+    }
+  }, 120_000);
+
+  test("recovers a committed invitation with no journal and maps a concurrent claim to 409", async () => {
+    if (!app || !client || !shared) return;
+    managedEmailMessages.splice(0);
+    managedEmailOutcome = { status: "sent", providerMessageId: "recovered-message" };
+    const invitationOperationId = crypto.randomUUID();
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId: accountId,
+      actorSubjectId: subjectId,
+      operationId: invitationOperationId,
+      targetSubjectId: null,
+      targetEmail: `missing-journal-${crypto.randomUUID()}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const listedBeforeRecovery = await app.request(
+      `http://x/v1/organizations/${accountId}/invitations`,
+      { headers: { cookie: "session=present" } },
+    );
+    expect(listedBeforeRecovery.status).toBe(200);
+    expect(
+      (
+        (await listedBeforeRecovery.json()) as {
+          invitations: Array<{ id: string; delivery: unknown }>;
+        }
+      ).invitations.find((candidate) => candidate.id === invitation.id),
+    ).toMatchObject({ delivery: null });
+    const recovered = await app.request(
+      `http://x/v1/organizations/${accountId}/invitations/${invitation.id}/delivery/retry`,
+      {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ operationId: crypto.randomUUID() }),
+      },
+    );
+    expect(recovered.status).toBe(200);
+    expect(await recovered.json()).toMatchObject({ state: "sent", attemptCount: 1 });
+
+    const deferredTargetEmail = `deferred-journal-${crypto.randomUUID()}@example.test`;
+    const deferredInvitationOperationId = crypto.randomUUID();
+    const deferredInvitation = await createOrganizationInvitation(client.db, {
+      organizationId: accountId,
+      actorSubjectId: subjectId,
+      operationId: deferredInvitationOperationId,
+      targetSubjectId: null,
+      targetEmail: deferredTargetEmail,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    let providerReachedResolve!: () => void;
+    let releaseProviderResolve!: () => void;
+    const providerReached = new Promise<void>((resolve) => {
+      providerReachedResolve = resolve;
+    });
+    const releaseProvider = new Promise<void>((resolve) => {
+      releaseProviderResolve = resolve;
+    });
+    managedEmailSendHook = async (message) => {
+      if (message.to !== deferredTargetEmail) return;
+      providerReachedResolve();
+      await releaseProvider;
+    };
+    try {
+      const endpoint = `http://x/v1/organizations/${accountId}/invitations/${deferredInvitation.id}/delivery/retry`;
+      const firstRetry = app.request(endpoint, {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ operationId: crypto.randomUUID() }),
+      });
+      await providerReached;
+      const messagesAtProvider = managedEmailMessages.length;
+      const concurrentRetry = await app.request(endpoint, {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ operationId: crypto.randomUUID() }),
+      });
+      expect(concurrentRetry.status).toBe(409);
+      expect(managedEmailMessages).toHaveLength(messagesAtProvider);
+      releaseProviderResolve();
+      expect((await firstRetry).status).toBe(200);
+    } finally {
+      managedEmailSendHook = null;
+      releaseProviderResolve();
+    }
+
+    const heldInvitationOperationId = crypto.randomUUID();
+    const heldInvitation = await createOrganizationInvitation(client.db, {
+      organizationId: accountId,
+      actorSubjectId: subjectId,
+      operationId: heldInvitationOperationId,
+      targetSubjectId: null,
+      targetEmail: `held-journal-${crypto.randomUUID()}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const held = await claimOrganizationUserSetupDelivery(client.db, {
+      organizationId: accountId,
+      actorSubjectId: subjectId,
+      invitationId: heldInvitation.id,
+      invitationOperationId: heldInvitationOperationId,
+      operationId: crypto.randomUUID(),
+    });
+    if (!held.claimed) throw new Error("held delivery was not claimed");
+    const conflicted = await app.request(
+      `http://x/v1/organizations/${accountId}/invitations/${heldInvitation.id}/delivery/retry`,
+      {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ operationId: crypto.randomUUID() }),
+      },
+    );
+    expect(conflicted.status).toBe(409);
+    await shared.admin`
+      update organization_user_setup_deliveries
+      set claim_expires_at = clock_timestamp() - interval '1 second'
+      where id = ${held.delivery.id}`;
+    const recoveredHeld = await app.request(
+      `http://x/v1/organizations/${accountId}/invitations/${heldInvitation.id}/delivery/retry`,
+      {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({ operationId: crypto.randomUUID() }),
+      },
+    );
+    expect(recoveredHeld.status).toBe(200);
+    expect(await recoveredHeld.json()).toMatchObject({ state: "sent", attemptCount: 2 });
+  }, 120_000);
+
+  test("returns an authoritative revoked invitation when revocation races provider delivery", async () => {
+    if (!app || !shared) return;
+    managedEmailMessages.splice(0);
+    const targetEmail = `delivery-response-race-${crypto.randomUUID()}@example.test`;
+    managedEmailSendHook = async (message) => {
+      if (message.to !== targetEmail) return;
+      await shared!.admin`
+        update organization_membership_invitations
+        set status = 'revoked', revision = revision + 1, updated_at = clock_timestamp()
+        where account_id = ${accountId} and target_email = ${targetEmail}`;
+    };
+    try {
+      const response = await app.request(`http://x/v1/organizations/${accountId}/invitations`, {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          email: targetEmail,
+          role: "member",
+          initialWorkspaceIds: [],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          operationId: crypto.randomUUID(),
+        }),
+      });
+      expect(response.status).toBe(201);
+      expect(await response.json()).toMatchObject({
+        targetEmail,
+        status: "revoked",
+        delivery: { state: "revoked", retryState: "unavailable" },
+      });
+    } finally {
+      managedEmailSendHook = null;
+      managedEmailMessages.splice(0);
+    }
+  }, 120_000);
 
   test("exposes owner-managed private-session settings behind readiness", async () => {
     if (!shared || !client || !app) return;

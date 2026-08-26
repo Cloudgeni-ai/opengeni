@@ -258,7 +258,7 @@ import type {
   UserResourceGrantMutationResponse,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
-  ListOrganizationMembersResponse,
+  ListOrganizationAdministrationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
   CreateOrganizationInvitationRequest,
@@ -3849,11 +3849,20 @@ export class OpenGeniClient {
     );
   }
 
-  async listOrganizationMembers(organizationId: string): Promise<ListOrganizationMembersResponse> {
-    return await this.requestJson<ListOrganizationMembersResponse>(
+  async listOrganizationAdministrationMembers(
+    organizationId: string,
+  ): Promise<ListOrganizationAdministrationMembersResponse> {
+    return await this.requestJson<ListOrganizationAdministrationMembersResponse>(
       "GET",
       `/v1/organizations/${organizationId}/members`,
     );
+  }
+
+  /** @deprecated Use listOrganizationAdministrationMembers for its privacy-safe projection. */
+  async listOrganizationMembers(
+    organizationId: string,
+  ): Promise<ListOrganizationAdministrationMembersResponse> {
+    return await this.listOrganizationAdministrationMembers(organizationId);
   }
 
   /** Canonical organization identity and every non-personal workspace access roster. */
