@@ -24,10 +24,10 @@ import {
   listRecentModelCalls,
   listScheduledTasks,
   requireWorkspace,
-  sumUsageQuantity,
   sumUsageQuantityByDay,
   sumUsageQuantityByHour,
   sumUsageQuantityInRange,
+  sumUsageQuantitySinceForInsights,
   type Database,
 } from "@opengeni/db";
 
@@ -305,12 +305,12 @@ export async function getWorkspaceInsights(
     settings.sandboxSelfhostedEnabled
       ? countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now)
       : Promise.resolve(0),
-    sumUsageQuantity(db, {
+    sumUsageQuantitySinceForInsights(db, {
       workspaceId: input.workspaceId,
       eventType: "model.tokens",
       since: startOfUtcMonth(now),
     }),
-    sumUsageQuantity(db, {
+    sumUsageQuantitySinceForInsights(db, {
       workspaceId: input.workspaceId,
       eventType: "agent_run.created",
       since: startOfUtcMonth(now),
