@@ -70,7 +70,14 @@ function nullableString(row: JsonRecord, key: string): string | null {
 }
 
 function numberValue(row: JsonRecord, key: string): number {
-  const value = Number(row[key] ?? 0);
+  const raw = row[key];
+  if (
+    (typeof raw !== "number" && typeof raw !== "string") ||
+    (typeof raw === "string" && raw.trim().length === 0)
+  ) {
+    throw new Error(`Insights model bundle ${key} is not numeric`);
+  }
+  const value = Number(raw);
   if (!Number.isFinite(value)) {
     throw new Error(`Insights model bundle ${key} is not numeric`);
   }
