@@ -275,10 +275,24 @@ describe("rig CRUD lifecycle", () => {
 
   test("rejects explicit Rig images at the storage boundary", async () => {
     if (!available) return;
-    await expect(shared!.admin`
-      insert into rig_versions(account_id, workspace_id, rig_id, version, image)
-      values (${randomUUID()}, ${randomUUID()}, ${randomUUID()}, 1, 'ubuntu:24.04')
-    `).rejects.toThrow("Rig image overrides are unsupported");
+    let rejection: unknown;
+    try {
+      await shared!.admin.begin(async (transaction) => {
+        await transaction`select set_config('statement_timeout', '5s', true)`;
+        await transaction`
+          insert into rig_versions(account_id, workspace_id, rig_id, version, image)
+          values (${randomUUID()}, ${randomUUID()}, ${randomUUID()}, 1, 'ubuntu:24.04')
+        `;
+      });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toMatchObject({
+      code: "23514",
+      constraint_name: "rig_versions_platform_base_only",
+    });
+    expect((rejection as Error).message).toContain("Rig image overrides are unsupported");
   });
 
   test("update touches name/description only; delete removes the rig + versions", async () => {
