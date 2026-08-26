@@ -1409,14 +1409,14 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     expect(calls).toBe(1);
 
-    // A large streamed append creates real scroll range and starts the camera,
-    // but no reader leave occurred. Commit the older page before its next rAF.
+    // A large streamed append creates real scroll range, but no reader leave
+    // occurred, so the pinned viewport stays on the truthful live tip.
     const liveItems = [...tail, userItem("live-growth", "large live growth")];
     layout.setContentHeight(1_600);
     await r.rerender(
       <MessageTimeline items={liveItems} status="running" hasOlder onLoadOlder={onLoadOlder} />,
     );
-    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
 
     // Final-page availability can commit before the fetched rows. It must not
     // release the pending owner that still identifies the delayed prepend.
@@ -1428,14 +1428,14 @@ describe("MessageTimeline pagination affordances", () => {
         onLoadOlder={onLoadOlder}
       />,
     );
-    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
 
     // Promise settlement still does not prove that the fetched rows committed.
     // Keep this exact owner through the settlement-only render as well.
     await actRun(() => load.resolve(true));
     await flush();
     expect(calls).toBe(1);
-    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
 
     layout.setContentHeight(2_200);
     await r.rerender(
@@ -1668,8 +1668,8 @@ describe("MessageTimeline pagination affordances", () => {
     expect(calls).toBe(2);
 
     // Return to the live tip, then let another bounded append evict the retry's
-    // oldest row and create camera debt. Its delayed prepend must still use the
-    // rebased owner to hard-park the live tail in the commit that lands it.
+    // oldest row. Its delayed prepend must still use the rebased owner to keep
+    // the truthful live tail parked in the commit that lands it.
     await actRun(() => {
       scroller.scrollTop = scroller.scrollHeight;
       scroller.dispatchEvent(new Event("scroll"));
@@ -1687,7 +1687,7 @@ describe("MessageTimeline pagination affordances", () => {
         onLoadOlder={onLoadOlder}
       />,
     );
-    expect(distanceFromBottom(scroller)).toBeGreaterThan(48);
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
 
     layout.setContentHeight(2_300);
     await r.rerender(
@@ -3138,7 +3138,7 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("pinned tip-debt from growth does not unpin without a reader scroll-up", async () => {
+  test("pinned growth does not unpin without a reader scroll-up", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -3164,8 +3164,8 @@ describe("MessageTimeline pagination affordances", () => {
       scroller.dispatchEvent(new Event("scroll"));
     });
 
-    // Content grew under a pinned reader; scrollTop stale ⇒ tip-debt. A scroll
-    // echo must keep the pin and recover — not show Jump to latest.
+    // Content grew under a pinned reader. A scroll echo must keep the pin and
+    // track the truthful tip — not show Jump to latest.
     layout.setContentHeight(2300);
     await actRun(() => {
       scroller.dispatchEvent(new Event("scroll"));
@@ -3178,9 +3178,9 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
-  test("pinned appends soft-follow the tip; a later scroll-up cancels the camera", async () => {
-    // Tip-follow eases toward the bottom. Mid-follow wheel-up unpins —
-    // camera echoes (downward scrollTop) must not swallow that intent.
+  test("pinned appends stay at the tip; a later scroll-up releases the camera", async () => {
+    // Pinned growth stays on the truthful tip. A later wheel-up still unpins —
+    // programmatic scroll echoes must not swallow that intent.
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
       frames.push(cb);
@@ -3206,7 +3206,8 @@ describe("MessageTimeline pagination affordances", () => {
       scroller.dispatchEvent(new Event("scroll"));
     });
 
-    // Tip growth + tip-follow reaches the bottom after camera frames drain.
+    // Tip growth remains visible immediately; draining frames is a no-op for
+    // new growth but still covers any pre-existing camera work.
     layout.setContentHeight(2300);
     await r.rerender(
       <MessageTimeline events={[...initial, agentDelta(21, "world")]} status="running" />,
