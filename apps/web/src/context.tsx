@@ -1890,9 +1890,10 @@ export function RootRouteComponent() {
       setAccessError(null);
     });
     configureManagedActorEpoch(transition.to?.actorEpoch ?? null);
-    // Create the next client only after the old actor's client lease has been
-    // invalidated. This also reconnects streams for two login bindings that
-    // resolve to the same canonical human but carry distinct actor epochs.
+    // Create the next client only after the old actor's transport and client
+    // generation have been invalidated. This also reconnects streams for two
+    // login bindings that resolve to the same canonical human but carry
+    // distinct actor epochs.
     flushSync(() => {
       setAccessKeyVersion((version) => version + 1);
     });

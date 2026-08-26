@@ -97,6 +97,7 @@ type BrowserProblems = {
   pendingRequestFailureChecks: Set<Promise<void>>;
   retirementChecks: string[];
   retiredFiniteReads: string[];
+  retiredFiniteReadTombstones: Map<object, string>;
 };
 
 type CompletionResponseLoss = {
@@ -256,6 +257,7 @@ type BrowserRequestFailureInput = {
 
 type FiniteReadRetirementInput = {
   acceptedActorTransitions: readonly ActorMutationAcceptance[];
+  actorDispatches: readonly { actorEpoch: string; startedAt: number }[];
   actorEpoch: string | null;
   confirmedActorEpoch: string;
   confirmedAt: number;
@@ -292,6 +294,7 @@ function sessionSetAuthorityHash(cookieHeader: string | null): string | null {
 
 function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
   const pathname = new URL(input.url).pathname;
+  const isConnectionReset = /NET_RESET|CONNECTION_RESET/iu.test(input.failure);
   const isCancellation =
     /ERR_ABORTED|NS_BINDING_ABORTED|NET_RESET|CONNECTION_RESET|cancelled|canceled/iu.test(
       input.failure,
@@ -307,6 +310,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
   );
   const isExpectedScopedActorReadCancellation =
     isCancellation &&
+    !isConnectionReset &&
     isActorOwnedRead &&
     input.actorEpoch !== null &&
     allowedDispatchPhases?.has(input.dispatchPhase) === true;
@@ -331,6 +335,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     ) === true;
   const isExpectedEvidenceCatalogCancellation =
     isCancellation &&
+    !isConnectionReset &&
     input.method === "GET" &&
     input.actorEpoch !== null &&
     input.dispatchPhase === "responsive-evidence-bootstrap" &&
@@ -338,6 +343,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname);
   const isExpectedDocumentBootstrapCancellation =
     isCancellation &&
+    !isConnectionReset &&
     input.method === "GET" &&
     input.dispatchPhase === input.responsePhase &&
     DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true;
@@ -350,6 +356,16 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     return null;
   }
   return `[dispatch=${input.dispatchPhase}; actor=${input.actorEpoch ?? "missing"}; response=${input.responsePhase}] ${input.method} ${input.url}: ${input.failure}`;
+}
+
+function retiredFiniteReadTerminalProblem(
+  description: string | undefined,
+  terminal: { kind: "finished" } | { kind: "response"; status: number },
+): string | null {
+  if (description === undefined) return null;
+  return terminal.kind === "response"
+    ? `${description} [unexpected-late-response=${terminal.status}]`
+    : `${description} [unexpected-late-finish]`;
 }
 
 function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInput): boolean {
@@ -378,8 +394,14 @@ function finiteReadMayRetireAfterActorTransition(input: FiniteReadRetirementInpu
         transition.path === "/v1/auth/session-set/select" &&
         transition.actorEpoch === input.confirmedActorEpoch &&
         transition.sessionSetAuthorityHash === input.currentSessionSetAuthorityHash &&
-        transition.acceptedAt >= input.startedAt &&
-        transition.acceptedAt <= input.confirmedAt,
+        transition.acceptedAt <= input.confirmedAt &&
+        input.actorDispatches.some(
+          (dispatch) =>
+            dispatch.actorEpoch === input.confirmedActorEpoch &&
+            dispatch.startedAt >= transition.acceptedAt &&
+            dispatch.startedAt >= input.startedAt &&
+            dispatch.startedAt <= input.confirmedAt,
+        ),
     )
   );
 }
@@ -481,6 +503,7 @@ function observeBrowser(page: Page): BrowserProblems {
     pendingRequestFailureChecks: new Set(),
     retirementChecks: [],
     retiredFiniteReads: [],
+    retiredFiniteReadTombstones: new Map(),
   };
   observedBrowserProblems.set(page, problems);
   const requestPhases = new WeakMap<
@@ -540,6 +563,14 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("response", (response) => {
     const request = response.request();
     const pathname = new URL(response.url()).pathname;
+    const retiredTerminalProblem = retiredFiniteReadTerminalProblem(
+      problems.retiredFiniteReadTombstones.get(request),
+      { kind: "response", status: response.status() },
+    );
+    if (retiredTerminalProblem !== null) {
+      problems.failedRequests.push(retiredTerminalProblem);
+      problems.retiredFiniteReadTombstones.delete(request);
+    }
     const pendingFiniteRead = problems.pendingFiniteReads.get(request);
     if (pendingFiniteRead !== undefined) {
       pendingFiniteRead.description = `${pendingFiniteRead.description} [response=${response.status()}; end=${performance.now().toFixed(1)}]`;
@@ -577,6 +608,14 @@ function observeBrowser(page: Page): BrowserProblems {
   page.on("requestfinished", (request) => {
     problems.activeStreams.delete(request);
     problems.pendingFiniteReads.delete(request);
+    const retiredTerminalProblem = retiredFiniteReadTerminalProblem(
+      problems.retiredFiniteReadTombstones.get(request),
+      { kind: "finished" },
+    );
+    if (retiredTerminalProblem !== null) {
+      problems.failedRequests.push(retiredTerminalProblem);
+      problems.retiredFiniteReadTombstones.delete(request);
+    }
   });
   page.on("console", (message) => {
     if (message.type() === "error") {
@@ -598,6 +637,7 @@ function observeBrowser(page: Page): BrowserProblems {
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
     problems.activeStreams.delete(request);
+    problems.retiredFiniteReadTombstones.delete(request);
     // A failed finite read is terminal whether expected or not. Remove it from
     // quiescence tracking, but keep every non-transition failure in the strict
     // final ledger—including canceled product mutations.
@@ -702,28 +742,6 @@ async function retirePendingReadsAfterConfirmedActorTransition(
     oldWorkspaceId: string;
   },
 ): Promise<void> {
-  const samePageProcessedAcceptedActor = problems.actorDispatches.some(
-    (dispatch) =>
-      dispatch.actorEpoch === input.confirmedActorEpoch &&
-      actorMutationAcceptances.some(
-        (transition) =>
-          ACTOR_CHANGING_ACCEPTANCE_PATHS.has(transition.path) &&
-          transition.actorEpoch === input.confirmedActorEpoch &&
-          dispatch.startedAt >= transition.acceptedAt &&
-          dispatch.startedAt <= input.confirmedAt,
-      ),
-  );
-  if (!samePageProcessedAcceptedActor) {
-    problems.retirementChecks.push(
-      JSON.stringify({
-        confirmedActorEpoch: input.confirmedActorEpoch,
-        confirmedAt: input.confirmedAt,
-        oldWorkspaceId: input.oldWorkspaceId,
-        result: "no-same-page-accepted-actor-dispatch",
-      }),
-    );
-    return;
-  }
   const currentSessionSetAuthorityHash = sessionSetAuthorityHash(
     await browserCookieHeader(page.context()),
   );
@@ -733,6 +751,7 @@ async function retirePendingReadsAfterConfirmedActorTransition(
       (await Promise.race([pending.sessionSetAuthorityHash, Bun.sleep(1_000).then(() => null)]));
     const retirementInput = {
       acceptedActorTransitions: actorMutationAcceptances,
+      actorDispatches: problems.actorDispatches,
       actorEpoch: pending.actorEpoch,
       confirmedActorEpoch: input.confirmedActorEpoch,
       confirmedAt: input.confirmedAt,
@@ -768,6 +787,7 @@ async function retirePendingReadsAfterConfirmedActorTransition(
     problems.retiredFiniteReads.push(
       `${pending.description} [retired=confirmed-actor-${input.confirmedActorEpoch}]`,
     );
+    problems.retiredFiniteReadTombstones.set(request, pending.description);
     problems.pendingFiniteReads.delete(request);
   }
 }
@@ -1850,6 +1870,9 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    expect(requestFailureProblem({ ...oldActorRead, failure: "NS_ERROR_NET_RESET" })).toContain(
+      "/sessions",
+    );
     expect(
       requestFailureProblem({
         ...oldActorRead,
@@ -2055,6 +2078,7 @@ describe("provider-neutral browser account acceptance", () => {
           sessionSetAuthorityHash: "a".repeat(64),
         },
       ],
+      actorDispatches: [{ actorEpoch: "new-actor-epoch", startedAt: 250 }],
       actorEpoch: "old-actor-epoch",
       confirmedActorEpoch: "new-actor-epoch",
       confirmedAt: 300,
@@ -2068,6 +2092,16 @@ describe("provider-neutral browser account acceptance", () => {
       startedAt: 100,
     } satisfies FiniteReadRetirementInput;
     expect(finiteReadMayRetireAfterActorTransition(retirement)).toBe(true);
+    const retiredDescription = "GET /v1/workspaces/old-workspace/sessions";
+    expect(
+      retiredFiniteReadTerminalProblem(retiredDescription, { kind: "response", status: 200 }),
+    ).toContain("unexpected-late-response=200");
+    expect(retiredFiniteReadTerminalProblem(retiredDescription, { kind: "finished" })).toContain(
+      "unexpected-late-finish",
+    );
+    expect(
+      retiredFiniteReadTerminalProblem(undefined, { kind: "response", status: 200 }),
+    ).toBeNull();
     expect(
       finiteReadMayRetireAfterActorTransition({
         ...retirement,
@@ -2106,11 +2140,22 @@ describe("provider-neutral browser account acceptance", () => {
         requestSessionSetAuthorityHash: null,
       },
       { ...retirement, responseSeen: true },
-      { ...retirement, startedAt: 201 },
+      { ...retirement, startedAt: 251 },
       { ...retirement, confirmedAt: 199 },
+      { ...retirement, actorDispatches: [] },
+      {
+        ...retirement,
+        actorDispatches: [{ actorEpoch: "new-actor-epoch", startedAt: 99 }],
+      },
     ]) {
       expect(finiteReadMayRetireAfterActorTransition(invalid)).toBe(false);
     }
+    expect(
+      finiteReadMayRetireAfterActorTransition({
+        ...retirement,
+        startedAt: 225,
+      }),
+    ).toBe(true);
 
     const expectedRaceConsole =
       "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/session-set/select";

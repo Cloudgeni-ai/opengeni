@@ -28,11 +28,7 @@ let managedActorRevision = 0;
 type ManagedActorRequest = {
   abortActor: (reason: DOMException) => void;
 };
-type ManagedActorClientLease = {
-  abortActor: (reason: DOMException) => void;
-};
 const managedActorRequests = new Set<ManagedActorRequest>();
-const managedActorClientLeases = new Set<ManagedActorClientLease>();
 const managedActorMutationListeners = new Set<() => void>();
 const managedActorInvalidationListeners = new Set<() => void>();
 let managedActorMutationCount = 0;
@@ -75,11 +71,6 @@ export function isApiErrorStatus(error: unknown, status: number): boolean {
  */
 export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniCoreClient {
   const createdAtActorRevision = managedActorRevision;
-  const actorController = new AbortController();
-  const actorLease: ManagedActorClientLease = {
-    abortActor: (reason) => actorController.abort(reason),
-  };
-  let actorLeaseRegistered = false;
   return new OpenGeniCoreClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
@@ -87,29 +78,17 @@ export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniCo
     fetch: async (input, init) => {
       const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
       if (actorBound) {
-        if (!actorLeaseRegistered) {
-          managedActorClientLeases.add(actorLease);
-          actorLeaseRegistered = true;
-        }
-        if (createdAtActorRevision !== managedActorRevision && !actorController.signal.aborted) {
-          actorController.abort(new DOMException("The browser account changed", "AbortError"));
-        }
-        if (actorController.signal.aborted) {
-          throw actorController.signal.reason;
+        if (createdAtActorRevision !== managedActorRevision) {
+          throw new DOMException("The browser account changed", "AbortError");
         }
       }
-      const signal = actorBound
-        ? init?.signal
-          ? AbortSignal.any([init.signal, actorController.signal])
-          : actorController.signal
-        : init?.signal;
       const response = await managedActorFetch(input, {
         ...init,
         // API requests need managed-session cookies. The SDK explicitly marks
         // signed object-storage requests as credential-free; preserve that
         // narrower policy instead of overriding it at the console boundary.
         credentials: init?.credentials ?? "include",
-        signal,
+        signal: init?.signal,
       });
       handleApiContractResponse(response);
       return response;
@@ -130,10 +109,6 @@ export function configureManagedActorEpoch(epoch: string | null): void {
   for (const managedRequest of managedActorRequests) {
     managedRequest.abortActor(reason);
   }
-  for (const clientLease of managedActorClientLeases) {
-    clientLease.abortActor(reason);
-  }
-  managedActorClientLeases.clear();
 }
 
 export function currentManagedActorEpoch(): string | null {
