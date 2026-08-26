@@ -349,7 +349,12 @@ async function expectControlledVariableSetRemovalRace(removal: "revoke" | "delet
           authorization: await variableSetControlAuthorization(value),
           "content-type": "application/json",
         },
-        body: JSON.stringify({ variableSetIds: [retainedVariableSet.id, variableSet.id] }),
+        body: JSON.stringify({
+          variableSetIds:
+            removal === "revoke"
+              ? [variableSet.id, retainedVariableSet.id]
+              : [retainedVariableSet.id, variableSet.id],
+        }),
       },
     );
     expect(

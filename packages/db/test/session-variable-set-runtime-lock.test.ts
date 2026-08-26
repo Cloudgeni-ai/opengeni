@@ -28,7 +28,9 @@ describe("post-start session Variable Set runtime fence", () => {
     expect(updateSource).toContain("from ${schema.sessionTurnAttempts} attempt_row");
     expect(updateSource).toContain("from ${schema.sessionSystemUpdates} update_row");
     expect(updateSource).toContain("from ${schema.sessionGoals} goal_row");
-    expect(updateSource).toContain("isSessionVariableSetAttachmentFkViolation(error)");
+    expect(updateSource).toContain("isSessionVariableSetSelectionFkViolation(error)");
+    expect(source).toContain('"sessions_environment_id_fkey"');
+    expect(source).toContain('"session_variable_set_attachments_variable_set_id_fkey"');
     expect(updateSource).toContain("const current = await getVariableSet(");
     expect(updateSource).toContain('status: "invalid_variable_sets"');
     expect(updateSource.indexOf("lockSessionEventWriteRows")).toBeLessThan(

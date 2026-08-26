@@ -17237,16 +17237,18 @@ function isSessionChannelFkViolation(error: unknown): boolean {
   );
 }
 
-/**
- * The session selection UPDATE is projected into the attachment table by a
- * trigger. A Variable Set that disappears after API validation can therefore
- * fail only at this exact FK; keep unrelated integrity failures loud.
- */
-function isSessionVariableSetAttachmentFkViolation(error: unknown): boolean {
+const sessionVariableSetSelectionFkConstraints = new Set([
+  // Legacy final-entry mirror on sessions.variable_set_id.
+  "sessions_environment_id_fkey",
+  // Ordered attachment projection populated by the session UPDATE trigger.
+  "session_variable_set_attachments_variable_set_id_fkey",
+]);
+
+/** A selected Variable Set disappeared after validation; unrelated FKs stay loud. */
+function isSessionVariableSetSelectionFkViolation(error: unknown): boolean {
   return (
     nestedPostgresSqlState(error) === "23503" &&
-    safeDatabaseErrorFacts(error).constraint ===
-      "session_variable_set_attachments_variable_set_id_fkey"
+    sessionVariableSetSelectionFkConstraints.has(safeDatabaseErrorFacts(error).constraint ?? "")
   );
 }
 
@@ -17770,7 +17772,7 @@ export async function updateSessionVariableSets(
         return { status: "updated", event: mapEvent(eventRow) };
       }),
   ).catch(async (error: unknown) => {
-    if (!isSessionVariableSetAttachmentFkViolation(error)) throw error;
+    if (!isSessionVariableSetSelectionFkViolation(error)) throw error;
 
     // The failed transaction, including the session row, projection trigger,
     // lease rotation, event, and audit writes, has rolled back. Re-resolve the
