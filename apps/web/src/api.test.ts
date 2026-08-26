@@ -28,21 +28,20 @@ describe("web API auth helpers", () => {
     const pending = new Promise<Response>((resolve) => {
       release = resolve;
     });
-    let requestHeaders: Headers | null = null;
-    let requestSignal: AbortSignal | null = null;
+    const observed: { headers?: Headers; signal?: AbortSignal | null } = {};
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      requestHeaders = new Headers(init?.headers);
-      requestSignal = init?.signal ?? null;
+      observed.headers = new Headers(init?.headers);
+      observed.signal = init?.signal ?? null;
       return await pending;
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     try {
       configureManagedActorEpoch("7");
       const result = managedActorFetch("https://api.example.test/v1/workspaces");
       await Promise.resolve();
-      expect(requestHeaders?.get("x-opengeni-actor-epoch")).toBe("7");
+      expect(observed.headers?.get("x-opengeni-actor-epoch")).toBe("7");
       configureManagedActorEpoch("8");
-      expect(requestSignal?.aborted).toBe(true);
+      expect(observed.signal?.aborted).toBe(true);
       release(
         Response.json([], {
           headers: { "x-opengeni-actor-epoch": "7" },
@@ -58,7 +57,10 @@ describe("web API auth helpers", () => {
   test("rejects mismatched server provenance even before a local rotation hint", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
-      Response.json({ ok: true }, { headers: { "x-opengeni-actor-epoch": "10" } })) as typeof fetch;
+      Response.json(
+        { ok: true },
+        { headers: { "x-opengeni-actor-epoch": "10" } },
+      )) as unknown as typeof fetch;
     try {
       configureManagedActorEpoch("9");
       await expect(managedActorFetch("https://api.example.test/v1/access")).rejects.toMatchObject({
@@ -72,10 +74,10 @@ describe("web API auth helpers", () => {
 
   test("keeps an established response body actor-bound until the stream closes", async () => {
     const originalFetch = globalThis.fetch;
-    let requestSignal: AbortSignal | null = null;
+    const observed: { signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-      requestSignal = init?.signal ?? null;
+      observed.signal = init?.signal ?? null;
       return new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
@@ -84,7 +86,7 @@ describe("web API auth helpers", () => {
         }),
         { headers: { "content-type": "text/event-stream" } },
       );
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     try {
       configureManagedActorEpoch("12");
@@ -95,7 +97,7 @@ describe("web API auth helpers", () => {
       await expect(read).resolves.toMatchObject({ done: false });
       const lateRead = reader.read();
       configureManagedActorEpoch("13");
-      expect(requestSignal?.aborted).toBe(true);
+      expect(observed.signal?.aborted).toBe(true);
       await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
     } finally {
       configureManagedActorEpoch(null);
@@ -109,7 +111,7 @@ describe("web API auth helpers", () => {
     const unsubscribe = subscribeManagedActorMutationBusy(() => {
       snapshots.push(managedActorMutationBusySnapshot());
     });
-    globalThis.fetch = (async () => Response.json({ ok: true })) as typeof fetch;
+    globalThis.fetch = (async () => Response.json({ ok: true })) as unknown as typeof fetch;
     try {
       configureManagedActorEpoch("14");
       const response = await managedActorFetch("https://api.example.test/v1/workspaces", {
@@ -136,7 +138,7 @@ describe("web API auth helpers", () => {
       Response.json(
         { error: { details: { managedAuthCode: "actor_change_required" } } },
         { status: 409, headers: { "x-opengeni-actor-state": "changed" } },
-      )) as typeof fetch;
+      )) as unknown as typeof fetch;
     try {
       configureManagedActorEpoch("15");
       const response = await managedActorFetch("https://api.example.test/v1/access");

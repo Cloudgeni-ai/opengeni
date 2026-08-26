@@ -4126,6 +4126,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
   apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+  managedAuthSessionSetMode: "legacy",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [

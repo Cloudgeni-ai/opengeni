@@ -74,8 +74,9 @@ export class BrowserAccountsApiError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
+    options?: { cause?: unknown },
   ) {
-    super(code);
+    super(code, options?.cause === undefined ? undefined : { cause: options.cause });
   }
 }
 
@@ -221,18 +222,26 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
     body?: unknown,
     headers: Record<string, string> = {},
   ): Promise<unknown> {
-    const response = await this.#fetch(`${this.#baseUrl}${path}`, {
-      method,
-      credentials: "include",
-      headers: {
-        accept: "application/json",
-        [MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER]:
-          MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-        ...headers,
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+    let response: Response;
+    try {
+      response = await this.#fetch(`${this.#baseUrl}${path}`, {
+        method,
+        credentials: "include",
+        headers: {
+          accept: "application/json",
+          [MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER]:
+            MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          ...headers,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (cause) {
+      if (method !== "GET") {
+        throw new BrowserAccountsApiError(503, "operation_outcome_unknown", { cause });
+      }
+      throw cause;
+    }
     const value = await response.json().catch(() => null);
     if (!response.ok) {
       const code = managedAuthErrorCode(value) ?? `http_${response.status}`;

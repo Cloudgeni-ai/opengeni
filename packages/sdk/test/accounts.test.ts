@@ -90,4 +90,28 @@ describe("BrowserAccountsClient", () => {
       "/v1/auth/session-set",
     ]);
   });
+
+  test("classifies a lost mutation response as outcome unknown for exact replay", async () => {
+    let calls = 0;
+    const client = new BrowserAccountsClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        calls += 1;
+        if (calls === 1) return Response.json(projection);
+        throw new TypeError("connection closed after request write");
+      },
+    });
+    await client.getSessionSet();
+    await expect(
+      client.selectLoginSlot({
+        operationId: "11111111-1111-4111-8111-111111111111",
+        expectedGeneration: "1",
+        slotId: "22222222-2222-4222-8222-222222222222",
+      }),
+    ).rejects.toMatchObject({
+      name: "BrowserAccountsApiError",
+      status: 503,
+      code: "operation_outcome_unknown",
+    });
+  });
 });

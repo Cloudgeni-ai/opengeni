@@ -22,7 +22,7 @@ describe("browser account popup protocol", () => {
       transactionId: TRANSACTION,
     };
     const valid = {
-      data: { type: "opengeni-account-auth-complete", transactionId: TRANSACTION },
+      data: { type: "opengeni-account-auth-complete" as const, transactionId: TRANSACTION },
       origin: expected.origin,
       source: popup,
     };

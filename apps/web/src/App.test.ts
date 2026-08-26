@@ -1751,6 +1751,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
     return {
       deploymentRevision: "rev-1",
       apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      managedAuthSessionSetMode: "legacy",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],

@@ -63,7 +63,7 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
   if (!validTransactionId) {
     return (
       <section className="flex flex-1 items-center justify-center px-4">
-        <Notice tone="danger" title="Invalid account request">
+        <Notice tone="failed" title="Invalid account request">
           Close this window and start the account action again from OpenGeni.
         </Notice>
       </section>

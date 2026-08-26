@@ -347,7 +347,7 @@ export function BrowserAccountsProvider({
         }
         return true;
       } catch (caught) {
-        await fail(caught, pending.kind);
+        return await fail(caught, pending.kind);
       }
     },
     [fail, inspectBlockers, settleActorTransition],
@@ -443,7 +443,7 @@ export function BrowserAccountsProvider({
         setPhase("ready");
         return next;
       } catch (caught) {
-        await fail(caught, kind);
+        return await fail(caught, kind);
       }
     },
     [client, fail, inspectBlockers],
@@ -505,7 +505,7 @@ export function BrowserAccountsProvider({
         }
         return true;
       } catch (caught) {
-        await fail(caught, activeTransaction.kind);
+        return await fail(caught, activeTransaction.kind);
       }
     },
     [client, fail, inspectBlockers, settleActorTransition],
