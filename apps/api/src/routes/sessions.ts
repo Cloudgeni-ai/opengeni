@@ -1822,6 +1822,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (result.status === "not_found") {
       throw new HTTPException(404, { message: "session not found" });
     }
+    if (result.status === "invalid_variable_sets") {
+      throw new ApiHttpError(422, {
+        code: "validation_failed",
+        message: "One or more selected Variable Sets are no longer available.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { variableSetIds: result.variableSetIds },
+      });
+    }
     if (result.status === "blocked") {
       const messages = {
         turn_in_flight:

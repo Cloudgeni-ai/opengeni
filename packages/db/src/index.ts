@@ -17237,6 +17237,19 @@ function isSessionChannelFkViolation(error: unknown): boolean {
   );
 }
 
+/**
+ * The session selection UPDATE is projected into the attachment table by a
+ * trigger. A Variable Set that disappears after API validation can therefore
+ * fail only at this exact FK; keep unrelated integrity failures loud.
+ */
+function isSessionVariableSetAttachmentFkViolation(error: unknown): boolean {
+  return (
+    nestedPostgresSqlState(error) === "23503" &&
+    safeDatabaseErrorFacts(error).constraint ===
+      "session_variable_set_attachments_variable_set_id_fkey"
+  );
+}
+
 function mapChannel(row: typeof schema.channels.$inferSelect): Channel {
   return {
     id: row.id,
@@ -17482,6 +17495,7 @@ export async function setSessionChannel(
 export type UpdateSessionVariableSetsResult =
   | { status: "updated"; event: SessionEvent }
   | { status: "unchanged" }
+  | { status: "invalid_variable_sets"; variableSetIds: string[] }
   | {
       status: "blocked";
       reason: "turn_in_flight" | "shared_sandbox_group" | "live_sandbox_holders";
@@ -17508,7 +17522,7 @@ export async function updateSessionVariableSets(
     }>;
   },
 ): Promise<UpdateSessionVariableSetsResult> {
-  return await withWorkspaceSubjectSessionActivityRls(
+  return await withWorkspaceSubjectSessionActivityRls<UpdateSessionVariableSetsResult>(
     db,
     input.workspaceId,
     input.subjectId,
@@ -17755,7 +17769,32 @@ export async function updateSessionVariableSets(
         );
         return { status: "updated", event: mapEvent(eventRow) };
       }),
-  );
+  ).catch(async (error: unknown) => {
+    if (!isSessionVariableSetAttachmentFkViolation(error)) throw error;
+
+    // The failed transaction, including the session row, projection trigger,
+    // lease rotation, event, and audit writes, has rolled back. Re-resolve the
+    // exact requested identities under the same tenant/subject authority so a
+    // concurrent revoke/delete is translated without masking any other FK bug.
+    const unavailableVariableSetIds: string[] = [];
+    for (const variableSet of input.variableSets) {
+      const current = await getVariableSet(
+        db,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+        },
+        variableSet.id,
+      );
+      if (!current) unavailableVariableSetIds.push(variableSet.id);
+    }
+    if (unavailableVariableSetIds.length === 0) throw error;
+    return {
+      status: "invalid_variable_sets",
+      variableSetIds: unavailableVariableSetIds,
+    };
+  });
 }
 
 export async function countRigs(
