@@ -546,7 +546,7 @@ test("emits the selected actor epoch and closes before a cross-tab actor event",
   durableReads.length = 0;
   let currentEpoch = "7";
   let publish: ((events: SessionEvent[]) => void) | null = null;
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async (
       _workspaceId: string,
       _sessionId: string,
@@ -555,7 +555,7 @@ test("emits the selected actor epoch and closes before a cross-tab actor event",
       publish = listener;
       return () => {};
     },
-  } as unknown as EventBus;
+  });
   const response = await sseSessionStream(
     fakeDb as never,
     bus,
