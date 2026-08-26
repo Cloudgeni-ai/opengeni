@@ -168,12 +168,7 @@ describe("compound composer framework", () => {
 
     function Parent() {
       const [value, setValue] = useState("");
-      return (
-        <Child
-          value={value}
-          setValue={(next) => startTransition(() => setValue(next))}
-        />
-      );
+      return <Child value={value} setValue={(next) => startTransition(() => setValue(next))} />;
     }
 
     mounted = await renderComponent(<Parent />);
