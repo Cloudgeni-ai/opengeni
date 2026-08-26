@@ -43,6 +43,7 @@ export type BrowserAccountsClientOptions = {
 
 export interface BrowserAccountsClientLike {
   getSessionSet(): Promise<ManagedAuthSessionSetProjectionType>;
+  reconcileSessionSetAuthority(): Promise<ManagedAuthSessionSetProjectionType>;
   bootstrapSessionSet(
     request: BootstrapManagedAuthSessionSetRequestType,
   ): Promise<ManagedAuthSessionSetProjectionType>;
@@ -90,6 +91,8 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
     { signature: string; csrfToken: string; actorEpoch: string }
   >();
   #projection: ManagedAuthSessionSetProjectionType | null = null;
+  #authorityReadEpoch = 0;
+  #authorityReconciliation: Promise<ManagedAuthSessionSetProjectionType> | null = null;
 
   constructor(options: BrowserAccountsClientOptions) {
     this.#baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -97,9 +100,31 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
   }
 
   async getSessionSet(): Promise<ManagedAuthSessionSetProjectionType> {
-    return this.#remember(
-      ManagedAuthSessionSetProjection.parse(await this.#request("GET", "/v1/auth/session-set")),
-    );
+    const activeReconciliation = this.#authorityReconciliation;
+    if (activeReconciliation) return await activeReconciliation;
+    const readEpoch = this.#authorityReadEpoch;
+    const received = await this.#readSessionSet();
+    if (readEpoch !== this.#authorityReadEpoch) {
+      return this.#authorityReconciliation
+        ? await this.#authorityReconciliation
+        : (this.#projection ?? (await this.getSessionSet()));
+    }
+    return this.#remember(received);
+  }
+
+  async reconcileSessionSetAuthority(): Promise<ManagedAuthSessionSetProjectionType> {
+    if (this.#authorityReconciliation) return await this.#authorityReconciliation;
+    const previous = this.#projection;
+    const readEpoch = ++this.#authorityReadEpoch;
+    const reconciliation = this.#reconcileSessionSetAuthority(previous, readEpoch);
+    this.#authorityReconciliation = reconciliation;
+    try {
+      return await reconciliation;
+    } finally {
+      if (this.#authorityReconciliation === reconciliation) {
+        this.#authorityReconciliation = null;
+      }
+    }
   }
 
   async bootstrapSessionSet(request: BootstrapManagedAuthSessionSetRequestType) {
@@ -125,6 +150,7 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
   async completeEmailPasswordTransaction(
     request: CompleteManagedAuthEmailPasswordTransactionRequestType,
   ) {
+    const authorityReadEpoch = this.#authorityReadEpoch;
     const response = CompleteManagedAuthLoginTransactionResponse.parse(
       await this.#mutation(
         "POST",
@@ -133,6 +159,9 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
         request,
       ),
     );
+    if (authorityReadEpoch !== this.#authorityReadEpoch) {
+      return { ...response, projection: await this.getSessionSet() };
+    }
     const remembered = this.#remember(response.projection);
     if (remembered !== response.projection) {
       return { ...response, projection: await this.getSessionSet() };
@@ -176,7 +205,9 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
         request,
       ),
     );
+    this.#authorityReadEpoch += 1;
     this.#projection = null;
+    this.#mutationAdmissions.clear();
     return receipt;
   }
 
@@ -197,9 +228,11 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
     schema: S,
     request: z.infer<S>,
   ): Promise<ManagedAuthSessionSetProjectionType> {
+    const authorityReadEpoch = this.#authorityReadEpoch;
     const received = ManagedAuthSessionSetProjection.parse(
       await this.#mutation(method, path, schema, request),
     );
+    if (authorityReadEpoch !== this.#authorityReadEpoch) return await this.getSessionSet();
     const remembered = this.#remember(received);
     // An exact replay may legitimately return its older durable receipt after
     // another tab has advanced this in-memory client. Reconcile from authority
@@ -280,6 +313,37 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
       throw new BrowserAccountsApiError(503, "operation_outcome_unknown");
     }
     return value;
+  }
+
+  async #readSessionSet(): Promise<ManagedAuthSessionSetProjectionType> {
+    return ManagedAuthSessionSetProjection.parse(
+      await this.#request("GET", "/v1/auth/session-set"),
+    );
+  }
+
+  async #reconcileSessionSetAuthority(
+    previous: ManagedAuthSessionSetProjectionType | null,
+    readEpoch: number,
+  ): Promise<ManagedAuthSessionSetProjectionType> {
+    const first = await this.#readSessionSet();
+    const second = await this.#readSessionSet();
+    if (readEpoch !== this.#authorityReadEpoch) {
+      return await this.#reconcileSessionSetAuthority(this.#projection, this.#authorityReadEpoch);
+    }
+    if (this.#projection !== previous) return this.#remember(second);
+    if (!previous || compareProjectionClock(second, previous) >= 0) {
+      return this.#remember(second);
+    }
+    if (compareProjectionClock(first, previous) < 0 && compareProjectionClock(second, first) >= 0) {
+      // Same-authority clocks never decrease. Two sequential no-store reads
+      // that both remain below the remembered clock therefore prove that the
+      // HttpOnly authority rotated; the second may already have advanced from
+      // the fresh authority's initial 1/1 projection.
+      this.#projection = second;
+      this.#mutationAdmissions.clear();
+      return second;
+    }
+    return previous;
   }
 
   #remember(projection: ManagedAuthSessionSetProjectionType) {

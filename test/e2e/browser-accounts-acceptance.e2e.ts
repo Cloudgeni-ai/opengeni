@@ -211,14 +211,30 @@ const EXPECTED_HTTP_CONSOLE_ERRORS: ReadonlyArray<{
   },
 ];
 
+type ActorMutationAcceptance = {
+  acceptedAt: number;
+  actorEpoch: string | null;
+  path: string;
+};
+
 type BrowserRequestFailureInput = {
+  acceptedActorTransitions?: readonly ActorMutationAcceptance[];
   actorEpoch: string | null;
   dispatchPhase: string;
+  failedAt?: number;
   failure: string;
   method: string;
   responsePhase: string;
+  startedAt?: number;
   url: string;
 };
+
+const ACTOR_CHANGING_ACCEPTANCE_PATHS = new Set([
+  "/v1/auth/session-set/logout-all",
+  "/v1/auth/session-set/logout-one",
+  "/v1/auth/session-set/select",
+  "/v1/auth/session-set/transactions/email-password",
+]);
 
 function isExpectedHttpConsoleError(rendered: string, phase: string): boolean {
   return EXPECTED_HTTP_CONSOLE_ERRORS.some(
@@ -243,6 +259,24 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     isActorOwnedRead &&
     input.actorEpoch !== null &&
     allowedDispatchPhases?.has(input.dispatchPhase) === true;
+  const startedAt = input.startedAt;
+  const failedAt = input.failedAt;
+  const isAcceptedActorTransitionCancellation =
+    isCancellation &&
+    isActorOwnedRead &&
+    input.actorEpoch !== null &&
+    typeof startedAt === "number" &&
+    Number.isFinite(startedAt) &&
+    typeof failedAt === "number" &&
+    Number.isFinite(failedAt) &&
+    input.acceptedActorTransitions?.some(
+      (transition) =>
+        ACTOR_CHANGING_ACCEPTANCE_PATHS.has(transition.path) &&
+        transition.actorEpoch !== null &&
+        transition.actorEpoch !== input.actorEpoch &&
+        transition.acceptedAt >= startedAt &&
+        transition.acceptedAt <= failedAt,
+    ) === true;
   const isExpectedEvidenceCatalogCancellation =
     isCancellation &&
     input.method === "GET" &&
@@ -257,6 +291,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true;
   if (
     isExpectedScopedActorReadCancellation ||
+    isAcceptedActorTransitionCancellation ||
     isExpectedEvidenceCatalogCancellation ||
     isExpectedDocumentBootstrapCancellation
   ) {
@@ -271,7 +306,7 @@ let edge: ReturnType<typeof Bun.serve> | null = null;
 let publicOrigin = "";
 let edgeCookieSummary = "not-observed";
 let completionResponseLoss: CompletionResponseLoss | null = null;
-const actorMutationAcceptances: Array<{ acceptedAt: number; path: string }> = [];
+const actorMutationAcceptances: ActorMutationAcceptance[] = [];
 let alpha: AccountFixture;
 let beta: AccountFixture;
 
@@ -429,14 +464,18 @@ function observeBrowser(page: Page): BrowserProblems {
     problems.pageErrors.push(`[${problems.phase}] ${error.message}`);
   });
   page.on("requestfailed", (request) => {
+    const failedAt = performance.now();
     const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
     const problem = requestFailureProblem({
+      acceptedActorTransitions: actorMutationAcceptances,
       actorEpoch: dispatch?.actorEpoch ?? null,
       dispatchPhase: dispatch?.phase ?? "unknown",
+      failedAt,
       failure,
       method: request.method(),
       responsePhase: problems.phase,
+      startedAt: dispatch?.startedAt,
       url: request.url(),
     });
     // A failed finite read is terminal whether expected or not. Remove it from
@@ -811,14 +850,23 @@ async function openAccountMenu(page: Page, displayName: string): Promise<Locator
   const menu = accountMenuSurface(page);
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (await menu.isVisible()) return menu;
+    if (await menu.isVisible()) {
+      try {
+        await waitForStableAccountMenu(page, menu);
+        return menu;
+      } catch (error) {
+        lastError = error;
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await page.waitForTimeout(100);
+      }
+    }
     if ((await trigger.getAttribute("aria-expanded")) === "true") {
       await page.keyboard.press("Escape");
     }
     await trigger.click();
     try {
       await menu.waitFor({ timeout: 3_000 });
-      await menu.getByRole("menuitem").first().waitFor({ timeout: 3_000 });
+      await waitForStableAccountMenu(page, menu);
       return menu;
     } catch (error) {
       lastError = error;
@@ -836,6 +884,17 @@ async function openAccountMenu(page: Page, displayName: string): Promise<Locator
   );
 }
 
+async function waitForStableAccountMenu(page: Page, menu: Locator): Promise<void> {
+  const firstItem = menu.getByRole("menuitem").first();
+  for (let sample = 0; sample < 3; sample += 1) {
+    await firstItem.waitFor({ timeout: 1_000 });
+    await page.waitForTimeout(100);
+  }
+  if (!(await menu.isVisible()) || !(await firstItem.isVisible())) {
+    throw new Error("account menu did not remain ready for evidence");
+  }
+}
+
 async function openResponsiveAccountMenu(
   page: Page,
   displayName: string,
@@ -843,7 +902,7 @@ async function openResponsiveAccountMenu(
 ): Promise<Locator> {
   const menu = accountMenuSurface(page);
   if (await menu.isVisible()) {
-    await menu.getByRole("menuitem").first().waitFor();
+    await waitForStableAccountMenu(page, menu);
     return menu;
   }
   if (width < 1_024) {
@@ -855,7 +914,6 @@ async function openResponsiveAccountMenu(
     }
   }
   const opened = await openAccountMenu(page, displayName);
-  await opened.getByRole("menuitem").first().waitFor();
   return opened;
 }
 
@@ -1385,6 +1443,7 @@ beforeAll(async () => {
             completionResponseLoss.acceptedAt = performance.now();
             actorMutationAcceptances.push({
               acceptedAt: completionResponseLoss.acceptedAt,
+              actorEpoch: response.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
               path: url.pathname,
             });
           }
@@ -1432,6 +1491,7 @@ beforeAll(async () => {
         ) {
           actorMutationAcceptances.push({
             acceptedAt: performance.now(),
+            actorEpoch: response.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
             path: url.pathname,
           });
         }
@@ -1507,6 +1567,55 @@ describe("provider-neutral browser account acceptance", () => {
     ).toContain("responsive-accessibility-evidence");
     expect(requestFailureProblem({ ...oldActorRead, method: "POST" })).toContain("POST");
     expect(requestFailureProblem({ ...oldActorRead, actorEpoch: null })).toContain("actor=missing");
+    const longLivedOldActorStream = {
+      ...oldActorRead,
+      acceptedActorTransitions: [
+        {
+          acceptedAt: 200,
+          actorEpoch: "new-actor-epoch",
+          path: "/v1/auth/session-set/logout-all",
+        },
+      ],
+      dispatchPhase: "late-old-epoch-primary-settled-before-old-release",
+      failedAt: 300,
+      responsePhase: "logout-all-response-loss-replay",
+      startedAt: 100,
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(longLivedOldActorStream)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 200,
+            actorEpoch: longLivedOldActorStream.actorEpoch,
+            path: "/v1/auth/session-set/logout-all",
+          },
+        ],
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [
+          {
+            acceptedAt: 99,
+            actorEpoch: "new-actor-epoch",
+            path: "/v1/auth/session-set/logout-all",
+          },
+        ],
+      }),
+    ).toContain("/live-events/stream");
+    expect(
+      requestFailureProblem({
+        ...longLivedOldActorStream,
+        acceptedActorTransitions: [],
+        dispatchPhase: "primary-set-sign-in",
+        responsePhase: "primary-set-sign-in",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+      }),
+    ).toContain("/model-catalog");
     expect(
       requestFailureProblem({
         ...oldActorRead,
@@ -1535,10 +1644,16 @@ describe("provider-neutral browser account acceptance", () => {
     };
     expect(requestFailureProblem(crossTabBootstrapRead)).toBeNull();
     expect(
-      requestFailureProblem({ ...crossTabBootstrapRead, actorEpoch: "current-actor" }),
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        actorEpoch: "current-actor",
+      }),
     ).toBeNull();
     expect(
-      requestFailureProblem({ ...crossTabBootstrapRead, responsePhase: "cross-slot-deep-link" }),
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        responsePhase: "cross-slot-deep-link",
+      }),
     ).toContain("/v1/config/client");
     expect(
       requestFailureProblem({
@@ -1634,14 +1749,31 @@ describe("provider-neutral browser account acceptance", () => {
     try {
       setBrowserPhase(otherProblems, "independent-set-sign-in");
       await signIn(otherPage, beta);
+      // A sign-in is not settled merely because its account trigger mounted:
+      // the routed tree can still be finishing actor-owned finite bootstrap
+      // reads. Prove each sequential bootstrap independently before starting
+      // the next browser set, without exempting any cancellation or failure.
+      await waitForFiniteReadQuiescence(otherProblems);
+      expectNoBrowserProblems(otherProblems);
       setBrowserPhase(pageProblems, "primary-set-sign-in");
       await signIn(page, alpha);
+      await waitForFiniteReadQuiescence(pageProblems);
+      expectNoBrowserProblems(pageProblems);
       await expectActiveAccountAnnouncement(page, alpha);
       setBrowserPhase(secondTabProblems, "second-tab-bootstrap");
       await secondTab.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
         waitUntil: "domcontentloaded",
       });
       await accountMenuTrigger(secondTab, alpha.displayName).waitFor();
+      // Loading a full document in the shared browser set is a distinct
+      // bootstrap boundary. Both tabs must be finite-read quiescent and clean
+      // before the deliberate cross-tab actor races begin below.
+      await Promise.all([
+        waitForFiniteReadQuiescence(pageProblems),
+        waitForFiniteReadQuiescence(secondTabProblems),
+      ]);
+      expectNoBrowserProblems(pageProblems);
+      expectNoBrowserProblems(secondTabProblems);
 
       setBrowserPhase(pageProblems, "add-response-loss-replay");
       const betaProviderSessionsBeforeReplay = await authSessionCount(beta.email);
@@ -1904,6 +2036,7 @@ describe("provider-neutral browser account acceptance", () => {
       expect(authorityBeforeLogoutAll).toHaveLength(43);
       const projectionBeforeLogoutAll = await sessionSet(page);
       setBrowserPhase(pageProblems, "logout-all-response-loss-replay");
+      setBrowserPhase(secondTabProblems, "logout-all-response-loss-replay");
       completionResponseLoss = {
         acceptedAt: null,
         attempts: 0,
@@ -1975,6 +2108,34 @@ describe("provider-neutral browser account acceptance", () => {
       expect(authorityAfterLogoutAll).toHaveLength(43);
       expect(authorityAfterLogoutAll).not.toBe(authorityBeforeLogoutAll);
       setBrowserPhase(pageProblems, "signed-out-settled");
+      await secondTab.getByRole("heading", { name: "Sign in to OpenGeni" }).waitFor({
+        timeout: 30_000,
+      });
+      const signedOutSecondTabProjection = await sessionSet(secondTab);
+      expect(signedOutSecondTabProjection).toEqual(
+        expect.objectContaining({
+          actorEpoch: "1",
+          generation: "1",
+          selectedSlotId: null,
+          slots: [],
+          state: "ready",
+        }),
+      );
+      expect(secondTab.url()).not.toContain(beta.workspaceId);
+      const signedOutSecondTabBody = await secondTab.locator("body").innerText();
+      for (const tenantValue of [
+        alpha.displayName,
+        beta.displayName,
+        alpha.organizationName,
+        beta.organizationName,
+        alpha.workspaceId,
+        beta.workspaceId,
+        alpha.sessionId,
+        beta.sessionId,
+      ]) {
+        expect(signedOutSecondTabBody).not.toContain(tenantValue);
+      }
+      setBrowserPhase(secondTabProblems, "signed-out-settled");
       setBrowserPhase(otherProblems, "independent-set-after-other-logout-all");
       await otherPage.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(otherPage, beta.displayName).waitFor();
@@ -2046,6 +2207,7 @@ describe("provider-neutral browser account acceptance", () => {
             restrictedRuntimeRole: "opengeni_app",
             actualBetterAuthUsers: 2,
             tabsInOneBrowserSet: 2,
+            sameSetSecondTabNeutralizedAfterLogoutAll: true,
             anotherBrowserSetSurvivedLogoutAll: true,
             screenshots:
               engine === "chromium"

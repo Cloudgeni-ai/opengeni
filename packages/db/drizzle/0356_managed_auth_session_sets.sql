@@ -417,6 +417,8 @@ ALTER TABLE "auth_sessions"
 CREATE INDEX "auth_sessions_managed_auth_login_transaction_idx"
   ON "auth_sessions" ("managed_auth_login_transaction_id", "created_at")
   WHERE "managed_auth_login_transaction_id" IS NOT NULL;
+CREATE INDEX "auth_sessions_managed_auth_expiry_idx"
+  ON "auth_sessions" ("expires_at", "id");
 
 CREATE TABLE "managed_auth_session_set_operations" (
   "operation_id" uuid PRIMARY KEY,
@@ -2134,14 +2136,19 @@ BEGIN
         FROM auth_sessions auth_session
         LEFT JOIN managed_auth_login_transactions login_transaction
           ON login_transaction.id = auth_session.managed_auth_login_transaction_id
-        WHERE auth_session.managed_auth_login_transaction_id IS NOT NULL
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
             SELECT 1 FROM managed_auth_login_slots slot
             WHERE slot.auth_session_id = auth_session.id AND slot.status <> 'revoked'
           )
           AND (
-            login_transaction.id IS NULL OR login_transaction.status <> 'pending'
-            OR login_transaction.expires_at <= pg_catalog.clock_timestamp()
+            auth_session.expires_at <= pg_catalog.clock_timestamp()
+            OR (
+              auth_session.managed_auth_login_transaction_id IS NOT NULL
+              AND (
+                login_transaction.id IS NULL OR login_transaction.status <> 'pending'
+                OR login_transaction.expires_at <= pg_catalog.clock_timestamp()
+              )
+            )
           )
         ORDER BY auth_session.created_at, auth_session.id
         FOR UPDATE OF auth_session SKIP LOCKED

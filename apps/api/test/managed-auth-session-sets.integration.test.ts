@@ -108,7 +108,27 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     ).toBe(true);
     expect(oneCookie(signUp, "better-auth.session_token")).toBe("better-auth.session_token=");
     expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("absent");
+    const [sessionsAfterSignup] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from auth_sessions
+      where user_id = (select id from auth_users where email = ${email})
+    `;
+    expect(sessionsAfterSignup).toEqual({ count: 0 });
     await shared.admin`update auth_users set email_verified = true where email = ${email}`;
+
+    const unselectedSignIn = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie: authorityCookie },
+      body: JSON.stringify({ email, password, rememberMe: true }),
+    });
+    expect(unselectedSignIn.status).toBe(200);
+    expect(oneCookie(unselectedSignIn, "better-auth.session_token")).toBe(
+      "better-auth.session_token=",
+    );
+    const [sessionsAfterUnselectedSignIn] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from auth_sessions
+      where user_id = (select id from auth_users where email = ${email})
+    `;
+    expect(sessionsAfterUnselectedSignIn).toEqual({ count: 0 });
 
     const body = JSON.stringify({
       operationId: crypto.randomUUID(),
@@ -169,6 +189,7 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       select count(*)::integer as count from auth_sessions
       where user_id = (select id from auth_users where email = ${email})
     `;
+    expect(sessionsAfterCompletion).toEqual({ count: 1 });
 
     const completionReplay = await app.request("/v1/auth/session-set/transactions/email-password", {
       method: "POST",
@@ -260,6 +281,34 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
     });
+    for (const [label, presentedAuthority, clientAddress] of [
+      ["empty", "", "198.51.100.21"],
+      ["malformed", "not-a-session-set-authority", "198.51.100.22"],
+    ] as const) {
+      const unselectedEmail = `managed-session-set-dual-${label}-${crypto.randomUUID()}@example.test`;
+      const unselectedSignup = await app.request("/v1/auth/sign-up/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: `${MANAGED_AUTH_SESSION_SET_COOKIE}=${presentedAuthority}`,
+          "x-forwarded-for": clientAddress,
+        },
+        body: JSON.stringify({
+          name: `Dual ${label} authority user`,
+          email: unselectedEmail,
+          password: "password1234",
+        }),
+      });
+      expect(unselectedSignup.status).toBeLessThan(300);
+      expect(oneCookie(unselectedSignup, "better-auth.session_token")).toBe(
+        "better-auth.session_token=",
+      );
+      const [unselectedSessions] = await shared.admin<Array<{ count: number }>>`
+        select count(*)::integer as count from auth_sessions
+        where user_id = (select id from auth_users where email = ${unselectedEmail})
+      `;
+      expect(unselectedSessions).toEqual({ count: 0 });
+    }
     const initialResponse = await app.request("/v1/auth/session-set");
     const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
     const authority = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
@@ -279,6 +328,11 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
         managedAuthSha256(authorityValue(authority)),
       ),
     ).toBe("absent");
+    const [sessionsAfterSignup] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from auth_sessions
+      where user_id = (select id from auth_users where email = ${email})
+    `;
+    expect(sessionsAfterSignup).toEqual({ count: 0 });
     await shared.admin`update auth_users set email_verified = true where email = ${email}`;
 
     const begin = await app.request("/v1/auth/session-set/transactions", {

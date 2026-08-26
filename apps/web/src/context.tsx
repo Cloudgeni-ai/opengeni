@@ -1897,6 +1897,17 @@ export function RootRouteComponent() {
     // install or load any principal until the controller has reread authority
     // and invokes us again with the accepted projection.
     if (transition.to === null) return;
+    if (transition.to.selectedSlotId === null || transition.to.state !== "ready") {
+      // The authority reread has now proved that no tenant actor is selected.
+      // Remove the revoked workspace/session deep link from browser history;
+      // the earlier null transition is only a precommit hold and must not
+      // navigate because its initiating mutation can still fail.
+      authPrincipalIdRef.current = null;
+      setAuthSession(null);
+      setSession(null);
+      await navigate({ to: "/", replace: true });
+      return;
+    }
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       !transition.signal.aborted &&

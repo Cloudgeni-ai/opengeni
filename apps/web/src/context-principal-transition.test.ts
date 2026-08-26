@@ -118,6 +118,15 @@ describe("principal transition contract", () => {
     expect(transition.indexOf("if (transition.to === null) return;")).toBeLessThan(
       transition.indexOf("const acceptedPrincipal"),
     );
+    expect(transition).toContain(
+      'if (transition.to.selectedSlotId === null || transition.to.state !== "ready")',
+    );
+    expect(transition.indexOf('await navigate({ to: "/", replace: true });')).toBeGreaterThan(
+      transition.indexOf("if (transition.to === null) return;"),
+    );
+    expect(transition.indexOf('await navigate({ to: "/", replace: true });')).toBeLessThan(
+      transition.indexOf("const acceptedPrincipal"),
+    );
     for (const requiredClear of [
       "invalidatePrincipalWorkspaceState();",
       "setAuthSession(undefined);",

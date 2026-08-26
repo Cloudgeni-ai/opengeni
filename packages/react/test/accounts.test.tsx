@@ -48,8 +48,10 @@ function scriptedClient(
   overrides: Partial<BrowserAccountsClientLike> = {},
 ): BrowserAccountsClientLike {
   const initial = projection();
+  const getSessionSet = overrides.getSessionSet ?? (async () => initial);
   return {
-    getSessionSet: async () => initial,
+    getSessionSet,
+    reconcileSessionSetAuthority: async () => await getSessionSet(),
     bootstrapSessionSet: async () => initial,
     beginLoginTransaction: async (request) => ({
       id: request.operationId,

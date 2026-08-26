@@ -15,10 +15,14 @@ import {
 import { betterAuth } from "better-auth";
 import { createEmailVerificationToken } from "better-auth/api";
 import { hashPassword } from "better-auth/crypto";
+import { sql } from "drizzle-orm";
 import { Pool } from "pg";
 
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
-import { currentManagedAuthAttemptId } from "./managed-auth-attempt-context";
+import {
+  currentManagedAuthAttemptId,
+  shouldDiscardCurrentManagedAuthProviderSession,
+} from "./managed-auth-attempt-context";
 
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
 // (`managed-auth-type.ts`) — `dependencies.ts`/`access` reference it as a
@@ -261,6 +265,9 @@ export function createManagedAuth(
               return {
                 data: {
                   ...session,
+                  ...(shouldDiscardCurrentManagedAuthProviderSession()
+                    ? { expiresAt: new Date(0) }
+                    : {}),
                   identityId: preflightProjection.activeIdentity.id,
                   identityRevision: preflightProjection.activeIdentity.identityRevision,
                   authRevision: preflightProjection.activeIdentity.authRevision,
@@ -298,6 +305,9 @@ export function createManagedAuth(
             return {
               data: {
                 ...session,
+                ...(shouldDiscardCurrentManagedAuthProviderSession()
+                  ? { expiresAt: new Date(0) }
+                  : {}),
                 identityId: projection.activeIdentity.id,
                 identityRevision: projection.activeIdentity.identityRevision,
                 authRevision: projection.activeIdentity.authRevision,
@@ -306,6 +316,10 @@ export function createManagedAuth(
                 managedAuthLoginTransactionId: currentManagedAuthAttemptId(),
               },
             };
+          },
+          after: async (session) => {
+            if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
+            await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
           },
         },
       },

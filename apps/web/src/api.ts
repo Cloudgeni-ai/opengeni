@@ -149,11 +149,12 @@ export async function managedActorFetch(
   const inputSignal =
     init.signal ??
     (typeof Request !== "undefined" && input instanceof Request ? input.signal : null);
-  const abortFromCaller = () => controller.abort(inputSignal?.reason);
+  let abortTarget = (reason: unknown) => controller.abort(reason);
+  const abortFromCaller = () => abortTarget(inputSignal?.reason);
   if (inputSignal?.aborted) abortFromCaller();
   else inputSignal?.addEventListener("abort", abortFromCaller, { once: true });
   const actorRequest: ManagedActorRequest = {
-    abortActor: (reason) => controller.abort(reason),
+    abortActor: (reason) => abortTarget(reason),
   };
   managedActorRequests.add(actorRequest);
   const tracksMutation =
@@ -176,7 +177,11 @@ export async function managedActorFetch(
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
   try {
-    const response = await fetch(input, { ...init, headers, signal: controller.signal });
+    const response = await fetch(input, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
     if (
       acceptedEpoch !== null &&
       response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
@@ -184,29 +189,52 @@ export async function managedActorFetch(
       notifyManagedActorInvalidation();
     }
     const responseEpoch = response.headers.get(MANAGED_ACTOR_EPOCH_HEADER);
-    if (
+    const responseIsStale = () =>
       acceptedRevision !== managedActorRevision ||
       acceptedEpoch !== managedActorEpoch ||
-      (acceptedEpoch !== null && responseEpoch !== null && responseEpoch !== acceptedEpoch)
-    ) {
+      (acceptedEpoch !== null && responseEpoch !== null && responseEpoch !== acceptedEpoch);
+    if (responseIsStale()) {
       void response.body?.cancel();
       throw new DOMException("Ignored a response from the previous browser account", "AbortError");
     }
     if (!response.body) return response;
-    // Before headers, actor rotation aborts the native fetch. Once a response
-    // body is admitted, transfer actor ownership to the wrapper reader instead
-    // of aborting the already-resolved native fetch signal. WebKit otherwise
-    // reclassifies that post-header abort as an unhandled access-control error,
-    // even when the SDK consumes the response rejection. Cancelling the source
-    // reader still aborts the old actor's body immediately and the downstream
-    // body remains fail-closed with the same AbortError.
+    // Finite JSON is consumed before it crosses the actor boundary. Returning
+    // a manual bridge over a native compressed response can leave Chromium's
+    // transport lifecycle unresolved even after the source reader reaches
+    // EOF. Draining here also guarantees the native body already has a
+    // rejection consumer before any post-header actor abort.
+    let actorResponse = response;
+    if (isFiniteJsonResponse(response)) {
+      const bytes = await response.arrayBuffer();
+      if (responseIsStale()) {
+        throw new DOMException(
+          "Ignored a response from the previous browser account",
+          "AbortError",
+        );
+      }
+      actorResponse = new Response(bytes, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    }
+    // Before headers—and through a finite JSON drain—actor rotation aborts the
+    // native fetch. Once a streaming or detached body is admitted, transfer
+    // both actor and caller cancellation to the wrapper reader. WebKit otherwise
+    // reclassifies a post-header native abort as an unhandled access-control
+    // error. The downstream body remains fail-closed with the same AbortError.
     const actorBodyController = new AbortController();
-    actorRequest.abortActor = (reason) => actorBodyController.abort(reason);
+    abortTarget = (reason) => actorBodyController.abort(reason);
     responseOwnsCleanup = true;
-    return managedActorTrackedResponse(response, actorBodyController.signal, cleanup);
+    return managedActorTrackedResponse(actorResponse, actorBodyController.signal, cleanup);
   } finally {
     if (!responseOwnsCleanup) cleanup();
   }
+}
+
+function isFiniteJsonResponse(response: Response): boolean {
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  return contentType === "application/json" || contentType?.endsWith("+json") === true;
 }
 
 function managedActorTrackedResponse(
@@ -216,7 +244,18 @@ function managedActorTrackedResponse(
 ): Response {
   const reader = response.body!.getReader();
   let settled = false;
+  let readerReleased = false;
   let actorAbortReason: unknown | null = null;
+  const releaseReader = () => {
+    if (readerReleased) return;
+    try {
+      reader.releaseLock();
+      readerReleased = true;
+    } catch {
+      // A pending read owns the lock until it settles; its completion path
+      // retries this release before returning to the downstream consumer.
+    }
+  };
   const settle = () => {
     if (settled) return false;
     settled = true;
@@ -229,7 +268,10 @@ function managedActorTrackedResponse(
     const reason = signal.reason ?? new DOMException("The browser account changed", "AbortError");
     actorAbortReason = reason;
     settle();
-    void reader.cancel(reason).catch(() => undefined);
+    void reader
+      .cancel(reason)
+      .catch(() => undefined)
+      .finally(releaseReader);
   };
   // Keep actor-abort rejection consumer-owned. WebKit can report a stream
   // error raised directly inside the abort event as an unhandled page error
@@ -254,11 +296,13 @@ function managedActorTrackedResponse(
             return;
           }
           if (next.done) {
+            releaseReader();
             if (settle()) controller.close();
             return;
           }
           controller.enqueue(next.value);
         } catch (error) {
+          releaseReader();
           if (actorAbortReason !== null) {
             controller.error(actorAbortReason);
           } else if (settle()) {
@@ -270,6 +314,7 @@ function managedActorTrackedResponse(
         try {
           await reader.cancel(reason);
         } finally {
+          releaseReader();
           settle();
         }
       },

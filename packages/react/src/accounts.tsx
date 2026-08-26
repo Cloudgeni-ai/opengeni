@@ -488,7 +488,7 @@ export function BrowserAccountsProvider({
     try {
       const neutral = await beginNeutralActorInvalidation(before);
       if (neutral.signal.aborted || sequenceRef.current !== sequence) return null;
-      const accepted = await client.getSessionSet();
+      const accepted = await client.reconcileSessionSetAuthority();
       if (sequenceRef.current !== sequence) return null;
       return await settleActorTransition("cross_tab", before, accepted, sequence, false);
     } catch (caught) {

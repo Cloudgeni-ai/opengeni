@@ -857,6 +857,32 @@ describe("migration 0360 managed browser session sets", () => {
       select exists(select 1 from auth_sessions where id = ${login.sessionId}) as exists
     `;
     expect(adopted).toEqual({ exists: true });
+
+    const expiredUnselectedId = crypto.randomUUID();
+    const liveLegacyId = crypto.randomUUID();
+    await owned.admin`
+      insert into auth_sessions (
+        id, user_id, token, expires_at, identity_id, identity_revision, auth_revision,
+        login_binding_id, login_binding_revision
+      ) values
+      (
+        ${expiredUnselectedId}, ${login.userId}, ${crypto.randomUUID()},
+        now() - interval '1 second', ${login.identityId}::uuid, ${login.identityRevision},
+        ${login.authRevision}, ${login.bindingId}::uuid, ${login.bindingRevision}
+      ),
+      (
+        ${liveLegacyId}, ${login.userId}, ${crypto.randomUUID()},
+        now() + interval '1 hour', ${login.identityId}::uuid, ${login.identityRevision},
+        ${login.authRevision}, ${login.bindingId}::uuid, ${login.bindingRevision}
+      )
+    `;
+    expect(await reapManagedAuthIsolatedSessions(client.db, 10)).toBe(1);
+    const [unselected] = await owned.admin<Array<{ expired: boolean; live: boolean }>>`
+      select
+        exists(select 1 from auth_sessions where id = ${expiredUnselectedId}) as expired,
+        exists(select 1 from auth_sessions where id = ${liveLegacyId}) as live
+    `;
+    expect(unselected).toEqual({ expired: false, live: true });
   });
 
   test("pins reauthentication revisions and rejects a transaction begun before recovery", async () => {

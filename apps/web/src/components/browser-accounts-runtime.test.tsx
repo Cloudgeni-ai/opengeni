@@ -67,6 +67,7 @@ describe("signed-out browser account recovery", () => {
     const current = emptyBrokerProjection();
     const client: BrowserAccountsClientLike = {
       getSessionSet: async () => current,
+      reconcileSessionSetAuthority: async () => current,
       bootstrapSessionSet: async () => current,
       beginLoginTransaction: async () => {
         throw new Error("not used");
@@ -122,6 +123,7 @@ describe("signed-out browser account recovery", () => {
     const transitions: BrowserAccountTransition[] = [];
     const client: BrowserAccountsClientLike = {
       getSessionSet: async () => current,
+      reconcileSessionSetAuthority: async () => current,
       bootstrapSessionSet: async () => current,
       beginLoginTransaction: async () => {
         throw new Error("not used");
@@ -189,6 +191,7 @@ describe("signed-out browser account recovery", () => {
     });
     const client: BrowserAccountsClientLike = {
       getSessionSet: async () => current,
+      reconcileSessionSetAuthority: async () => current,
       bootstrapSessionSet: async () => current,
       beginLoginTransaction: async () => {
         throw new Error("not used");

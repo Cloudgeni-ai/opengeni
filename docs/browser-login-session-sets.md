@@ -135,6 +135,12 @@ it at final commit, and terminates a process that cannot renew before its durabl
 lease could expire. Cross-tab `BroadcastChannel` messages contain only an epoch
 hint; receiving tabs immediately neutralize their projection and reread authority.
 Stale results are suppressed by monotonic `BigInt` generation/epoch comparisons.
+Logout-all, expiry, or invalid-authority recovery may rotate the shared HttpOnly
+authority back to a lower clock; an explicit neutral reconciliation advances an
+SDK read epoch, then accepts that lower clock only after two sequential no-store
+reads both prove it without regressing each other. Pre-reconciliation reads cannot
+restore the old clock, and adopting the new authority clears every retained
+mutation admission.
 
 Same-human slots still take this full boundary. A second login binding cannot
 reuse or duplicate another slot's authority, and selecting it still advances the
@@ -160,9 +166,12 @@ actor epoch so binding-private state cannot survive.
   responses. Broker mode clears provider cookies. With session-set authority,
   dual mode preserves only an active set's exact selected compatibility mirror
   and otherwise clears the provider cookie instead of accepting an unselected
-  wildcard credential. A legacy dual client without session-set authority keeps
-  ordinary Better Auth behavior until explicit bootstrap. Selected
-  product-session capabilities remain on the fenced product routes.
+  wildcard credential. Any provider session minted by those unselected broker or
+  session-set-authority lifecycles is born expired and synchronously deleted before
+  the response returns; cleanup failure fails the provider request closed and leaves
+  a bounded-reaper-eligible row rather than a live credential. A legacy dual client
+  without session-set authority keeps ordinary Better Auth behavior until explicit
+  bootstrap. Selected product-session capabilities remain on the fenced product routes.
 - Session-set and provider-auth responses are `no-store`; secret material is
   excluded from operation evidence, errors, browser events, logs, and retained
   browser evidence.

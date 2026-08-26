@@ -77,6 +77,7 @@ import {
   managedAuthSha256,
 } from "@opengeni/core/managed-auth-session-sets";
 import { createBetterAuthSessionAdapter } from "./auth/managed-auth-session-adapter";
+import { runManagedAuthDiscardedProviderSession } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
@@ -589,7 +590,14 @@ export function createAppComposition(deps: AppDependencies): {
       headers.delete("authorization");
       headers.delete("x-forwarded-user");
       const providerRequest = new Request(c.req.raw, { headers });
-      const providerResponse = await managedAuth.handler(providerRequest);
+      const authority = getCookie(c, MANAGED_AUTH_SESSION_SET_COOKIE);
+      const discardProviderSession =
+        deps.settings.managedAuthSessionSetMode === "broker" || authority !== undefined;
+      const providerResponse = discardProviderSession
+        ? await runManagedAuthDiscardedProviderSession(
+            async () => await managedAuth.handler(providerRequest),
+          )
+        : await managedAuth.handler(providerRequest);
       let replacementCookies: readonly string[] | undefined;
       if (deps.settings.managedAuthSessionSetMode === "broker") {
         replacementCookies = await managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
@@ -597,8 +605,7 @@ export function createAppComposition(deps: AppDependencies): {
           c.req.header("cookie") ?? null,
         );
       } else {
-        const authority = getCookie(c, MANAGED_AUTH_SESSION_SET_COOKIE);
-        if (authority) {
+        if (authority !== undefined) {
           const snapshot = await getManagedAuthSessionSetSnapshot(deps.db, {
             authorityHash: managedAuthSha256(authority),
             mode: "dual",

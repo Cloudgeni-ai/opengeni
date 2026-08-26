@@ -63,6 +63,81 @@ describe("BrowserAccountsClient", () => {
     expect(await older).toMatchObject({ actorEpoch: "3", generation: "4" });
   });
 
+  test("double-confirms a rotated authority and fences a delayed old-authority GET", async () => {
+    const before = {
+      ...projection,
+      generation: "7",
+      actorEpoch: "5",
+      csrfToken: "b".repeat(43),
+      selectedSlotId: "22222222-2222-4222-8222-222222222222",
+      slots: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          displayName: "Person 1",
+          verifiedClaim: { kind: "email" as const, value: "person-1@example.test" },
+          state: "active" as const,
+        },
+      ],
+    };
+    const resetFirst = { ...projection, csrfToken: "r".repeat(43) };
+    const resetSecond = {
+      ...projection,
+      generation: "2",
+      csrfToken: "s".repeat(43),
+    };
+    const afterMutation = { ...resetSecond, generation: "3", csrfToken: "t".repeat(43) };
+    const requests: Request[] = [];
+    let getCount = 0;
+    let releaseDelayed!: (response: Response) => void;
+    const client = new BrowserAccountsClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (request.method !== "GET") return Response.json(afterMutation);
+        getCount += 1;
+        if (getCount === 1) return Response.json(before);
+        if (getCount === 2) {
+          return await new Promise<Response>((resolve) => {
+            releaseDelayed = resolve;
+          });
+        }
+        return Response.json(getCount === 3 ? resetFirst : resetSecond);
+      },
+    });
+
+    expect(await client.getSessionSet()).toEqual(before);
+    const delayed = client.getSessionSet();
+    expect(await client.reconcileSessionSetAuthority()).toEqual(resetSecond);
+    releaseDelayed(Response.json(before));
+    expect(await delayed).toEqual(resetSecond);
+
+    expect(
+      await client.selectLoginSlot({
+        operationId: "11111111-1111-4111-8111-111111111111",
+        expectedGeneration: "2",
+        slotId: "22222222-2222-4222-8222-222222222222",
+      }),
+    ).toEqual(afterMutation);
+    const mutation = requests.find((request) => request.method === "POST");
+    expect(mutation?.headers.get("x-opengeni-session-csrf")).toBe(resetSecond.csrfToken);
+    expect(mutation?.headers.get("x-opengeni-actor-epoch")).toBe(resetSecond.actorEpoch);
+  });
+
+  test("keeps the current actor when a reconciliation probe catches back up", async () => {
+    const before = { ...projection, generation: "7", actorEpoch: "5" };
+    const stale = { ...projection, generation: "6", actorEpoch: "4" };
+    const responses = [before, stale, before];
+    const client = new BrowserAccountsClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => Response.json(responses.shift()),
+    });
+
+    expect(await client.getSessionSet()).toEqual(before);
+    expect(await client.reconcileSessionSetAuthority()).toEqual(before);
+    expect(responses).toHaveLength(0);
+  });
+
   test("reconciles an older exact mutation receipt instead of adopting it as current", async () => {
     const responses = [
       { ...projection, generation: "5", actorEpoch: "3" },

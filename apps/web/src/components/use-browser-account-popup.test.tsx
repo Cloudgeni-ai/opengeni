@@ -46,6 +46,7 @@ function client(): BrowserAccountsClientLike {
   const current = projection();
   return {
     getSessionSet: async () => current,
+    reconcileSessionSetAuthority: async () => current,
     bootstrapSessionSet: async () => current,
     beginLoginTransaction: async () => transaction(),
     completeEmailPasswordTransaction: async () => ({ projection: current, returnIntent: null }),
