@@ -1,5 +1,26 @@
 # @opengeni/documents
 
+## 0.8.0
+
+### Minor Changes
+
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+
+### Patch Changes
+
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/db@3.3.0
+  - @opengeni/config@0.20.0
+  - @opengeni/storage@0.2.107
+
 ## 0.7.0
 
 ### Minor Changes
