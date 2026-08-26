@@ -341,12 +341,14 @@ describe("useSessionEvents", () => {
 
     let first!: Promise<boolean>;
     let second!: Promise<boolean>;
+    const owner: unknown[] = [];
     await actRun(() => {
-      first = hook.result.current.loadOlder();
+      first = (hook.result.current.loadOlder as (owner?: unknown[]) => Promise<boolean>)(owner);
       second = hook.result.current.loadOlder();
     });
     await flush();
     expect(listCalls.filter((call) => call.before === 5001)).toHaveLength(1);
+    expect(owner[0]).toBeUndefined();
     const [firstResult, secondResult] = await actRun(async () => {
       releaseOlder();
       return await Promise.all([first, second]);
@@ -362,6 +364,7 @@ describe("useSessionEvents", () => {
       store.length,
     );
     expect(hook.result.current.hasOlder).toBe(false);
+    expect(owner[0]).toBe(0);
 
     await hook.unmount();
   });

@@ -645,6 +645,56 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 
+  test("continues sentinel pagination after a zero-overlap older-page replacement", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&overlap-loads&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    // Live newest-suffix bounding first removes A's original oldest row. The
+    // owner is unmarked, so this remains forward eviction and A owns the
+    // underfill/sentinel paths.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.appendBoundedLivePage());
+    await page.locator('[data-conversation-message="user-1200"]').waitFor({ timeout: 5_000 });
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
+
+    // The accepted older page then fills the oldest-directed cap by itself,
+    // replacing every prior row. Its exact commit mark releases A even with zero
+    // identity overlap; the scrollable replacement waits for reader intent.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.replaceWithFullOlderPage());
+    await page.locator('[data-conversation-message="user-500"]').waitFor({ timeout: 5_000 });
+    const scroller = page.locator("[data-collapsed-history-test] [data-og-timeline-scroller]");
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().maxScroll > 400,
+    );
+    await scroller.hover();
+    await page.mouse.wheel(0, -8_000);
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop < 100,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+
+    // A's delayed settlement cannot release or reclaim B. Resize callbacks do
+    // not duplicate B, and B can commit the retained older page normally.
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleLoad(1, "success"));
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleLoad(2, "success", true),
+    );
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    await page.waitForFunction(() => document.querySelector("[data-og-retry]") === null);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("retries one transient underfill failure without resize loops or duplicate requests", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${baseUrl}/timeline-collapsed-history-test.html?manual-load`);
@@ -957,6 +1007,8 @@ describe("timeline scroll ownership browser regression", () => {
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
     const retry = page.getByRole("button", { name: "Retry earlier activity" });
     await retry.waitFor({ timeout: 5_000 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
 
     // Resize callbacks cannot amplify the declined request while Retry owns
     // this exact oldest boundary.

@@ -242,28 +242,31 @@ const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
 // State: 0 underfill, 1 prefetch pending, 2 prefetch settled.
 // The tuple identity is the exact request ownership fence. The boundary may rebase
 // forward while that request is pending when a bounded live-tail append evicts
-// its former oldest row; only a retained boundary behind a new first row proves
-// that older history actually prepended.
-type OlderLoadAttempt = [boundary: string | undefined, state?: number];
+// its former oldest row. First-party loaders mark the exact owner when their
+// older page commits; retained direction is the fallback for other hosts.
+type OlderLoadAttempt = [boundary: string | undefined | 0, state?: number];
 
-function invokeOlderLoad(load: () => unknown, noProgress: () => void): 1 | undefined {
+function invokeOlderLoad(
+  load: () => unknown,
+  noProgress: () => void,
+  attempt: OlderLoadAttempt,
+): 1 | undefined {
   try {
-    const result = load();
+    const result = (load as (attempt: OlderLoadAttempt) => unknown)(attempt);
     if (result === false) {
       noProgress();
-      return 1;
-    }
-    if (typeof (result as PromiseLike<unknown> | undefined)?.then == "function") {
+    } else if (typeof (result as PromiseLike<unknown> | undefined)?.then == "function") {
       void (result as PromiseLike<unknown>).then(
         (value) => value === false && noProgress(),
         noProgress,
       );
-      return 1;
+    } else {
+      return;
     }
   } catch {
     noProgress();
-    return 1;
   }
+  return 1;
 }
 
 /**
@@ -275,7 +278,8 @@ function invokeOlderLoad(load: () => unknown, noProgress: () => void): 1 | undef
  * cannot scroll at all is always pinned.
  */
 function maxScrollOf(node: HTMLElement): number {
-  return Math.max(0, node.scrollHeight - node.clientHeight);
+  // Browser layout guarantees scrollHeight is at least clientHeight.
+  return node.scrollHeight - node.clientHeight;
 }
 
 /**
@@ -821,7 +825,7 @@ export function MessageTimeline({
       // exact `false` is the first-party request-not-accepted receipt.
       // All other fulfillment retains this exact owner until its prepend
       // boundary commits; promise settlement alone cannot prove progress.
-      invokeOlderLoad(onLoadOlder, noProgress);
+      invokeOlderLoad(onLoadOlder, noProgress, attempt);
     },
     [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
@@ -1096,17 +1100,23 @@ export function MessageTimeline({
           : null;
     }
 
-    // Promise settlement is not itself permission to retry. Directional
-    // boundary movement settles ownership only after anchoring has consumed
-    // the current request: a retained prior boundary proves prepend, while a
-    // missing prior boundary is forward eviction and merely rebases the owner.
+    // Promise settlement is not itself permission to retry. An accepted older
+    // page marks its exact owner even when an oversized page replaces the whole
+    // bounded window. Without that mark, retain the compatibility fallback: a
+    // retained prior boundary proves prepend, while a missing prior boundary is
+    // forward eviction and merely rebases.
     const attempt = olderLoadAttemptRef.current;
-    if (!attempt || attempt[0] === olderBoundaryKey) {
+    if (!attempt) {
       return;
     }
-    if (attempt[0] !== undefined && !sourceItems?.find((entry) => entry.id === attempt[0])) {
-      attempt[0] = olderBoundaryKey;
-      return;
+    if (attempt[0] !== 0) {
+      if (attempt[0] === olderBoundaryKey) {
+        return;
+      }
+      if (attempt[0] != null && !sourceItems?.find((entry) => entry.id === attempt[0])) {
+        attempt[0] = olderBoundaryKey;
+        return;
+      }
     }
     if (!attempt[1] || !hasOlder) {
       setUnderfillSettledAttempt((olderLoadAttemptRef.current = null));
@@ -1265,7 +1275,10 @@ export function MessageTimeline({
         // Only rejection/throw/exact `false` is a no-progress receipt. Other
         // fulfillment retains the pending owner until boundary commit;
         // otherwise a delayed prepend could overlap a same-boundary request.
-        if (!invokeOlderLoad(onLoadOlder, noProgress) && olderLoadAttemptRef.current === attempt) {
+        if (
+          !invokeOlderLoad(onLoadOlder, noProgress, attempt) &&
+          olderLoadAttemptRef.current === attempt
+        ) {
           olderLoadAttemptRef.current[1] = 2;
           requestOlderIfUnderfilled(root);
         }

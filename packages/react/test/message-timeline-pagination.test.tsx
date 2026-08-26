@@ -1680,6 +1680,125 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("a committed full-window older replacement releases only its prior owner", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    const retryLoad = deferred<boolean>();
+    const loads = [first, second, retryLoad];
+    const owners: unknown[][] = [];
+    let calls = 0;
+    const onLoadOlder = (owner?: unknown[]) => {
+      if (owner) owners.push(owner);
+      return loads[calls++]!.promise;
+    };
+    const initialItems = [reasoningItem("full-window-tail", "collapsed live tail")];
+    const r = await renderComponent(
+      <MessageTimeline items={initialItems} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 240,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <MessageTimeline items={initialItems} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // A bounded live-tail append can evict every item that existed when A
+    // started. Without a committed older revision this is forward movement:
+    // rebase A and keep both underfill and resize from issuing B.
+    const liveReplacement = [userItem("bounded-live-replacement", "bounded live replacement")];
+    await r.rerender(
+      <MessageTimeline
+        items={liveReplacement}
+        status="running"
+        hasOlder
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    // A successful oldest-directed page can also replace the whole bounded
+    // source with zero overlap. Marking A's exact owner as committed releases
+    // it and permits exactly one follow-on underfill request for page B.
+    const olderReplacement = [reasoningItem("full-window-older", "older collapsed page")];
+    owners[0]![0] = 0;
+    await r.rerender(
+      <MessageTimeline items={olderReplacement} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    // A settles after B adopted the new owner. Its stale callback cannot release
+    // or convert B, and observer churn cannot duplicate the active request.
+    await actRun(() => first.reject(new Error("late full-window page A settlement")));
+    await flush();
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+    expect(r.container.querySelector("[data-og-retry]")).toBeNull();
+
+    await actRun(() => second.reject(new Error("transient page B failure")));
+    await flush();
+    const retry = r.container.querySelector("[data-og-retry]");
+    expect(retry).not.toBeNull();
+    await actRun(() => resizeCallback([], resizeObserver!));
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    await actRun(() => retry!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(calls).toBe(3);
+    await actRun(() => {
+      retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      resizeCallback([], resizeObserver!);
+    });
+    await drainFrames(frames);
+    expect(calls).toBe(3);
+
+    owners[2]![0] = 0;
+    await r.rerender(
+      <MessageTimeline
+        items={[reasoningItem("durable-start", "durable start")]}
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await actRun(() => retryLoad.resolve(true));
+    await flush();
+    expect(calls).toBe(3);
+    layout.restore();
+    await r.unmount();
+  });
+
   test("a declined older load during newer navigation exposes one bounded retry", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {

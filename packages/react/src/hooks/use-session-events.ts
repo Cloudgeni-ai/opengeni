@@ -427,81 +427,86 @@ export function useSessionEvents(
     loadingOldestRef.current ||
     loadingLatestRef.current;
 
-  const loadOlder = useCallback(async (): Promise<boolean> => {
-    if (!sessionId || navigationBusy() || !hasOlderRef.current) {
-      return false;
-    }
-    const before = oldestSequenceRef.current;
-    if (before === null) {
-      hasOlderRef.current = false;
-      setHasOlder(false);
-      return false;
-    }
-    const generation = generationRef.current;
-    loadingOlderRef.current = true;
-    setLoadingOlder(true);
-    try {
-      const window = await loadEventWindow(client, workspaceId, sessionId, {
-        before,
-        pageSize: OLDER_PAGE_SIZE,
-        targetGroups: OLDER_GROUP_TARGET,
-        maxFetches: OLDER_FETCH_CAP,
-      });
-      if (generationRef.current !== generation) {
+  const loadOlder = useCallback(
+    async (attempt?: unknown[]): Promise<boolean> => {
+      if (!sessionId || navigationBusy() || !hasOlderRef.current) {
         return false;
       }
-      if (window.events.length === 0) {
-        oldestSequenceRef.current = null;
+      const before = oldestSequenceRef.current;
+      if (before === null) {
         hasOlderRef.current = false;
         setHasOlder(false);
         return false;
       }
-      const current = eventWindowRef.current;
-      assertPrependOrder(current.events, window.events);
-      // Freeze the live iterator before replacing its in-memory window. Rows
-      // pending in the aborted iterator were never cursor-committed and will
-      // be replayed from the retained high-water mark below.
-      streamAbortRef.current?.abort();
-      observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
-      const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
-        direction: "oldest",
-      });
-      const retained = {
-        ...next,
-        truncated: current.truncated || next.truncated,
-      };
-      const retainedOldest = retained.events[0]?.sequence ?? null;
-      if (retainedOldest === null || retainedOldest >= before) {
-        throw new Error("@opengeni/react: loadOlder made no durable sequence progress");
+      const generation = generationRef.current;
+      loadingOlderRef.current = true;
+      setLoadingOlder(true);
+      try {
+        const window = await loadEventWindow(client, workspaceId, sessionId, {
+          before,
+          pageSize: OLDER_PAGE_SIZE,
+          targetGroups: OLDER_GROUP_TARGET,
+          maxFetches: OLDER_FETCH_CAP,
+        });
+        if (generationRef.current !== generation) {
+          return false;
+        }
+        if (window.events.length === 0) {
+          oldestSequenceRef.current = null;
+          hasOlderRef.current = false;
+          setHasOlder(false);
+          return false;
+        }
+        const current = eventWindowRef.current;
+        assertPrependOrder(current.events, window.events);
+        // Freeze the live iterator before replacing its in-memory window. Rows
+        // pending in the aborted iterator were never cursor-committed and will
+        // be replayed from the retained high-water mark below.
+        streamAbortRef.current?.abort();
+        observeSessionStatus(window.events, sessionStatusRef, setSessionStatusProjection);
+        const next = boundBrowserSessionEventWindow([...window.events, ...current.events], {
+          direction: "oldest",
+        });
+        const retained = {
+          ...next,
+          truncated: current.truncated || next.truncated,
+        };
+        const retainedOldest = retained.events[0]?.sequence ?? null;
+        if (retainedOldest === null || retainedOldest >= before) {
+          throw new Error("@opengeni/react: loadOlder made no durable sequence progress");
+        }
+        const retainedNewest = retained.events.at(-1)?.sequence ?? null;
+        eventWindowRef.current = retained;
+        if (attempt) attempt[0] = 0;
+        setEventWindow(retained);
+        oldestSequenceRef.current = retainedOldest;
+        newestSequenceRef.current = retainedNewest;
+        streamResumeSequenceRef.current = maxResumeSequence(retained.events);
+        // Oldest-directed eviction can discard newer in-memory rows. That fact
+        // keeps windowTruncated true, but it does not imply older durable rows
+        // exist; only the backward DB page can answer hasOlder truthfully.
+        const olderStillAvailable = window.hasOlder;
+        hasOlderRef.current = olderStillAvailable;
+        setHasOlder(olderStillAvailable);
+        if (viewModeRef.current === "history") {
+          const highWater = lastSequenceRef.current;
+          const newer =
+            retainedNewest !== null && (retainedNewest < highWater || retained.truncated);
+          hasNewerRef.current = newer;
+          setHasNewer(newer);
+        } else {
+          // Live mode keeps the historical contract: reconnect and replay the
+          // evicted tip through SSE so the window stays one contiguous suffix.
+          setStreamEpoch((epoch) => epoch + 1);
+        }
+        return olderStillAvailable;
+      } finally {
+        loadingOlderRef.current = false;
+        setLoadingOlder(false);
       }
-      const retainedNewest = retained.events.at(-1)?.sequence ?? null;
-      eventWindowRef.current = retained;
-      setEventWindow(retained);
-      oldestSequenceRef.current = retainedOldest;
-      newestSequenceRef.current = retainedNewest;
-      streamResumeSequenceRef.current = maxResumeSequence(retained.events);
-      // Oldest-directed eviction can discard newer in-memory rows. That fact
-      // keeps windowTruncated true, but it does not imply older durable rows
-      // exist; only the backward DB page can answer hasOlder truthfully.
-      const olderStillAvailable = window.hasOlder;
-      hasOlderRef.current = olderStillAvailable;
-      setHasOlder(olderStillAvailable);
-      if (viewModeRef.current === "history") {
-        const highWater = lastSequenceRef.current;
-        const newer = retainedNewest !== null && (retainedNewest < highWater || retained.truncated);
-        hasNewerRef.current = newer;
-        setHasNewer(newer);
-      } else {
-        // Live mode keeps the historical contract: reconnect and replay the
-        // evicted tip through SSE so the window stays one contiguous suffix.
-        setStreamEpoch((epoch) => epoch + 1);
-      }
-      return olderStillAvailable;
-    } finally {
-      loadingOlderRef.current = false;
-      setLoadingOlder(false);
-    }
-  }, [client, workspaceId, sessionId]);
+    },
+    [client, workspaceId, sessionId],
+  );
 
   const loadOldest = useCallback(async (): Promise<boolean> => {
     if (!sessionId || navigationBusy() || !hasOlderRef.current) {

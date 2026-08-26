@@ -15,6 +15,7 @@ type TimelineCollapsedHistoryHarness = {
   finishNewer: () => void;
   loadCalls: () => number;
   prependFilteredOlderPage: () => void;
+  replaceWithFullOlderPage: () => void;
   prependUnderfilledPage: () => void;
   removeLoader: () => void;
   settleLoad: (call: number, outcome: "success" | "failure", complete?: boolean) => void;
@@ -165,6 +166,7 @@ function Harness() {
     promise: Promise<boolean>;
     resolve: (value: boolean) => void;
     reject: (reason: unknown) => void;
+    owner: unknown[] | undefined;
   } | null>(null);
   const overlappingLoadsRef = useRef(
     new Map<
@@ -172,6 +174,7 @@ function Harness() {
       {
         resolve: (value: boolean) => void;
         reject: (reason: unknown) => void;
+        owner: unknown[] | undefined;
       }
     >(),
   );
@@ -296,63 +299,73 @@ function Harness() {
     [],
   );
 
-  const loadOlder = useCallback((): Promise<boolean> | void => {
-    if (declineDuringNewer && loadingNewer) {
-      const call = ++loadCallsRef.current;
-      setLoadCalls(call);
-      return Promise.resolve(false);
-    }
-    if (syncCachedPrefetch || syncCachedUnderfill) {
-      const call = ++loadCallsRef.current;
-      flushSync(() => {
+  const loadOlder = useCallback(
+    (owner?: unknown[]): Promise<boolean> | void => {
+      if (declineDuringNewer && loadingNewer) {
+        const call = ++loadCallsRef.current;
         setLoadCalls(call);
-        if (call === 1) {
-          setItems((current) =>
-            syncCachedUnderfill ? [userMessage(499)] : [userMessage(499), ...current],
-          );
-        }
-      });
-      flushSync(() => undefined);
-      return;
-    }
-    if (overlapLoads) {
-      const call = ++loadCallsRef.current;
-      setLoadCalls(call);
-      return new Promise<boolean>((resolve, reject) => {
-        overlappingLoadsRef.current.set(call, { resolve, reject });
-      });
-    }
-    const pending = pendingLoadRef.current;
-    if (pending) {
-      return pending.promise;
-    }
-    loadCallsRef.current += 1;
-    setLoadCalls(loadCallsRef.current);
-    setLoadingOlder(true);
-    let resolveLoad!: (value: boolean) => void;
-    let rejectLoad!: (reason: unknown) => void;
-    const load = new Promise<boolean>((resolve, reject) => {
-      resolveLoad = resolve;
-      rejectLoad = reject;
-    }).finally(() => setLoadingOlder(false));
-    pendingLoadRef.current = {
-      promise: load,
-      resolve: resolveLoad,
-      reject: rejectLoad,
-    };
-    if (!manualLoad) {
-      window.setTimeout(() => settleOlder("success"), 250);
-    }
-    return load;
-  }, [
-    declineDuringNewer,
-    loadingNewer,
-    manualLoad,
-    overlapLoads,
-    settleOlder,
-    syncCachedPrefetch,
-    syncCachedUnderfill,
-  ]);
+        return Promise.resolve(false);
+      }
+      if (syncCachedPrefetch || syncCachedUnderfill) {
+        const call = ++loadCallsRef.current;
+        flushSync(() => {
+          setLoadCalls(call);
+          if (call === 1) {
+            setItems((current) =>
+              syncCachedUnderfill ? [userMessage(499)] : [userMessage(499), ...current],
+            );
+          }
+        });
+        flushSync(() => undefined);
+        return;
+      }
+      if (overlapLoads) {
+        const call = ++loadCallsRef.current;
+        setLoadCalls(call);
+        return new Promise<boolean>((resolve, reject) => {
+          overlappingLoadsRef.current.set(call, { resolve, reject, owner });
+        });
+      }
+      const pending = pendingLoadRef.current;
+      if (pending) {
+        return pending.promise;
+      }
+      loadCallsRef.current += 1;
+      setLoadCalls(loadCallsRef.current);
+      setLoadingOlder(true);
+      let resolveLoad!: (value: boolean) => void;
+      let rejectLoad!: (reason: unknown) => void;
+      const load = new Promise<boolean>((resolve, reject) => {
+        resolveLoad = resolve;
+        rejectLoad = reject;
+      }).finally(() => setLoadingOlder(false));
+      pendingLoadRef.current = {
+        promise: load,
+        resolve: resolveLoad,
+        reject: rejectLoad,
+        owner,
+      };
+      if (!manualLoad) {
+        window.setTimeout(() => settleOlder("success"), 250);
+      }
+      return load;
+    },
+    [
+      declineDuringNewer,
+      loadingNewer,
+      manualLoad,
+      overlapLoads,
+      settleOlder,
+      syncCachedPrefetch,
+      syncCachedUnderfill,
+    ],
+  );
+
+  const replaceWithFullOlderPage = useCallback(() => {
+    const owner = pendingLoadRef.current?.owner ?? overlappingLoadsRef.current.get(1)?.owner;
+    if (owner) owner[0] = 0;
+    flushSync(() => setItems(prefetchWindow()));
+  }, []);
 
   useEffect(() => {
     window.timelineCollapsedHistoryHarness = {
@@ -365,6 +378,7 @@ function Harness() {
       finishNewer: () => setLoadingNewer(false),
       loadCalls: () => loadCallsRef.current,
       prependFilteredOlderPage,
+      replaceWithFullOlderPage,
       prependUnderfilledPage,
       removeLoader: () => setLoaderAvailable(false),
       settleLoad,
@@ -398,6 +412,7 @@ function Harness() {
     clickRetainedRetryAfterRemovingLoader,
     loadCalls,
     prependFilteredOlderPage,
+    replaceWithFullOlderPage,
     prependUnderfilledPage,
     scroller,
     settleLoad,
