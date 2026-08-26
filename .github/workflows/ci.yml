@@ -35,8 +35,9 @@ on:
 
 concurrency:
   # A Version PR has one authoritative latest head. When a newer main push
-  # regenerates that head, continuing to build the superseded head can only
-  # waste capacity and produce a predictably stale terminal-main failure.
+  # actually regenerates that head, continuing to build the superseded head can
+  # only waste capacity. Movement on main alone does not invalidate an admitted
+  # Version PR head or cancel its CI.
   # Pull-request heads are mutable in the same way: only the newest head can be
   # merged. Main pushes remain independent because an ancestor can still be an
   # admitted release source after a newer merge lands.
