@@ -82,7 +82,13 @@ export async function getManagedSession(
     const authority = requestCookie(c.req.raw, MANAGED_AUTH_SESSION_SET_COOKIE);
     if (authority) {
       try {
-        const expectedActorEpoch = c.req.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER) ?? null;
+        // A long-lived response reuses this exact Request for periodic
+        // authorization. Once admitted, the server-owned stamp is the actor
+        // fence: a client may omit the header on its initial GET, but a later
+        // reauthorization must not follow a newly selected actor.
+        const admittedActorEpoch = managedActorEpochByRequest.get(c.req.raw) ?? null;
+        const expectedActorEpoch =
+          admittedActorEpoch ?? c.req.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER) ?? null;
         const legacyAmbient =
           sessionSetMode === "dual" && expectedActorEpoch === null
             ? await options.sessionAdapter.resolveAmbientSession(c.req.raw.headers)
@@ -101,8 +107,10 @@ export async function getManagedSession(
           // The actor epoch is both an admission fence and response provenance.
           // A browser must ignore a late finite response after another tab has
           // advanced selection, even when the request itself was read-only.
-          c.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER, selected.projection.actorEpoch);
-          managedActorEpochByRequest.set(c.req.raw, selected.projection.actorEpoch);
+          if (admittedActorEpoch === null) {
+            c.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER, selected.projection.actorEpoch);
+            managedActorEpochByRequest.set(c.req.raw, selected.projection.actorEpoch);
+          }
         }
         if (selected && !selected.session) return null;
         if (selected?.session) {
@@ -140,7 +148,12 @@ export async function getManagedSession(
         return null;
       } catch (error) {
         if (error instanceof ManagedAuthActorChangeError) {
-          c.header("x-opengeni-actor-state", "changed");
+          // Response headers are immutable after an SSE body starts. The
+          // original response already carries its actor epoch; reauthorization
+          // closes that stream through the thrown conflict instead.
+          if (!managedActorEpochByRequest.has(c.req.raw)) {
+            c.header("x-opengeni-actor-state", "changed");
+          }
           throw new HTTPException(409, { message: error.code, cause: error });
         }
         throw error;
@@ -152,16 +165,20 @@ export async function getManagedSession(
       try {
         const adopted = await getManagedAuthAdoptedSessionSnapshot(options.db, ambient.session.id);
         if (adopted) {
+          const admittedActorEpoch = managedActorEpochByRequest.get(c.req.raw) ?? null;
           if (
             adopted.actorEpoch !== "1" ||
+            (admittedActorEpoch !== null && adopted.actorEpoch !== admittedActorEpoch) ||
             !adopted.selected ||
             adopted.selected.authSessionId !== ambient.session.id ||
             adopted.selected.authUserId !== ambient.user.id
           ) {
             throw new ManagedAuthActorChangeError();
           }
-          c.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER, adopted.actorEpoch);
-          managedActorEpochByRequest.set(c.req.raw, adopted.actorEpoch);
+          if (admittedActorEpoch === null) {
+            c.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER, adopted.actorEpoch);
+            managedActorEpochByRequest.set(c.req.raw, adopted.actorEpoch);
+          }
           if (requestNeedsActorMutationLease(c.req.method)) {
             await ensureActorMutationLeaseForHash(
               c.req.raw,
@@ -195,7 +212,9 @@ export async function getManagedSession(
         }
       } catch (error) {
         if (error instanceof ManagedAuthActorChangeError) {
-          c.header("x-opengeni-actor-state", "changed");
+          if (!managedActorEpochByRequest.has(c.req.raw)) {
+            c.header("x-opengeni-actor-state", "changed");
+          }
           throw new HTTPException(409, { message: error.code, cause: error });
         }
         throw error;

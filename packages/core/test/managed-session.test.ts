@@ -283,6 +283,60 @@ describe("getManagedSession", () => {
     expect(await response.json()).toEqual({ authenticated: false });
   });
 
+  test("reauthorizes a locked streaming response without mutating headers or following actors", async () => {
+    let reauthorize!: () => Promise<unknown>;
+    const changedSnapshot = {
+      ...sessionSetSnapshot,
+      projection: {
+        ...sessionSetSnapshot.projection,
+        generation: "4",
+        actorEpoch: "8",
+      },
+    };
+    const sequence = sequenceDatabase([
+      [{ result: sessionSetSnapshot }],
+      [{ result: sessionSetSnapshot }],
+      [{ result: changedSnapshot }],
+    ]);
+    const app = new Hono().get("/", async (c) => {
+      await getManagedSession(c, {} as never, {
+        db: sequence.db as never,
+        sessionSetMode: "broker",
+        sessionAdapter: managedSessionAdapter() as never,
+      });
+      reauthorize = () =>
+        getManagedSession(c, {} as never, {
+          db: sequence.db as never,
+          sessionSetMode: "broker",
+          sessionAdapter: managedSessionAdapter() as never,
+        });
+      return c.body(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(": heartbeat\n\n"));
+          },
+        }),
+      );
+    });
+
+    const response = await app.request("/", {
+      headers: {
+        cookie: `opengeni.session_set=${authority}`,
+        "x-opengeni-actor-epoch": "7",
+      },
+    });
+    const reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
+
+    await expect(reauthorize()).resolves.toMatchObject({ user: { id: "auth-user-1" } });
+    await expect(reauthorize()).rejects.toMatchObject({
+      status: 409,
+      message: "actor_change_required",
+    });
+    await reader.cancel();
+    expect(sequence.remaining).toHaveLength(0);
+  });
+
   test("acquires, validates, marks a known transition, and releases one exact actor lease", async () => {
     const sequence = sequenceDatabase([
       [{ result: sessionSetSnapshot }],
