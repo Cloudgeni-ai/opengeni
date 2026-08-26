@@ -440,6 +440,52 @@ describe("session pin reconciliation", () => {
     expect(authority.owns(moved)).toBe(false);
   });
 
+  test("lets causally newer list evidence retire a committed move without admitting stale rows", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const moveOwner = {};
+    const listOwner = {};
+    const beforeMove = { ...session, channelId: "channel-a" } as Session;
+    const moved = { ...session, channelId: "channel-b" } as Session;
+    const movedAgain = { ...session, channelId: "channel-c" } as Session;
+    const staleListGeneration = authority.beginRead();
+    const { beginMoveRequest, finishMoveRequest, recordMoveResponse } =
+      portableMoveAuthority(authority);
+    const request = beginMoveRequest(moveOwner, beforeMove)!;
+    const accepted: Array<Pick<Session, "id" | "workspaceId" | "channelId">> = [];
+    const unsubscribe = authority.subscribeToAcceptedReads((projection) => {
+      if (projection) accepted.push(projection);
+    });
+
+    expect(recordMoveResponse(moveOwner, request, moved)).toBe("accepted");
+    finishMoveRequest(moveOwner, request);
+
+    // A list request that started before response settlement may complete
+    // afterward, but its pre-move A snapshot cannot dislodge committed B.
+    authority.replace(listOwner, [beforeMove], 0, staleListGeneration);
+    expect(authority.project(beforeMove, staleListGeneration).channelId).toBe("channel-b");
+    expect(authority.owns(moved)).toBe(true);
+    expect(authority.owns(beforeMove)).toBe(false);
+    expect(accepted.at(-1)?.channelId).toBe("channel-b");
+
+    // After the mandatory point verification fails, a genuinely later root,
+    // pins, continuation, branch, or lineage request can observe an external
+    // B -> C move. Its actual request-start generation must retire the B fence
+    // and publish C so mounted overrides/context reconcile immediately.
+    const newerListGeneration = authority.beginRead();
+    authority.replace(listOwner, [movedAgain], 0, newerListGeneration);
+    expect(accepted.at(-1)?.channelId).toBe("channel-c");
+    expect(authority.project(beforeMove, staleListGeneration).channelId).toBe("channel-c");
+    expect(authority.owns(movedAgain)).toBe(true);
+    expect(authority.owns(moved)).toBe(false);
+
+    // The accepted list observation remains the persistent winner after the
+    // ephemeral page owner unmounts, just like an accepted exact point read.
+    authority.clear(listOwner);
+    expect(authority.project(beforeMove, staleListGeneration).channelId).toBe("channel-c");
+    expect(authority.owns(movedAgain)).toBe(true);
+    unsubscribe();
+  });
+
   test("fences an overlapping stale read that settles after a successful move response", () => {
     const authority = new SessionChannelProjectionAuthority();
     const owner = {};

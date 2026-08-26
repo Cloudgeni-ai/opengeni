@@ -66,7 +66,7 @@ export class SessionChannelProjectionAuthority {
 
   readonly beginRead = (): number => ++this.nextReadGeneration;
 
-  /** React to persistent exact read/write authority advancing. */
+  /** React to persistent accepted server/write authority advancing. */
   readonly subscribeToAcceptedReads = (
     listener: (accepted?: SessionChannelAcceptedRead) => void,
   ): (() => void) => {
@@ -171,15 +171,33 @@ export class SessionChannelProjectionAuthority {
       this.clear(owner);
       return;
     }
-    const next = new Map(
-      evidence.map(({ projection, readGeneration }) => [
-        sessionChannelProjectionKey(projection),
-        { channelId: projection.channelId ?? null, priority, readGeneration },
-      ]),
-    );
+    const projectionsByKey = new Map<string, SessionChannelProjection>();
+    const next = new Map<string, SessionChannelEvidence>();
+    for (const { projection, readGeneration } of evidence) {
+      const key = sessionChannelProjectionKey(projection);
+      projectionsByKey.set(key, projection);
+      next.set(key, {
+        channelId: projection.channelId ?? null,
+        priority,
+        readGeneration,
+      });
+    }
     const previous = this.projectionsByOwner.get(owner);
     if (previous) this.retainCompactedOwnerEvidence(previous, next);
     this.projectionsByOwner.set(owner, next);
+    if (priority === 0) {
+      for (const [key, projection] of projectionsByKey) {
+        const candidate = next.get(key);
+        const committedMove = this.committedMoves.get(key);
+        // Current server-owned page/lineage evidence is as authoritative as an
+        // exact read for channel filing when its request actually started after
+        // the successful move settled. Promote it persistently before retiring
+        // B so owner cleanup/remount cannot revive either B or a pre-move A.
+        if (candidate && committedMove && candidate.readGeneration > committedMove.readGeneration) {
+          this.recordReadObservation(projection, candidate.readGeneration, true);
+        }
+      }
+    }
     this.compactAcceptedReads();
   }
 
@@ -232,8 +250,10 @@ export class SessionChannelProjectionAuthority {
     const key = sessionChannelProjectionKey(projection);
     if (this.highestReadGeneration(key) > readGeneration) return false;
     const committedMove = this.committedMoves.get(key);
-    // Only an accepted exact read that started after settlement can choose B,
-    // a genuinely newer C, or deletion and retire the persistent move fence.
+    // Only accepted server evidence that started after settlement can choose
+    // B, a genuinely newer C, or deletion and retire the persistent move
+    // fence. Point/detail reads arrive here directly; current priority-0 list
+    // owners are promoted by replaceEvidence after the same causal check.
     if (committedMove && readGeneration > committedMove.readGeneration) {
       this.committedMoves.delete(key);
     }
