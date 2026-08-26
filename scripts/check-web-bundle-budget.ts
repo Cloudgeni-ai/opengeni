@@ -218,7 +218,13 @@ const budgets = {
   // and 1.5-KiB gzip platform-skew allowance. The measured 31,498-byte CSS
   // asset and every initial, per-file, file-count, lazy-chunk, and CSS cap stay
   // within their existing envelopes.
-  directSessionRaw: 2131 * kib,
+  // Prompt-free automatic session titles replace raw initial-message fallbacks
+  // across the shared rail/session surfaces. Exact Bun 1.4 Linux/x64 builds on
+  // protected main measure 2,182,218 raw bytes locally and 2,182,260 raw bytes
+  // in the workload image. Preserve the guard's one-KiB raw headroom by moving
+  // only this aggregate to the next compliant whole-KiB envelope; gzip,
+  // file-count, initial, per-file, lazy-chunk, and CSS caps remain unchanged.
+  directSessionRaw: 2133 * kib,
   directSessionGzip: 596 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
