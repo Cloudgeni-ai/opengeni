@@ -419,6 +419,60 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
   }, 60_000);
 
+  test("accepts a service turn's immutable causal human and rejects pure service work", async () => {
+    for (const fixture of [
+      { name: "causal-service", initiatingHumanSubjectId: grant.subjectId, allowed: true },
+      { name: "pure-service", initiatingHumanSubjectId: null, allowed: false },
+    ]) {
+      const attempt = await seedAttempt(grant, {
+        initiatorKind: "service",
+        initiatorSubjectId: "goal-continuation",
+        initiatingHumanSubjectId: fixture.initiatingHumanSubjectId,
+      });
+      const server = buildOpenGeniMcpServer(
+        {
+          settings: testSettings(),
+          db: client.db,
+          objectStorage,
+          bus: new MemoryEventBus(),
+        } as ApiRouteDeps,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["artifacts:publish"],
+          principalKind: "agent_attempt",
+          metadata: {
+            sessionId: attempt.sessionId,
+            turnId: attempt.turnId,
+            attemptId: attempt.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            firstPartyMcpTools: ["artifacts_create"],
+          },
+        },
+      );
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      const mcp = new Client({ name: `workspace-artifact-${fixture.name}`, version: "1" });
+      await server.connect(serverTransport);
+      await mcp.connect(clientTransport);
+      const putsBefore = objectPutCount;
+      try {
+        const result = await mcp.callTool({
+          name: "artifacts_create",
+          arguments: {
+            title: fixture.name,
+            html: "<!doctype html><main>Service turn artifact</main>",
+            idempotencyKey: fixture.name,
+          },
+        });
+        expect(result.isError === true).toBe(!fixture.allowed);
+        expect(objectPutCount).toBe(putsBefore + (fixture.allowed ? 1 : 0));
+      } finally {
+        await Promise.all([mcp.close(), server.close()]);
+      }
+    }
+  }, 60_000);
+
   test("rejects signed attempt claims that lack durable tool or permission authority", async () => {
     const cases: Array<{
       name: string;
@@ -509,6 +563,9 @@ async function seedAttempt(
   options: {
     permissions?: Permission[] | null;
     tools?: FirstPartyMcpToolName[];
+    initiatorKind?: "subject" | "service";
+    initiatorSubjectId?: string;
+    initiatingHumanSubjectId?: string | null;
   } = {},
 ): Promise<Attempt> {
   const session = await createSession(client.db, {
@@ -530,12 +587,15 @@ async function seedAttempt(
     INSERT INTO session_turns (
       account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
       status, position, prompt, model, reasoning_effort, sandbox_backend,
-      execution_generation, initiator_kind, initiator_subject_id, initiator_context
+      execution_generation, initiator_kind, initiator_subject_id, initiator_context,
+      initiating_human_subject_id
     ) VALUES (
       ${targetGrant.accountId}, ${targetGrant.workspaceId}, ${session.id}, gen_random_uuid(),
       ${`artifact-wf-${crypto.randomUUID()}`}, 'running', 0, 'Publish artifact',
-      'gpt-5.6-sol', 'medium', 'none', ${executionGeneration}, 'subject',
-      ${targetGrant.subjectId}, '{"accepted":true}'::jsonb
+      'gpt-5.6-sol', 'medium', 'none', ${executionGeneration},
+      ${options.initiatorKind ?? "subject"},
+      ${options.initiatorSubjectId ?? targetGrant.subjectId},
+      '{"accepted":true}'::jsonb, ${options.initiatingHumanSubjectId ?? null}
     ) RETURNING id`;
   const attemptId = crypto.randomUUID();
   await shared.admin.begin(async (tx) => {
