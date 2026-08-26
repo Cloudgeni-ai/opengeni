@@ -19,6 +19,7 @@ const personalWorkspaceId = "22222222-2222-4222-8222-222222222222";
 const personalWorkspace: Workspace = {
   id: personalWorkspaceId,
   accountId: organizationId,
+  kind: "personal",
   name: "Roadmap",
   slug: null,
   externalSource: null,

@@ -29,7 +29,7 @@ function deferred<Value>() {
 }
 
 describe("managed self context", () => {
-  test("classifies Personal only from the exact server-issued organization/workspace tuple", () => {
+  test("uses canonical workspace kind for display while owner linkage uses the exact tuple", () => {
     const identity = managedSelfContextIdentity({
       credentialGeneration: 4,
       managedUserId: "user-id",
@@ -44,26 +44,40 @@ describe("managed self context", () => {
     ).toEqual(membership);
     expect(
       isPersonalWorkspace(
-        { id: personalWorkspaceId, accountId: "44444444-4444-4444-8444-444444444444" },
+        {
+          id: personalWorkspaceId,
+          accountId: "44444444-4444-4444-8444-444444444444",
+          kind: "personal",
+        },
+        selfContext,
+      ),
+    ).toBe(true);
+    expect(
+      isPersonalWorkspace(
+        {
+          id: "55555555-5555-4555-8555-555555555555",
+          accountId: organizationId,
+          kind: "shared",
+        },
         selfContext,
       ),
     ).toBe(false);
     expect(
       isPersonalWorkspace(
-        { id: "55555555-5555-4555-8555-555555555555", accountId: organizationId },
-        selfContext,
+        { id: personalWorkspaceId, accountId: organizationId, kind: "personal" },
+        null,
       ),
-    ).toBe(false);
-    expect(isPersonalWorkspace({ id: personalWorkspaceId, accountId: organizationId }, null)).toBe(
-      false,
-    );
+    ).toBe(true);
     for (const status of ["suspended", "revoked"] as const) {
       expect(
-        isPersonalWorkspace({ id: personalWorkspaceId, accountId: organizationId }, {
-          identity,
-          memberships: [{ ...membership, status }],
-        } as unknown as ManagedSelfContext),
-      ).toBe(false);
+        isPersonalWorkspace(
+          { id: personalWorkspaceId, accountId: organizationId, kind: "personal" },
+          {
+            identity,
+            memberships: [{ ...membership, status }],
+          } as unknown as ManagedSelfContext,
+        ),
+      ).toBe(true);
     }
   });
 

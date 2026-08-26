@@ -29,9 +29,8 @@ describe("organization administration surface", () => {
       "acceptOrganizationInvitation",
       "updateOrganizationMember",
       "updateOrganizationWorkspace",
-      "addOrganizationWorkspaceMember",
-      "updateOrganizationWorkspaceMember",
-      "removeOrganizationWorkspaceMember",
+      "putOrganizationWorkspaceMember",
+      "revokeOrganizationWorkspaceMember",
       "getOrganizationRetentionPolicy",
       "updateOrganizationRetentionPolicy",
     ]) {
@@ -47,7 +46,8 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain("member.name?.trim()");
     expect(adminSource).toContain("member.email");
     expect(adminSource).toContain("Add organization member");
-    expect(adminSource).toContain("Workspace administrator");
+    expect(adminSource).toContain("Custom permissions…");
+    expect(adminSource).toContain("Personal content stays personal");
     expect(adminSource).not.toContain(".addWorkspaceMember(");
     expect(adminSource).not.toContain(".removeWorkspaceMember(");
     expect(adminSource).toContain("props.onAuthorityChanged()");

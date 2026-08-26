@@ -776,8 +776,6 @@ describe("organization membership routes", () => {
     const createOperationId = crypto.randomUUID();
     const createBody = {
       name: "Created through organization",
-      slug: `org-created-${crypto.randomUUID()}`,
-      agentInstructions: "Help this team.",
       operationId: createOperationId,
     };
     const created = await app.request(`http://x/v1/organizations/${accountId}/workspaces`, {
@@ -801,55 +799,74 @@ describe("organization membership routes", () => {
     expect(createdMembership?.count).toBe(0);
 
     const missingUpdate = await app.request(
-      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${encodeURIComponent(targetSubjectId)}`,
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${crypto.randomUUID()}`,
       {
-        method: "PATCH",
+        method: "PUT",
         headers: { cookie: "session=present", "content-type": "application/json" },
-        body: JSON.stringify({ role: "admin", permissions: ["workspace:admin"] }),
+        body: JSON.stringify({
+          role: "admin",
+          expectedUpdatedAt: null,
+          operationId: crypto.randomUUID(),
+        }),
       },
     );
     expect(missingUpdate.status).toBe(404);
 
     const add = await app.request(
-      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members`,
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${targetMembershipId}`,
       {
-        method: "POST",
+        method: "PUT",
         headers: { cookie: "session=present", "content-type": "application/json" },
         body: JSON.stringify({
-          organizationMembershipId: targetMembershipId,
           role: "member",
-          permissions: ["workspace:read", "sessions:read"],
+          expectedUpdatedAt: null,
+          operationId: crypto.randomUUID(),
         }),
       },
     );
-    expect(add.status).toBe(201);
-    expect(await add.json()).toMatchObject({
+    expect(add.status).toBe(200);
+    const addedAccess = (await add.json()) as { updatedAt: string; permissions: string[] };
+    expect(addedAccess).toMatchObject({
       subjectId: targetSubjectId,
       role: "member",
-      permissions: ["workspace:read", "sessions:read"],
     });
+    expect(addedAccess.permissions).toContain("sessions:create");
 
     const promote = await app.request(
-      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${encodeURIComponent(targetSubjectId)}`,
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${targetMembershipId}`,
       {
-        method: "PATCH",
+        method: "PUT",
         headers: { cookie: "session=present", "content-type": "application/json" },
-        body: JSON.stringify({ role: "admin", permissions: ["workspace:admin"] }),
+        body: JSON.stringify({
+          role: "admin",
+          expectedUpdatedAt: addedAccess.updatedAt,
+          operationId: crypto.randomUUID(),
+        }),
       },
     );
     expect(promote.status).toBe(200);
-    expect(await promote.json()).toMatchObject({
+    const promotedAccess = (await promote.json()) as { updatedAt: string; permissions: string[] };
+    expect(promotedAccess).toMatchObject({
       subjectId: targetSubjectId,
       role: "admin",
-      permissions: ["workspace:admin"],
     });
+    expect(promotedAccess.permissions).toContain("workspace:admin");
+
+    const [workspaceBeforeRename] = await shared.admin<Array<{ updatedAt: string }>>`
+      select to_char(
+        updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+      ) as "updatedAt" from workspaces where id = ${sharedWorkspaceId}`;
 
     const rename = await app.request(
       `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}`,
       {
         method: "PATCH",
         headers: { cookie: "session=present", "content-type": "application/json" },
-        body: JSON.stringify({ name: "Renamed through organization" }),
+        body: JSON.stringify({
+          name: "Renamed through organization",
+          expectedUpdatedAt: workspaceBeforeRename!.updatedAt,
+          operationId: crypto.randomUUID(),
+        }),
       },
     );
     expect(rename.status).toBe(200);
@@ -867,23 +884,32 @@ describe("organization membership routes", () => {
     expect(await settings.json()).toMatchObject({ settings: { memoryEnabled: true } });
 
     const personalDenied = await app.request(
-      `http://x/v1/organizations/${accountId}/workspaces/${personalWorkspaceId}/members`,
+      `http://x/v1/organizations/${accountId}/workspaces/${personalWorkspaceId}/members/${targetMembershipId}`,
+      {
+        method: "PUT",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          role: "viewer",
+          expectedUpdatedAt: null,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(personalDenied.status).toBe(403);
+
+    const remove = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${targetMembershipId}/revoke`,
       {
         method: "POST",
         headers: { cookie: "session=present", "content-type": "application/json" },
         body: JSON.stringify({
-          organizationMembershipId: targetMembershipId,
-          permissions: ["workspace:read"],
+          expectedUpdatedAt: promotedAccess.updatedAt,
+          operationId: crypto.randomUUID(),
         }),
       },
     );
-    expect(personalDenied.status).toBe(404);
-
-    const remove = await app.request(
-      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${encodeURIComponent(targetSubjectId)}`,
-      { method: "DELETE", headers: { cookie: "session=present" } },
-    );
-    expect(remove.status).toBe(204);
+    expect(remove.status).toBe(200);
+    expect(await remove.json()).toMatchObject({ removed: true, replay: false });
     const after = await shared.admin<Array<{ actorCount: number; targetCount: number }>>`
       select
         count(*) filter (where subject_id = ${subjectId})::int as "actorCount",

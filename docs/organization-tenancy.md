@@ -488,9 +488,10 @@ The managed-human API surface is:
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
 - `PATCH /v1/organizations/:organizationId/workspaces/:workspaceId` plus its
-  `/settings` route, and `POST|PATCH|DELETE` below
-  `/v1/organizations/:organizationId/workspaces/:workspaceId/members` for the
-  shared-workspace control plane; and
+  `/settings` route, `PUT
+  /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
+  for an idempotent named or custom grant, and the explicit `/revoke` command
+  below that member route for the shared-workspace control plane; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
 These routes require a direct managed-human cookie session; API keys and
@@ -704,6 +705,50 @@ activate it. Organization
 Overview presents Member and Workspace administrator as the primary access
 presets while preserving existing custom permission sets until an administrator
 deliberately replaces one.
+
+Migration `0350_organization_shared_workspace_administration.sql` completes
+that product contract as a rolling, additive compatibility slice. Every public
+`Workspace` now carries a required machine-readable `kind` of `personal` or
+`shared`. The database derives it only from the canonical
+`organization_memberships.personal_workspace_id` pointer under exact
+account/workspace RLS context; names, slugs, and client guesses never determine
+authority. Signup and invitation acceptance still create only the joining
+human's Personal workspace. A shared workspace exists only after an owner or
+administrator explicitly creates it.
+
+The server owns three exact shared-workspace role definitions: `viewer`,
+`member`, and `admin`. The administration overview returns their labels,
+descriptions, and permission arrays, and every named grant materializes that
+server-owned array rather than accepting caller permissions. Existing or newly
+authored advanced permission sets remain an explicit `custom` escape hatch;
+the server validates them against workspace-scoped permission vocabulary and
+never lets custom workspace access smuggle account or billing authority.
+Organization owners and administrators may create and rename shared
+workspaces, grant or replace access, and revoke access. Ordinary organization
+members, cross-organization membership ids, and every Personal workspace fail
+closed. Organization membership role changes keep the 0263 sole-owner
+invariant; workspace roles do not alter organization roles.
+
+Create, rename, grant, and revoke are operation-id idempotent. Renames and
+access replacement/removal are exact-timestamp CAS fenced. Immutable FORCE-RLS
+receipt and event tables record the actor membership, shared workspace, target
+membership/access row, action, and named/custom role without accepting direct
+application DML. Revocation enters the organization advisory fence before the
+canonical session-tenancy and per-subject personal-state locks, then delegates
+destructive cleanup to the existing 0278 settlement/removal protocol before
+writing its receipt. This preserves queued/live turn cancellation and personal
+row teardown without reintroducing the organization/workspace lock inversion.
+
+Rolling compatibility is explicit: the legacy `list_organization_members`
+function and its Personal retention fields remain unchanged for older binaries.
+New organization-administration routes use the separate
+`list_organization_administration_members` projection, which exposes safe
+name/email plus shared-workspace access and omits Personal workspace and
+retention metadata. Organization settings is the sole editor for the human
+roster and shared-workspace grants. Workspace settings performs no raw human
+roster read or edit; it shows only the notice/link back to Organization
+settings, while its separate Slack access-request queue keeps its existing
+workspace-admin lifecycle.
 
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, terminally cancels

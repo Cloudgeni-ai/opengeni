@@ -4,7 +4,7 @@ import {
   AgentTopologyPageResponse as ContractAgentTopologyPageResponse,
   ActivateCodexRealtimeConnectionRequest as ContractActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
-  AddOrganizationWorkspaceMemberRequest as ContractAddOrganizationWorkspaceMemberRequest,
+  PutOrganizationWorkspaceMemberRequest as ContractPutOrganizationWorkspaceMemberRequest,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
   IntegrationDefinitionSummary as ContractIntegrationDefinitionSummary,
   IntegrationPresentation as ContractIntegrationPresentation,
@@ -142,7 +142,7 @@ import type {
   IntegrationPresentation,
   ActivateCodexRealtimeConnectionRequest,
   AcknowledgeStreamResponse,
-  AddOrganizationWorkspaceMemberRequest,
+  PutOrganizationWorkspaceMemberRequest,
   AddWorkspaceMemberRequest,
   AttachViewerRequest,
   AttachViewerResponse,
@@ -713,10 +713,10 @@ describe("SDK / contracts parity", () => {
       [acceptMember, acceptList, acceptAdd, acceptUpdate].every((fn) => typeof fn === "function"),
     ).toBe(true);
 
-    const acceptOrganizationAdd = (
-      value: Omit<AddOrganizationWorkspaceMemberRequest, "permissions">,
-    ): Omit<z.input<typeof ContractAddOrganizationWorkspaceMemberRequest>, "permissions"> => value;
-    expect(typeof acceptOrganizationAdd).toBe("function");
+    const acceptOrganizationPut = (
+      value: Omit<PutOrganizationWorkspaceMemberRequest, "permissions">,
+    ): Omit<z.input<typeof ContractPutOrganizationWorkspaceMemberRequest>, "permissions"> => value;
+    expect(typeof acceptOrganizationPut).toBe("function");
 
     const add: AddWorkspaceMemberRequest = {
       email: "teammate@example.com",
@@ -728,10 +728,10 @@ describe("SDK / contracts parity", () => {
     };
     expect(ContractAddWorkspaceMemberRequest.safeParse(add).success).toBe(true);
     expect(
-      ContractAddOrganizationWorkspaceMemberRequest.safeParse({
-        organizationMembershipId: "00000000-0000-4000-8000-000000000001",
+      ContractPutOrganizationWorkspaceMemberRequest.safeParse({
         role: "member",
-        permissions: ["workspace:read"],
+        expectedUpdatedAt: null,
+        operationId: "00000000-0000-4000-8000-000000000001",
       }).success,
     ).toBe(true);
     expect(ContractUpdateWorkspaceMemberRequest.safeParse(update).success).toBe(true);
