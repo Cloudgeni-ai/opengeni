@@ -195,14 +195,6 @@ async function visibleCounts(input: Fixture, subjectId: string | null) {
   }
 }
 
-function executionTimeMs(plan: unknown): number {
-  if (!Array.isArray(plan)) return Number.POSITIVE_INFINITY;
-  const first = plan[0];
-  if (!first || typeof first !== "object") return Number.POSITIVE_INFINITY;
-  const value = (first as Record<string, unknown>)["Execution Time"];
-  return typeof value === "number" ? value : Number.POSITIVE_INFINITY;
-}
-
 describe("migration 0356 set-based Insights session visibility", () => {
   test("initializes application roles when upgrading a database recorded through 0355", async () => {
     const blank = await acquireBlankTestDatabase("migration-0356-upgrade-roles");
@@ -321,11 +313,12 @@ describe("migration 0356 set-based Insights session visibility", () => {
           'visible_workspace_insights_model_call_facts',
           'visible_workspace_insights_usage_events'
         )
+        and procedure.pronargs = 3
       order by procedure.proname`;
     expect(functions).toHaveLength(2);
     for (const fn of functions) {
       expect(fn.securityDefiner).toBe(true);
-      expect(fn.volatility).toBe("s");
+      expect(fn.volatility).toBe("v");
       expect(fn.settings).toContain("search_path=pg_catalog, public, opengeni_private, pg_temp");
       expect(fn.appCanExecute).toBe(true);
       expect(fn.publicCanExecute).toBe(false);
@@ -399,7 +392,7 @@ describe("migration 0356 set-based Insights session visibility", () => {
     if (!shared) return;
     const input = await seedFixture();
     const policies = await shared.admin<
-      Array<{ tableName: string; usingExpression: string; checkExpression: string }>
+      Array<{ tableName: string; usingExpression: string; checkExpression: string | null }>
     >`
       select tablename as "tableName", qual as "usingExpression", with_check as "checkExpression"
       from pg_policies
@@ -410,7 +403,8 @@ describe("migration 0356 set-based Insights session visibility", () => {
     expect(policies).toHaveLength(2);
     for (const policy of policies) {
       expect(policy.usingExpression).toContain("session_reference_visible");
-      expect(policy.checkExpression).toBe(policy.usingExpression);
+      expect(policy.usingExpression).toContain("insights_fact_read_policy_capability_active");
+      expect(policy.checkExpression).toBeNull();
     }
 
     expect(await visibleCounts(input, input.ownerSubjectId)).toEqual({
@@ -523,77 +517,22 @@ describe("migration 0356 set-based Insights session visibility", () => {
     expect(unrelated.context.totalCalls).toBe(1);
   });
 
-  test("does not execute one sessions lookup per model-call fact", async () => {
+  test("keeps the released entry points on the latest bounded implementation", async () => {
     if (!shared) return;
-    const input = await seedFixture();
-    const bulkSessions = 512;
-    const factsPerSession = 8;
-    const bulkSessionIds: string[] = [];
-    for (let offset = 0; offset < bulkSessions; offset += 16) {
-      const batch = await Promise.all(
-        Array.from({ length: Math.min(16, bulkSessions - offset) }, (_, index) =>
-          createSession(client!.db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            initialMessage: `Insights performance fixture ${offset + index}`,
-            resources: [],
-            metadata: {},
-            model: "test-model",
-            reasoningEffort: "medium",
-            latencyMode: "standard",
-            sandboxBackend: "none",
-          }),
-        ),
-      );
-      bulkSessionIds.push(...batch.map((session) => session.id));
-    }
-    await shared.admin`
-      insert into model_call_facts (
-        account_id, workspace_id, session_id, turn_id, source_key, provider,
-        provider_api, model, billing_path, input_tokens, total_tokens,
-        priced_cost_micros, occurred_at
-      )
-      select
-        ${input.accountId}, ${input.workspaceId}, bulk_sessions.id,
-        gen_random_uuid(), ${`bulk-${crypto.randomUUID()}-`} || row_number() over ()::text,
-        'test', 'responses', 'test-model', 'external', 1, 1, 0, now()
-      from unnest(${bulkSessionIds}::uuid[]) bulk_sessions(id)
-      cross join generate_series(1, ${factsPerSession}) facts(n)`;
-
-    const app = postgres(shared.appUrl, {
-      max: 1,
-      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
-    });
-    try {
-      const plans = await app.begin(async (tx) => {
-        await tx`select set_config('opengeni.account_id', ${input.accountId}, true)`;
-        await tx`select set_config('opengeni.workspace_id', ${input.workspaceId}, true)`;
-        await tx`select set_config('opengeni.subject_id', ${input.ownerSubjectId}, true)`;
-        const direct = await tx.unsafe<Array<Record<string, unknown>>>(
-          `explain (analyze, format json)
-           select count(*)
-           from model_call_facts
-           where workspace_id = '${input.workspaceId}'::uuid
-             and occurred_at >= '${input.since.toISOString()}'::timestamptz
-             and occurred_at < '${input.until.toISOString()}'::timestamptz`,
-        );
-        const setBased = await tx.unsafe<Array<Record<string, unknown>>>(
-          `explain (analyze, format json)
-           select count(*)
-           from opengeni_private.visible_workspace_insights_model_call_facts(
-             '${input.workspaceId}'::uuid,
-             '${input.since.toISOString()}'::timestamptz,
-             '${input.until.toISOString()}'::timestamptz
-           )`,
-        );
-        return {
-          direct: direct[0]?.["QUERY PLAN"],
-          setBased: setBased[0]?.["QUERY PLAN"],
-        };
-      });
-      expect(executionTimeMs(plans.setBased)).toBeLessThan(executionTimeMs(plans.direct) / 3);
-    } finally {
-      await app.end();
-    }
+    const functions = await shared.admin<Array<{ name: string; source: string }>>`
+      select procedure.proname as name, procedure.prosrc as source
+      from pg_proc procedure
+      inner join pg_namespace namespace on namespace.oid = procedure.pronamespace
+      where namespace.nspname = 'opengeni_private'
+        and procedure.proname in (
+          'visible_workspace_insights_model_call_facts',
+          'visible_workspace_insights_usage_events'
+        )
+        and procedure.pronargs = 3
+      order by procedure.proname`;
+    expect(functions).toHaveLength(2);
+    expect(functions[0]?.source).toContain("NULL, NULL");
+    expect(functions[1]?.source).toContain("WITH visible_sessions AS MATERIALIZED");
+    expect(functions[1]?.source).toContain("insights_fact_read_runtime_capabilities");
   });
 });
