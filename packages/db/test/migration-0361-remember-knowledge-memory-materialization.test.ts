@@ -11,6 +11,7 @@ const migrationUrl = new URL(
   import.meta.url,
 );
 const migration = await Bun.file(migrationUrl).text();
+const provisionRoles = await Bun.file(new URL("../src/provision-roles.ts", import.meta.url)).text();
 
 describe("migration 0361 remember Knowledge Memory materialization", () => {
   test("owns exact, idempotent confirmation-to-Memory materialization", () => {
@@ -36,6 +37,9 @@ describe("migration 0361 remember Knowledge Memory materialization", () => {
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("remember_knowledge_memory_materializations");
     expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toContain(
       "materialize_remember_knowledge_memory(uuid, uuid, uuid)",
+    );
+    expect(provisionRoles).toContain(
+      "GRANT EXECUTE ON FUNCTION %I.materialize_remember_knowledge_memory(uuid, uuid, uuid) TO %I",
     );
   });
 });
