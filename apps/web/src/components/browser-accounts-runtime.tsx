@@ -114,6 +114,7 @@ export function BrowserAccountsSignedOutPanel(props: { dualEmptySetFallback?: Re
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
   const busy = accounts.phase === "committing" || accounts.phase === "loading";
+  const slots = accounts.projection?.slots ?? [];
 
   if (
     accounts.projection?.mode === "dual" &&
@@ -123,9 +124,16 @@ export function BrowserAccountsSignedOutPanel(props: { dualEmptySetFallback?: Re
     return props.dualEmptySetFallback;
   }
 
-  function signIn() {
-    popup.open(() => accounts.beginAdd(), {
-      onError: (error) => toast.error("Couldn't start sign in", { description: String(error) }),
+  function authenticate(kind: "add" | "reauth", slotId?: string) {
+    popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
+      onError: (error) =>
+        toast.error("Couldn't start account authentication", { description: String(error) }),
+    });
+  }
+
+  function select(slotId: string) {
+    void accounts.selectSlot(slotId).catch((error) => {
+      toast.error("Couldn't select that account", { description: String(error) });
     });
   }
 
@@ -137,10 +145,13 @@ export function BrowserAccountsSignedOutPanel(props: { dualEmptySetFallback?: Re
             <UserRoundPlusIcon className="size-5" />
           </span>
           <div>
-            <h1 className="text-base font-semibold">Sign in to OpenGeni</h1>
+            <h1 className="text-base font-semibold">
+              {slots.length > 0 ? "Choose an account" : "Sign in to OpenGeni"}
+            </h1>
             <p className="mt-1 text-sm text-fg-subtle">
-              Authentication opens in an isolated window so an existing account is never replaced
-              implicitly.
+              {slots.length > 0
+                ? "No browser account is active. Choose one explicitly before OpenGeni loads account data."
+                : "Authentication opens in an isolated window so an existing account is never replaced implicitly."}
             </p>
           </div>
         </div>
@@ -149,10 +160,57 @@ export function BrowserAccountsSignedOutPanel(props: { dualEmptySetFallback?: Re
             The account request did not finish. Try again.
           </p>
         ) : null}
-        <Button type="button" className="min-h-11 w-full" disabled={busy} onClick={signIn}>
-          {busy ? <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" /> : null}
-          Continue with email
-        </Button>
+        <div className="grid gap-2">
+          {slots.map((slot) =>
+            slot.state === "active" ? (
+              <Button
+                key={slot.id}
+                type="button"
+                variant="secondary"
+                className="min-h-11 h-auto w-full justify-start py-2 text-left"
+                disabled={busy}
+                aria-label={`Continue as ${slot.displayName}`}
+                onClick={() => select(slot.id)}
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{slot.displayName}</span>
+                  <span className="block truncate text-xs font-normal text-fg-subtle">
+                    {slot.verifiedClaim.value}
+                  </span>
+                </span>
+              </Button>
+            ) : (
+              <Button
+                key={slot.id}
+                type="button"
+                variant="secondary"
+                className="min-h-11 h-auto w-full justify-start py-2 text-left"
+                disabled={busy}
+                aria-label={`Re-authenticate ${slot.displayName}`}
+                onClick={() => authenticate("reauth", slot.id)}
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{slot.displayName}</span>
+                  <span className="block truncate text-xs font-normal text-fg-subtle">
+                    Re-authentication required
+                  </span>
+                </span>
+              </Button>
+            ),
+          )}
+          <Button
+            type="button"
+            className="min-h-11 w-full"
+            variant={slots.length > 0 ? "outline" : "default"}
+            disabled={busy}
+            onClick={() => authenticate("add")}
+          >
+            {busy ? (
+              <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+            ) : null}
+            {slots.length > 0 ? "Use another account" : "Continue with email"}
+          </Button>
+        </div>
       </div>
     </section>
   );

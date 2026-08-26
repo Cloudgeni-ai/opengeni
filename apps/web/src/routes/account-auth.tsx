@@ -1,4 +1,4 @@
-import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
+import { BrowserAccountsApiError, createBrowserAccountsClient } from "@opengeni/sdk/accounts";
 import { Loader2Icon } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 
@@ -17,7 +17,10 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
     () => createBrowserAccountsClient({ baseUrl: browserAccountsApiBaseUrl }),
     [],
   );
-  const completionOperationId = useRef(crypto.randomUUID());
+  const completionAttempt = useRef<{
+    operationId: string;
+    expectedGeneration: string;
+  } | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -43,19 +46,31 @@ export function AccountAuthRoute({ transactionId }: { transactionId: string | un
     setError(null);
     try {
       const projection = await client.getSessionSet();
-      await client.completeEmailPasswordTransaction({
-        operationId: completionOperationId.current,
+      const attempt = completionAttempt.current ?? {
+        operationId: crypto.randomUUID(),
         expectedGeneration: projection.generation,
+      };
+      completionAttempt.current = attempt;
+      await client.completeEmailPasswordTransaction({
+        operationId: attempt.operationId,
+        expectedGeneration: attempt.expectedGeneration,
         transactionId: validTransactionId,
         email: email.trim(),
         password,
       });
+      completionAttempt.current = null;
       setPassword("");
       finish("opengeni-account-auth-complete");
     } catch (caught) {
       // Credentials stay inside this isolated window and are discarded after
-      // every failed attempt. The idempotency key remains stable for an
-      // outcome-unknown retry, while the password must be typed again.
+      // every failed attempt. Preserve both the idempotency key and its exact
+      // generation only when transport loss made the committed outcome
+      // unknown. Definitive failures start a fresh command on the next submit.
+      if (
+        !(caught instanceof BrowserAccountsApiError && caught.code === "operation_outcome_unknown")
+      ) {
+        completionAttempt.current = null;
+      }
       setPassword("");
       setError(caught instanceof Error ? caught.message : "Authentication failed");
     } finally {
