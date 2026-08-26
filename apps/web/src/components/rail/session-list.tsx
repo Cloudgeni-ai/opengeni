@@ -704,12 +704,16 @@ export function SessionList() {
       if (existing?.operation === operation) return existing.promise;
 
       let readGeneration = 0;
+      const detailReadOwner = {};
       const promise = readSessionChannelMovePoint(
         sessionClient,
         rail.workspaceId,
         sessionId,
         () => {
-          readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+          readGeneration = context.sessionChannelProjectionAuthority.beginDetailRead(
+            detailReadOwner,
+            { id: sessionId, workspaceId: rail.workspaceId },
+          );
         },
       )
         .then((authoritative) => {
@@ -764,6 +768,7 @@ export function SessionList() {
       const probe = { operation, promise };
       channelMoveProbes.current.set(sessionId, probe);
       void promise.finally(() => {
+        context.sessionChannelProjectionAuthority.finishDetailReads(detailReadOwner);
         if (channelMoveProbes.current.get(sessionId) === probe) {
           channelMoveProbes.current.delete(sessionId);
         }

@@ -197,6 +197,15 @@ export function SessionRoute({
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
+  const sessionDetailReadOwner = useRef<object>({});
+  const beginSessionDetailRead = useCallback(
+    () =>
+      context.sessionChannelProjectionAuthority.beginDetailRead(sessionDetailReadOwner.current, {
+        id: sessionId,
+        workspaceId,
+      }),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
   const {
     session: fetchedSession,
     loading,
@@ -206,8 +215,18 @@ export function SessionRoute({
     refresh: refreshSession,
   } = useSession(sessionId, {
     events,
-    beginRead: context.sessionChannelProjectionAuthority.beginRead,
+    beginRead: beginSessionDetailRead,
   });
+  useEffect(
+    () => () =>
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
+  useEffect(() => {
+    if (loadError) {
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current);
+    }
+  }, [context.sessionChannelProjectionAuthority, loadError]);
   const creationHandoff =
     context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
       ? context.sessionCreationHandoff

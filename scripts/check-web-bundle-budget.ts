@@ -241,11 +241,12 @@ const budgets = {
   // KiB gzip, preserving one KiB of raw headroom and the 1.5-KiB Linux/x64
   // platform-skew allowance. The measured 31,498-byte CSS asset and every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stay fixed.
-  // Shared lineage request-start identity relay on the exact current-main
-  // Linux/x64 Bun 1.4 production merge measures 2,188,272 raw bytes. Calibrate
-  // only this raw aggregate to the policy-derived 2,138-KiB envelope, retaining
-  // 1,040 bytes of headroom. Every compressed, file-count, initial, per-file,
-  // lazy-chunk, and CSS cap remains fixed.
+  // Shared lineage request-start identity relay plus request-causal cleanup
+  // authority on the exact current-main Linux/x64 Bun 1.4 production merge
+  // measures 2,190,109 raw bytes. Calibrate only this raw aggregate to the
+  // policy-derived 2,140-KiB envelope, retaining 1,251 bytes of headroom. Every
+  // compressed, file-count, initial, per-file, lazy-chunk, and CSS cap remains
+  // fixed.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 598 * kib,
   directSessionFiles: 24,

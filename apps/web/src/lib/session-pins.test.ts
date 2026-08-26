@@ -8,6 +8,7 @@ import {
   applySessionPinProjection,
   applySessionRailProjection,
   mergeSessionContextProjection,
+  mergeSessionDetailReadProjection,
   notifySessionPinChanged,
   reconcileFailedSessionPin,
   SessionChannelProjectionAuthority,
@@ -627,6 +628,85 @@ describe("session pin reconciliation", () => {
     expect(authority.recordRead(stale, staleGeneration)).toBe(false);
     expect(authority.project(stale, staleGeneration)).toMatchObject({ channelId: "channel-b" });
     expect(authority.owns(accepted)).toBe(true);
+  });
+
+  test("retains newer list evidence across owner cleanup while an older detail can settle", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const detailOwner = {};
+    const rootOwner = {};
+    const acceptedDetail = { ...session, channelId: "channel-a" } as Session;
+    const newerRoot = { ...session, channelId: "channel-b" } as Session;
+    const acceptedGeneration = authority.beginRead();
+    expect(authority.recordRead(acceptedDetail, acceptedGeneration)).toBe(true);
+    const staleDetailGeneration = authority.beginDetailRead(detailOwner, session);
+    const rootGeneration = authority.beginRead();
+    authority.replace(rootOwner, [newerRoot], 0, rootGeneration);
+
+    expect(authority.owns(newerRoot)).toBe(true);
+    authority.clear(rootOwner);
+    const retainedOwners = (
+      authority as unknown as {
+        retainedOwners: Map<string, [string | null, number, Set<number>]>;
+      }
+    ).retainedOwners;
+    expect(retainedOwners.size).toBe(1);
+
+    const acceptedStaleDetail = authority.recordRead(acceptedDetail, staleDetailGeneration);
+    expect(acceptedStaleDetail).toBe(false);
+    expect(
+      mergeSessionDetailReadProjection(
+        newerRoot,
+        acceptedDetail,
+        authority,
+        staleDetailGeneration,
+        acceptedStaleDetail,
+      ),
+    ).toMatchObject({ channelId: "channel-b" });
+
+    authority.finishDetailReads(detailOwner);
+    expect(retainedOwners.size).toBe(0);
+  });
+
+  test("retains only the causally newest cleanup owner and lets newer evidence converge", () => {
+    const authority = new SessionChannelProjectionAuthority();
+    const detailOwner = {};
+    const replacedOwner = {};
+    const newerOwner = {};
+    const moveOwner = {};
+    const before = { ...session, channelId: "channel-a" } as Session;
+    const replaced = { ...session, channelId: "channel-b" } as Session;
+    const remounted = { ...session, channelId: "channel-c" } as Session;
+    const newerDetail = { ...session, channelId: "channel-d" } as Session;
+    const moved = { ...session, channelId: "channel-e" } as Session;
+    expect(authority.recordRead(before, authority.beginRead())).toBe(true);
+    const staleDetailGeneration = authority.beginDetailRead(detailOwner, session);
+    authority.replace(replacedOwner, [replaced], 0, authority.beginRead());
+    authority.replace(newerOwner, [remounted], 0, authority.beginRead());
+
+    // Replacing the older owner must not persist B over the still-mounted,
+    // causally newer C source. Clearing C then retains exactly C for G2.
+    authority.replace(replacedOwner, [], 0, authority.beginRead());
+    const retainedOwners = (
+      authority as unknown as {
+        retainedOwners: Map<string, [string | null, number, Set<number>]>;
+      }
+    ).retainedOwners;
+    expect(retainedOwners.size).toBe(0);
+    authority.clear(newerOwner);
+    expect([...retainedOwners.values()].map(([channelId]) => channelId)).toEqual(["channel-c"]);
+    expect(authority.recordRead(before, staleDetailGeneration)).toBe(false);
+    expect(authority.project(before, staleDetailGeneration).channelId).toBe("channel-c");
+
+    // A genuinely newer detail replaces the temporary cleanup fence, and a
+    // later committed move still becomes the exact persistent winner.
+    expect(authority.recordRead(newerDetail, authority.beginRead())).toBe(true);
+    expect(retainedOwners.size).toBe(0);
+    authority.finishDetailReads(detailOwner);
+    const request = authority.beginMove(moveOwner, newerDetail)!;
+    expect(authority.recordMove(moveOwner, request, moved)).toBe("accepted");
+    authority.finishMove(moveOwner, request);
+    expect(authority.owns(moved)).toBe(true);
+    expect(authority.owns(newerDetail)).toBe(false);
   });
 
   test("publishes an accepted-read revision for a remounted non-open row", () => {

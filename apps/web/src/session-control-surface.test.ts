@@ -162,11 +162,15 @@ describe("session control surface architecture", () => {
     expect(list).toContain("reconcileSessionChannelMoves(current, channelAuthoritySessions)");
     expect(list).not.toContain("reconcileSessionChannelMoves(current, listedSessions)");
     expect(list).toContain("requestError.status === 404");
+    expect(list).toContain("sessionChannelProjectionAuthority.beginDetailRead(");
+    expect(list).toContain("sessionChannelProjectionAuthority.finishDetailReads(detailReadOwner)");
     expect(move).toContain("getSession(workspaceId, sessionId, {");
     expect(move).toContain("fresh: true");
     expect(move).toContain("onRequestStart");
     expect(route).toContain("readRevision: sessionReadRevision");
     expect(route).toContain("readGeneration: sessionReadGeneration");
+    expect(route).toContain("sessionChannelProjectionAuthority.beginDetailRead(");
+    expect(route).toContain("sessionChannelProjectionAuthority.finishDetailReads(");
     expect(route).toContain("sessionChannelProjectionAuthority.recordRead(");
     expect(route).toContain(
       "const accepted = context.sessionChannelProjectionAuthority.recordRead(",
