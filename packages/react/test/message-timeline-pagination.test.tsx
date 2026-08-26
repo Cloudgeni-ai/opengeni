@@ -2217,6 +2217,76 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("an empty source releases its first successful page for follow-on underfill", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {
+      frames.push(callback);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let resizeCallback: ResizeObserverCallback = () => undefined;
+    let resizeObserver: ResizeObserver | null = null;
+    globalThis.ResizeObserver = class implements ResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resizeCallback = callback;
+        resizeObserver = this;
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    };
+
+    const first = deferred<boolean>();
+    const second = deferred<boolean>();
+    let calls = 0;
+    const onLoadOlder = () => {
+      calls += 1;
+      return calls === 1 ? first.promise : second.promise;
+    };
+    const r = await renderComponent(
+      <MessageTimeline items={[]} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 240 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 400 });
+
+    await r.rerender(
+      <MessageTimeline items={[]} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await drainFrames(frames);
+    expect(calls).toBe(1);
+
+    await actRun(() => first.resolve(true));
+    await flush();
+    const firstPage = [reasoningItem("first-page-step", "first page step")];
+    await r.rerender(
+      <MessageTimeline items={firstPage} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    resizeCallback([], resizeObserver!);
+    resizeCallback([], resizeObserver!);
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+
+    await r.rerender(
+      <MessageTimeline
+        items={[reasoningItem("older-step", "older step"), ...firstPage]}
+        status="idle"
+        hasOlder={false}
+        onLoadOlder={onLoadOlder}
+      />,
+    );
+    await actRun(() => second.resolve(true));
+    await flush();
+    resizeCallback([], resizeObserver!);
+    await drainFrames(frames);
+    expect(calls).toBe(2);
+    await r.unmount();
+  });
+
   test("an explicit underfill retry remains actionable after resize creates a scroll range", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {

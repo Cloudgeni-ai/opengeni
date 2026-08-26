@@ -798,6 +798,33 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
   }, 30_000);
 
+  test("continues pagination after the first successful page from an empty window", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(
+      `${baseUrl}/timeline-collapsed-history-test.html?manual-load&empty-window&omit-loading-older`,
+    );
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness !== undefined);
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
+
+    // Promise fulfillment is not progress by itself. Once the first durable
+    // page commits, undefined → defined is a real boundary advance and must
+    // release A so the still-underfilled window can request page B.
+    await page.evaluate(() =>
+      window.timelineCollapsedHistoryHarness!.settleOlderWithoutPrepend("success"),
+    );
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.prependUnderfilledPage());
+    await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 2);
+
+    await page.setViewportSize({ width: 1280, height: 899 });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(250);
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+
+    await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleOlder("success"));
+    await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
+    expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(2);
+  }, 30_000);
+
   test("promotes a settled prefetch after viewport collapse to bounded retry", async () => {
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(
