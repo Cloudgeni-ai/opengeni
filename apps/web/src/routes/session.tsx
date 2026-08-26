@@ -104,7 +104,10 @@ import {
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
 } from "@/lib/session-attention";
-import { mergeSessionContextProjection } from "@/lib/session-pins";
+import {
+  mergeSessionContextProjection,
+  mergeSessionDetailReadProjection,
+} from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
@@ -195,12 +198,36 @@ export function SessionRoute({
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
+  const sessionDetailReadOwner = useRef<object>({});
+  const beginSessionDetailRead = useCallback(
+    () =>
+      context.sessionChannelProjectionAuthority.beginDetailRead(sessionDetailReadOwner.current, {
+        id: sessionId,
+        workspaceId,
+      }),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
   const {
     session: fetchedSession,
     loading,
     error: loadError,
+    readRevision: sessionReadRevision,
+    readGeneration: sessionReadGeneration,
     refresh: refreshSession,
-  } = useSession(sessionId, { events });
+  } = useSession(sessionId, {
+    events,
+    beginRead: beginSessionDetailRead,
+  });
+  useEffect(
+    () => () =>
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
+  useEffect(() => {
+    if (loadError) {
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current);
+    }
+  }, [context.sessionChannelProjectionAuthority, loadError]);
   const creationHandoff =
     context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
       ? context.sessionCreationHandoff
@@ -298,9 +325,47 @@ export function SessionRoute({
     windowFocused: document.hasFocus(),
   }));
   const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
+  const reconciledSessionRead = useRef<{ sessionId: string; revision: number } | null>(null);
   useEffect(() => {
-    setContextSession((current) => mergeSessionContextProjection(current, session));
-  }, [session, setContextSession]);
+    if (!fetchedSession || sessionReadRevision === 0) return;
+    if (
+      reconciledSessionRead.current?.sessionId === sessionId &&
+      reconciledSessionRead.current.revision === sessionReadRevision
+    ) {
+      return;
+    }
+    reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
+    const accepted = context.sessionChannelProjectionAuthority.recordRead(
+      fetchedSession,
+      sessionReadGeneration,
+    );
+    setContextSession((current) =>
+      mergeSessionDetailReadProjection(
+        current,
+        fetchedSession,
+        context.sessionChannelProjectionAuthority,
+        sessionReadGeneration,
+        accepted,
+      ),
+    );
+  }, [
+    context.sessionChannelProjectionAuthority,
+    fetchedSession,
+    sessionId,
+    sessionReadGeneration,
+    sessionReadRevision,
+    setContextSession,
+  ]);
+  useEffect(() => {
+    setContextSession((current) =>
+      mergeSessionContextProjection(
+        current,
+        session,
+        context.sessionChannelProjectionAuthority,
+        "live",
+      ),
+    );
+  }, [context.sessionChannelProjectionAuthority, session, setContextSession]);
   useEffect(() => {
     const reconcileForeground = () => {
       setForeground({

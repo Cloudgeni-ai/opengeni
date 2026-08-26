@@ -67,6 +67,7 @@ describe("principal transition contract", () => {
       "setSelectedRepoIds(new Set())",
       "setSelectedCapabilityToolIds(new Set())",
       "setWorkspaceStateOwnerId(workspaceId)",
+      "sessionChannelProjectionAuthority.clearWorkspace(previousWorkspaceId)",
     ]) {
       expect(reset).toContain(requiredFence);
     }
