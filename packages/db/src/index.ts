@@ -454,6 +454,7 @@ export * from "./capability-integrations";
 export * from "./integration-bindings";
 export * from "./integration-facets";
 export * from "./insights";
+export * from "./insights-model-bundle";
 export * from "./organization-membership-lifecycle";
 import { assertActiveManagedHumanOrganizationMembership } from "./organization-membership-lifecycle";
 // Deliberately NOT `export *`: `accountIdInRlsScope` is an internal convenience
