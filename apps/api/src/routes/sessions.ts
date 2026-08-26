@@ -211,6 +211,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
+  getManagedAuthRequestActorEpoch,
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -2559,6 +2560,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       c.req.raw.signal,
       {
         observability: deps.observability,
+        actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorizeAfterMs:
           authorization?.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
         reauthorize: async () => {

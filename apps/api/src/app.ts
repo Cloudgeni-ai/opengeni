@@ -37,6 +37,8 @@ import {
   configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
   getWorkspace,
+  reapManagedAuthIsolatedSessions,
+  reapExpiredManagedAuthSessionSets,
   rlsContextForWorkspace,
   withSessionRlsActorContext,
 } from "@opengeni/db";
@@ -55,15 +57,20 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
+  ManagedAuthActorLeaseOutcomeUnknownError,
   hasPermission,
   requireAccessGrant,
   requireLiveAgentAttemptAuthorization,
   requirePermission,
+  releaseManagedAuthRequestActorLease,
+  validateManagedAuthRequestActorLease,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
+import { ManagedAuthActorChangeError } from "@opengeni/core/managed-auth-session-sets";
+import { createBetterAuthSessionAdapter } from "./auth/managed-auth-session-adapter";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
@@ -136,6 +143,11 @@ import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
+import {
+  registerManagedAuthSessionSetRoutes,
+  requireManagedAuthProviderRouteAllowed,
+  scrubManagedAuthProviderResponse,
+} from "./routes/managed-auth-session-sets";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
@@ -167,6 +179,8 @@ export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
+const managedAuthReaperDatabases = new WeakSet<object>();
+const MANAGED_AUTH_REAPER_INTERVAL_MS = 60_000;
 
 /** Effective Hono bodyLimit — API JSON ceiling or voice multipart + multipart overhead. */
 export function apiRequestBodyLimitBytes(settings: {
@@ -202,6 +216,9 @@ export function createAppComposition(deps: AppDependencies): {
   assertManagedEmailTransportMetadata(managedEmailTransport);
   const managedAuth =
     deps.managedAuth ?? createManagedAuth(deps.settings, deps.db, managedEmailTransport);
+  const managedAuthSessionAdapter =
+    deps.managedAuthSessionAdapter ??
+    (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -284,6 +301,24 @@ export function createAppComposition(deps: AppDependencies): {
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
   const observability =
     deps.observability ?? createObservability(deps.settings, { component: "api" });
+  if (
+    managedAuth &&
+    deps.settings.managedAuthSessionSetMode !== "legacy" &&
+    !managedAuthReaperDatabases.has(deps.db as object)
+  ) {
+    managedAuthReaperDatabases.add(deps.db as object);
+    const timer = setInterval(() => {
+      void Promise.all([
+        reapManagedAuthIsolatedSessions(deps.db, 100),
+        reapExpiredManagedAuthSessionSets(deps.db, 100),
+      ]).catch((error) => {
+        observability.error("Managed isolated-auth orphan reap failed", {
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+        });
+      });
+    }, MANAGED_AUTH_REAPER_INTERVAL_MS);
+    (timer as ReturnType<typeof setInterval> & { unref?: () => void }).unref?.();
+  }
   const transcription =
     deps.transcription === undefined
       ? createTranscriptionService({
@@ -304,6 +339,7 @@ export function createAppComposition(deps: AppDependencies): {
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
     managedAuth,
+    managedAuthSessionAdapter,
     managedEmailTransport,
     objectStorage,
     documentIndexer,
@@ -332,13 +368,17 @@ export function createAppComposition(deps: AppDependencies): {
       "Range",
       "X-OpenGeni-Access-Key",
       "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
+      "X-OpenGeni-Session-Csrf",
       "X-OpenGeni-Subject",
     ],
     exposeHeaders: [
       "Accept-Ranges",
       "Content-Range",
       "X-OpenGeni-Api-Contract",
+      "X-OpenGeni-Actor-Epoch",
+      "X-OpenGeni-Actor-State",
       "X-OpenGeni-Correlation-Id",
     ],
   };
@@ -495,11 +535,56 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  app.use("/v1/*", async (c, next) => {
+    try {
+      await next();
+      try {
+        await validateManagedAuthRequestActorLease(c.req.raw);
+      } catch (error) {
+        if (error instanceof ManagedAuthActorChangeError) {
+          c.header("x-opengeni-actor-state", "changed");
+          throw new HTTPException(409, { message: error.code, cause: error });
+        }
+        if (error instanceof ManagedAuthActorLeaseOutcomeUnknownError) {
+          throw new ApiHttpError(503, {
+            code: "upstream_unavailable",
+            message: error.code,
+            retryable: true,
+            outcomeUnknown: true,
+            details: { managedAuthCode: error.code },
+          });
+        }
+        throw error;
+      }
+    } finally {
+      await releaseManagedAuthRequestActorLease(c.req.raw).catch((error) => {
+        observability.error("Managed actor mutation lease release failed", {
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+        });
+      });
+    }
+  });
+
   // These product-owned auth routes must be registered before Better Auth's
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
+  registerManagedAuthSessionSetRoutes(app, routeDeps);
   if (managedAuth) {
-    app.on(["GET", "POST"], "/v1/auth/*", (c) => managedAuth.handler(c.req.raw));
+    app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
+      if (deps.settings.managedAuthSessionSetMode === "legacy") {
+        return await managedAuth.handler(c.req.raw);
+      }
+      requireManagedAuthProviderRouteAllowed(c.req.method, new URL(c.req.url).pathname);
+      // Provider authentication/recovery is isolated from whichever actor the
+      // browser currently renders. Selected-session capabilities are all
+      // product-owned above this wildcard and generation/epoch fenced.
+      const headers = new Headers(c.req.raw.headers);
+      headers.delete("cookie");
+      headers.delete("authorization");
+      headers.delete("x-forwarded-user");
+      const providerRequest = new Request(c.req.raw, { headers });
+      return await scrubManagedAuthProviderResponse(await managedAuth.handler(providerRequest));
+    });
   }
 
   app.get("/healthz", (c) =>
@@ -585,6 +670,7 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
+        managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         analytics: clientAnalyticsConfig(deps.settings),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,

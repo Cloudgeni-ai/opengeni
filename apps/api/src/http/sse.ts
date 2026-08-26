@@ -19,6 +19,7 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
 const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
@@ -463,6 +464,7 @@ export async function sseSessionStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -636,6 +638,7 @@ export async function sseWorkspaceControlStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -763,6 +766,7 @@ export async function sseWorkspaceLiveStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -851,6 +855,7 @@ export async function sseWorkspaceInteractionRevisionStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -922,6 +927,8 @@ export type SseDeliveryOptions = {
   /** Current ACL re-check, run even while the event stream is idle. */
   reauthorize?: (() => Promise<void>) | undefined;
   reauthorizeAfterMs?: number | undefined;
+  /** Exact selected actor emitted on the stream response for cross-tab fencing. */
+  actorEpoch?: string | undefined;
 };
 
 export type SessionSseDeliveryOptions = SseDeliveryOptions;

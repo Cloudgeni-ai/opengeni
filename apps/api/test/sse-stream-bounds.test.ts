@@ -541,6 +541,43 @@ test("rechecks current authority and suppresses a live event after revocation", 
   await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
 });
 
+test("emits the selected actor epoch and closes before a cross-tab actor event", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  let currentEpoch = "7";
+  let publish: ((events: SessionEvent[]) => void) | null = null;
+  const bus = {
+    subscribe: async (
+      _workspaceId: string,
+      _sessionId: string,
+      listener: (events: SessionEvent[]) => void,
+    ) => {
+      publish = listener;
+      return () => {};
+    },
+  } as unknown as EventBus;
+  const response = await sseSessionStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    {
+      actorEpoch: "7",
+      reauthorize: async () => {
+        if (currentEpoch !== "7") throw new Error("selected actor changed in another tab");
+      },
+    },
+  );
+  expect(response.headers.get("x-opengeni-actor-epoch")).toBe("7");
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+  currentEpoch = "8";
+  publish?.([event(1)]);
+  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+});
+
 test("every long-lived SSE surface closes when its current workspace authority is revoked", async () => {
   durableEvents = [];
   durableControlEvents = [];

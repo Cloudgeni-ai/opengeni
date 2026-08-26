@@ -517,6 +517,29 @@ describe("API helpers", () => {
     expect(trusted.status).toBe(204);
     expect(trusted.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
     expect(trusted.headers.get("access-control-allow-credentials")).toBe("true");
+
+    const managed = await app.request("http://localhost/v1/auth/session-set/select", {
+      method: "OPTIONS",
+      headers: {
+        origin: "http://localhost:5173",
+        "access-control-request-method": "POST",
+        "access-control-request-headers":
+          "content-type,x-opengeni-api-contract,x-opengeni-session-csrf,x-opengeni-actor-epoch",
+      },
+    });
+    expect(managed.status).toBe(204);
+    expect(managed.headers.get("access-control-allow-headers")?.toLowerCase()).toContain(
+      "x-opengeni-session-csrf",
+    );
+    expect(managed.headers.get("access-control-allow-headers")?.toLowerCase()).toContain(
+      "x-opengeni-actor-epoch",
+    );
+    expect(externalResponse.headers.get("access-control-expose-headers")?.toLowerCase()).toContain(
+      "x-opengeni-actor-epoch",
+    );
+    expect(externalResponse.headers.get("access-control-expose-headers")?.toLowerCase()).toContain(
+      "x-opengeni-actor-state",
+    );
   });
 
   test("normalizes dynamic route labels for metrics", () => {
@@ -1706,6 +1729,7 @@ describe("GET /v1/config/client", () => {
     const config = await fetchClientConfig(settings);
 
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
+    expect(config.managedAuthSessionSetMode).toBe("legacy");
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     // Built-in deployment topology stays private in the client projection.
@@ -1718,6 +1742,17 @@ describe("GET /v1/config/client", () => {
     });
     expect(defaultModel).not.toHaveProperty("deployment");
     expect(defaultModel).not.toHaveProperty("credentialSource");
+  });
+
+  test("projects the safe dual/broker session-set rollout discriminator", async () => {
+    expect(
+      (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "dual" })))
+        .managedAuthSessionSetMode,
+    ).toBe("dual");
+    expect(
+      (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "broker" })))
+        .managedAuthSessionSetMode,
+    ).toBe("broker");
   });
 
   test("keeps analytics off by default and exposes only configured public identifiers", async () => {
@@ -1807,6 +1842,81 @@ describe("GET /v1/config/client", () => {
     expect(glm).not.toHaveProperty("deployment");
     expect(glm).not.toHaveProperty("credentialSource");
     expect(JSON.stringify(config)).not.toContain("fw_test");
+  });
+});
+
+describe("managed session-set route ownership", () => {
+  function boundaryApp(providerHandler: (request: Request) => Response | Promise<Response>) {
+    return createApp({
+      settings: testSettings({
+        environment: "production",
+        productAccessMode: "managed",
+        managedAuthSessionSetMode: "dual",
+        publicBaseUrl: "https://opengeni.test",
+        betterAuthSecret: "managed-session-set-boundary-secret-32-bytes",
+      }),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: {
+        handler: providerHandler,
+        api: {},
+      } as never,
+      managedAuthSessionAdapter: {} as never,
+    });
+  }
+
+  test("lets the nested session-set contract own a production mismatch envelope", async () => {
+    const response = await boundaryApp(() => new Response("provider should not run")).request(
+      "/v1/auth/session-set/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opengeni-api-contract": "stale-contract",
+          cookie: `opengeni.session_set=${"a".repeat(43)}`,
+        },
+        body: JSON.stringify({
+          operationId: "11111111-1111-4111-8111-111111111111",
+          expectedGeneration: "1",
+        }),
+      },
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: { details: { managedAuthCode: "api_contract_changed" } },
+    });
+  });
+
+  test("blocks provider session capabilities and strips provider tokens from allowed auth", async () => {
+    let providerCalls = 0;
+    const app = boundaryApp(() => {
+      providerCalls += 1;
+      return Response.json(
+        {
+          token: "provider-token-must-not-cross",
+          session: { id: "provider-session" },
+          user: { id: "user-1", email: "user@example.test" },
+        },
+        { headers: { "set-cookie": "better-auth.session_token=signed; Path=/; HttpOnly" } },
+      );
+    });
+    const blocked = await app.request("/v1/auth/list-sessions");
+    expect(blocked.status).toBe(409);
+    expect(providerCalls).toBe(0);
+    expect(await blocked.json()).toMatchObject({
+      error: { details: { managedAuthCode: "provider_route_blocked" } },
+    });
+
+    const signIn = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "user@example.test", password: "password1234" }),
+    });
+    expect(signIn.status).toBe(200);
+    expect(providerCalls).toBe(1);
+    expect(await signIn.json()).toEqual({ user: { id: "user-1", email: "user@example.test" } });
+    expect(signIn.headers.get("set-cookie")).toContain("better-auth.session_token=");
   });
 });
 

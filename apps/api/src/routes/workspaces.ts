@@ -45,6 +45,7 @@ import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
+  getManagedAuthRequestActorEpoch,
   hasPermission,
   requireAccessContext,
   requireAccessGrant,
@@ -363,6 +364,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       c.req.raw.signal,
       {
         observability: deps.observability,
+        actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
         reauthorize: async () => {
           await requireFreshAccessGrant(c, deps, workspaceId, "workspace:read");
         },

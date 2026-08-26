@@ -15755,6 +15755,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
     productAccessMode: ProductAccessMode,
+    // Safe rollout discriminator: the browser only mounts the optional
+    // @opengeni/sdk/accounts controller when this is dual or broker.
+    managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
     analytics: z
       .object({

@@ -293,6 +293,7 @@ describe("release schema contract", () => {
       "0359_insights_force_rls_read_capability.sql",
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
+      "0356_managed_auth_session_sets.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -362,6 +363,9 @@ describe("release schema contract", () => {
     const organizationUserSetupDelivery = completeSourceContract.migrations.some(
       (migration) => migration.path === "0351_organization_user_setup_delivery.sql",
     );
+    const managedAuthSessionSets = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0356_managed_auth_session_sets.sql",
+    );
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
@@ -378,9 +382,12 @@ describe("release schema contract", () => {
         (greenfieldSessionTenancyActivation ? 1 : 0) +
         (organizationSharedWorkspaceAdministration ? 1 : 0) +
         (organizationUserSetupDelivery ? 1 : 0) +
-        (sessionVariableSetAttachments ? 1 : 0),
-      latestMigration: sessionVariableSetAttachments
-        ? "0352_session_variable_set_attachments.sql"
+        (sessionVariableSetAttachments ? 1 : 0) +
+        (managedAuthSessionSets ? 1 : 0),
+      latestMigration: managedAuthSessionSets
+        ? "0356_managed_auth_session_sets.sql"
+        : sessionVariableSetAttachments
+          ? "0352_session_variable_set_attachments.sql"
         : organizationUserSetupDelivery
           ? "0351_organization_user_setup_delivery.sql"
           : organizationSharedWorkspaceAdministration

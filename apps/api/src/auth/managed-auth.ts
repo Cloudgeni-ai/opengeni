@@ -9,6 +9,7 @@ import { ensureManagedAccessForUser } from "@opengeni/db";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanIdentityProjection,
+  getCanonicalHumanExactLoginBindingForAuthUser,
   synchronizeCanonicalHumanLoginBindings,
 } from "@opengeni/db/canonical-human-identities";
 import { betterAuth } from "better-auth";
@@ -17,6 +18,7 @@ import { hashPassword } from "better-auth/crypto";
 import { Pool } from "pg";
 
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
+import { currentManagedAuthAttemptId } from "./managed-auth-attempt-context";
 
 // `ManagedAuth` (the Better Auth `Auth<any>` alias) is owned by @opengeni/core
 // (`managed-auth-type.ts`) — `dependencies.ts`/`access` reference it as a
@@ -121,6 +123,25 @@ export function createManagedAuth(
           returned: false,
           bigint: true,
         },
+        loginBindingId: {
+          type: "string",
+          fieldName: "login_binding_id",
+          input: false,
+          returned: false,
+        },
+        loginBindingRevision: {
+          type: "number",
+          fieldName: "login_binding_revision",
+          input: false,
+          returned: false,
+          bigint: true,
+        },
+        managedAuthLoginTransactionId: {
+          type: "string",
+          fieldName: "managed_auth_login_transaction_id",
+          input: false,
+          returned: false,
+        },
       },
     },
     account: {
@@ -215,8 +236,13 @@ export function createManagedAuth(
               binding: null,
             });
             if (!preflight.allowed) {
+              const exactRecoveryBinding = await getCanonicalHumanExactLoginBindingForAuthUser(db, {
+                authUserId: session.userId,
+                providerId: "credential",
+              });
               const recoveryBinding = preflightProjection.loginBindings.find(
-                (binding) => binding.status === "recovery_pending",
+                (binding) =>
+                  binding.id === exactRecoveryBinding.id && binding.status === "recovery_pending",
               );
               const recoveryAdmission = decideCanonicalHumanSessionAdmission({
                 intent: "recovery_completion",
@@ -238,14 +264,21 @@ export function createManagedAuth(
                   identityId: preflightProjection.activeIdentity.id,
                   identityRevision: preflightProjection.activeIdentity.identityRevision,
                   authRevision: preflightProjection.activeIdentity.authRevision,
+                  loginBindingId: recoveryBinding!.id,
+                  loginBindingRevision: recoveryBinding!.revision,
+                  managedAuthLoginTransactionId: currentManagedAuthAttemptId(),
                 },
               };
             }
 
             await synchronizeCanonicalHumanLoginBindings(db, session.userId);
             const projection = await getCanonicalHumanIdentityProjection(db, session.userId);
+            const exactBinding = await getCanonicalHumanExactLoginBindingForAuthUser(db, {
+              authUserId: session.userId,
+              providerId: "credential",
+            });
             const activeBinding = projection.loginBindings.find(
-              (binding) => binding.id === projection.activeIdentity.activeLoginBindingId,
+              (binding) => binding.id === exactBinding.id,
             );
             const admission = decideCanonicalHumanSessionAdmission({
               intent: "ordinary_session",
@@ -268,6 +301,9 @@ export function createManagedAuth(
                 identityId: projection.activeIdentity.id,
                 identityRevision: projection.activeIdentity.identityRevision,
                 authRevision: projection.activeIdentity.authRevision,
+                loginBindingId: exactBinding.id,
+                loginBindingRevision: exactBinding.revision,
+                managedAuthLoginTransactionId: currentManagedAuthAttemptId(),
               },
             };
           },

@@ -30,6 +30,10 @@
       "types": "./src/core.ts",
       "default": "./src/core.ts"
     },
+    "./accounts": {
+      "types": "./src/accounts.ts",
+      "default": "./src/accounts.ts"
+    },
     "./artifacts": {
       "types": "./src/artifacts.ts",
       "default": "./src/artifacts.ts"

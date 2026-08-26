@@ -512,6 +512,7 @@ describe("OpenGeniClient access + workspaces", () => {
       mcpServers: [{ id: "documents", name: "Documents" }],
       fileUploads: { enabled: true, maxSizeBytes: 26214400 },
       productAccessMode: "managed",
+      managedAuthSessionSetMode: "dual",
       auth: { mode: "managedSession", session: "cookie" },
     };
     const { client, requests } = makeClient(() => jsonResponse(config));
@@ -520,6 +521,7 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(requests[0]!.method).toBe("GET");
     expect(new URL(requests[0]!.url).pathname).toBe("/v1/config/client");
     expect(result.defaultModel).toBe("gpt-5.6-sol");
+    expect(result.managedAuthSessionSetMode).toBe("dual");
     expect(result.models.map((model) => `${model.provider}:${model.id}:${model.api}`)).toEqual([
       "openai:gpt-5.6-sol:responses",
       "fireworks:accounts/fireworks/models/glm-5p2:chat",

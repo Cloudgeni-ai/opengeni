@@ -1508,6 +1508,7 @@ export async function ensureManagedAccessForUser(
     name: string;
     emailVerified?: boolean;
     provisionFallbackOrganization?: boolean;
+    bindPendingInvitations?: boolean;
   },
 ): Promise<AccessContext> {
   return (await ensureManagedAccessForUserWithOrganizationMemberships(db, input)).accessContext;
@@ -1653,6 +1654,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     name: string;
     emailVerified?: boolean;
     provisionFallbackOrganization?: boolean;
+    bindPendingInvitations?: boolean;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
@@ -1660,7 +1662,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, subjectId);
-    if (input.emailVerified === true) {
+    if (input.emailVerified === true && input.bindPendingInvitations !== false) {
       await rawRows(
         txDb,
         sql`select bind_pending_organization_invitations_for_verified_email(
@@ -67885,6 +67887,7 @@ export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
 export * from "./interaction-placement-loss";
 export * from "./canonical-human-identities";
+export * from "./managed-auth-session-sets";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";

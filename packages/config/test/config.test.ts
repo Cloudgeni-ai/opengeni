@@ -407,6 +407,37 @@ describe("Google Drive integration settings", () => {
   });
 });
 
+describe("managed auth browser session-set rollout", () => {
+  test("remains default-off and accepts only the rolling compatibility modes", () => {
+    expect(withEnv({}, () => getSettings()).managedAuthSessionSetMode).toBe("legacy");
+    expect(
+      withEnv({ OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "dual" }, () => getSettings())
+        .managedAuthSessionSetMode,
+    ).toBe("dual");
+    expect(() =>
+      withEnv({ OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "enabled" }, () => getSettings()),
+    ).toThrow();
+  });
+
+  test("requires an HTTPS public authority outside local/test", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+          OPENGENI_PUBLIC_BASE_URL: "http://managed.example.test",
+          OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+          OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+          OPENGENI_RESEND_API_KEY: "re_test",
+          OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString("base64"),
+          OPENGENI_MANAGED_AUTH_SESSION_SET_MODE: "dual",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(/must use https when browser session sets are enabled/);
+  });
+});
+
 describe("personal GitHub OAuth settings", () => {
   const enabled = {
     OPENGENI_ENVIRONMENT: "test",

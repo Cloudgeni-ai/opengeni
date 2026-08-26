@@ -324,6 +324,32 @@ const CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES = [
   "canonical_human_login_bindings",
   "canonical_human_identity_operations",
 ] as const;
+const MANAGED_AUTH_SESSION_SET_ROUTINES = [
+  "get_canonical_human_exact_login_binding(text, text)",
+  "managed_auth_session_set_authority_state(text)",
+  "managed_auth_session_set_snapshot(text, text, boolean, boolean, boolean)",
+  "managed_auth_session_set_bootstrap(text, text, text, text, uuid, text, bigint, bigint)",
+  "managed_auth_session_set_begin_transaction(text, text, uuid, text, bigint, uuid, bigint, text, text, uuid, uuid, text, timestamp with time zone)",
+  "managed_auth_session_set_complete_transaction(text, text, uuid, text, bigint, bigint, uuid, text, text, text)",
+  "managed_auth_session_set_mutate(text, text, uuid, text, bigint, bigint, text, uuid, uuid, uuid, text, text)",
+  "managed_auth_actor_mutation_fence(text, bigint, uuid)",
+  "managed_auth_actor_mutation_lease_acquire(text, bigint, uuid, integer)",
+  "managed_auth_actor_mutation_lease_release(text, uuid)",
+  "managed_auth_actor_mutation_lease_validate(text, bigint, uuid)",
+  "managed_auth_adopted_session_snapshot(text)",
+  "managed_auth_isolated_session_reap(integer)",
+  "managed_auth_expired_session_set_reap(integer)",
+  "managed_auth_session_set_operation_receipt(text, uuid, text, text)",
+] as const;
+const MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES = [
+  "managed_auth_browser_installations",
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_session_sets",
+  "managed_auth_login_slots",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
 const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
@@ -511,6 +537,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...SCOPED_COMPUTE_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
+  ...MANAGED_AUTH_SESSION_SET_ROUTINES,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -702,6 +729,13 @@ export const FORCE_RLS_TABLES = [
   "machine_metrics_latest",
   "machine_metrics_series",
   "machine_removal_operations",
+  "managed_auth_browser_installations",
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_slots",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+  "managed_auth_session_sets",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
@@ -1202,6 +1236,13 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "managed_auth_browser_installations",
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_slots",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+  "managed_auth_session_sets",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -2251,6 +2292,24 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if ((MANAGED_AUTH_SESSION_SET_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.length) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} managed auth session-set authority tables are missing`,
+        );
+      } else if (authorityOwners.size !== 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (routine.owner !== authorityTables[0]!.owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+        );
       }
     } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>
