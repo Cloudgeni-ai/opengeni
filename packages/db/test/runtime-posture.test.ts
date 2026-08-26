@@ -460,13 +460,6 @@ describe("runtime database posture evaluator", () => {
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
           new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
       ).length;
-      const automaticSessionTitleProtectedTableCount = [
-        "automatic_session_title_fanout_outbox_v1",
-      ].filter(
-        (table) =>
-          new Set<string>(FORCE_RLS_TABLES).has(table) &&
-          new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
-      ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
             [FORCE_RLS_TABLES, 292],
@@ -493,9 +486,7 @@ describe("runtime database posture evaluator", () => {
       for (const [tables, length] of contracts) {
         const expectedLength =
           tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
-            ? length +
-              personalResourceProtectedTableCount +
-              automaticSessionTitleProtectedTableCount
+            ? length + personalResourceProtectedTableCount
             : length;
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -505,10 +496,10 @@ describe("runtime database posture evaluator", () => {
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount = hasCurrentMainActivityLedger ? 304 : 211;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount + automaticSessionTitleProtectedTableCount,
+        tableCount + personalResourceProtectedTableCount,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount + automaticSessionTitleProtectedTableCount,
+        tableCount + personalResourceProtectedTableCount,
       );
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
@@ -616,22 +607,17 @@ describe("runtime database posture evaluator", () => {
 
   test("enforces the automatic session title fanout capability boundary", () => {
     const posture = safePosture();
-    posture.tables.push({
+    posture.privateTables.push({
       name: "automatic_session_title_fanout_outbox_v1",
       owner: "opengeni_migrator",
       rlsEnabled: true,
       rlsForced: true,
       rlsActive: true,
       policyCount: 1,
-      artifactOutboxDispatcherPolicy: false,
-      artifactMaterializerPolicy: false,
       select: false,
       insert: false,
       update: false,
       delete: false,
-      truncate: false,
-      references: false,
-      trigger: false,
     });
     posture.privateRoutines.push(
       {
@@ -670,13 +656,7 @@ describe("runtime database posture evaluator", () => {
         securityDefiner: false,
       },
     );
-    const titleFanoutOptions: RuntimeDatabasePostureOptions = {
-      ...options,
-      protectedTables: ["tenant_rows", "automatic_session_title_fanout_outbox_v1"],
-      protectedNoDirectDmlTables: ["automatic_session_title_fanout_outbox_v1"],
-    };
-
-    expect(evaluateRuntimeDatabasePosture(posture, titleFanoutOptions)).toEqual([]);
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
 
     const enqueue = posture.privateRoutines.find((routine) =>
       routine.name.startsWith("enqueue_automatic_session_title_fanout_v1("),
@@ -697,8 +677,13 @@ describe("runtime database posture evaluator", () => {
     policyTrigger.publicExecute = true;
     policyTrigger.securityDefiner = true;
 
-    expect(evaluateRuntimeDatabasePosture(posture, titleFanoutOptions)).toEqual(
+    posture.privateTables.at(-1)!.insert = true;
+    posture.privateTables.at(-1)!.rlsForced = false;
+
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
       expect.arrayContaining([
+        expect.stringContaining("does not FORCE RLS"),
+        expect.stringContaining("forbidden direct privileges on private table"),
         expect.stringContaining(
           "runtime role lacks rolling-compatible automatic session title fanout migration helper",
         ),

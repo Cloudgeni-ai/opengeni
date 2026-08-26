@@ -470,10 +470,7 @@ describe("migration 0303 session tenancy product activation", () => {
         and relation_namespace.nspname = current_schema()
         and referenced_relation.relname = 'sessions'
         and referenced_attribute.attname = 'id'
-        and relation.relname not in (
-          'sessions',
-          'automatic_session_title_fanout_outbox_v1'
-        )
+        and relation.relname <> 'sessions'
         and relation.relrowsecurity
         and not exists (
           select 1

@@ -47,6 +47,7 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
 
 const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
   "enforce_automatic_session_title_policy_v1()";
+const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fanout_outbox_v1";
 const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
   "acquire_automatic_session_title_quarantine_fences_v1(integer)";
 
@@ -544,7 +545,6 @@ export const FORCE_RLS_TABLES = [
   "attached_browser_inventories",
   "audit_events",
   "auth_runs",
-  "automatic_session_title_fanout_outbox_v1",
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
@@ -1147,7 +1147,6 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
-  "automatic_session_title_fanout_outbox_v1",
   "canonical_human_identities",
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
@@ -1323,6 +1322,10 @@ export type RuntimeTargetRoutinePosture = RuntimeRoutinePosture & {
 export type RuntimePrivateTablePosture = {
   name: string;
   owner: string;
+  rlsEnabled?: boolean;
+  rlsForced?: boolean;
+  rlsActive?: boolean;
+  policyCount?: number;
   select: boolean;
   insert: boolean;
   update: boolean;
@@ -1584,6 +1587,10 @@ export async function inspectRuntimeDatabasePosture(
       const privateTables = resultRows<{
         name: string;
         owner: string;
+        rls_enabled: boolean;
+        rls_forced: boolean;
+        rls_active: boolean;
+        policy_count: number;
         can_select: boolean;
         can_insert: boolean;
         can_update: boolean;
@@ -1593,6 +1600,10 @@ export async function inspectRuntimeDatabasePosture(
           select
             c.relname::text as name,
             pg_get_userbyid(c.relowner)::text as owner,
+            c.relrowsecurity as rls_enabled,
+            c.relforcerowsecurity as rls_forced,
+            row_security_active(c.oid) as rls_active,
+            (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
             has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
             has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
             has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
@@ -1608,12 +1619,17 @@ export async function inspectRuntimeDatabasePosture(
               ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
-              ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE}
+              ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
+              ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
       ).map((row) => ({
         name: row.name,
         owner: row.owner,
+        rlsEnabled: row.rls_enabled,
+        rlsForced: row.rls_forced,
+        rlsActive: row.rls_active,
+        policyCount: row.policy_count,
         select: row.can_select,
         insert: row.can_insert,
         update: row.can_update,
@@ -2353,8 +2369,60 @@ export function evaluateRuntimeDatabasePosture(
     }
   }
 
-  const automaticTitleFanoutOutbox = tableByName.get("automatic_session_title_fanout_outbox_v1");
+  const automaticTitleFanoutOutboxes = posture.privateTables.filter(
+    (table) => table.name === AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE,
+  );
+  const automaticTitleFanoutRoutineNames = new Set<string>([
+    ...AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES,
+    AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
+    AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
+  ]);
+  const automaticTitleFanoutCatalogPresent = posture.privateRoutines.some((routine) =>
+    automaticTitleFanoutRoutineNames.has(routine.name),
+  );
+  if (automaticTitleFanoutCatalogPresent && automaticTitleFanoutOutboxes.length !== 1) {
+    violations.push(
+      `automatic session title fanout private outbox ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE} is missing or ambiguous`,
+    );
+  }
+  const automaticTitleFanoutOutbox = automaticTitleFanoutOutboxes[0];
   if (automaticTitleFanoutOutbox) {
+    if (automaticTitleFanoutOutbox.owner === expectedRole) {
+      violations.push(
+        `runtime role owns private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name}`,
+      );
+    }
+    if (!automaticTitleFanoutOutbox.rlsEnabled) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} does not ENABLE RLS`,
+      );
+    }
+    if (!automaticTitleFanoutOutbox.rlsForced) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} does not FORCE RLS`,
+      );
+    }
+    if (!automaticTitleFanoutOutbox.rlsActive) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} has inactive RLS for runtime role`,
+      );
+    }
+    if ((automaticTitleFanoutOutbox.policyCount ?? 0) < 1) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} has no RLS policy`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", automaticTitleFanoutOutbox.select],
+      ["INSERT", automaticTitleFanoutOutbox.insert],
+      ["UPDATE", automaticTitleFanoutOutbox.update],
+      ["DELETE", automaticTitleFanoutOutbox.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${automaticTitleFanoutOutbox.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
+    }
     for (const expectedRoutine of AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES) {
       const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
       if (matches.length !== 1) {

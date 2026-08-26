@@ -1939,8 +1939,14 @@ BEGIN
     -- The automatic-title migration helper and policy trigger deliberately
     -- retain role-scoped EXECUTE for pre-policy startup/readiness
     -- compatibility. Both are SECURITY INVOKER and PUBLIC remains revoked; RLS
-    -- and the table ACL deny app-role enqueue writes, while PostgreSQL refuses
-    -- direct trigger calls, so neither grant conveys data authority.
+    -- and the private-table ACL deny app-role enqueue writes, while PostgreSQL
+    -- refuses direct trigger calls, so neither grant conveys data authority.
+    IF to_regclass('opengeni_private.automatic_session_title_fanout_outbox_v1') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.automatic_session_title_fanout_outbox_v1 FROM %I',
+        ${literal(role)}
+      );
+    END IF;
     IF to_regprocedure('opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid,uuid,uuid,uuid)') IS NOT NULL THEN
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid) TO %I',

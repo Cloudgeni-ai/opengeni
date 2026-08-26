@@ -1,18 +1,22 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
 } from "@opengeni/contracts";
 import {
   acquireOwnerMigratedTestDatabase,
+  acquireBlankTestDatabase,
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { migrate, parseConcurrentIndexMigration } from "../src/migrate";
+import { provisionRoles } from "../src/provision-roles";
 import {
+  evaluateRuntimeDatabasePosture,
   FORCE_RLS_TABLES,
+  inspectRuntimeDatabasePosture,
   PROTECTED_NO_DIRECT_DML_TABLES,
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
 } from "../src/runtime-posture";
@@ -50,6 +54,7 @@ const quarantineMigrationUrl = new URL(
   import.meta.url,
 );
 const provisionRolesUrl = new URL("../src/provision-roles.ts", import.meta.url);
+const migrationsDirectoryUrl = new URL("../drizzle/", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let shared: SharedTestDatabase | null = null;
@@ -255,7 +260,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     const fence = await readFile(fenceMigrationUrl, "utf8");
     const quarantineIndex = await readFile(quarantineIndexMigrationUrl, "utf8");
     const quarantine = await readFile(quarantineMigrationUrl, "utf8");
-    const provisionRoles = await readFile(provisionRolesUrl, "utf8");
+    const provisionRolesSource = await readFile(provisionRolesUrl, "utf8");
     expect(fence.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(fence).not.toContain("LOCK TABLE sessions");
     expect(fence).not.toContain("ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY");
@@ -264,9 +269,14 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     expect(fence).toContain("sessions_automatic_title_quarantine_v1");
     expect(fence).toContain("session_events_automatic_title_quarantine_v1");
     expect(fence).toContain("'session_events'::regclass");
-    expect(fence).toContain("CREATE TABLE automatic_session_title_fanout_outbox_v1");
-    expect(FORCE_RLS_TABLES).toContain("automatic_session_title_fanout_outbox_v1");
-    expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("automatic_session_title_fanout_outbox_v1");
+    expect(fence).toContain(
+      "CREATE TABLE opengeni_private.automatic_session_title_fanout_outbox_v1",
+    );
+    expect(fence).not.toContain("CREATE TABLE automatic_session_title_fanout_outbox_v1");
+    expect(FORCE_RLS_TABLES).not.toContain("automatic_session_title_fanout_outbox_v1");
+    expect(PROTECTED_NO_DIRECT_DML_TABLES).not.toContain(
+      "automatic_session_title_fanout_outbox_v1",
+    );
     expect(fence).toContain("automatic_title_fanout_workspace_event_fk");
     expect(fence).toContain("automatic_title_fanout_pending_idx");
     expect(fence).toContain("enqueue_automatic_session_title_fanout_v1");
@@ -274,13 +284,19 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     expect(fence).toContain("claim_automatic_session_title_fanout_v1");
     expect(fence).toContain("mark_automatic_session_title_fanout_delivered_v1");
     expect(fence).toContain("mark_automatic_session_title_fanout_failed_v1");
-    expect(provisionRoles).toContain(
+    expect(provisionRolesSource).toContain(
       "GRANT EXECUTE ON FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid) TO %I",
     );
-    expect(provisionRoles).toContain(
+    expect(provisionRolesSource).toContain(
       "GRANT EXECUTE ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1() TO %I",
     );
-    expect(provisionRoles).not.toContain(
+    expect(provisionRolesSource).toContain(
+      "REVOKE ALL PRIVILEGES ON TABLE opengeni_private.automatic_session_title_fanout_outbox_v1 FROM %I",
+    );
+    expect(fence).toContain("opengeni.migration_application_roles");
+    expect(fence).toContain("pg_catalog.jsonb_array_elements_text(configured_roles)");
+    expect(fence).not.toContain("TO opengeni_app");
+    expect(provisionRolesSource).not.toContain(
       "REVOKE EXECUTE ON FUNCTION opengeni_private.claim_automatic_session_title_fanout_v1(integer) FROM %I",
     );
     expect(fence).toContain("FOR UPDATE SKIP LOCKED");
@@ -309,14 +325,20 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     expect(fence).toContain("BEFORE INSERT OR UPDATE OF title, title_source");
     expect(fence).toContain("ON sessions");
     expect(fence).not.toContain("public.sessions");
-    expect(fence).not.toContain("RAISE EXCEPTION");
+    const triggerBody = fence.slice(
+      fence.indexOf(
+        "CREATE OR REPLACE FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()",
+      ),
+      fence.indexOf(
+        "REVOKE ALL ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()",
+      ),
+    );
+    expect(triggerBody).not.toContain("RAISE EXCEPTION");
     expect(fence).toContain(
       "REVOKE ALL ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1()",
     );
     expect(fence).toContain("FROM PUBLIC");
-    expect(fence).toContain(
-      "GRANT EXECUTE ON FUNCTION\n      opengeni_private.enforce_automatic_session_title_policy_v1()\n      TO opengeni_app",
-    );
+    expect(fence).toContain("'enforce_automatic_session_title_policy_v1()'");
 
     expect(
       quarantineIndex.startsWith(
@@ -658,7 +680,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     expect(safeAfterFirst[0]?.count).toBe(1);
     const fanoutAfterFirst = await database.admin<Array<{ count: number }>>`
       select count(*)::int as count
-      from automatic_session_title_fanout_outbox_v1
+      from opengeni_private.automatic_session_title_fanout_outbox_v1
       where session_id = any(${ids}::uuid[])
     `;
     expect(fanoutAfterFirst[0]?.count).toBe(1);
@@ -676,7 +698,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     expect(safeAfterFailure[0]?.count).toBe(1);
     const fanoutAfterFailure = await database.admin<Array<{ count: number }>>`
       select count(*)::int as count
-      from automatic_session_title_fanout_outbox_v1
+      from opengeni_private.automatic_session_title_fanout_outbox_v1
       where session_id = any(${ids}::uuid[])
     `;
     expect(fanoutAfterFailure[0]?.count).toBe(1);
@@ -691,7 +713,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     expect(remaining[0]?.count).toBe(0);
     const finalFanout = await database.admin<Array<{ count: number }>>`
       select count(*)::int as count
-      from automatic_session_title_fanout_outbox_v1
+      from opengeni_private.automatic_session_title_fanout_outbox_v1
       where session_id = any(${ids}::uuid[])
     `;
     expect(finalFanout[0]?.count).toBe(3);
@@ -841,22 +863,22 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       select
         has_table_privilege(
           'opengeni_app',
-          'automatic_session_title_fanout_outbox_v1',
+          'opengeni_private.automatic_session_title_fanout_outbox_v1',
           'SELECT'
         ) as select,
         has_table_privilege(
           'opengeni_app',
-          'automatic_session_title_fanout_outbox_v1',
+          'opengeni_private.automatic_session_title_fanout_outbox_v1',
           'INSERT'
         ) as insert,
         has_table_privilege(
           'opengeni_app',
-          'automatic_session_title_fanout_outbox_v1',
+          'opengeni_private.automatic_session_title_fanout_outbox_v1',
           'UPDATE'
         ) as update,
         has_table_privilege(
           'opengeni_app',
-          'automatic_session_title_fanout_outbox_v1',
+          'opengeni_private.automatic_session_title_fanout_outbox_v1',
           'DELETE'
         ) as delete
     `;
@@ -883,6 +905,180 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       executeAsAppRole("select opengeni_private.enforce_automatic_session_title_policy_v1()"),
     ).rejects.toThrow(/trigger functions can only be called as triggers/iu);
   }, 180_000);
+
+  test("keeps custom old binaries ready immediately after 0353 and converges deferred roles", async () => {
+    const blank = await acquireBlankTestDatabase("automatic-title-custom-role-rolling");
+    if (!blank) {
+      if (requireRealDatabase) throw new Error("real blank database unavailable");
+      return;
+    }
+
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    const customRole = `og_title_custom_${suffix}`;
+    const deferredRole = `og_title_deferred_${suffix}`;
+    const customPassword = crypto.randomUUID();
+    const deferredPassword = crypto.randomUUID();
+    const admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
+    let customClient: DbClient | null = null;
+    let deferredClient: DbClient | null = null;
+
+    const roleUrl = (role: string, password: string) => {
+      const value = new URL(blank.databaseUrl);
+      value.username = role;
+      value.password = password;
+      return value.toString();
+    };
+    const titleRoutineNames = new Set([
+      "claim_automatic_session_title_fanout_v1(integer)",
+      "enforce_automatic_session_title_policy_v1()",
+      "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)",
+      "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+      "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+    ]);
+    const postureOptions = (expectedRole: string) => ({
+      rlsStrategy: "force" as const,
+      expectedRole,
+      targetSchema: "public",
+    });
+
+    try {
+      await admin.unsafe(
+        `CREATE TABLE schema_migrations (
+          name text PRIMARY KEY,
+          applied_at timestamptz NOT NULL DEFAULT now()
+        )`,
+      );
+      const migrationFiles = (await readdir(migrationsDirectoryUrl))
+        .filter((file) => file.endsWith(".sql"))
+        .sort();
+      const heldMigrations = migrationFiles.filter(
+        (file) =>
+          Buffer.compare(
+            Buffer.from(file, "utf8"),
+            Buffer.from("0353_automatic_session_title_policy_fence.sql", "utf8"),
+          ) >= 0,
+      );
+      for (const file of heldMigrations) {
+        await admin`insert into schema_migrations (name) values (${file})`;
+      }
+
+      await migrate(blank.databaseUrl, undefined, {
+        applicationDatabaseRoles: [customRole],
+      });
+      await provisionRoles(blank.databaseUrl, {
+        appRole: customRole,
+        appPassword: customPassword,
+      });
+
+      await admin`
+        delete from schema_migrations
+        where name = '0353_automatic_session_title_policy_fence.sql'
+      `;
+      await migrate(blank.databaseUrl, undefined, {
+        applicationDatabaseRoles: [customRole, deferredRole],
+      });
+
+      expect(
+        Array.from(
+          await admin<Array<{ exists: boolean }>>`
+          select exists(
+            select 1 from pg_roles where rolname = ${deferredRole}
+          ) as exists
+        `,
+        ),
+      ).toEqual([{ exists: false }]);
+
+      customClient = createDb(roleUrl(customRole, customPassword), { max: 1 });
+      const customPosture = await inspectRuntimeDatabasePosture(
+        customClient.db,
+        postureOptions(customRole),
+      );
+      expect(
+        customPosture.tables.some(
+          (table) => table.name === "automatic_session_title_fanout_outbox_v1",
+        ),
+      ).toBe(false);
+      expect(
+        customPosture.privateTables.find(
+          (table) => table.name === "automatic_session_title_fanout_outbox_v1",
+        ),
+      ).toMatchObject({
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+        policyCount: 1,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      });
+      expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual([]);
+
+      // Model the complete pre-policy posture with its original target-table
+      // contract and private-routine generic loop. The current evaluator covers
+      // every unchanged identity/schema/table/routine invariant after removing
+      // only the new title catalog, then the old generic loop evaluates all five
+      // newly visible private routines exactly as the old binary did.
+      const legacyPosture = {
+        ...customPosture,
+        privateTables: customPosture.privateTables.filter(
+          (table) => table.name !== "automatic_session_title_fanout_outbox_v1",
+        ),
+        privateRoutines: customPosture.privateRoutines.filter(
+          (routine) => !titleRoutineNames.has(routine.name),
+        ),
+      };
+      expect(evaluateRuntimeDatabasePosture(legacyPosture, postureOptions(customRole))).toEqual([]);
+      expect(
+        customPosture.privateRoutines
+          .filter((routine) => titleRoutineNames.has(routine.name))
+          .map((routine) => ({
+            name: routine.name,
+            execute: routine.execute,
+            publicExecute: routine.publicExecute,
+          }))
+          .sort((left, right) => left.name.localeCompare(right.name)),
+      ).toEqual(
+        [...titleRoutineNames]
+          .sort((left, right) => left.localeCompare(right))
+          .map((name) => ({ name, execute: true, publicExecute: false })),
+      );
+
+      await provisionRoles(blank.databaseUrl, {
+        appRole: deferredRole,
+        appPassword: deferredPassword,
+      });
+      deferredClient = createDb(roleUrl(deferredRole, deferredPassword), {
+        max: 1,
+      });
+      const deferredPosture = await inspectRuntimeDatabasePosture(
+        deferredClient.db,
+        postureOptions(deferredRole),
+      );
+      expect(evaluateRuntimeDatabasePosture(deferredPosture, postureOptions(deferredRole))).toEqual(
+        [],
+      );
+      expect(
+        deferredPosture.privateTables.find(
+          (table) => table.name === "automatic_session_title_fanout_outbox_v1",
+        ),
+      ).toMatchObject({
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+      });
+    } finally {
+      await customClient?.close().catch(() => undefined);
+      await deferredClient?.close().catch(() => undefined);
+      for (const role of [customRole, deferredRole]) {
+        await admin.unsafe(`DROP OWNED BY "${role}"`).catch(() => undefined);
+        await admin.unsafe(`DROP ROLE IF EXISTS "${role}"`).catch(() => undefined);
+      }
+      await admin.end().catch(() => undefined);
+      await blank.release();
+    }
+  }, 900_000);
 
   test("keeps the pre-policy scheduler writer safe and non-throwing during rollout", async () => {
     const database = shared;

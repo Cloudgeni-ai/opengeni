@@ -34,6 +34,7 @@ import {
   integer,
   jsonb,
   numeric,
+  pgSchema,
   pgTable,
   primaryKey,
   text,
@@ -60,6 +61,8 @@ const bytea = customType<{ data: Uint8Array; driverData: Uint8Array }>({
     return "bytea";
   },
 });
+
+const opengeniPrivateSchema = pgSchema("opengeni_private");
 
 export type ConnectorActionPolicyDecision = "allow" | "ask" | "block";
 
@@ -7829,7 +7832,7 @@ export const sessionEvents = pgTable(
  * these exact committed events and marks them delivered; duplicate publication
  * after a process crash is safe because consumers sequence-fence every event.
  */
-export const automaticSessionTitleFanoutOutboxV1 = pgTable(
+export const automaticSessionTitleFanoutOutboxV1 = opengeniPrivateSchema.table(
   "automatic_session_title_fanout_outbox_v1",
   {
     id: uuid("id").primaryKey().defaultRandom(),

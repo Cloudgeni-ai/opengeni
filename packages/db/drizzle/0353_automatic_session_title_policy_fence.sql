@@ -74,7 +74,7 @@ WITH CHECK (
 -- to the event so the existing deployment-wide workflow-wake dispatcher can
 -- fan it out after any migration/worker crash. This is deliberately one
 -- bounded global outbox, not one durable poll per open SSE connection.
-CREATE TABLE automatic_session_title_fanout_outbox_v1 (
+CREATE TABLE opengeni_private.automatic_session_title_fanout_outbox_v1 (
   id uuid PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
   account_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
@@ -98,30 +98,38 @@ CREATE TABLE automatic_session_title_fanout_outbox_v1 (
 );
 
 CREATE UNIQUE INDEX automatic_title_fanout_event_uq
-  ON automatic_session_title_fanout_outbox_v1(event_id);
+  ON opengeni_private.automatic_session_title_fanout_outbox_v1(event_id);
 CREATE INDEX automatic_title_fanout_pending_idx
-  ON automatic_session_title_fanout_outbox_v1(created_at, id)
+  ON opengeni_private.automatic_session_title_fanout_outbox_v1(created_at, id)
   WHERE delivered_at IS NULL;
 
-ALTER TABLE automatic_session_title_fanout_outbox_v1 ENABLE ROW LEVEL SECURITY;
-ALTER TABLE automatic_session_title_fanout_outbox_v1 FORCE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.automatic_session_title_fanout_outbox_v1
+  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE opengeni_private.automatic_session_title_fanout_outbox_v1
+  FORCE ROW LEVEL SECURITY;
 CREATE POLICY automatic_title_fanout_owner_v1
-ON automatic_session_title_fanout_outbox_v1
+ON opengeni_private.automatic_session_title_fanout_outbox_v1
 FOR ALL
 USING (
   current_user = (
     SELECT pg_catalog.pg_get_userbyid(relation.relowner)
     FROM pg_catalog.pg_class relation
-    WHERE relation.oid = 'automatic_session_title_fanout_outbox_v1'::regclass
+    WHERE relation.oid =
+      'opengeni_private.automatic_session_title_fanout_outbox_v1'::regclass
   )
 )
 WITH CHECK (
   current_user = (
     SELECT pg_catalog.pg_get_userbyid(relation.relowner)
     FROM pg_catalog.pg_class relation
-    WHERE relation.oid = 'automatic_session_title_fanout_outbox_v1'::regclass
+    WHERE relation.oid =
+      'opengeni_private.automatic_session_title_fanout_outbox_v1'::regclass
   )
 );
+
+REVOKE ALL ON TABLE
+  opengeni_private.automatic_session_title_fanout_outbox_v1
+  FROM PUBLIC;
 
 -- Keep the batched backfill as one WITH statement while preserving the old
 -- runtime posture's all-private-routines EXECUTE rule. This helper is
@@ -141,7 +149,7 @@ SECURITY INVOKER
 SET search_path FROM CURRENT
 AS $automatic_title_fanout_enqueue$
   WITH enqueued AS (
-    INSERT INTO automatic_session_title_fanout_outbox_v1 (
+    INSERT INTO opengeni_private.automatic_session_title_fanout_outbox_v1 (
       account_id,
       workspace_id,
       session_id,
@@ -186,14 +194,14 @@ SET search_path FROM CURRENT
 AS $automatic_title_fanout_claim$
   WITH candidates AS MATERIALIZED (
     SELECT pending.id
-    FROM automatic_session_title_fanout_outbox_v1 pending
+    FROM opengeni_private.automatic_session_title_fanout_outbox_v1 pending
     WHERE pending.delivered_at IS NULL
     ORDER BY pending.created_at, pending.id
     FOR UPDATE SKIP LOCKED
     LIMIT greatest(1, least(coalesce(p_limit, 100), 1000))
   ),
   claimed AS (
-    UPDATE automatic_session_title_fanout_outbox_v1 pending
+    UPDATE opengeni_private.automatic_session_title_fanout_outbox_v1 pending
     SET attempts = pending.attempts + 1,
         updated_at = pg_catalog.clock_timestamp()
     FROM candidates
@@ -234,7 +242,7 @@ SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $automatic_title_fanout_delivered$
   WITH delivered AS (
-    UPDATE automatic_session_title_fanout_outbox_v1 pending
+    UPDATE opengeni_private.automatic_session_title_fanout_outbox_v1 pending
     SET delivered_at = pg_catalog.clock_timestamp(),
         last_error = NULL,
         updated_at = pg_catalog.clock_timestamp()
@@ -257,7 +265,7 @@ SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $automatic_title_fanout_failed$
   WITH failed AS (
-    UPDATE automatic_session_title_fanout_outbox_v1 pending
+    UPDATE opengeni_private.automatic_session_title_fanout_outbox_v1 pending
     SET last_error = pg_catalog.left(coalesce(p_error, 'unknown failure'), 500),
         updated_at = pg_catalog.clock_timestamp()
     WHERE pending.id = p_outbox_id
@@ -280,25 +288,6 @@ REVOKE ALL ON FUNCTION
 REVOKE ALL ON FUNCTION
   opengeni_private.mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)
   FROM PUBLIC;
-
-DO $automatic_title_fanout_grants$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)
-      TO opengeni_app;
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.claim_automatic_session_title_fanout_v1(integer)
-      TO opengeni_app;
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)
-      TO opengeni_app;
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)
-      TO opengeni_app;
-  END IF;
-END
-$automatic_title_fanout_grants$;
 
 -- The 0345 session-tenancy trigger requires every non-superuser migration
 -- owner to hold the affected workspace fence before PostgreSQL takes a session
@@ -401,18 +390,83 @@ FROM PUBLIC;
 
 -- Pre-policy API and worker binaries require EXECUTE on every non-artifact
 -- opengeni_private routine during startup/readiness. Preserve that rolling and
--- rollback posture without granting data authority: PostgreSQL trigger
--- functions cannot be called as ordinary functions, this routine remains
--- SECURITY INVOKER, and PUBLIC has no EXECUTE.
-DO $automatic_title_policy_trigger_grants$
+-- rollback posture for every exact runtime login supplied to the migration
+-- runner. PUBLIC remains revoked, the app roles receive no direct outbox table
+-- privileges, the enqueue helper remains SECURITY INVOKER, and PostgreSQL
+-- trigger functions cannot be called as ordinary functions.
+DO $automatic_title_rolling_compatibility_grants$
+DECLARE
+  configured_roles_text text := nullif(
+    pg_catalog.current_setting('opengeni.migration_application_roles', true), ''
+  );
+  configured_roles jsonb;
+  role_name text;
+  routine_signature text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION
-      opengeni_private.enforce_automatic_session_title_policy_v1()
-      TO opengeni_app;
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      '0353 automatic session title policy requires an explicit application database role list'
+      USING ERRCODE = '55000';
   END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      '0353 automatic session title policy received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF pg_catalog.jsonb_typeof(configured_roles) <> 'array'
+    OR pg_catalog.jsonb_array_length(configured_roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (
+      SELECT 1
+      FROM pg_catalog.jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE pg_catalog.jsonb_typeof(value) <> 'string'
+        OR pg_catalog.btrim(value #>> '{}') = ''
+        OR pg_catalog.octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT pg_catalog.count(*)
+      FROM pg_catalog.jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT pg_catalog.count(DISTINCT value)
+      FROM pg_catalog.jsonb_array_elements_text(configured_roles) AS roles(value)
+    )
+  THEN
+    RAISE EXCEPTION
+      '0353 automatic session title policy received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+
+  FOR role_name IN
+    SELECT value
+    FROM pg_catalog.jsonb_array_elements_text(configured_roles) AS roles(value)
+    ORDER BY value COLLATE "C"
+  LOOP
+    IF EXISTS (
+      SELECT 1 FROM pg_catalog.pg_roles role_row WHERE role_row.rolname = role_name
+    ) THEN
+      EXECUTE pg_catalog.format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.automatic_session_title_fanout_outbox_v1 FROM %I',
+        role_name
+      );
+      FOREACH routine_signature IN ARRAY ARRAY[
+        'enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)',
+        'claim_automatic_session_title_fanout_v1(integer)',
+        'mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)',
+        'mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)',
+        'enforce_automatic_session_title_policy_v1()'
+      ]
+      LOOP
+        EXECUTE pg_catalog.format(
+          'GRANT EXECUTE ON FUNCTION opengeni_private.%s TO %I',
+          routine_signature,
+          role_name
+        );
+      END LOOP;
+    END IF;
+  END LOOP;
 END
-$automatic_title_policy_trigger_grants$;
+$automatic_title_rolling_compatibility_grants$;
 
 CREATE TRIGGER sessions_automatic_title_policy_v1_fence
 BEFORE INSERT OR UPDATE OF title, title_source ON sessions

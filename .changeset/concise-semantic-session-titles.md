@@ -7,4 +7,4 @@
 "@opengeni/api-router": patch
 ---
 
-Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, rolling-compatible least-privilege database posture, bounded durable SSE catch-up after NATS subscriber reconnects, and UI projections that never use raw initial prompts as display names.
+Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, bounded durable SSE catch-up after NATS subscriber reconnects, and UI projections that never use raw initial prompts as display names.
