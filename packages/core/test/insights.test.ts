@@ -101,11 +101,13 @@ describe("getWorkspaceInsights", () => {
 
   test("uses UTC-month model.tokens and agent_run.created for caps", async () => {
     stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockImplementation(async (_db, input) => {
-      if (input.eventType === "model.tokens") return 1_234;
-      if (input.eventType === "agent_run.created") return 7;
-      throw new Error(`unexpected cap meter ${input.eventType}`);
-    });
+    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockImplementation(
+      async (_db, input) => {
+        if (input.eventType === "model.tokens") return 1_234;
+        if (input.eventType === "agent_run.created") return 7;
+        throw new Error(`unexpected cap meter ${input.eventType}`);
+      },
+    );
     restores.push(() => capSpy.mockRestore());
 
     const now = new Date("2026-07-15T12:00:00.000Z");
@@ -145,7 +147,7 @@ describe("getWorkspaceInsights", () => {
 
   test("does not invent machines when selfhosted is disabled", async () => {
     const { machines } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(0);
+    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
     restores.push(() => capSpy.mockRestore());
 
     const { snapshot } = await getWorkspaceInsights(
@@ -159,7 +161,7 @@ describe("getWorkspaceInsights", () => {
 
   test("uses elapsed UTC-hour buckets for today and daily buckets for longer ranges", async () => {
     const { emptyDays, emptyHours, usageDay, usageHour } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(0);
+    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
     restores.push(() => capSpy.mockRestore());
 
     const { snapshot: today } = await getWorkspaceInsights(
@@ -205,7 +207,7 @@ describe("getWorkspaceInsights", () => {
 
   test("keeps token/cache coverage and hypothetical provider cost separate from credits", async () => {
     const { emptyAgg, emptyHours, recent } = stubEmptyWorkspace();
-    const capSpy = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(0);
+    const capSpy = spyOn(opengeniDb, "sumUsageQuantitySinceForInsights").mockResolvedValue(0);
     restores.push(() => capSpy.mockRestore());
     emptyAgg
       .mockResolvedValueOnce([

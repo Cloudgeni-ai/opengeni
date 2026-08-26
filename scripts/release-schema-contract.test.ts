@@ -109,7 +109,7 @@ describe("release schema contract", () => {
     );
   });
 
-  test("registers automatic session title migrations without repinning host-export history", async () => {
+  test("registers forward migrations without repinning host-export history", async () => {
     const completeSourceContract = await buildSchemaContract();
     const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
       (migration) => migration.path === "0353_automatic_session_title_policy_fence.sql",
@@ -123,10 +123,14 @@ describe("release schema contract", () => {
     const sessionVariableSetAttachments = completeSourceContract.migrations.some(
       (migration) => migration.path === "0352_session_variable_set_attachments.sql",
     );
+    const setBasedInsightsSessionVisibility = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0356_set_based_insights_session_visibility.sql",
+    );
     const automaticSessionTitleMigrationPaths = new Set([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
+      "0356_set_based_insights_session_visibility.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -137,16 +141,19 @@ describe("release schema contract", () => {
         migrationsBeforeAutomaticSessionTitles.length +
         (automaticSessionTitlePolicyFence ? 1 : 0) +
         (automaticSessionTitleQuarantineIndex ? 1 : 0) +
-        (automaticSessionTitleQuarantine ? 1 : 0),
-      latestMigration: automaticSessionTitleQuarantine
-        ? "0355_automatic_session_title_quarantine.sql"
-        : automaticSessionTitleQuarantineIndex
-          ? "0354_automatic_session_title_quarantine_index.sql"
-          : automaticSessionTitlePolicyFence
-            ? "0353_automatic_session_title_policy_fence.sql"
-            : sessionVariableSetAttachments
-              ? "0352_session_variable_set_attachments.sql"
-              : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
+        (automaticSessionTitleQuarantine ? 1 : 0) +
+        (setBasedInsightsSessionVisibility ? 1 : 0),
+      latestMigration: setBasedInsightsSessionVisibility
+        ? "0356_set_based_insights_session_visibility.sql"
+        : automaticSessionTitleQuarantine
+          ? "0355_automatic_session_title_quarantine.sql"
+          : automaticSessionTitleQuarantineIndex
+            ? "0354_automatic_session_title_quarantine_index.sql"
+            : automaticSessionTitlePolicyFence
+              ? "0353_automatic_session_title_policy_fence.sql"
+              : sessionVariableSetAttachments
+                ? "0352_session_variable_set_attachments.sql"
+                : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
     });
   });
 
@@ -155,6 +162,7 @@ describe("release schema contract", () => {
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
+      "0356_set_based_insights_session_visibility.sql",
     ]);
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
@@ -243,6 +251,7 @@ describe("release schema contract", () => {
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
+      "0356_set_based_insights_session_visibility.sql",
     );
     // Each appended migration moves both of these, and two candidates can be in
     // flight at once, so derive them from what is actually on disk rather than
