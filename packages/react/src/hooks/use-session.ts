@@ -99,6 +99,13 @@ export function useSession(
   // the UI reflects the new title without polling or a full re-fetch.
   const onTitleEvent = useCallback(
     (event: SessionEvent) => {
+      // The fetched session row is the authoritative title projection through
+      // lastSequence. Shared feeds may replay that historical tail after the
+      // fetch; applying it would undo a row-only migration quarantine. Only an
+      // event committed after this snapshot may live-patch the title.
+      if (!base || event.sequence <= base.lastSequence) {
+        return;
+      }
       const payload = (event.payload ?? {}) as { title?: unknown; source?: unknown };
       const title = payload.title;
       if (typeof title !== "string") {
@@ -108,9 +115,6 @@ export function useSession(
         payload.source === "user" || payload.source === "agent" ? payload.source : null;
       setOverride((current): Session | null => {
         const next = current ?? base;
-        if (!next) {
-          return current;
-        }
         return { ...next, title, titleSource: source };
       });
     },

@@ -1,6 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb, createSession, grantWorkspaceAccess, removeWorkspaceMember } from "@opengeni/db";
+import {
+  createDb,
+  createSession,
+  grantWorkspaceAccess,
+  removeWorkspaceMember,
+  updateSessionTitle,
+} from "@opengeni/db";
 import { signDelegatedAccessToken, type Permission, type SessionEvent } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
@@ -708,7 +714,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         workspaceId,
         "Pinned hierarchy manager",
       );
-      const ordinaryChild = await createSession(dbClient.db, {
+      const ordinaryChild = await createTitledSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
         initialMessage: "Ordinary manager child",
@@ -720,7 +726,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         sandboxBackend: "none",
         parentSessionId: manager.id,
       });
-      const intermediary = await createSession(dbClient.db, {
+      const intermediary = await createTitledSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
         initialMessage: "Lazy hierarchy intermediary",
@@ -732,7 +738,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         sandboxBackend: "none",
         parentSessionId: manager.id,
       });
-      const intermediarySibling = await createSession(dbClient.db, {
+      const intermediarySibling = await createTitledSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
         initialMessage: "Ordinary intermediary child",
@@ -744,7 +750,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         sandboxBackend: "none",
         parentSessionId: intermediary.id,
       });
-      const descendant = await createSession(dbClient.db, {
+      const descendant = await createTitledSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
         initialMessage: "Pinned hierarchy descendant",
@@ -756,7 +762,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         sandboxBackend: "none",
         parentSessionId: intermediary.id,
       });
-      const leaf = await createSession(dbClient.db, {
+      const leaf = await createTitledSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
         initialMessage: "Descendant-owned leaf",
@@ -936,7 +942,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // the ordinary authenticated lineage read and production UI rendering.
       const childSessionIds: string[] = [];
       for (const index of [1, 2]) {
-        const child = await createSession(dbClient.db, {
+        const child = await createTitledSession(dbClient.db, {
           accountId: manager.accountId,
           workspaceId,
           initialMessage: `Trusted child agent ${index}`,
@@ -950,7 +956,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         });
         childSessionIds.push(child.id);
       }
-      const grandchild = await createSession(dbClient.db, {
+      const grandchild = await createTitledSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
         initialMessage: `Intermediate agent ${"with a long descriptive title ".repeat(4)}`.slice(
@@ -965,7 +971,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         sandboxBackend: "none",
         parentSessionId: childSessionIds[0]!,
       });
-      const deepChild = await createSession(dbClient.db, {
+      const deepChild = await createTitledSession(dbClient.db, {
         accountId: manager.accountId,
         workspaceId,
         initialMessage: `Deep nested agent ${"with a long descriptive title ".repeat(5)}`.slice(
@@ -1821,10 +1827,48 @@ async function createSessionThroughApi(
       if (!response.ok) {
         throw new Error(`session create failed: ${response.status} ${await response.text()}`);
       }
-      return (await response.json()) as BrowserSession;
+      const created = (await response.json()) as BrowserSession;
+      // Session-pin acceptance needs stable, human-readable fixture identities.
+      // Set those identities through the public manual-rename path instead of
+      // relying on the first prompt to become a display title.
+      const renameResponse = await fetch(
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${created.id}`,
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ title: sessionMessage }),
+        },
+      );
+      if (!renameResponse.ok) {
+        throw new Error(
+          `session rename failed: ${renameResponse.status} ${await renameResponse.text()}`,
+        );
+      }
+      return (await renameResponse.json()) as BrowserSession;
     },
     { apiBaseUrl, workspaceId, initialMessage, options },
   );
+}
+
+async function createTitledSession(
+  db: Parameters<typeof createSession>[0],
+  input: Parameters<typeof createSession>[1],
+): Promise<Awaited<ReturnType<typeof createSession>>> {
+  const session = await createSession(db, input);
+  const result = await updateSessionTitle(db, {
+    workspaceId: input.workspaceId,
+    sessionId: session.id,
+    title: input.initialMessage,
+    source: "user",
+  });
+  if (!result.updated || result.title !== input.initialMessage) {
+    throw new Error(`failed to assign explicit fixture title to session ${session.id}`);
+  }
+  return {
+    ...session,
+    title: result.title,
+    titleSource: "user",
+  };
 }
 
 async function setSessionPinThroughApi(

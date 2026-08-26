@@ -54,6 +54,7 @@ import { ModelPicker } from "@/components/pickers";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   agentConfigFromFormState,
   applyScheduledTaskCadence,
@@ -1300,8 +1301,7 @@ function ScheduledTaskForm(props: {
               ) : null}
               {props.sessions.map((session) => (
                 <option key={session.id} value={session.id}>
-                  {session.title?.trim() || session.initialMessage.trim() || "Untitled session"} ·{" "}
-                  {session.status}
+                  {sessionDisplayTitle(session)} · {session.status}
                 </option>
               ))}
             </Select>

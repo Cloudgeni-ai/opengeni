@@ -488,9 +488,10 @@ The managed-human API surface is:
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
 - `PATCH /v1/organizations/:organizationId/workspaces/:workspaceId` plus its
-  `/settings` route, and `POST|PATCH|DELETE` below
-  `/v1/organizations/:organizationId/workspaces/:workspaceId/members` for the
-  shared-workspace control plane; and
+  `/settings` route, `PUT
+  /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
+  for an idempotent named or custom grant, and the explicit `/revoke` command
+  below that member route for the shared-workspace control plane; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
 These routes require a direct managed-human cookie session; API keys and
@@ -582,32 +583,74 @@ organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
-Pre-registration invitation creation creates a matching
-`organization_user_setup_intents` row, then asks the shared managed-auth email
-transport to send the recipient a setup link. Only the SHA-256 digest of the
-deterministic server-signed bearer is stored; the email carries it in a URL
-fragment that the browser consumes and scrubs before any API request. The table
-is FORCE RLS with no application-role DML, and its creation capability requires
-the exact invitation creator's live owner/administrator membership.
+Pre-registration invitation creation now claims a matching durable
+`organization_user_setup_deliveries` row and append-only attempt before calling
+the shared managed-auth email transport. The delivery freezes the invited
+name/email, organization name/role, and exact named shared-workspace access. It
+stores only SHA-256 token/payload digests, never the bearer or rendered message
+body. `organization_user_setup_deliveries` and
+`organization_user_setup_delivery_attempts` are FORCE RLS with no application-
+role DML; PUBLIC-revoked SECURITY DEFINER claim, prepare, settle, and preview
+capabilities are the only application seams.
 
-When `OPENGENI_RESEND_API_KEY` is configured, the transport attempts provider
-delivery with an idempotency key derived from the invitation operation id. An
-exact API replay derives the same bearer and provider key without minting
-another authority. In local or test mode without that provider key, the
-transport logs that delivery was skipped and returns successfully; it does not
-provide a capturable setup link. In a non-local deployment, a missing provider
-key or a provider error fails the request after the invitation and setup intent
-may already have committed, so the administrator receives an outcome-unknown
-result. This phase has no durable delivery outcome, retry, or reconciliation
-state.
+The prepare capability writes the stable bearer and payload digests and the
+`provider_started` marker before provider I/O. A stable provider idempotency key
+belongs to the delivery rather than an HTTP attempt, so exact create replays and
+explicit retries send byte-identical content under the same key. The digest
+includes the effective provider sender as well as recipient, subject, text, and
+HTML plus an immutable provider/account/policy idempotency scope, so changing
+`OPENGENI_EMAIL_FROM`, provider, provider account, or key-retention policy cannot
+silently change a retry under an old key. Clear provider refusals settle as
+`failed`; network/server ambiguity settles as `outcome_unknown` and is never
+blindly retried by the server. Each transport declares a conservative key-
+retention guarantee. The prepare boundary persists the resulting absolute safe-
+until fence, and an ambiguous retry cannot extend it. Resend declares its
+documented 24-hour retention; another injected transport supplies its own bound
+scope and retention. Once the durable fence expires, `retryState` becomes
+`reconciliation_required`, the API rejects a new send, and People & invitations
+instructs an administrator to reconcile provider state instead of offering a
+retry. Every allowed retry appends an attempt and preserves the delivery id,
+bearer, frozen snapshot, payload digest, provider scope, safe-until fence, and
+provider key. A prior unresolved outcome also survives a later render/prepare
+failure or pre-provider lease expiry; only a same-scope idempotent provider
+settlement or revocation clears it. Revocation wins over an in-flight provider
+result and atomically closes its claim and attempt.
+
+Invitation creation and provider delivery intentionally remain separate
+transactions. If the process exits after the invitation commits but before its
+delivery journal is created, the invitation list shows `Delivery not started`
+and offers `Send invitation`. That authenticated retry resolves the immutable
+invite operation receipt server-side, creates the missing ledger while keeping
+the original creator binding, and sends through the ordinary prepare/settle
+path. An exact expired pre-provider claim becomes `failed`; an expired
+provider-started claim becomes `outcome_unknown`. Neither can remain a hidden
+permanent `pending` row.
+
+`OPENGENI_RESEND_API_KEY` selects the standalone Resend adapter, while embedded
+hosts may inject another provider-neutral `ManagedEmailTransport`. An injected
+transport must declare a bounded sender, a stable non-secret idempotency scope
+that identifies provider/account/policy, and an integer retention guarantee;
+composition rejects malformed metadata before any invitation can commit.
+Local/test mode uses a process-local capture transport whose entries are count-
+and TTL-bounded and one-time readable; it has no route, database, disk, or log
+surface. Production managed-mode configuration validation still requires a
+provider key; the injectable seam does not relax that deployment preflight.
 
 Because the bearer is derived from the invitation id, the URL and signing
 configuration (`OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET`) is proven as a precondition *before* the
 invitation commits and reported as `503`; a deployment missing either would
 otherwise fail after the row exists without even being able to construct the
-setup link. This precondition does not prove provider availability or record a
-delivery outcome.
+setup link. Provider availability is deliberately not part of that
+configuration precondition; the durable journal records the resulting delivery
+outcome.
+
+`POST /v1/auth/organization-setup/preview` accepts the same signed-out bearer
+under the setup abuse limiter and returns only its frozen safe invitation
+projection. Pending previews include organization, invited name/email, role,
+named shared-workspace access, and expiry. Invalid, expired, revoked, and
+completed links return explicit bounded states without disclosing another
+invitation or account.
 
 `POST /v1/auth/organization-setup` accepts the unguessable bearer without a
 session. A bounded fail-closed global/per-client application limiter runs
@@ -641,6 +684,33 @@ product mutations are also API-contract fenced, and the web sends the exact
 release contract revision, so a stale client cannot cross the cutover after
 service resumes.
 
+The canonical repository acceptance for this lifecycle is
+`test/e2e/organization-onboarding-acceptance.e2e.ts`. It composes the real
+Better Auth handler and Hono API, migrates PostgreSQL through a dedicated
+`NOSUPERUSER NOBYPASSRLS` owner, provisions and connects through
+`opengeni_app`, drives public operations through the SDK, and completes the
+human paths in a production-built web bundle under Chromium. Its process-local
+mail capture is count- and TTL-bounded, one-time readable, and never persists a
+bearer or rendered body. The lane proves ordinary named signup, the exact
+Personal-only owner graph, immediate private-session creation, unregistered
+setup, registered invitation choice, shared grant/revoke, stale and
+cross-organization rejection, password reset, delivery refusal/ambiguity, RLS
+posture, accessibility, responsive layout, and browser-error cleanliness.
+
+Run the same fail-closed boundary locally with:
+
+```bash
+OPENGENI_REQUIRE_REAL_DB=1 \
+OPENGENI_ONBOARDING_EVIDENCE_DIR=/tmp/opengeni-onboarding-evidence \
+bun scripts/run-browser-e2e.ts \
+  ./test/e2e/organization-onboarding-acceptance.e2e.ts
+```
+
+The curated `onboarding` CI lane retains a machine-readable evidence file plus
+1440 px, 390 px, and 320 px screenshots. Missing Docker/PostgreSQL, Chromium,
+an evidence file, or any expected capture fails the lane rather than producing
+a skipped green result.
+
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
 and Billing sections. Overview projects the canonical organization name plus
@@ -673,9 +743,13 @@ private sessions, credentials, Connections, or personal resources. Workspace
 access is administered from the organization console: invite the person to the
 organization first, then assign an active organization member to each shared
 workspace. Workspace settings links back to that control plane instead of
-creating an independent invitation path. The setup path attempts provider email
-delivery as described above; durable outcome and retry administration remain a
-later delivery phase.
+creating an independent invitation path. People & invitations shows the invited
+name/email, organization role, exact named shared-workspace access, invitation
+and delivery state, attempt count, and explicit retry controls for failed or
+outcome-unknown delivery. A sole active owner's role/suspend/remove controls
+remain visible but disabled with the instruction to assign another active owner
+first. The setup screen renders the frozen invitation preview and states that
+no Personal workspace is shared.
 
 Migration `0331_managed_organization_creation.sql` introduced the
 managed-cookie-only `POST /v1/organizations` factory with a provisional initial
@@ -704,6 +778,59 @@ activate it. Organization
 Overview presents Member and Workspace administrator as the primary access
 presets while preserving existing custom permission sets until an administrator
 deliberately replaces one.
+
+Migration `0350_organization_shared_workspace_administration.sql` completes
+that product contract as a rolling, additive compatibility slice. Every public
+`Workspace` now carries a required machine-readable `kind` of `personal` or
+`shared`. The database derives it only from the canonical
+`organization_memberships.personal_workspace_id` pointer under exact
+account/workspace RLS context; names, slugs, and client guesses never determine
+authority. Signup and invitation acceptance still create only the joining
+human's Personal workspace. A shared workspace exists only after an owner or
+administrator explicitly creates it.
+
+The server owns three exact shared-workspace role definitions: `viewer`,
+`member`, and `admin`. The administration overview returns their labels,
+descriptions, and permission arrays, and every named grant materializes that
+server-owned array rather than accepting caller permissions. Existing or newly
+authored advanced permission sets remain an explicit `custom` escape hatch;
+the server validates them against workspace-scoped permission vocabulary and
+never lets custom workspace access smuggle account or billing authority.
+Organization owners and administrators may create and rename shared
+workspaces, grant or replace access, and revoke access. Ordinary organization
+members, cross-organization membership ids, and every Personal workspace fail
+closed. Organization membership role changes keep the 0263 sole-owner
+invariant; workspace roles do not alter organization roles.
+
+Create, rename, grant, and revoke are operation-id idempotent. Renames and
+access replacement/removal are exact-timestamp CAS fenced. Immutable FORCE-RLS
+receipt and event tables record the actor membership, shared workspace, target
+membership/access row, action, and named/custom role without accepting direct
+application DML. Revocation enters the organization advisory fence before the
+canonical session-tenancy and per-subject personal-state locks, then delegates
+destructive cleanup to the existing 0278 settlement/removal protocol before
+writing its receipt. This preserves queued/live turn cancellation and personal
+row teardown without reintroducing the organization/workspace lock inversion.
+
+Rolling compatibility is explicit: the legacy `list_organization_members`
+function and its Personal retention fields remain unchanged for older binaries.
+New organization-administration routes use the separate
+`list_organization_administration_members` projection, which exposes safe
+name/email plus shared-workspace access and omits Personal workspace and
+retention metadata. Organization settings is the sole editor for the human
+roster and shared-workspace grants. Workspace settings performs no raw human
+roster read or edit; it shows only the notice/link back to Organization
+settings, while its separate Slack access-request queue keeps its existing
+workspace-admin lifecycle.
+
+Migration `0351_organization_user_setup_delivery.sql` adds the rolling durable
+invitation-email delivery boundary described above. Its lock prefix is
+normalized email advisory fence, canonical organization advisory fence,
+account row, actor membership, invitation, delivery, then attempt. Claim holder
+ids are server-generated and capability-bound; caller operation ids identify
+replay receipts but never authorize settlement. A released `provider_started`
+claim projects `outcome_unknown`, preserving ambiguity for explicit human
+reconciliation rather than permitting a second untracked send.
 
 Suspension immediately removes persisted shared-workspace grants, revokes
 personal-resource grants, fences membership-owned sessions, terminally cancels
@@ -1242,16 +1369,16 @@ activity-write fence described in the Legacy behavior section, and migration
 reads. The later bounded API/core/SDK activation described above does not widen
 the personal-workspace exception or add another durable membership row.
 
-### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 + 0348 current)
+### C. Membership lifecycle (0263 + 0314 + 0330 + 0331 + 0348 + 0351 current)
 
 The invitation, role, suspension, reactivation, offboarding, retention,
 operator-driven destructive expiry, and multi-organization access projection
 described above are active. The bounded managed web administration surface
 described above is also active. Verified-email invitation binding,
 self-service managed organization creation, organization-scoped shared
-workspace administration, and the invited-user setup email attempt are active.
-Durable email delivery outcome/retry reconciliation and automatic scheduling of
-the operator command remain deferred.
+workspace administration, the invited-user setup email, and durable email
+delivery outcome/retry reconciliation are active. Automatic scheduling of the
+operator command remains deferred.
 
 ### D. Backfill
 
@@ -2171,6 +2298,32 @@ the global boundary before the operator's source locks would introduce a
 RowExclusive/global-lock deadlock and is forbidden. Migration 0340 does not
 itself auto-activate new organizations.
 
+Migration 0349 consumes that frozen boundary only inside
+`complete_self_service_organization_setup`. The setup transaction first writes
+and validates exactly one newly inserted `better-auth:user` organization, one
+active owner membership, its canonical Personal workspace and control row, no
+`workspace_memberships`, and its immutable setup receipt. The explicit 0348
+orphan-account adoption branch is excluded even when the adopted account was
+otherwise empty. Only after that proof does the owner-only helper take the
+canonical boundary and inspect a committed activation witness. With no witness,
+the setup commits unactivated and remains on the operator procedure above; with
+a witness, the same transaction appends the existing version-1 activation
+receipt shape, an enabled version-1 private-session setting and immutable
+setting event, plus `session_tenancy_greenfield_activation_evidence` binding the
+exact setup operation, Personal-only graph digest, witness, parity digest, and
+setting event. A failure rolls back the account graph, setup receipt, activation,
+setting/event, and evidence together, so retry is deterministic and no
+unreceipted private authority can escape. Setup replay returns its existing
+receipt and never re-runs activation; a changed operation remains a conflict.
+
+The greenfield helper and evidence table have no runtime-role or PUBLIC access,
+use FORCE RLS under the real non-superuser/non-BYPASSRLS owner posture, and are
+not an alternate activation API for existing organizations. Migration 0349 also
+opens and restores a subject-and-organization-fenced owner policy window around
+the two Personal private-create membership readers; without that repair those
+readers were blind under FORCE RLS and an otherwise activated fresh owner could
+not create the immediate private session promised by the signup contract.
+
 ### What an operator must not do
 
 - Do not restart a pre-activation image after an activation migration has
@@ -2194,7 +2347,6 @@ itself auto-activate new organizations.
 
 ## Remaining non-goals
 
-- durable invitation-email delivery outcome, retry, and reconciliation state;
 - a personal `workspace_memberships` row or delegated personal-workspace access;
 - user-resource authority/grant writes, discovery, or sharing;
 - resource CRUD or discovery changes;

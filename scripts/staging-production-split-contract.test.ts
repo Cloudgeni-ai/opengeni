@@ -33,6 +33,20 @@ describe("staging / production split workflows", () => {
 
   test("canary npm publish does not consume changesets or move latest", () => {
     const source = workflow("publish-canary.yml");
+    const admission = source.indexOf("name: Admit protected main source");
+    const checkout = source.indexOf("name: Check out source");
+    const install = source.indexOf("name: Install dependencies");
+    const publish = source.indexOf("name: Publish canary versions");
+    expect(admission).toBeGreaterThan(-1);
+    expect(admission).toBeLessThan(checkout);
+    expect(checkout).toBeLessThan(install);
+    expect(install).toBeLessThan(publish);
+    expect(source).toContain('[[ "$GITHUB_REF" == "refs/heads/main" ]]');
+    expect(source).toContain('[[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]');
+    expect(source).toContain('[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]');
+    expect(source).toContain('ref: "${{ github.sha }}"');
+    expect(source).toContain('[[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]');
+    expect(source).not.toContain("inputs.source_sha || github.sha");
     expect(source).toContain("bun scripts/publish-canary.ts");
     expect(source).toContain("group: publish-canary");
     expect(source).toContain('NPM_CONFIG_PROVENANCE: "true"');

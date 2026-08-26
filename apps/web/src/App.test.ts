@@ -928,6 +928,7 @@ describe("organization helpers", () => {
     return {
       id,
       accountId,
+      kind: "shared",
       name: id,
       slug: null,
       externalSource: null,
@@ -2710,6 +2711,7 @@ describe("workspace switcher helpers", () => {
       createdAt: "2026-06-11T08:00:00.000Z",
       updatedAt: "2026-06-11T08:00:00.000Z",
       ...patch,
+      kind: patch.kind ?? "shared",
     };
   }
 });

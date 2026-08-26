@@ -4,8 +4,35 @@ import { Permission } from "./permissions";
 export const OrganizationMembershipRole = z.enum(["owner", "admin", "member"]);
 export type OrganizationMembershipRole = z.infer<typeof OrganizationMembershipRole>;
 
+export const WorkspaceMemberRole = z.enum(["viewer", "member", "admin", "custom"]);
+export type WorkspaceMemberRole = z.infer<typeof WorkspaceMemberRole>;
+
+export const AssignableWorkspaceMemberRole = z.enum(["viewer", "member", "admin"]);
+export type AssignableWorkspaceMemberRole = z.infer<typeof AssignableWorkspaceMemberRole>;
+
 export const OrganizationInvitationStatus = z.enum(["pending", "accepted", "revoked", "expired"]);
 export type OrganizationInvitationStatus = z.infer<typeof OrganizationInvitationStatus>;
+
+export const OrganizationUserSetupDeliveryState = z.enum([
+  "pending",
+  "sent",
+  "failed",
+  "outcome_unknown",
+  "revoked",
+]);
+export type OrganizationUserSetupDeliveryState = z.infer<typeof OrganizationUserSetupDeliveryState>;
+
+export const OrganizationUserSetupDelivery = z.object({
+  id: z.string().uuid(),
+  state: OrganizationUserSetupDeliveryState,
+  attemptCount: z.number().int().nonnegative(),
+  revision: z.number().int().positive(),
+  errorClass: z.string().min(1).max(64).nullable(),
+  retryState: z.enum(["available", "reconciliation_required", "unavailable"]),
+  sentAt: z.string().datetime({ offset: true }).nullable(),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type OrganizationUserSetupDelivery = z.infer<typeof OrganizationUserSetupDelivery>;
 
 export const OrganizationInvitation = z.object({
   id: z.string().uuid(),
@@ -21,6 +48,7 @@ export const OrganizationInvitation = z.object({
   acceptedMembershipId: z.string().uuid().nullable(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
+  delivery: OrganizationUserSetupDelivery.nullable().default(null),
 });
 export type OrganizationInvitation = z.infer<typeof OrganizationInvitation>;
 
@@ -40,6 +68,34 @@ export const OrganizationMember = z.object({
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type OrganizationMember = z.infer<typeof OrganizationMember>;
+
+export const OrganizationAdministrationMemberWorkspaceAccess = z.object({
+  workspaceId: z.string().uuid(),
+  workspaceName: z.string().min(1).max(255),
+  membershipId: z.string().uuid(),
+  role: WorkspaceMemberRole,
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type OrganizationAdministrationMemberWorkspaceAccess = z.infer<
+  typeof OrganizationAdministrationMemberWorkspaceAccess
+>;
+
+/** Safe admin projection. Personal-workspace and personal-resource metadata are absent. */
+export const OrganizationAdministrationMember = z.object({
+  id: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  subjectId: z.string().min(1).max(1024),
+  name: z.string().min(1).max(1024).nullable(),
+  email: z.string().email().max(320).nullable(),
+  role: OrganizationMembershipRole,
+  status: z.enum(["provisioning", "active", "suspended", "revoked"]),
+  authorizationRevision: z.number().int().positive(),
+  sharedWorkspaceAccess: z.array(OrganizationAdministrationMemberWorkspaceAccess).max(500),
+  revokedAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type OrganizationAdministrationMember = z.infer<typeof OrganizationAdministrationMember>;
 
 export const OrganizationSummary = z.object({
   id: z.string().uuid(),
@@ -72,12 +128,17 @@ export type UpdateOrganizationPrivateSessionSettingsRequest = z.infer<
 
 export const OrganizationWorkspaceAccessMember = z.object({
   membershipId: z.string().uuid(),
+  organizationMembershipId: z.string().uuid().nullable(),
   subjectId: z.string().min(1).max(1024),
+  name: z.string().min(1).max(1024).nullable(),
+  email: z.string().email().max(320).nullable(),
   subjectLabel: z.string().min(1).max(1024).nullable(),
   principalKind: z.enum(["human", "service"]),
-  role: z.string().min(1).max(64),
+  organizationRole: OrganizationMembershipRole.nullable(),
+  role: WorkspaceMemberRole,
   permissions: z.array(z.string().min(1).max(128)),
   createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
 });
 export type OrganizationWorkspaceAccessMember = z.infer<typeof OrganizationWorkspaceAccessMember>;
 
@@ -91,32 +152,80 @@ export const OrganizationWorkspaceAccess = z.object({
 });
 export type OrganizationWorkspaceAccess = z.infer<typeof OrganizationWorkspaceAccess>;
 
+export const OrganizationWorkspaceRoleDefinition = z.object({
+  role: AssignableWorkspaceMemberRole,
+  label: z.string().min(1).max(64),
+  description: z.string().min(1).max(512),
+  permissions: z.array(Permission).min(1),
+});
+export type OrganizationWorkspaceRoleDefinition = z.infer<
+  typeof OrganizationWorkspaceRoleDefinition
+>;
+
 export const OrganizationAdministrationOverview = z.object({
   organization: OrganizationSummary,
+  roles: z.array(OrganizationWorkspaceRoleDefinition).length(3),
   workspaces: z.array(OrganizationWorkspaceAccess).max(500),
 });
 export type OrganizationAdministrationOverview = z.infer<typeof OrganizationAdministrationOverview>;
 
-// Organization-control-plane assignment of an existing active organization
-// member to a shared workspace. The target is a membership rather than an
-// email address: joining the organization and receiving workspace access stay
-// two explicit lifecycle steps, and this surface cannot become a user lookup.
-export const AddOrganizationWorkspaceMemberRequest = z.object({
-  organizationMembershipId: z.string().uuid(),
-  role: z.string().trim().min(1).max(64).optional(),
-  permissions: z.array(Permission).max(128),
-});
-export type AddOrganizationWorkspaceMemberRequest = z.infer<
-  typeof AddOrganizationWorkspaceMemberRequest
+export const CreateOrganizationWorkspaceRequest = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type CreateOrganizationWorkspaceRequest = z.infer<typeof CreateOrganizationWorkspaceRequest>;
+
+export const UpdateOrganizationWorkspaceRequest = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    expectedUpdatedAt: z.string().datetime({ offset: true }),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type UpdateOrganizationWorkspaceRequest = z.infer<typeof UpdateOrganizationWorkspaceRequest>;
+
+export const PutOrganizationWorkspaceMemberRequest = z.discriminatedUnion("role", [
+  z
+    .object({
+      role: AssignableWorkspaceMemberRole,
+      expectedUpdatedAt: z.string().datetime({ offset: true }).nullable(),
+      operationId: z.string().uuid(),
+    })
+    .strict(),
+  z
+    .object({
+      role: z.literal("custom"),
+      permissions: z.array(Permission).max(128),
+      expectedUpdatedAt: z.string().datetime({ offset: true }).nullable(),
+      operationId: z.string().uuid(),
+    })
+    .strict(),
+]);
+export type PutOrganizationWorkspaceMemberRequest = z.infer<
+  typeof PutOrganizationWorkspaceMemberRequest
 >;
 
-export const CreateOrganizationWorkspaceRequest = z.object({
-  name: z.string().trim().min(1).max(120),
-  slug: z.string().trim().min(1).max(120).nullable().optional(),
-  agentInstructions: z.string().nullable().optional(),
-  operationId: z.string().uuid(),
-});
-export type CreateOrganizationWorkspaceRequest = z.infer<typeof CreateOrganizationWorkspaceRequest>;
+export const RevokeOrganizationWorkspaceMemberRequest = z
+  .object({
+    expectedUpdatedAt: z.string().datetime({ offset: true }),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type RevokeOrganizationWorkspaceMemberRequest = z.infer<
+  typeof RevokeOrganizationWorkspaceMemberRequest
+>;
+
+export const RevokeOrganizationWorkspaceMemberResponse = z
+  .object({
+    removed: z.boolean(),
+    replay: z.boolean(),
+  })
+  .strict();
+export type RevokeOrganizationWorkspaceMemberResponse = z.infer<
+  typeof RevokeOrganizationWorkspaceMemberResponse
+>;
 
 export const CreateOrganizationRequest = z.object({
   name: z.string().trim().min(1).max(120),
@@ -262,6 +371,48 @@ export type CompleteOrganizationUserSetupResponse = z.infer<
   typeof CompleteOrganizationUserSetupResponse
 >;
 
+export const PreviewOrganizationUserSetupRequest = z
+  .object({ token: z.string().min(32).max(2048) })
+  .strict();
+export type PreviewOrganizationUserSetupRequest = z.infer<
+  typeof PreviewOrganizationUserSetupRequest
+>;
+
+export const OrganizationUserSetupPreviewWorkspace = z.object({
+  workspaceId: z.string().uuid(),
+  workspaceName: z.string().min(1).max(255),
+  role: AssignableWorkspaceMemberRole,
+});
+export type OrganizationUserSetupPreviewWorkspace = z.infer<
+  typeof OrganizationUserSetupPreviewWorkspace
+>;
+
+const OrganizationUserSetupPreviewUnavailable = z.object({
+  state: z.enum(["unavailable", "expired", "revoked", "completed"]),
+});
+const OrganizationUserSetupPreviewPending = z.object({
+  state: z.literal("pending"),
+  organizationId: z.string().uuid(),
+  organizationName: z.string().trim().min(1).max(120),
+  targetEmail: z.string().email().max(320),
+  targetName: z.string().trim().min(1).max(120).nullable(),
+  organizationRole: OrganizationMembershipRole,
+  sharedWorkspaceAccess: z.array(OrganizationUserSetupPreviewWorkspace).max(100),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export const OrganizationUserSetupPreview = z.discriminatedUnion("state", [
+  OrganizationUserSetupPreviewUnavailable,
+  OrganizationUserSetupPreviewPending,
+]);
+export type OrganizationUserSetupPreview = z.infer<typeof OrganizationUserSetupPreview>;
+
+export const RetryOrganizationUserSetupDeliveryRequest = z
+  .object({ operationId: z.string().uuid() })
+  .strict();
+export type RetryOrganizationUserSetupDeliveryRequest = z.infer<
+  typeof RetryOrganizationUserSetupDeliveryRequest
+>;
+
 /** Authenticated organization-name-only setup after ordinary account creation. */
 export const CompleteSelfServiceOrganizationSetupRequest = z.object({
   organizationName: z.string().trim().min(1).max(120),
@@ -373,6 +524,9 @@ export type AcceptOrganizationInvitationResponse = z.infer<
 >;
 export const ListOrganizationMembersResponse = z.object({
   members: z.array(OrganizationMember),
+});
+export const ListOrganizationAdministrationMembersResponse = z.object({
+  members: z.array(OrganizationAdministrationMember).max(1000),
 });
 export const ListSelfOrganizationMembershipsResponse = z.object({
   memberships: z.array(OrganizationMember),

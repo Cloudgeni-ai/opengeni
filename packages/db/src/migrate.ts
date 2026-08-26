@@ -12,6 +12,8 @@ const ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION = "0306_atomic_personal_resourc
 const UNREGISTERED_INVITATION_CUTOVER_MIGRATION = "0314_unregistered_organization_invitations.sql";
 const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machine_attachments.sql";
 const NAMED_SIGNUP_CUTOVER_MIGRATION = "0348_named_signup_and_user_setup.sql";
+const AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION =
+  "0353_automatic_session_title_policy_fence.sql";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
@@ -40,7 +42,9 @@ export type MigrationRuntimeOptions = {
   /**
    * Exact database login roles that may run an OpenGeni API or worker against
    * this target. Maintenance cutovers use this list to reject a live mixed-
-   * version fleet. Dedicated-schema and custom-role deployments must supply it.
+   * version fleet, and rolling ACL migrations use it to preserve old-binary
+   * readiness until later role provisioning converges. Dedicated-schema and
+   * custom-role deployments must supply it.
    */
   applicationDatabaseRoles?: string[];
 };
@@ -263,7 +267,7 @@ function migrationApplicationRoles(
     ].filter((role): role is string => Boolean(role) && role !== DEFAULT_APPLICATION_DATABASE_ROLE);
     if (schema || configuredRuntimeRoles.length > 0) {
       throw new Error(
-        "Migration 0257 requires the exact application database roles via " +
+        "Pending migrations require the exact application database roles via " +
           "MigrationRuntimeOptions.applicationDatabaseRoles or " +
           "OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES for dedicated-schema or custom-role deployments",
       );
@@ -380,7 +384,8 @@ export async function migrate(
       !applied.has(ATOMIC_PERSONAL_RESOURCE_CUTOVER_MIGRATION) ||
       !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION) ||
       !applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION) ||
-      !applied.has(NAMED_SIGNUP_CUTOVER_MIGRATION)
+      !applied.has(NAMED_SIGNUP_CUTOVER_MIGRATION) ||
+      !applied.has(AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION)
     ) {
       const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);
       await sql`select set_config(

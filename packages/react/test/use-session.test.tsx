@@ -15,14 +15,14 @@ const serverSession = {
   titleSource: null,
 } as Session;
 
-function titleEvent(title: string): SessionEvent {
+function titleEvent(title: string, sequence = 1, source: "user" | "agent" = "user"): SessionEvent {
   return {
-    id: "title-event-1",
+    id: `title-event-${sequence}`,
     workspaceId: WORKSPACE_ID,
     sessionId: SESSION_ID,
-    sequence: 1,
+    sequence,
     type: "session.title_set",
-    payload: { title, source: "user" },
+    payload: { title, source },
     occurredAt: "2026-07-27T00:00:00.000Z",
     clientEventId: null,
     turnId: null,
@@ -129,6 +129,48 @@ describe("useSession", () => {
     expect(requests).toBe(2);
     expect(hook.result.current.session?.channelId).toBe("channel-new");
     expect(hook.result.current.readGeneration).toBeGreaterThan(laterListGeneration);
+    await hook.unmount();
+  });
+
+  test("does not let historical title replay undo an authoritative row quarantine", async () => {
+    const quarantinedSession = {
+      ...serverSession,
+      lastSequence: 7,
+      title: "New conversation",
+      titleSource: "agent",
+    } as Session;
+    const client = fakeClient({ getSession: async () => quarantinedSession });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useSession(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
+      [] as SessionEvent[],
+    );
+    await flush();
+
+    // A shared route feed can publish its historical tail only after the row
+    // fetch completes. Sequence 7 is already represented by the fetched row,
+    // whose title was quarantined independently of the append-only event.
+    await hook.rerender([titleEvent("Password: swordfish", 7, "agent")]);
+    await flush();
+    expect(hook.result.current.session).toMatchObject({
+      title: "New conversation",
+      titleSource: "agent",
+    });
+
+    // A genuinely newer title event still updates the live projection.
+    await hook.rerender([
+      titleEvent("Password: swordfish", 7, "agent"),
+      titleEvent("OAuth callback failures", 8, "agent"),
+    ]);
+    await flush();
+    expect(hook.result.current.session).toMatchObject({
+      title: "OAuth callback failures",
+      titleSource: "agent",
+    });
     await hook.unmount();
   });
 });

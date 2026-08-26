@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -14,10 +15,23 @@ const completeSelfServiceSetup = mock(async () => ({
   organizationId: crypto.randomUUID(),
   personalWorkspaceId: crypto.randomUUID(),
 }));
+const previewSetup = mock(
+  async (_input: { token: string }): Promise<OrganizationUserSetupPreview> => ({
+    state: "pending",
+    organizationId: "00000000-0000-4000-8000-000000000001",
+    organizationName: "Test Organization",
+    targetEmail: "invitee@example.test",
+    targetName: null,
+    organizationRole: "member",
+    sharedWorkspaceAccess: [],
+    expiresAt: "2026-09-01T00:00:00.000Z",
+  }),
+);
 
 mock.module("@/api", () => ({
   AuthApiError: class AuthApiError extends Error {},
   completeOrganizationUserSetup: completeSetup,
+  previewOrganizationUserSetup: previewSetup,
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
   getSelfServiceOrganizationOnboardingStatus: mock(async () => ({
     state: "required" as const,
@@ -249,6 +263,75 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("keeps setup credentials absent across loading, failure, and every terminal preview", async () => {
+    let resolveLoading!: (preview: OrganizationUserSetupPreview) => void;
+    previewSetup.mockImplementationOnce(
+      () =>
+        new Promise<OrganizationUserSetupPreview>((resolve) => {
+          resolveLoading = resolve;
+        }),
+    );
+    const loadingContainer = document.createElement("div");
+    document.body.appendChild(loadingContainer);
+    const loadingRoot = createRoot(loadingContainer);
+    try {
+      await act(async () => loadingRoot.render(<SetupAccountRoute token="loading-token" />));
+      expect(loadingContainer.textContent).toContain("Checking this invitation");
+      expect(loadingContainer.querySelector("form")).toBeNull();
+      expect(loadingContainer.querySelector("#setup-account-password")).toBeNull();
+      await act(async () =>
+        resolveLoading({
+          state: "unavailable",
+        }),
+      );
+      await flush();
+    } finally {
+      await act(async () => loadingRoot.unmount());
+      loadingContainer.remove();
+    }
+
+    previewSetup.mockImplementationOnce(async () => {
+      throw new Error("preview offline");
+    });
+    const failedContainer = document.createElement("div");
+    document.body.appendChild(failedContainer);
+    const failedRoot = createRoot(failedContainer);
+    try {
+      await act(async () => failedRoot.render(<SetupAccountRoute token="failed-token" />));
+      await flush();
+      expect(failedContainer.textContent).toContain("We couldn't check this invitation");
+      expect(failedContainer.querySelector("form")).toBeNull();
+      expect(failedContainer.querySelector("#setup-account-password")).toBeNull();
+    } finally {
+      await act(async () => failedRoot.unmount());
+      failedContainer.remove();
+    }
+
+    for (const [state, title] of [
+      ["unavailable", "This setup link is unavailable"],
+      ["expired", "This setup link has expired"],
+      ["revoked", "This invitation was revoked"],
+      ["completed", "This account is already set up"],
+    ] as const) {
+      previewSetup.mockImplementationOnce(async () => ({ state }));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () => root.render(<SetupAccountRoute token={`${state}-token`} />));
+        await flush();
+        expect(container.textContent).toContain(title);
+        expect(container.querySelector("form")).toBeNull();
+        expect(container.querySelector("#setup-account-name")).toBeNull();
+        expect(container.querySelector("#setup-account-password")).toBeNull();
+        expect(container.querySelector("#setup-account-confirm")).toBeNull();
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    }
+  });
+
   test("accepts setup authority only from a bounded fragment and scrubs every URL token", () => {
     expect(
       setupAccountTokenFromUrl(
@@ -265,5 +348,73 @@ describe("organization onboarding UI", () => {
     expect(
       setupAccountTokenFromUrl(`https://opengeni.test/setup-account#token=${"x".repeat(2_049)}`),
     ).toEqual({ token: null, scrubbedPath: "/setup-account" });
+  });
+
+  test("keeps the scrubbed fragment bearer across the lazy-route history remount only until preview settles", async () => {
+    const previewCallCount = previewSetup.mock.calls.length;
+    let resolveSecondPreview!: (preview: OrganizationUserSetupPreview) => void;
+    previewSetup.mockImplementationOnce(
+      () => new Promise<OrganizationUserSetupPreview>(() => undefined),
+    );
+    previewSetup.mockImplementationOnce(
+      () =>
+        new Promise<OrganizationUserSetupPreview>((resolve) => {
+          resolveSecondPreview = resolve;
+        }),
+    );
+    window.history.replaceState(null, "", "/setup-account");
+    window.location.hash = "token=lazy-remount-fragment-token";
+    expect(window.location.hash).toBe("#token=lazy-remount-fragment-token");
+
+    const firstContainer = document.createElement("div");
+    document.body.appendChild(firstContainer);
+    const firstRoot = createRoot(firstContainer);
+    await act(async () => firstRoot.render(<SetupAccountRoute />));
+    expect(window.location.href).not.toContain("lazy-remount-fragment-token");
+    expect(firstContainer.textContent).toContain("Checking this invitation");
+    await act(async () => firstRoot.unmount());
+    firstContainer.remove();
+
+    const secondContainer = document.createElement("div");
+    document.body.appendChild(secondContainer);
+    const secondRoot = createRoot(secondContainer);
+    try {
+      await act(async () => secondRoot.render(<SetupAccountRoute />));
+      expect(secondContainer.textContent).toContain("Checking this invitation");
+      expect(previewSetup.mock.calls.slice(-2).map(([request]) => request)).toEqual([
+        { token: "lazy-remount-fragment-token" },
+        { token: "lazy-remount-fragment-token" },
+      ]);
+      await act(async () =>
+        resolveSecondPreview({
+          state: "pending",
+          organizationId: "00000000-0000-4000-8000-000000000001",
+          organizationName: "Test Organization",
+          targetEmail: "invitee@example.test",
+          targetName: null,
+          organizationRole: "member",
+          sharedWorkspaceAccess: [],
+          expiresAt: "2026-09-01T00:00:00.000Z",
+        }),
+      );
+      await flush();
+      expect(secondContainer.querySelector("#setup-account-password")).not.toBeNull();
+      expect(secondContainer.textContent).not.toContain("This link is incomplete");
+    } finally {
+      await act(async () => secondRoot.unmount());
+      secondContainer.remove();
+    }
+
+    const settledContainer = document.createElement("div");
+    document.body.appendChild(settledContainer);
+    const settledRoot = createRoot(settledContainer);
+    try {
+      await act(async () => settledRoot.render(<SetupAccountRoute />));
+      expect(settledContainer.textContent).toContain("This link is incomplete");
+      expect(previewSetup).toHaveBeenCalledTimes(previewCallCount + 2);
+    } finally {
+      await act(async () => settledRoot.unmount());
+      settledContainer.remove();
+    }
   });
 });

@@ -21,7 +21,7 @@ describe("organization administration surface", () => {
 
   test("uses only lifecycle APIs and never links a member personal workspace", () => {
     for (const method of [
-      "listOrganizationMembers",
+      "listOrganizationAdministrationMembers",
       "listOrganizationInvitationsForOrganization",
       "createOrganizationInvitation",
       "revokeOrganizationInvitation",
@@ -29,9 +29,8 @@ describe("organization administration surface", () => {
       "acceptOrganizationInvitation",
       "updateOrganizationMember",
       "updateOrganizationWorkspace",
-      "addOrganizationWorkspaceMember",
-      "updateOrganizationWorkspaceMember",
-      "removeOrganizationWorkspaceMember",
+      "putOrganizationWorkspaceMember",
+      "revokeOrganizationWorkspaceMember",
       "getOrganizationRetentionPolicy",
       "updateOrganizationRetentionPolicy",
     ]) {
@@ -47,7 +46,8 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain("member.name?.trim()");
     expect(adminSource).toContain("member.email");
     expect(adminSource).toContain("Add organization member");
-    expect(adminSource).toContain("Workspace administrator");
+    expect(adminSource).toContain("Custom permissions…");
+    expect(adminSource).toContain("Personal content stays personal");
     expect(adminSource).not.toContain(".addWorkspaceMember(");
     expect(adminSource).not.toContain(".removeWorkspaceMember(");
     expect(adminSource).toContain("props.onAuthorityChanged()");
@@ -70,7 +70,9 @@ describe("organization administration surface", () => {
     expect(adminSource).toContain(
       "The authoritative policy was refreshed. Review it and submit a new action.",
     );
-    expect(adminSource).not.toContain("retryOrganization");
+    expect(adminSource).toContain("async function retryInvitationDelivery");
+    expect(adminSource).toContain("onClick={() => void retryInvitationDelivery(invite)}");
+    expect(adminSource.match(/retryOrganizationUserSetupDelivery\(/g)?.length).toBe(1);
   });
 
   test("wires reads and mutations to independent lanes and invalidates on unmount", () => {
@@ -92,10 +94,13 @@ describe("organization administration surface", () => {
     expect(tenancyDocs).toContain("reads and mutations use independent operation lanes");
     expect(tenancyDocs).toContain("The lifecycle therefore **adopts** that exact\naccount");
     expect(tenancyDocs).toContain(
+      "durable email\ndelivery outcome/retry reconciliation are active",
+    );
+    expect(tenancyDocs).not.toContain(
       "This phase has no durable delivery outcome, retry, or reconciliation\nstate",
     );
-    expect(tenancyDocs).toContain(
-      "durable invitation-email delivery outcome, retry, and reconciliation state",
+    expect(tenancyDocs).not.toContain(
+      "Durable email delivery outcome/retry reconciliation and automatic scheduling",
     );
     expect(tenancyDocs).not.toContain("Provider email delivery remains a\nnon-goal");
     expect(tenancyDocs).not.toContain("- provider invitation email delivery;");

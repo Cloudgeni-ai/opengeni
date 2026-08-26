@@ -488,8 +488,14 @@ async function grantAppRoleIfSchemaExists(
     "list_self_organization_invitations(text,uuid,integer)",
     "get_self_organization_invitation(text,uuid)",
     "list_organization_members(uuid,text)",
+    "list_organization_administration_members(uuid,text)",
     "list_organization_invitations(uuid,text,uuid,integer)",
     "get_organization_administration_overview(uuid,text)",
+    "get_workspace_kind(uuid,uuid)",
+    "organization_workspace_command(jsonb)",
+    "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
+    "prepare_organization_workspace_member_removal(jsonb)",
+    "record_organization_workspace_member_removal(jsonb,uuid,uuid)",
     "create_managed_organization(text,text,text,uuid)",
     "assert_organization_shared_workspace_administrator(uuid,uuid,text)",
     "open_organization_shared_workspace_administration_capability(uuid,uuid,text)",
@@ -503,6 +509,11 @@ async function grantAppRoleIfSchemaExists(
     "accept_organization_invitation_v2(jsonb)",
     "complete_self_service_organization_setup(jsonb)",
     "ensure_organization_user_setup_intent(jsonb)",
+    "claim_organization_user_setup_delivery(jsonb)",
+    "prepare_organization_user_setup_delivery(jsonb)",
+    "settle_organization_user_setup_delivery(jsonb)",
+    "preview_organization_user_setup(text)",
+    "get_organization_invitation_for_administration(uuid,text,uuid)",
     "preflight_organization_user_setup(text)",
     "complete_organization_user_setup(jsonb)",
     "organization_membership_command(jsonb)",
@@ -1933,6 +1944,29 @@ BEGIN
       );
       EXECUTE format(
         'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.scoped_compute_capabilities FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    -- The automatic-title migration helper and policy trigger deliberately
+    -- retain role-scoped EXECUTE for pre-policy startup/readiness
+    -- compatibility. Both are SECURITY INVOKER and PUBLIC remains revoked; RLS
+    -- and the private-table ACL deny app-role enqueue writes, while PostgreSQL
+    -- refuses direct trigger calls, so neither grant conveys data authority.
+    IF to_regclass('opengeni_private.automatic_session_title_fanout_outbox_v1') IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.automatic_session_title_fanout_outbox_v1 FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid,uuid,uuid,uuid)') IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid) TO %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.enforce_automatic_session_title_policy_v1()') IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.enforce_automatic_session_title_policy_v1() TO %I',
         ${literal(role)}
       );
     END IF;

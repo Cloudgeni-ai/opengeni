@@ -68,50 +68,54 @@ describe("OpenGeniClient", () => {
   test("uses organization-scoped shared-workspace control-plane routes", async () => {
     const organizationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const membershipId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const subjectId = "user:member@example.test";
     const { client, requests } = makeClient(() => jsonResponse({}));
 
     await client.createOrganizationWorkspace(organizationId, {
       name: "Product systems",
-      slug: "product-systems",
       operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     });
     await client.updateOrganizationWorkspace(organizationId, WORKSPACE_ID, {
       name: "Product systems",
+      expectedUpdatedAt: "2026-08-25T12:00:00.000Z",
+      operationId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
     });
     await client.updateOrganizationWorkspaceSettings(organizationId, WORKSPACE_ID, {
       memoryEnabled: true,
     });
-    await client.addOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, {
-      organizationMembershipId: membershipId,
+    await client.putOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, membershipId, {
       role: "member",
+      expectedUpdatedAt: null,
+      operationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    });
+    await client.putOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, membershipId, {
+      role: "custom",
       permissions: ["workspace:read"],
+      expectedUpdatedAt: "2026-08-25T12:00:00.000Z",
+      operationId: "ffffffff-ffff-4fff-8fff-ffffffffffff",
     });
-    await client.updateOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, subjectId, {
-      role: "admin",
-      permissions: ["workspace:admin"],
+    await client.revokeOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, membershipId, {
+      expectedUpdatedAt: "2026-08-25T12:00:00.000Z",
+      operationId: "99999999-9999-4999-8999-999999999999",
     });
-    await client.removeOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, subjectId);
 
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `POST /v1/organizations/${organizationId}/workspaces`,
         `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}`,
         `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/settings`,
-        `POST /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members`,
-        `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${encodeURIComponent(subjectId)}`,
-        `DELETE /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${encodeURIComponent(subjectId)}`,
+        `PUT /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}`,
+        `PUT /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}`,
+        `POST /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}/revoke`,
       ],
     );
     expect(JSON.parse(requests[0]!.body!)).toEqual({
       name: "Product systems",
-      slug: "product-systems",
       operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     });
     expect(JSON.parse(requests[3]!.body!)).toEqual({
-      organizationMembershipId: membershipId,
       role: "member",
-      permissions: ["workspace:read"],
+      expectedUpdatedAt: null,
+      operationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
     });
   });
 

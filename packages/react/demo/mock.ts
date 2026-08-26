@@ -4312,6 +4312,7 @@ function fabricateWorkspace(name: string): Workspace {
   return {
     id: demoUuid(),
     accountId: ACCOUNT_ID,
+    kind: "shared",
     name,
     slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
     externalSource: null,

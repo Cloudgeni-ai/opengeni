@@ -57,11 +57,11 @@ describe("managed organization onboarding", () => {
     const operationId = crypto.randomUUID();
     const first = await deriveOrganizationUserSetupToken(settings, {
       invitationId,
-      operationId,
+      deliveryId: operationId,
     });
     const retry = await deriveOrganizationUserSetupToken(settings, {
       invitationId,
-      operationId,
+      deliveryId: operationId,
     });
     expect(retry).toEqual(first);
     expect(first.token).not.toBe(first.digest);
@@ -120,7 +120,7 @@ describe("managed organization onboarding", () => {
     });
     const setup = await deriveOrganizationUserSetupToken(settings, {
       invitationId: invitation.id,
-      operationId,
+      deliveryId: operationId,
     });
     await ensureOrganizationUserSetupIntent(client.db, {
       organizationId: membership!.organizationId,
@@ -181,7 +181,7 @@ describe("managed organization onboarding", () => {
     });
     const expiredSetup = await deriveOrganizationUserSetupToken(settings, {
       invitationId: expiredInvitation.id,
-      operationId: expiredInvitationOperationId,
+      deliveryId: expiredInvitationOperationId,
     });
     await ensureOrganizationUserSetupIntent(client.db, {
       organizationId: membership!.organizationId,

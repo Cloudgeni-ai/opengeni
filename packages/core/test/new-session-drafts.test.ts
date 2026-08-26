@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { AccessGrant, ResourceRef, ToolRef } from "@opengeni/contracts";
+import {
+  AUTOMATIC_SESSION_TITLE_FALLBACK,
+  type AccessGrant,
+  type ResourceRef,
+  type ToolRef,
+} from "@opengeni/contracts";
 import {
   bindAuthorizedGitHubInstallationRepositories,
   createDb,
@@ -130,6 +135,8 @@ describe("core new-session draft hydration", () => {
 
     expect(session.id).toBeString();
     expect(session.initialTurnId).toBeString();
+    expect(session.title).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
+    expect(session.titleSource).toBe("agent");
   }, 180_000);
 
   test("treats a markerless old-client save, including [], as explicit tools", async () => {

@@ -3684,6 +3684,18 @@ export type RevokeUserResourceGrantResponse = {
 };
 
 export type OrganizationMembershipRole = "owner" | "admin" | "member";
+export type WorkspaceMemberRole = "viewer" | "member" | "admin" | "custom";
+export type AssignableWorkspaceMemberRole = "viewer" | "member" | "admin";
+export type OrganizationUserSetupDelivery = {
+  id: string;
+  state: "pending" | "sent" | "failed" | "outcome_unknown" | "revoked";
+  attemptCount: number;
+  revision: number;
+  errorClass: string | null;
+  retryState: "available" | "reconciliation_required" | "unavailable";
+  sentAt: string | null;
+  updatedAt: string;
+};
 export type OrganizationInvitation = {
   id: string;
   organizationId: string;
@@ -3698,6 +3710,7 @@ export type OrganizationInvitation = {
   acceptedMembershipId: string | null;
   createdAt: string;
   updatedAt: string;
+  delivery: OrganizationUserSetupDelivery | null;
 };
 export type OrganizationMember = {
   id: string;
@@ -3714,6 +3727,27 @@ export type OrganizationMember = {
   createdAt: string;
   updatedAt: string;
 };
+export type OrganizationAdministrationMemberWorkspaceAccess = {
+  workspaceId: string;
+  workspaceName: string;
+  membershipId: string;
+  role: WorkspaceMemberRole;
+  updatedAt: string;
+};
+export type OrganizationAdministrationMember = {
+  id: string;
+  organizationId: string;
+  subjectId: string;
+  name: string | null;
+  email: string | null;
+  role: OrganizationMembershipRole;
+  status: "provisioning" | "active" | "suspended" | "revoked";
+  authorizationRevision: number;
+  sharedWorkspaceAccess: OrganizationAdministrationMemberWorkspaceAccess[];
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 export type OrganizationSummary = {
   id: string;
   name: string;
@@ -3722,12 +3756,17 @@ export type OrganizationSummary = {
 };
 export type OrganizationWorkspaceAccessMember = {
   membershipId: string;
+  organizationMembershipId: string | null;
   subjectId: string;
+  name: string | null;
+  email: string | null;
   subjectLabel: string | null;
   principalKind: "human" | "service";
-  role: string;
+  organizationRole: OrganizationMembershipRole | null;
+  role: WorkspaceMemberRole;
   permissions: string[];
   createdAt: string;
+  updatedAt: string;
 };
 export type OrganizationWorkspaceAccess = {
   id: string;
@@ -3739,7 +3778,14 @@ export type OrganizationWorkspaceAccess = {
 };
 export type OrganizationAdministrationOverview = {
   organization: OrganizationSummary;
+  roles: OrganizationWorkspaceRoleDefinition[];
   workspaces: OrganizationWorkspaceAccess[];
+};
+export type OrganizationWorkspaceRoleDefinition = {
+  role: AssignableWorkspaceMemberRole;
+  label: string;
+  description: string;
+  permissions: Permission[];
 };
 export type OrganizationPrivateSessionSettings = {
   organizationId: string;
@@ -3749,17 +3795,29 @@ export type OrganizationPrivateSessionSettings = {
   updatedAt: string;
   changed?: boolean;
 };
-export type AddOrganizationWorkspaceMemberRequest = {
-  organizationMembershipId: string;
-  role?: string | undefined;
-  permissions: Permission[];
-};
-export type CreateOrganizationWorkspaceRequest = {
+export type CreateOrganizationWorkspaceRequest = { name: string; operationId: string };
+export type UpdateOrganizationWorkspaceRequest = {
   name: string;
-  slug?: string | null;
-  agentInstructions?: string | null;
+  expectedUpdatedAt: string;
   operationId: string;
 };
+export type PutOrganizationWorkspaceMemberRequest =
+  | {
+      role: AssignableWorkspaceMemberRole;
+      expectedUpdatedAt: string | null;
+      operationId: string;
+    }
+  | {
+      role: "custom";
+      permissions: Permission[];
+      expectedUpdatedAt: string | null;
+      operationId: string;
+    };
+export type RevokeOrganizationWorkspaceMemberRequest = {
+  expectedUpdatedAt: string;
+  operationId: string;
+};
+export type RevokeOrganizationWorkspaceMemberResponse = { removed: boolean; replay: boolean };
 export type CreateOrganizationRequest = {
   name: string;
   operationId: string;
@@ -3798,6 +3856,24 @@ export type AcceptOrganizationInvitationRequest = {
   operationId: string;
 };
 export type RevokeOrganizationInvitationRequest = AcceptOrganizationInvitationRequest;
+export type PreviewOrganizationUserSetupRequest = { token: string };
+export type OrganizationUserSetupPreview =
+  | { state: "unavailable" | "expired" | "revoked" | "completed" }
+  | {
+      state: "pending";
+      organizationId: string;
+      organizationName: string;
+      targetEmail: string;
+      targetName: string | null;
+      organizationRole: OrganizationMembershipRole;
+      sharedWorkspaceAccess: Array<{
+        workspaceId: string;
+        workspaceName: string;
+        role: AssignableWorkspaceMemberRole;
+      }>;
+      expiresAt: string;
+    };
+export type RetryOrganizationUserSetupDeliveryRequest = { operationId: string };
 export type UpdateOrganizationMemberRequest = {
   kind: "change_role" | "suspend" | "reactivate" | "offboard";
   role?: OrganizationMembershipRole;
@@ -3815,7 +3891,10 @@ export type ListOrganizationInvitationsPageResponse = {
   invitations: OrganizationInvitation[];
   nextCursor: string | null;
 };
-export type ListOrganizationMembersResponse = { members: OrganizationMember[] };
+export type ListOrganizationMembersResponse = { members: OrganizationAdministrationMember[] };
+export type ListOrganizationAdministrationMembersResponse = {
+  members: OrganizationAdministrationMember[];
+};
 export type AcceptOrganizationInvitationResponse = {
   invitation: OrganizationInvitation;
   membership: OrganizationMember;
@@ -3824,6 +3903,7 @@ export type AcceptOrganizationInvitationResponse = {
 export type Workspace = {
   id: string;
   accountId: string;
+  kind: "personal" | "shared";
   name: string;
   slug: string | null;
   externalSource: string | null;

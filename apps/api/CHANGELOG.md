@@ -1,5 +1,70 @@
 # @opengeni/api-router
 
+## 2.3.1
+
+### Patch Changes
+
+- 8fabf12: Document the one-way deployment boundary for named signup and invited-user
+  setup. Migration 0348 requires every API, control worker, and turn worker to be
+  stopped and drained before it runs, with the exact old/new application database
+  roles supplied to the migration runner. Start only binaries built for schema
+  ordinal 0348 or newer after it commits; never restart a pre-0348 image, and
+  remain in maintenance to fix forward if the new runtime cannot start.
+- 8fabf12: Repair realtime human-authority routing and metrics, personal Document reads
+  under FORCE RLS, private-session visibility transition checks, and
+  tenant-scoped session-tenancy fencing through migrations 0343-0345.
+
+  Migration 0345 is a one-way maintenance cutover. Stop and drain every API,
+  control worker, and turn worker before applying it, then start only binaries
+  built for schema ordinal 0345 or newer. Never restart a pre-0345 image after
+  the migration commits: its session-tenancy writes do not enter the required
+  workspace fence and will fail closed.
+
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+  - @opengeni/core@2.3.1
+  - @opengeni/documents@0.8.1
+  - @opengeni/events@0.3.126
+
+## 2.3.0
+
+### Minor Changes
+
+- 47b88d3: Add explicit managed onboarding: ordinary verified signup completes an organization-name-only setup that creates only the owner membership and canonical Personal workspace, while unregistered invitees can use a digest-only one-time account setup link before signing in normally.
+- c5e4684: Expose bounded organization-admin audit APIs and SDK methods for Default-collection backfill runs, operations, workspace receipts, and organization-wide Document authority reclassifications.
+- dc10a36: Let an administrator see and set which OpenGeni workspace each Slack channel starts work in, from the Slack capability sheet. A channel with no choice is not broken: it asks the first person who uses it and remembers the answer, and the sheet says so.
+- dc6cfff: Turn per-channel and per-DM Slack workspace routing on by default, and stop counting a personal workspace as a routing choice in a channel.
+
+  A personal workspace is now a candidate only in that person's own bot DM. It is the wrong destination for a channel - a shared thread routed into one member's private space is invisible to everyone else in the channel - and because managed tenancy provisions a personal workspace for every member, counting it meant nobody ever had exactly one candidate. That defeated the sole-candidate rule, so an organization with a single shared workspace would have been asked to choose in every channel despite having no choice to make.
+
+  With that fixed, an organization with one shared workspace sees no change. For an organization with several, an unrouted channel asks the first person who uses it and remembers the answer, and a bot DM goes to that person's own personal workspace. Two things are worth knowing before upgrading: someone who has lost live organization authority in the routed workspace now receives a refusal in their bot DM where the previous code failed silently, and someone whose only workspace is their own personal one is now refused in a channel rather than having channel work land somewhere nobody else can see. Apply migrations through 0342 before running the new image. Set `OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=false` to restore the short-circuit to the installation's own workspace.
+
+### Patch Changes
+
+- 977fa0f: Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+- Updated dependencies [c10f396]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/core@2.3.0
+  - @opengeni/db@3.3.0
+  - @opengeni/documents@0.8.0
+  - @opengeni/config@0.20.0
+  - @opengeni/runtime@1.3.2
+  - @opengeni/artifact-tool@0.3.6
+  - @opengeni/codemode@0.4.14
+  - @opengeni/events@0.3.125
+  - @opengeni/github@0.5.4
+  - @opengeni/observability@0.8.5
+  - @opengeni/storage@0.2.107
+
 ## 2.2.0
 
 ### Minor Changes

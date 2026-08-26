@@ -1,14 +1,28 @@
 import { Link } from "@tanstack/react-router";
 import { CheckIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 
-import { completeOrganizationUserSetup } from "@/api";
+import { completeOrganizationUserSetup, previewOrganizationUserSetup } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 
 const MIN_PASSWORD_LENGTH = 8;
+const SETUP_TOKEN_REMOUNT_HANDOFF_MS = 30_000;
+
+// `history.replaceState` is intentionally used to scrub the setup bearer
+// before any API request. TanStack observes that history mutation and may
+// remount this lazy route, so React component state alone is not a reliable
+// handoff. Keep at most one token in process memory for one short remount window
+// and release it when the active preview settles; never project it into history,
+// web storage, logs, or a server-side surface.
+let pendingBrowserSetupToken: {
+  pathname: string;
+  token: string;
+  expiryTimer: number;
+} | null = null;
 
 export function SetupAccountRoute({ token }: { token?: string | undefined }) {
   const [setupToken] = useState(() => token ?? consumeSetupAccountTokenFromBrowserLocation());
@@ -19,6 +33,34 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
+  const [preview, setPreview] = useState<OrganizationUserSetupPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(Boolean(setupToken));
+  const [previewFailed, setPreviewFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    if (!setupToken) return;
+    setPreviewLoading(true);
+    setPreviewFailed(false);
+    void previewOrganizationUserSetup({ token: setupToken })
+      .then((result) => {
+        if (!active) return;
+        setPreview(result);
+        if (result.state === "pending" && result.targetName) setName(result.targetName);
+      })
+      .catch(() => {
+        if (active) setPreviewFailed(true);
+      })
+      .finally(() => {
+        if (active) {
+          releasePendingBrowserSetupToken(setupToken);
+          setPreviewLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [setupToken]);
 
   async function submit() {
     setError(null);
@@ -92,6 +134,17 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
               <Link to="/">Return to sign in</Link>
             </Button>
           </>
+        ) : previewLoading ? (
+          <div className="flex items-center gap-2 text-sm text-fg-subtle" role="status">
+            <Loader2Icon className="size-4 animate-spin" />
+            Checking this invitation…
+          </div>
+        ) : previewFailed ? (
+          <Notice tone="failed" title="We couldn't check this invitation">
+            Refresh the page to try again. Account setup has not started.
+          </Notice>
+        ) : preview?.state !== "pending" ? (
+          <UnavailableSetupState state={preview?.state ?? "unavailable"} />
         ) : (
           <form
             onSubmit={(event) => {
@@ -99,6 +152,27 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
               void submit();
             }}
           >
+            <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3 text-sm">
+              <p>
+                <span className="font-medium">{preview.organizationName}</span> invited{" "}
+                <span className="font-medium">{preview.targetEmail}</span> as{" "}
+                {titleCase(preview.organizationRole)}.
+              </p>
+              {preview.sharedWorkspaceAccess.length > 0 ? (
+                <ul className="mt-2 list-disc space-y-1 pl-5">
+                  {preview.sharedWorkspaceAccess.map((workspace) => (
+                    <li key={workspace.workspaceId}>
+                      {workspace.workspaceName}: {titleCase(workspace.role)}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-2 text-fg-subtle">No shared workspaces are assigned yet.</p>
+              )}
+              <p className="mt-2 text-fg-subtle">
+                This does not share anyone&apos;s Personal workspace.
+              </p>
+            </div>
             <div className="mb-3">
               <Label htmlFor="setup-account-name">Your name</Label>
               <Input
@@ -155,6 +229,45 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
   );
 }
 
+function UnavailableSetupState({
+  state,
+}: {
+  state: "unavailable" | "expired" | "revoked" | "completed";
+}) {
+  const copy = {
+    unavailable: {
+      title: "This setup link is unavailable",
+      body: "Ask your organization administrator for a new invitation.",
+    },
+    expired: {
+      title: "This setup link has expired",
+      body: "Ask your organization administrator to retry the invitation.",
+    },
+    revoked: {
+      title: "This invitation was revoked",
+      body: "Contact your organization administrator if you still need access.",
+    },
+    completed: {
+      title: "This account is already set up",
+      body: "Sign in with the account created from this invitation.",
+    },
+  }[state];
+  return (
+    <>
+      <Notice tone={state === "completed" ? "success" : "failed"} title={copy.title}>
+        {copy.body}
+      </Notice>
+      <Button asChild variant="secondary" className="mt-4 w-full">
+        <Link to="/">Return to sign in</Link>
+      </Button>
+    </>
+  );
+}
+
+function titleCase(value: string): string {
+  return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
 export function setupAccountTokenFromUrl(value: string): {
   token: string | null;
   scrubbedPath: string;
@@ -175,7 +288,34 @@ export function setupAccountTokenFromUrl(value: string): {
 function consumeSetupAccountTokenFromBrowserLocation(): string | null {
   if (typeof window === "undefined") return null;
   const { token, scrubbedPath } = setupAccountTokenFromUrl(window.location.href);
+  if (token) {
+    cachePendingBrowserSetupToken(window.location.pathname, token);
+  }
+  const availableToken =
+    token ??
+    (pendingBrowserSetupToken?.pathname === window.location.pathname
+      ? pendingBrowserSetupToken.token
+      : null);
   const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (scrubbedPath !== currentPath) window.history.replaceState(null, "", scrubbedPath);
-  return token;
+  return availableToken;
+}
+
+function cachePendingBrowserSetupToken(pathname: string, token: string): void {
+  if (pendingBrowserSetupToken) window.clearTimeout(pendingBrowserSetupToken.expiryTimer);
+  const pending = {
+    pathname,
+    token,
+    expiryTimer: 0,
+  };
+  pending.expiryTimer = window.setTimeout(() => {
+    if (pendingBrowserSetupToken === pending) pendingBrowserSetupToken = null;
+  }, SETUP_TOKEN_REMOUNT_HANDOFF_MS);
+  pendingBrowserSetupToken = pending;
+}
+
+function releasePendingBrowserSetupToken(token: string): void {
+  if (pendingBrowserSetupToken?.token !== token) return;
+  window.clearTimeout(pendingBrowserSetupToken.expiryTimer);
+  pendingBrowserSetupToken = null;
 }

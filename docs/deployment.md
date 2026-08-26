@@ -453,6 +453,75 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
+### Durable invited-user email delivery (0351)
+
+Migration 0351 is rolling and additive. Before inviting users, configure
+`OPENGENI_RESEND_API_KEY` and `OPENGENI_EMAIL_FROM`; production managed-mode
+configuration validation requires the provider key. Embedded hosts may bind an
+equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
+does not relax the deployment preflight today. Keep
+`OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
+bearers are stable HMAC identities and the browser receives them only in the
+email URL fragment.
+
+The API records a durable attempt and `provider_started` marker before provider
+I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,
+or released provider-started claim is shown as `outcome_unknown`. Do not repair
+either state with database DML or by crafting a new email. Resend keeps an
+idempotency key for 24 hours. Its adapter declares that guarantee and a keyed
+provider-account scope; the database persists the resulting absolute safe-until
+fence at the first provider boundary. People & invitations offers a retry for a
+clear failure and for an ambiguous outcome only while that immutable provider-
+specific fence remains open; retries never extend an unresolved fence and reuse
+the exact delivery id, provider scope/key, bearer digest, effective
+`OPENGENI_EMAIL_FROM`, and frozen safe payload. When the fence closes the state
+becomes `reconciliation_required`: inspect Resend/provider history and do not
+resend. A retry that fails before provider I/O cannot downgrade an older
+unresolved outcome to an ordinary failure.
+After confirming provider state, revoke the old invitation before deliberately
+creating a new one if access is still required.
+
+`Delivery not started` is the recoverable crash boundary between the committed
+invitation and its first journal claim. Use its `Send invitation` control; the
+server resolves the original immutable invite receipt, preserves the creator
+binding, and creates the missing journal. Expired pre-provider claims project
+as failed/retryable rather than staying pending. Do not insert or update journal
+rows manually.
+Revoking the invitation is authoritative even if an earlier provider call later
+reports success, and revocation closes the active claim/attempt. The database
+never stores the setup bearer or rendered email body.
+
+Embedded `ManagedEmailTransport` implementations must declare a bounded sender,
+a stable non-secret scope that changes with provider, provider account, or
+idempotency policy, and a conservative integer retention in seconds. API
+composition validates this metadata before accepting invitations. Changing the
+scope while an outcome is unresolved is intentionally refused and requires
+operator reconciliation.
+
+Repository onboarding readiness is proven by the curated `onboarding` CI lane,
+which uses a bounded process-local transport and writes only safe screenshots
+and summarized JSON evidence. That green result proves application behavior,
+the real migration/runtime-role boundary, and provider-neutral delivery
+semantics. It does **not** prove that Resend or another external provider is
+configured, that staging has received a message, or that production is ready.
+
+Provider and environment acceptance are separate, ordered gates:
+
+1. configure `OPENGENI_RESEND_API_KEY`, `OPENGENI_EMAIL_FROM`,
+   `OPENGENI_PUBLIC_BASE_URL`, and `OPENGENI_BETTER_AUTH_SECRET` through the
+   environment's secret authority, never repository files or evidence;
+2. in an explicitly authorized non-production environment, send an invitation
+   through the configured provider and retain provider-side idempotency plus
+   delivery evidence without retaining the setup bearer or rendered body;
+3. prove the exact candidate in staging, including signup, verification,
+   invitation setup, sign-in/password reset, initial shared grants, revocation,
+   readiness, logs, and bounded alerts; and
+4. promote or run production acceptance only under the repository's existing
+   exact-candidate release authority and a fresh deployment authorization.
+
+A merge, green repository CI run, local Docker result, or provider-free capture
+must never be interpreted as authorization to mutate staging or production.
+
 ### Canonical organization-tenancy authority activation
 
 Organization-tenancy activation follows the same maintenance shape, one
@@ -559,6 +628,17 @@ For each subsequent activation:
    after all source-table locks; do not move the boundary earlier, because future
    greenfield provisioning writes its complete graph before taking the same
    fence and the reversed order would deadlock.
+
+   Migration 0349 implements that greenfield side. After at least one operator
+   activation is committed, an ordinary eligible self-service signup
+   automatically appends its version-1 activation receipt, deterministic
+   greenfield evidence, and enabled private-session setting/event in the same
+   transaction as its owner + Personal-workspace graph and setup receipt. There
+   is no second operator command for that newly inserted organization. A signup
+   that wins the boundary before the first committed witness stays unactivated,
+   as do every 0348 adopted legacy account and all existing organizations; run
+   this drained operator procedure for those organizations. Never hand-insert a
+   greenfield evidence or activation row to bypass that distinction.
 
    Migration 0303 created `session_tenancy_activations` with `FORCE ROW LEVEL
    SECURITY` and a `FOR SELECT`-only policy, so under this exact

@@ -109,8 +109,48 @@ describe("release schema contract", () => {
     );
   });
 
-  test("preserves published host-export history and appends the forward repair", async () => {
+  test("registers automatic session title migrations without repinning host-export history", async () => {
     const completeSourceContract = await buildSchemaContract();
+    const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0353_automatic_session_title_policy_fence.sql",
+    );
+    const automaticSessionTitleQuarantineIndex = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0354_automatic_session_title_quarantine_index.sql",
+    );
+    const automaticSessionTitleQuarantine = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0355_automatic_session_title_quarantine.sql",
+    );
+    const automaticSessionTitleMigrationPaths = new Set([
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
+    ]);
+    const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
+      (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
+    );
+
+    expect(completeSourceContract).toMatchObject({
+      fileCount:
+        migrationsBeforeAutomaticSessionTitles.length +
+        (automaticSessionTitlePolicyFence ? 1 : 0) +
+        (automaticSessionTitleQuarantineIndex ? 1 : 0) +
+        (automaticSessionTitleQuarantine ? 1 : 0),
+      latestMigration: automaticSessionTitleQuarantine
+        ? "0355_automatic_session_title_quarantine.sql"
+        : automaticSessionTitleQuarantineIndex
+          ? "0354_automatic_session_title_quarantine_index.sql"
+          : automaticSessionTitlePolicyFence
+            ? "0353_automatic_session_title_policy_fence.sql"
+            : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
+    });
+  });
+
+  test("preserves published host-export history and appends the forward repair", async () => {
+    const completeSourceContract = await contractWithoutMigrations([
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
+    ]);
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
       "0239_task_tree_notes.sql",
@@ -129,6 +169,9 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
       "0237_interaction_transition_reaper.sql",
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
@@ -182,8 +225,18 @@ describe("release schema contract", () => {
       "0346_document_migration_audit_surface.sql",
       "0347_connection_authority_convergence_evidence.sql",
       "0348_named_signup_and_user_setup.sql",
+      "0349_greenfield_session_tenancy_activation.sql",
+      "0350_organization_shared_workspace_administration.sql",
+      "0351_organization_user_setup_delivery.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
+    );
+    // The shared complete-contract assertion intentionally excludes these
+    // branch-local migrations, but the governed hash must exclude them too.
+    appendedMigrationPaths.unshift(
+      "0353_automatic_session_title_policy_fence.sql",
+      "0354_automatic_session_title_quarantine_index.sql",
+      "0355_automatic_session_title_quarantine.sql",
     );
     // Each appended migration moves both of these, and two candidates can be in
     // flight at once, so derive them from what is actually on disk rather than
@@ -226,6 +279,15 @@ describe("release schema contract", () => {
     const namedSignupAndUserSetup = completeSourceContract.migrations.some(
       (migration) => migration.path === "0348_named_signup_and_user_setup.sql",
     );
+    const greenfieldSessionTenancyActivation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0349_greenfield_session_tenancy_activation.sql",
+    );
+    const organizationSharedWorkspaceAdministration = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0350_organization_shared_workspace_administration.sql",
+    );
+    const organizationUserSetupDelivery = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0351_organization_user_setup_delivery.sql",
+    );
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
@@ -238,32 +300,41 @@ describe("release schema contract", () => {
         (tenantScopedSessionTenancyFence ? 1 : 0) +
         (documentMigrationAuditSurface ? 1 : 0) +
         (connectionAuthorityConvergenceEvidence ? 1 : 0) +
-        (namedSignupAndUserSetup ? 1 : 0),
-      latestMigration: namedSignupAndUserSetup
-        ? "0348_named_signup_and_user_setup.sql"
-        : connectionAuthorityConvergenceEvidence
-          ? "0347_connection_authority_convergence_evidence.sql"
-          : documentMigrationAuditSurface
-            ? "0346_document_migration_audit_surface.sql"
-            : tenantScopedSessionTenancyFence
-              ? "0345_tenant_scoped_session_tenancy_fence.sql"
-              : privateSessionVisibilityTransitionGate
-                ? "0344_private_session_visibility_transition_gate.sql"
-                : personalDocumentForceRlsRepair
-                  ? "0343_personal_document_force_rls_lock_repair.sql"
-                  : slackRoutePromptSinglePending
-                    ? "0342_slack_route_prompt_single_pending.sql"
-                    : slackRoutingProbeFence
-                      ? "0341_slack_routing_probe_organization_fence.sql"
-                      : tenancyBackfillActivationEvidence
-                        ? "0340_tenancy_backfill_activation_evidence.sql"
-                        : documentAuthorityReclassification
-                          ? "0339_document_authority_reclassification.sql"
-                          : atomicConnectedMachineAttachments
-                            ? "0338_atomic_connected_machine_attachments.sql"
-                            : routedSlackHandles
-                              ? "0337_slack_routed_action_handles.sql"
-                              : "0336_atomic_session_fork_visibility.sql",
+        (namedSignupAndUserSetup ? 1 : 0) +
+        (greenfieldSessionTenancyActivation ? 1 : 0) +
+        (organizationSharedWorkspaceAdministration ? 1 : 0) +
+        (organizationUserSetupDelivery ? 1 : 0),
+      latestMigration: organizationUserSetupDelivery
+        ? "0351_organization_user_setup_delivery.sql"
+        : organizationSharedWorkspaceAdministration
+          ? "0350_organization_shared_workspace_administration.sql"
+          : greenfieldSessionTenancyActivation
+            ? "0349_greenfield_session_tenancy_activation.sql"
+            : namedSignupAndUserSetup
+              ? "0348_named_signup_and_user_setup.sql"
+              : connectionAuthorityConvergenceEvidence
+                ? "0347_connection_authority_convergence_evidence.sql"
+                : documentMigrationAuditSurface
+                  ? "0346_document_migration_audit_surface.sql"
+                  : tenantScopedSessionTenancyFence
+                    ? "0345_tenant_scoped_session_tenancy_fence.sql"
+                    : privateSessionVisibilityTransitionGate
+                      ? "0344_private_session_visibility_transition_gate.sql"
+                      : personalDocumentForceRlsRepair
+                        ? "0343_personal_document_force_rls_lock_repair.sql"
+                        : slackRoutePromptSinglePending
+                          ? "0342_slack_route_prompt_single_pending.sql"
+                          : slackRoutingProbeFence
+                            ? "0341_slack_routing_probe_organization_fence.sql"
+                            : tenancyBackfillActivationEvidence
+                              ? "0340_tenancy_backfill_activation_evidence.sql"
+                              : documentAuthorityReclassification
+                                ? "0339_document_authority_reclassification.sql"
+                                : atomicConnectedMachineAttachments
+                                  ? "0338_atomic_connected_machine_attachments.sql"
+                                  : routedSlackHandles
+                                    ? "0337_slack_routed_action_handles.sql"
+                                    : "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(
@@ -302,6 +373,21 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0348_named_signup_and_user_setup.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0349_greenfield_session_tenancy_activation.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "rolling" });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0350_organization_shared_workspace_administration.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "rolling" });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0351_organization_user_setup_delivery.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "rolling" });
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0331_managed_organization_creation.sql",
