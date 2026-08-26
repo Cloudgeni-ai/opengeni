@@ -78,8 +78,8 @@ export function useSessionLineage(
     }
     let readGeneration = 0;
     const lineage = await client.getSessionLineage(workspaceId, sessionId, {
-      onRequestStart: () => {
-        readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+      onRequestStart: (sharedReadGeneration) => {
+        readGeneration = sharedReadGeneration ?? beginRead?.() ?? ++nextReadGeneration.current;
       },
     });
     return {

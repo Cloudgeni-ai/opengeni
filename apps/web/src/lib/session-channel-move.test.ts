@@ -201,7 +201,7 @@ describe("optimistic session channel moves", () => {
       pageGeneration,
       11,
       newerRootReadGeneration,
-    ).map(({ session: authoritative }) => authoritative);
+    ).map(([authoritative]) => authoritative);
     const afterDisplayPatch = reconcileSessionChannelMoves(overrides, authority);
 
     expect(afterDisplayPatch).toBe(overrides);

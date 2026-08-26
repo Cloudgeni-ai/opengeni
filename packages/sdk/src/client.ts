@@ -565,6 +565,11 @@ export type OpenGeniClientOptions = {
   headers?: Record<string, string> | (() => Record<string, string>);
   /** Custom fetch implementation. Defaults to the global `fetch`. */
   fetch?: FetchLike;
+  /**
+   * Optional causal clock for shared session projection GETs. The selected
+   * request generation is retained for observers that join after launch.
+   */
+  beginSharedRead?: (() => number) | undefined;
   /** Positive deadline for interactive session commands. Defaults to 15 seconds. */
   sessionCommandTimeoutMs?: number;
 };
@@ -577,11 +582,11 @@ export type OpenGeniRequestOptions = {
 
 export type SharedSessionReadOptions = {
   /**
-   * Invoked immediately before the selected shared network GET starts. A
-   * caller that joins an already-started request is not notified because that
-   * request's causal start precedes the caller.
+   * Observe the selected shared network GET's actual start. A caller joining
+   * an already-started request receives its retained generation when the
+   * client has a `beginSharedRead` clock.
    */
-  onRequestStart?: (() => void) | undefined;
+  onRequestStart?: ((readGeneration?: number) => void) | undefined;
 };
 
 export type GetSessionOptions = SharedSessionReadOptions & {
@@ -598,7 +603,8 @@ type SingleFlightReadEntry = {
   generation: number;
   promise: Promise<unknown>;
   started: boolean;
-  startListeners: Set<() => void>;
+  stamp?: number | undefined;
+  listeners: Set<(readGeneration?: number) => void>;
 };
 
 /** Follow-up prompt fields accepted by both queue and Steer. Session tools are updated separately. */
@@ -668,9 +674,9 @@ export class OpenGeniClient {
   private readonly options: OpenGeniClientOptions;
   private readonly fetchImpl: FetchLike;
   private readonly sessionCommandTimeoutMs: number;
-  private readonly readInFlight = new Map<string, SingleFlightReadEntry>();
-  private readonly readGeneration = new Map<string, number>();
-  private readonly readTrailing = new Map<string, SingleFlightReadEntry>();
+  private readonly active = new Map<string, SingleFlightReadEntry>();
+  private readonly generations = new Map<string, number>();
+  private readonly queued = new Map<string, SingleFlightReadEntry>();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
 
@@ -940,7 +946,7 @@ export class OpenGeniClient {
     options: GetSessionOptions = {},
   ): Promise<Session> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}`;
-    return await this.singleFlightRead(path, () => this.requestJson<Session>("GET", path), options);
+    return await this.sharedRead(path, () => this.requestJson<Session>("GET", path), options);
   }
 
   async updateSession(
@@ -1218,47 +1224,44 @@ export class OpenGeniClient {
     options: GetSessionLineageOptions = {},
   ): Promise<SessionLineageResponse> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/lineage`;
-    return await this.singleFlightRead(
+    return await this.sharedRead(
       path,
       () => this.requestJson<SessionLineageResponse>("GET", path),
       options,
     );
   }
 
-  private singleFlightRead<T>(
+  private sharedRead<T>(
     key: string,
     read: () => Promise<T>,
     options: GetSessionOptions = {},
   ): Promise<T> {
-    const existing = this.readInFlight.get(key);
+    const existing = this.active.get(key);
     if (existing) {
-      if (!options.fresh) return existing.promise as Promise<T>;
+      if (!options.fresh) {
+        this.observeRead(existing, options.onRequestStart);
+        return existing.promise as Promise<T>;
+      }
       const requiredGeneration = existing.generation + 1;
-      const queued = this.readTrailing.get(key);
+      const queued = this.queued.get(key);
       if (queued && queued.generation >= requiredGeneration) {
-        if (options.onRequestStart) queued.startListeners.add(options.onRequestStart);
+        this.observeRead(queued, options.onRequestStart);
         return queued.promise as Promise<T>;
       }
       const predecessor = queued?.promise ?? existing.promise;
-      return this.queueSingleFlightRead(
-        key,
-        predecessor,
-        requiredGeneration,
-        read,
-        options.onRequestStart,
-      );
+      return this.queueRead(key, predecessor, requiredGeneration, read, options.onRequestStart);
     }
     // The active entry clears in its finally before reactions on its public
     // promise run. During that settlement gap a successor may already be
     // queued but not yet launched; every caller must join that exact successor
     // instead of bypassing it with a competing GET for the same generation.
-    const queued = this.readTrailing.get(key);
+    const queued = this.queued.get(key);
     if (queued && (!options.fresh || !queued.started)) {
-      if (options.onRequestStart) queued.startListeners.add(options.onRequestStart);
+      this.observeRead(queued, options.onRequestStart);
       return queued.promise as Promise<T>;
     }
     if (queued) {
-      return this.queueSingleFlightRead(
+      return this.queueRead(
         key,
         queued.promise,
         queued.generation + 1,
@@ -1266,65 +1269,89 @@ export class OpenGeniClient {
         options.onRequestStart,
       );
     }
-    const generation = (this.readGeneration.get(key) ?? 0) + 1;
+    const generation = (this.generations.get(key) ?? 0) + 1;
     const entry: SingleFlightReadEntry = {
       generation,
       promise: Promise.resolve(undefined),
       started: false,
-      startListeners: new Set(options.onRequestStart ? [options.onRequestStart] : []),
+      listeners: new Set(options.onRequestStart ? [options.onRequestStart] : []),
     };
-    entry.promise = this.launchSingleFlightRead(key, entry, read);
+    entry.promise = this.launchRead(key, entry, read);
     return entry.promise as Promise<T>;
   }
 
-  private queueSingleFlightRead<T>(
+  private queueRead<T>(
     key: string,
     predecessor: Promise<unknown>,
     generation: number,
     read: () => Promise<T>,
-    onRequestStart?: () => void,
+    onRequestStart?: (readGeneration?: number) => void,
   ): Promise<T> {
     const entry: SingleFlightReadEntry = {
       generation,
       promise: Promise.resolve(undefined),
       started: false,
-      startListeners: new Set(onRequestStart ? [onRequestStart] : []),
+      listeners: new Set(onRequestStart ? [onRequestStart] : []),
     };
     entry.promise = predecessor.then(
-      () => this.launchSingleFlightRead(key, entry, read),
-      () => this.launchSingleFlightRead(key, entry, read),
+      () => this.launchRead(key, entry, read),
+      () => this.launchRead(key, entry, read),
     );
-    this.readTrailing.set(key, entry);
+    this.queued.set(key, entry);
     const clear = () => {
-      if (this.readTrailing.get(key) !== entry) return;
-      this.readTrailing.delete(key);
-      if (!this.readInFlight.has(key)) this.readGeneration.delete(key);
+      if (this.queued.get(key) !== entry) return;
+      this.queued.delete(key);
+      if (!this.active.has(key)) this.generations.delete(key);
     };
     void entry.promise.then(clear, clear);
     return entry.promise as Promise<T>;
   }
 
-  private launchSingleFlightRead<T>(
+  private launchRead<T>(
     key: string,
     entry: SingleFlightReadEntry,
     read: () => Promise<T>,
   ): Promise<T> {
     entry.started = true;
-    this.readGeneration.set(key, entry.generation);
-    this.readInFlight.set(key, entry);
-    for (const listener of entry.startListeners) {
+    this.generations.set(key, entry.generation);
+    this.active.set(key, entry);
+    try {
+      entry.stamp = this.options.beginSharedRead?.();
+    } catch {
+      // Causal metadata cannot cancel or replace the selected network GET.
+    }
+    for (const listener of entry.listeners) {
       try {
-        listener();
+        listener(entry.stamp);
       } catch {
         // Read metadata observers cannot cancel or replace the selected GET.
       }
     }
-    entry.startListeners.clear();
+    entry.listeners.clear();
     return read().finally(() => {
-      if (this.readInFlight.get(key) !== entry) return;
-      this.readInFlight.delete(key);
-      if (!this.readTrailing.has(key)) this.readGeneration.delete(key);
+      if (this.active.get(key) !== entry) return;
+      this.active.delete(key);
+      if (!this.queued.has(key)) this.generations.delete(key);
     });
+  }
+
+  private observeRead(
+    entry: SingleFlightReadEntry,
+    listener: ((readGeneration?: number) => void) | undefined,
+  ): void {
+    if (!listener) return;
+    if (!entry.started) {
+      entry.listeners.add(listener);
+      return;
+    }
+    // Without a client-wide clock there is no launch-time identity to replay;
+    // invoking the observer now would fabricate a causally later generation.
+    if (entry.stamp === undefined) return;
+    try {
+      listener(entry.stamp);
+    } catch {
+      // Read metadata observers cannot cancel or replace the selected GET.
+    }
   }
 
   /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
@@ -1984,7 +2011,7 @@ export class OpenGeniClient {
 
   async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`;
-    return await this.singleFlightRead(path, () =>
+    return await this.sharedRead(path, () =>
       this.requestSessionCommand<SessionQueueSnapshot>("GET", path),
     );
   }
@@ -2320,7 +2347,7 @@ export class OpenGeniClient {
   /** The session's goal. 404s when the session never had one. */
   async getGoal(workspaceId: string, sessionId: string): Promise<SessionGoal> {
     const path = `/v1/workspaces/${workspaceId}/sessions/${sessionId}/goal`;
-    return await this.singleFlightRead(path, () => this.requestJson<SessionGoal>("GET", path));
+    return await this.sharedRead(path, () => this.requestJson<SessionGoal>("GET", path));
   }
 
   async updateGoal(

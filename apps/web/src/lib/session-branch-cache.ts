@@ -5,7 +5,7 @@ import { mergeSessionForRail } from "./sessions-group";
 export type SessionBranchPage = {
   sessions: Session[];
   /** Per-row causal generations for rows returned by accepted branch reads. */
-  channelReadGenerations: ReadonlyMap<string, number>;
+  channelGenerations: ReadonlyMap<string, number>;
   nextCursor: string | null;
   loading: boolean;
   failed: boolean;
@@ -65,13 +65,13 @@ export function upsertSessionBranchChild(
   } else {
     const cached = sessions[index]!;
     const merged = mergeSessionForRail(cached, child);
-    nextSessions[index] = page?.channelReadGenerations.has(child.id)
+    nextSessions[index] = page?.channelGenerations.has(child.id)
       ? { ...merged, channelId: cached.channelId ?? null }
       : merged;
   }
   return new Map(pages).set(parentSessionId, {
     sessions: nextSessions,
-    channelReadGenerations: page?.channelReadGenerations ?? new Map(),
+    channelGenerations: page?.channelGenerations ?? new Map(),
     nextCursor: page?.nextCursor ?? null,
     loading: page?.loading ?? false,
     failed: page?.failed ?? false,
@@ -91,7 +91,7 @@ export function beginSessionBranchRequest(
   const previous = pages.get(parentSessionId);
   return new Map(pages).set(parentSessionId, {
     sessions: previous?.sessions ?? [],
-    channelReadGenerations: previous?.channelReadGenerations ?? new Map(),
+    channelGenerations: previous?.channelGenerations ?? new Map(),
     nextCursor: previous?.nextCursor ?? null,
     loading: true,
     failed: false,
@@ -116,8 +116,8 @@ export function commitSessionBranchPage(
   const previous = pages.get(parentSessionId);
   if (options.requestId !== undefined && previous?.requestId !== options.requestId) return pages;
   const merged = new Map<string, Session>();
-  const channelReadGenerations = options.append
-    ? new Map(previous?.channelReadGenerations ?? [])
+  const channelGenerations = options.append
+    ? new Map(previous?.channelGenerations ?? [])
     : new Map<string, number>();
   if (options.append) {
     for (const session of [
@@ -138,12 +138,12 @@ export function commitSessionBranchPage(
   const readGeneration = options.readGeneration ?? 0;
   if (readGeneration > 0) {
     for (const session of input.sessions) {
-      channelReadGenerations.set(session.id, readGeneration);
+      channelGenerations.set(session.id, readGeneration);
     }
   }
   return new Map(pages).set(parentSessionId, {
     sessions: [...merged.values()],
-    channelReadGenerations,
+    channelGenerations,
     nextCursor: input.nextCursor,
     loading: false,
     failed: false,
@@ -156,12 +156,12 @@ export function commitSessionBranchPage(
 /** Current branch rows that may own channel filing, with their actual read starts. */
 export function authoritativeSessionBranchChannels(
   page: SessionBranchPage,
-): Array<{ session: Session; readGeneration: number }> {
+): Array<readonly [session: Session, readGeneration: number]> {
   const byId = new Map(page.sessions.map((session) => [session.id, session]));
-  const evidence: Array<{ session: Session; readGeneration: number }> = [];
-  for (const [sessionId, readGeneration] of page.channelReadGenerations) {
+  const evidence: Array<readonly [session: Session, readGeneration: number]> = [];
+  for (const [sessionId, readGeneration] of page.channelGenerations) {
     const session = byId.get(sessionId);
-    if (session && readGeneration > 0) evidence.push({ session, readGeneration });
+    if (session && readGeneration > 0) evidence.push([session, readGeneration]);
   }
   return evidence;
 }

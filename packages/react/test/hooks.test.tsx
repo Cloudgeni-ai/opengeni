@@ -1106,6 +1106,8 @@ describe("useSessionLineage", () => {
   test("does not assign a post-move generation when a remount joins a pre-move lineage GET", async () => {
     let requests = 0;
     let channelId = "channel-a";
+    let causalGeneration = 0;
+    const beginRead = () => ++causalGeneration;
     let releaseInitial!: () => void;
     let markInitialStarted!: () => void;
     const initialGate = new Promise<void>((resolve) => {
@@ -1116,6 +1118,7 @@ describe("useSessionLineage", () => {
     });
     const client = new OpenGeniClient({
       baseUrl: "https://api.example.test",
+      beginSharedRead: beginRead,
       fetch: async () => {
         requests += 1;
         const request = requests;
@@ -1151,10 +1154,8 @@ describe("useSessionLineage", () => {
     const preMoveConsumer = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
     await initialStarted;
 
-    let causalGeneration = 0;
     channelId = "channel-b";
-    const acceptedMoveGeneration = ++causalGeneration;
-    const beginRead = () => ++causalGeneration;
+    const acceptedMoveGeneration = beginRead();
     const remountedRail = await renderHook(
       () =>
         useSessionLineage(SESSION_ID, {
@@ -1173,7 +1174,7 @@ describe("useSessionLineage", () => {
     await flush();
 
     expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-a");
-    expect(remountedRail.result.current.readGeneration).toBe(0);
+    expect(remountedRail.result.current.readGeneration).toBeGreaterThan(0);
     expect(remountedRail.result.current.readGeneration).toBeLessThan(acceptedMoveGeneration);
 
     await reactAct(async () => {
@@ -1183,6 +1184,70 @@ describe("useSessionLineage", () => {
     expect(requests).toBe(2);
     expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-b");
     expect(remountedRail.result.current.readGeneration).toBeGreaterThan(acceptedMoveGeneration);
+    await remountedRail.unmount();
+  });
+
+  test("uses a post-settlement generation when the rail joins a non-authority lineage GET", async () => {
+    let requests = 0;
+    let causalGeneration = 0;
+    const beginRead = () => ++causalGeneration;
+    const acceptedMoveGeneration = beginRead();
+    let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
+    });
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: beginRead,
+      fetch: async () => {
+        requests += 1;
+        markInitialStarted();
+        await initialGate;
+        return new Response(
+          JSON.stringify({
+            ancestors: [
+              {
+                id: "ancestor",
+                workspaceId: WORKSPACE_ID,
+                channelId: "channel-c",
+              },
+            ],
+            children: [],
+            truncated: false,
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      },
+    });
+
+    // A mounted route/header poll starts the shared request after B settles;
+    // the authority-bearing rail joins only after that actual network start.
+    const nonAuthorityConsumer = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+    const remountedRail = await renderHook(
+      () =>
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          beginRead,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(requests).toBe(1);
+    expect(causalGeneration).toBe(acceptedMoveGeneration + 1);
+    releaseInitial();
+    await nonAuthorityConsumer;
+    await flush();
+
+    expect(remountedRail.result.current.lineage?.ancestors[0]?.channelId).toBe("channel-c");
+    expect(remountedRail.result.current.readGeneration).toBeGreaterThan(acceptedMoveGeneration);
+    expect(remountedRail.result.current.readGeneration).toBe(causalGeneration);
     await remountedRail.unmount();
   });
 

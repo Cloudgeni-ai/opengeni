@@ -605,8 +605,8 @@ export function RootRouteComponent() {
     // The version is an explicit identity fence: credentials are read lazily,
     // but consumers need a new client object to reconnect hooks and streams.
     void accessKeyVersion;
-    return createOpenGeniClient();
-  }, [accessKeyVersion]);
+    return createOpenGeniClient(sessionChannelProjectionAuthority.beginRead);
+  }, [accessKeyVersion, sessionChannelProjectionAuthority]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =

@@ -530,19 +530,28 @@ describe("OpenGeniClient", () => {
     expect(requests).toBe(4);
   });
 
-  test("reports lineage starts only to callers present when the shared GET launches", async () => {
+  test("replays a pre-settlement lineage start generation without restamping a late joiner", async () => {
     let requests = 0;
     let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
     const initialGate = new Promise<void>((resolve) => {
       releaseInitial = resolve;
     });
-    const starts: string[] = [];
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    let causalGeneration = 0;
+    const joinedStarts: number[] = [];
     const client = new OpenGeniClient({
       baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
       fetch: async () => {
         requests += 1;
         const request = requests;
-        if (request === 1) await initialGate;
+        if (request === 1) {
+          markInitialStarted();
+          await initialGate;
+        }
         return jsonResponse({
           ancestors: [{ id: `ancestor-${request}` }],
           children: [],
@@ -551,27 +560,63 @@ describe("OpenGeniClient", () => {
       },
     });
 
-    const active = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
-      onRequestStart: () => starts.push("active"),
-    });
-    await Bun.sleep(1);
+    const active = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+    const acceptedMoveGeneration = ++causalGeneration;
     const joined = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
-      onRequestStart: () => starts.push("joined"),
+      onRequestStart: (generation) => joinedStarts.push(generation ?? 0),
     });
 
     expect(requests).toBe(1);
-    expect(starts).toEqual(["active"]);
+    expect(joinedStarts).toEqual([1]);
+    expect(joinedStarts[0]).toBeLessThan(acceptedMoveGeneration);
+    expect(causalGeneration).toBe(acceptedMoveGeneration);
     releaseInitial();
     expect((await active).ancestors[0]?.id).toBe("ancestor-1");
     expect((await joined).ancestors[0]?.id).toBe("ancestor-1");
-    expect(starts).toEqual(["active"]);
+  });
 
-    const later = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
-      onRequestStart: () => starts.push("later"),
+  test("replays a post-settlement lineage start generation to an authority joiner", async () => {
+    let requests = 0;
+    let releaseInitial!: () => void;
+    let markInitialStarted!: () => void;
+    const initialGate = new Promise<void>((resolve) => {
+      releaseInitial = resolve;
     });
-    expect((await later).ancestors[0]?.id).toBe("ancestor-2");
-    expect(requests).toBe(2);
-    expect(starts).toEqual(["active", "later"]);
+    const initialStarted = new Promise<void>((resolve) => {
+      markInitialStarted = resolve;
+    });
+    let causalGeneration = 0;
+    const acceptedMoveGeneration = ++causalGeneration;
+    const joinedStarts: number[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      beginSharedRead: () => ++causalGeneration,
+      fetch: async () => {
+        requests += 1;
+        markInitialStarted();
+        await initialGate;
+        return jsonResponse({
+          ancestors: [{ id: "ancestor-channel-c" }],
+          children: [],
+          truncated: false,
+        });
+      },
+    });
+
+    const active = client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
+    await initialStarted;
+    const joined = client.getSessionLineage(WORKSPACE_ID, SESSION_ID, {
+      onRequestStart: (generation) => joinedStarts.push(generation ?? 0),
+    });
+
+    expect(requests).toBe(1);
+    expect(joinedStarts).toEqual([2]);
+    expect(joinedStarts[0]).toBeGreaterThan(acceptedMoveGeneration);
+    expect(causalGeneration).toBe(2);
+    releaseInitial();
+    expect((await active).ancestors[0]?.id).toBe("ancestor-channel-c");
+    expect((await joined).ancestors[0]?.id).toBe("ancestor-channel-c");
   });
 
   test("queues one fresh session read behind an existing projection read", async () => {
@@ -617,15 +662,15 @@ describe("OpenGeniClient", () => {
         throw new Error("single-flight regression uses the selected read directly");
       },
     });
-    const singleFlightRead = (
+    const sharedRead = (
       client as unknown as {
-        singleFlightRead<T>(
+        sharedRead<T>(
           key: string,
           read: () => Promise<T>,
           options?: { fresh?: boolean },
         ): Promise<T>;
       }
-    ).singleFlightRead.bind(client);
+    ).sharedRead.bind(client);
     const read = async () => {
       requests += 1;
       const request = requests;
@@ -635,12 +680,12 @@ describe("OpenGeniClient", () => {
       };
     };
 
-    const active = singleFlightRead("session", read);
+    const active = sharedRead("session", read);
     // Register this reaction before the fresh successor is queued. When the
     // predecessor settles it must join that queued successor, not launch a
     // competing request during the active-entry cleanup gap.
-    const reactionRead = active.then(() => singleFlightRead("session", read));
-    const queuedFresh = singleFlightRead("session", read, { fresh: true });
+    const reactionRead = active.then(() => sharedRead("session", read));
+    const queuedFresh = sharedRead("session", read, { fresh: true });
     await Bun.sleep(1);
     expect(requests).toBe(1);
 
@@ -725,15 +770,15 @@ describe("OpenGeniClient", () => {
         throw new Error("single-flight regression uses the selected read directly");
       },
     });
-    const singleFlightRead = (
+    const sharedRead = (
       client as unknown as {
-        singleFlightRead<T>(
+        sharedRead<T>(
           key: string,
           read: () => Promise<T>,
           options?: { fresh?: boolean },
         ): Promise<T>;
       }
-    ).singleFlightRead.bind(client);
+    ).sharedRead.bind(client);
     const read = () => {
       requests += 1;
       const request = requests;
@@ -749,17 +794,15 @@ describe("OpenGeniClient", () => {
       return Promise.resolve(result);
     };
 
-    const initial = singleFlightRead("session", read);
-    const queuedFresh = singleFlightRead("session", read, { fresh: true });
+    const initial = sharedRead("session", read);
+    const queuedFresh = sharedRead("session", read, { fresh: true });
     releaseInitial();
     await queuedStarted;
 
     // launchSingleFlightRead's finally clears the active slot before the
     // queued entry's public promise settles. A write continuation in that gap
     // still requires a successor generation, not the completed queued read.
-    const postWriteFresh = queuedRead.then(() =>
-      singleFlightRead("session", read, { fresh: true }),
-    );
+    const postWriteFresh = queuedRead.then(() => sharedRead("session", read, { fresh: true }));
     releaseQueued();
 
     expect((await initial).request).toBe(1);

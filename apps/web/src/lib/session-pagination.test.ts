@@ -63,11 +63,11 @@ describe("session continuation pagination", () => {
       sessions: [row("first"), row("replace")],
       nextCursor: "next",
       failed: true,
-      snapshotReadRevision: 4,
-      snapshotReadGeneration: 14,
-      snapshotSource: "root" as const,
-      authoritativeSessionIds: new Set(["first", "replace"]),
-      channelReadGenerations: new Map([
+      snapshotRevision: 4,
+      snapshotGeneration: 14,
+      source: "root" as const,
+      authoritativeIds: new Set(["first", "replace"]),
+      channelGenerations: new Map([
         ["first", 14],
         ["replace", 14],
       ]),
@@ -95,11 +95,11 @@ describe("session continuation pagination", () => {
       sessions: [row("older-a"), row("older-b")],
       nextCursor: "expired",
       failed: true,
-      snapshotReadRevision: 6,
-      snapshotReadGeneration: 16,
-      snapshotSource: "root" as const,
-      authoritativeSessionIds: new Set(["older-a", "older-b"]),
-      channelReadGenerations: new Map([
+      snapshotRevision: 6,
+      snapshotGeneration: 16,
+      source: "root" as const,
+      authoritativeIds: new Set(["older-a", "older-b"]),
+      channelGenerations: new Map([
         ["older-a", 16],
         ["older-b", 16],
       ]),
@@ -112,11 +112,11 @@ describe("session continuation pagination", () => {
       sessions: retained.sessions,
       nextCursor: "fresh-next",
       failed: false,
-      snapshotReadRevision: 8,
-      snapshotReadGeneration: 0,
-      snapshotSource: "root",
-      authoritativeSessionIds: new Set(),
-      channelReadGenerations: new Map(),
+      snapshotRevision: 8,
+      snapshotGeneration: 0,
+      source: "root",
+      authoritativeIds: new Set(),
+      channelGenerations: new Map(),
     });
   });
 
@@ -139,9 +139,7 @@ describe("session continuation pagination", () => {
     state = rebaseSessionContinuation(state, 11, 11, freshFirstPage, 31, 41, "rebase");
 
     expect(state.sessions.find((session) => session.id === fresh.id)?.channelId).toBe("channel-b");
-    expect(authoritativeSessionContinuationChannels(state, 11, 31, 41)).toEqual([
-      { session: fresh, readGeneration: 41 },
-    ]);
+    expect(authoritativeSessionContinuationChannels(state, 11, 31, 41)).toEqual([[fresh, 41]]);
     expect(state.sessions.map((session) => session.id)).toEqual(["shared", "retained"]);
   });
 
@@ -185,11 +183,11 @@ describe("session continuation pagination", () => {
       sessions: [row("current")],
       nextCursor: "current-next",
       failed: false,
-      snapshotReadRevision: 9,
-      snapshotReadGeneration: 19,
-      snapshotSource: "root" as const,
-      authoritativeSessionIds: new Set(["current"]),
-      channelReadGenerations: new Map([["current", 19]]),
+      snapshotRevision: 9,
+      snapshotGeneration: 19,
+      source: "root" as const,
+      authoritativeIds: new Set(["current"]),
+      channelGenerations: new Map([["current", 19]]),
     };
 
     expect(
@@ -278,7 +276,7 @@ describe("session continuation pagination", () => {
       "rebase",
     );
     const rebasedEvidence = authoritativeSessionContinuation(state, 5, 12, detailGeneration);
-    authority.replace(continuationOwner, rebasedEvidence, 0, state.snapshotReadGeneration);
+    authority.replace(continuationOwner, rebasedEvidence, 0, state.snapshotGeneration);
     expect(authority.owns(rebasedB)).toBe(true);
     expect(authority.owns(detailA)).toBe(false);
 
@@ -330,12 +328,9 @@ describe("session continuation pagination", () => {
       continuationGeneration,
     );
     const evidence = authoritativeSessionContinuationChannels(state, 7, 101, pageOneGeneration);
-    authority.replaceEvidence(
-      continuationOwner,
-      evidence.map(({ session, readGeneration }) => ({ projection: session, readGeneration })),
-    );
+    authority.replaceOwner(continuationOwner, evidence);
 
-    expect(evidence).toEqual([{ session: continuationB, readGeneration: continuationGeneration }]);
+    expect(evidence).toEqual([[continuationB, continuationGeneration]]);
     expect(authority.owns(continuationB)).toBe(true);
     expect(authority.owns(detailA)).toBe(false);
   });
@@ -363,10 +358,7 @@ describe("session continuation pagination", () => {
       staleContinuationGeneration,
     );
     let evidence = authoritativeSessionContinuationChannels(state, 8, 102, snapshotGeneration);
-    authority.replaceEvidence(
-      continuationOwner,
-      evidence.map(({ session, readGeneration }) => ({ projection: session, readGeneration })),
-    );
+    authority.replaceOwner(continuationOwner, evidence);
     expect(authority.owns(detailC)).toBe(true);
     expect(authority.owns(staleB)).toBe(false);
     expect(authority.project(staleB, staleContinuationGeneration).channelId).toBe("channel-c");
@@ -399,13 +391,8 @@ describe("session continuation pagination", () => {
       postRebaseContinuationGeneration,
     );
     evidence = authoritativeSessionContinuationChannels(state, 8, 103, newerRootGeneration);
-    authority.replaceEvidence(
-      continuationOwner,
-      evidence.map(({ session, readGeneration }) => ({ projection: session, readGeneration })),
-    );
-    expect(evidence).toEqual([
-      { session: freshD, readGeneration: postRebaseContinuationGeneration },
-    ]);
+    authority.replaceOwner(continuationOwner, evidence);
+    expect(evidence).toEqual([[freshD, postRebaseContinuationGeneration]]);
     expect(authority.owns(freshD)).toBe(true);
   });
 });

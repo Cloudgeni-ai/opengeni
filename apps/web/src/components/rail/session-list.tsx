@@ -377,13 +377,13 @@ export function SessionList() {
   const continuationSnapshotReadRevision =
     activeContinuation.nextCursor === undefined
       ? rootReadRevision
-      : activeContinuation.snapshotReadRevision;
+      : activeContinuation.snapshotRevision;
   const continuationSnapshotReadGeneration =
     activeContinuation.nextCursor === undefined
       ? rootReadGeneration
-      : activeContinuation.snapshotReadGeneration;
+      : activeContinuation.snapshotGeneration;
   const continuationSnapshotSource =
-    activeContinuation.nextCursor === undefined ? "root" : activeContinuation.snapshotSource;
+    activeContinuation.nextCursor === undefined ? "root" : activeContinuation.source;
   const [loadingMoreGeneration, setLoadingMoreGeneration] = useState<number | null>(null);
   const loadingMore = loadingMoreGeneration === pageGeneration;
   const loadMoreAttempt = useRef(0);
@@ -417,13 +417,13 @@ export function SessionList() {
     () => new Map(),
   );
   const acceptedChannelReadRevision = useSyncExternalStore(
-    context.sessionChannelProjectionAuthority.subscribeToAcceptedReads,
-    context.sessionChannelProjectionAuthority.getAcceptedReadRevision,
-    context.sessionChannelProjectionAuthority.getAcceptedReadRevision,
+    context.sessionChannelProjectionAuthority.subscribe,
+    context.sessionChannelProjectionAuthority.getRevision,
+    context.sessionChannelProjectionAuthority.getRevision,
   );
   useEffect(
     () =>
-      context.sessionChannelProjectionAuthority.subscribeToAcceptedReads((accepted) => {
+      context.sessionChannelProjectionAuthority.subscribe((accepted) => {
         if (!accepted) return;
         if (accepted.workspaceId !== rail.workspaceId) return;
         setChannelMoveOverrides((current) => {
@@ -496,21 +496,21 @@ export function SessionList() {
   const pinnedChannelReadGeneration = hierarchyMode ? globalPinsReadGeneration : rootReadGeneration;
   const currentListChannelEvidence = useMemo(() => {
     void acceptedChannelReadRevision;
-    const evidence = new Map<string, { session: Session; readGeneration: number }>();
+    const evidence = new Map<string, readonly [session: Session, readGeneration: number]>();
     const add = (candidates: readonly Session[], readGeneration: number) => {
       for (const session of candidates) {
         const current = evidence.get(session.id);
-        if (!current || readGeneration >= current.readGeneration) {
-          evidence.set(session.id, { session, readGeneration });
+        if (!current || readGeneration >= current[1]) {
+          evidence.set(session.id, [session, readGeneration]);
         }
       }
     };
-    for (const { session, readGeneration } of authoritativeExtraSessionEvidence) {
+    for (const [session, readGeneration] of authoritativeExtraSessionEvidence) {
       add([session], readGeneration);
     }
     add(sessions, rootReadGeneration);
     add(pinned, pinnedChannelReadGeneration);
-    for (const { session, readGeneration } of loadedChildChannelEvidence) {
+    for (const [session, readGeneration] of loadedChildChannelEvidence) {
       add([session], readGeneration);
     }
     return evidence;
@@ -532,13 +532,10 @@ export function SessionList() {
     return [...source.values()].map((session) => {
       const evidence = currentListChannelEvidence.get(session.id);
       const projected =
-        evidence && (session.channelId ?? null) !== (evidence.session.channelId ?? null)
-          ? { ...session, channelId: evidence.session.channelId ?? null }
+        evidence && (session.channelId ?? null) !== (evidence[0].channelId ?? null)
+          ? { ...session, channelId: evidence[0].channelId ?? null }
           : session;
-      return context.sessionChannelProjectionAuthority.project(
-        projected,
-        evidence?.readGeneration ?? 0,
-      );
+      return context.sessionChannelProjectionAuthority.project(projected, evidence?.[1] ?? 0);
     });
   }, [
     context.sessionChannelProjectionAuthority,
@@ -550,7 +547,7 @@ export function SessionList() {
   ]);
   const rootChannelAuthoritySessions = useMemo(() => sessions, [sessions]);
   const channelAuthoritySessions = useMemo(() => {
-    return [...currentListChannelEvidence.values()].map(({ session, readGeneration }) =>
+    return [...currentListChannelEvidence.values()].map(([session, readGeneration]) =>
       context.sessionChannelProjectionAuthority.project(session, readGeneration),
     );
   }, [context.sessionChannelProjectionAuthority, currentListChannelEvidence]);
@@ -581,24 +578,15 @@ export function SessionList() {
   }, [context.sessionChannelProjectionAuthority, rootChannelAuthoritySessions, rootReadGeneration]);
   useLayoutEffect(() => {
     const owner = continuationChannelProjectionOwner.current;
-    context.sessionChannelProjectionAuthority.replaceEvidence(
+    context.sessionChannelProjectionAuthority.replaceOwner(
       owner,
-      authoritativeExtraSessionEvidence.map(({ session, readGeneration }) => ({
-        projection: session,
-        readGeneration,
-      })),
+      authoritativeExtraSessionEvidence,
     );
     return () => context.sessionChannelProjectionAuthority.clear(owner);
   }, [authoritativeExtraSessionEvidence, context.sessionChannelProjectionAuthority]);
   useLayoutEffect(() => {
     const owner = branchChannelProjectionOwner.current;
-    context.sessionChannelProjectionAuthority.replaceEvidence(
-      owner,
-      loadedChildChannelEvidence.map(({ session, readGeneration }) => ({
-        projection: session,
-        readGeneration,
-      })),
-    );
+    context.sessionChannelProjectionAuthority.replaceOwner(owner, loadedChildChannelEvidence);
     return () => context.sessionChannelProjectionAuthority.clear(owner);
   }, [context.sessionChannelProjectionAuthority, loadedChildChannelEvidence]);
   useLayoutEffect(() => {
@@ -1102,7 +1090,7 @@ export function SessionList() {
       if (session.channelId === channelId) return;
       const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
       if (!acceptedTransition) return;
-      const moveRequest = context.sessionChannelProjectionAuthority.beginMoveRequest(
+      const moveRequest = context.sessionChannelProjectionAuthority.beginMove(
         moveRequestOwner.current,
         session,
       );
@@ -1137,10 +1125,7 @@ export function SessionList() {
         }
         if (
           !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition) ||
-          !context.sessionChannelProjectionAuthority.ownsMoveRequest(
-            moveRequestOwner.current,
-            moveRequest,
-          )
+          !context.sessionChannelProjectionAuthority.ownsMove(moveRequestOwner.current, moveRequest)
         ) {
           return;
         }
@@ -1148,7 +1133,7 @@ export function SessionList() {
           // The successful write response is exact evidence. Settlement
           // fences reads that started before it returned, while a completed
           // newer read requires the post-response point verification below.
-          const disposition = context.sessionChannelProjectionAuthority.recordMoveResponse(
+          const disposition = context.sessionChannelProjectionAuthority.recordMove(
             moveRequestOwner.current,
             moveRequest,
             moved,
@@ -1180,10 +1165,7 @@ export function SessionList() {
         }
         await refreshSessionPages();
       } finally {
-        context.sessionChannelProjectionAuthority.finishMoveRequest(
-          moveRequestOwner.current,
-          moveRequest,
-        );
+        context.sessionChannelProjectionAuthority.finishMove(moveRequestOwner.current, moveRequest);
         const pending = pendingSessionFocus.current;
         if (pending?.sessionId === session.id && pending.operation === focusOperation) {
           pending.settled = true;

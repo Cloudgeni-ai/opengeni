@@ -57,9 +57,10 @@ export function isApiErrorStatus(error: unknown, status: number): boolean {
  * request (the stored access key can change at runtime) and cookies ride
  * along for managed-session deployments.
  */
-export function createOpenGeniClient(): OpenGeniCoreClient {
+export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniCoreClient {
   return new OpenGeniCoreClient({
     baseUrl: apiBaseUrl,
+    beginSharedRead,
     headers: () => authHeaders(),
     fetch: async (input, init) => {
       const response = await fetch(input, {

@@ -11,22 +11,14 @@ const outboundChannels = new Map<string, BroadcastChannel>();
 
 type SessionTreeStats = NonNullable<Session["treeStats"]>;
 type SessionChannelProjection = Pick<Session, "id" | "workspaceId" | "channelId">;
-type SessionChannelEvidence = {
-  channelId: string | null;
-  priority: number;
-  readGeneration: number;
-  retainsAcceptedRead?: boolean;
-};
-type SessionChannelRead = {
-  channelId: string | null;
-  present: boolean;
-  readGeneration: number;
-};
-type SessionChannelCommittedMove = {
-  channelId: string | null;
-  operation: number;
-  readGeneration: number;
-};
+type SessionChannelEvidence = [
+  channelId: string | null,
+  priority: number,
+  readGeneration: number,
+  retainsAcceptedRead?: boolean,
+];
+type SessionChannelRead = [channelId: string | null, present: boolean, readGeneration: number];
+type SessionChannelCommittedMove = [channelId: string | null, readGeneration: number];
 type SessionChannelAcceptedRead = SessionChannelProjection & {
   readGeneration: number;
 };
@@ -50,67 +42,59 @@ function sessionChannelProjectionKey(projection: Pick<Session, "id" | "workspace
  * without putting browser-only provenance onto the public Session contract.
  */
 export class SessionChannelProjectionAuthority {
-  private readonly projectionsByOwner = new Map<
-    object,
-    ReadonlyMap<string, SessionChannelEvidence>
-  >();
-  private readonly acceptedReads = new Map<string, SessionChannelRead>();
-  private readonly committedMoves = new Map<string, SessionChannelCommittedMove>();
-  private readonly acceptedReadListeners = new Set<
-    (accepted?: SessionChannelAcceptedRead) => void
-  >();
-  private readonly pendingMoveRequests = new Map<string, { owner: object; operation: number }>();
-  private nextReadGeneration = 0;
-  private nextMoveOperation = 0;
-  private acceptedReadRevision = 0;
+  private readonly owners = new Map<object, Map<string, SessionChannelEvidence>>();
+  private readonly reads = new Map<string, SessionChannelRead>();
+  private readonly moves = new Map<string, SessionChannelCommittedMove>();
+  private readonly listeners = new Set<(accepted?: SessionChannelAcceptedRead) => void>();
+  private readonly requests = new Map<string, [owner: object, operation: number]>();
+  private readClock = 0;
+  private moveClock = 0;
+  private revision = 0;
 
-  readonly beginRead = (): number => ++this.nextReadGeneration;
+  readonly beginRead = (): number => ++this.readClock;
 
   /** React to persistent accepted server/write authority advancing. */
-  readonly subscribeToAcceptedReads = (
+  readonly subscribe = (
     listener: (accepted?: SessionChannelAcceptedRead) => void,
   ): (() => void) => {
-    this.acceptedReadListeners.add(listener);
-    return () => this.acceptedReadListeners.delete(listener);
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   };
 
   /** Reactive snapshot for consumers whose projected rows depend on persistent authority. */
-  readonly getAcceptedReadRevision = (): number => this.acceptedReadRevision;
+  readonly getRevision = (): number => this.revision;
 
   /**
    * Persist one pending move across rail lifetimes. The same mounted owner
    * cannot duplicate its request; a new mount may supersede it with a new
    * explicit user intent, after which the older response loses authority.
    */
-  beginMoveRequest(
+  beginMove(
     owner: object,
     projection: Pick<SessionChannelProjection, "id" | "workspaceId">,
   ): SessionChannelMoveRequest | null {
     const key = sessionChannelProjectionKey(projection);
-    if (this.pendingMoveRequests.get(key)?.owner === owner) return null;
+    if (this.requests.get(key)?.[0] === owner) return null;
     const request = {
       workspaceId: projection.workspaceId,
       sessionId: projection.id,
-      operation: ++this.nextMoveOperation,
+      operation: ++this.moveClock,
       // A mutation response is evidence from the request start, not from the
       // later time at which its promise happens to settle.
       readGeneration: this.beginRead(),
     };
-    this.pendingMoveRequests.set(key, {
-      owner,
-      operation: request.operation,
-    });
+    this.requests.set(key, [owner, request.operation]);
     return request;
   }
 
-  ownsMoveRequest(owner: object, request: SessionChannelMoveRequest): boolean {
-    const current = this.pendingMoveRequests.get(
+  ownsMove(owner: object, request: SessionChannelMoveRequest): boolean {
+    const current = this.requests.get(
       sessionChannelProjectionKey({ id: request.sessionId, workspaceId: request.workspaceId }),
     );
-    return current?.owner === owner && current.operation === request.operation;
+    return current?.[0] === owner && current[1] === request.operation;
   }
 
-  recordMoveResponse(
+  recordMove(
     owner: object,
     request: SessionChannelMoveRequest,
     projection: SessionChannelProjection,
@@ -118,7 +102,7 @@ export class SessionChannelProjectionAuthority {
     if (
       projection.id !== request.sessionId ||
       projection.workspaceId !== request.workspaceId ||
-      !this.ownsMoveRequest(owner, request)
+      !this.ownsMove(owner, request)
     ) {
       return "rejected";
     }
@@ -128,20 +112,16 @@ export class SessionChannelProjectionAuthority {
     // this response. In either case retain exact B at a new settlement
     // generation: every overlapping read already has an older generation even
     // if it has not completed, and a rail unmount cannot discard this fence.
-    const verificationRequired = this.highestReadGeneration(key) > request.readGeneration;
+    const verificationRequired = this.highestGeneration(key) > request.readGeneration;
     const readGeneration = this.beginRead();
-    this.committedMoves.set(key, {
-      channelId: projection.channelId ?? null,
-      operation: request.operation,
-      readGeneration,
-    });
-    this.publishAuthorityChange({ ...projection, readGeneration });
+    this.moves.set(key, [projection.channelId ?? null, readGeneration]);
+    this.publish({ ...projection, readGeneration });
     return verificationRequired ? "verification-required" : "accepted";
   }
 
-  finishMoveRequest(owner: object, request: SessionChannelMoveRequest): void {
-    if (!this.ownsMoveRequest(owner, request)) return;
-    this.pendingMoveRequests.delete(
+  finishMove(owner: object, request: SessionChannelMoveRequest): void {
+    if (!this.ownsMove(owner, request)) return;
+    this.requests.delete(
       sessionChannelProjectionKey({ id: request.sessionId, workspaceId: request.workspaceId }),
     );
   }
@@ -152,84 +132,77 @@ export class SessionChannelProjectionAuthority {
     priority = 0,
     readGeneration = 0,
   ): void {
-    this.replaceEvidence(
+    this.replaceOwner(
       owner,
-      projections.map((projection) => ({ projection, readGeneration })),
+      projections.map((projection) => [projection, readGeneration] as const),
       priority,
     );
   }
 
-  replaceEvidence(
+  replaceOwner(
     owner: object,
-    evidence: readonly {
-      projection: SessionChannelProjection;
-      readGeneration: number;
-    }[],
+    evidence: readonly (readonly [projection: SessionChannelProjection, readGeneration: number])[],
     priority = 0,
   ): void {
     if (evidence.length === 0) {
       this.clear(owner);
       return;
     }
-    const projectionsByKey = new Map<string, SessionChannelProjection>();
     const next = new Map<string, SessionChannelEvidence>();
-    for (const { projection, readGeneration } of evidence) {
+    for (const [projection, readGeneration] of evidence) {
       const key = sessionChannelProjectionKey(projection);
-      projectionsByKey.set(key, projection);
-      next.set(key, {
-        channelId: projection.channelId ?? null,
-        priority,
-        readGeneration,
-      });
+      next.set(key, [projection.channelId ?? null, priority, readGeneration]);
     }
-    const previous = this.projectionsByOwner.get(owner);
-    if (previous) this.retainCompactedOwnerEvidence(previous, next);
-    this.projectionsByOwner.set(owner, next);
+    const previous = this.owners.get(owner);
+    if (previous) this.retainOwner(previous, next);
+    this.owners.set(owner, next);
     if (priority === 0) {
-      for (const [key, projection] of projectionsByKey) {
+      for (const [projection] of evidence) {
+        const key = sessionChannelProjectionKey(projection);
         const candidate = next.get(key);
-        const committedMove = this.committedMoves.get(key);
+        const committedMove = this.moves.get(key);
         // Current server-owned page/lineage evidence is as authoritative as an
         // exact read for channel filing when its request actually started after
         // the successful move settled. Promote it persistently before retiring
         // B so owner cleanup/remount cannot revive either B or a pre-move A.
-        if (candidate && committedMove && candidate.readGeneration > committedMove.readGeneration) {
-          this.recordReadObservation(projection, candidate.readGeneration, true);
+        if (candidate && committedMove && candidate[2] > committedMove[1]) {
+          this.recordObservation(projection, candidate[2], true);
         }
       }
     }
-    this.compactAcceptedReads();
+    this.compact();
   }
 
   clear(owner: object): void {
-    const previous = this.projectionsByOwner.get(owner);
-    if (previous) this.retainCompactedOwnerEvidence(previous);
-    this.projectionsByOwner.delete(owner);
+    const previous = this.owners.get(owner);
+    if (previous) this.retainOwner(previous);
+    this.owners.delete(owner);
   }
 
   /** Drop browser-only evidence when its workspace principal/route fence is retired. */
   clearWorkspace(workspaceId: string): void {
     const prefix = `${workspaceId}\u0000`;
-    for (const key of this.acceptedReads.keys()) {
+    for (const key of this.reads.keys()) {
       if (!key.startsWith(prefix)) continue;
-      this.acceptedReads.delete(key);
+      this.reads.delete(key);
     }
-    for (const [owner, projections] of this.projectionsByOwner) {
-      const retained = new Map([...projections].filter(([key]) => !key.startsWith(prefix)));
-      if (retained.size === 0) this.projectionsByOwner.delete(owner);
-      else if (retained.size !== projections.size) this.projectionsByOwner.set(owner, retained);
+    for (const [owner, projections] of this.owners) {
+      for (const key of projections.keys()) {
+        if (key.startsWith(prefix)) projections.delete(key);
+      }
+      if (projections.size === 0) this.owners.delete(owner);
     }
-    for (const key of this.pendingMoveRequests.keys()) {
-      if (key.startsWith(prefix)) this.pendingMoveRequests.delete(key);
+    for (const key of this.requests.keys()) {
+      if (key.startsWith(prefix)) this.requests.delete(key);
     }
-    for (const key of this.committedMoves.keys()) {
-      if (key.startsWith(prefix)) this.committedMoves.delete(key);
+    for (const key of this.moves.keys()) {
+      if (key.startsWith(prefix)) this.moves.delete(key);
     }
   }
 
   /** Retain an accepted exact/detail read so older list requests cannot revive stale filing. */
   recordRead(projection: SessionChannelProjection, readGeneration: number): boolean {
-    return this.recordReadObservation(projection, readGeneration, true);
+    return this.recordObservation(projection, readGeneration, true);
   }
 
   /** Fence a not-found point read without treating absence as a channel projection. */
@@ -237,10 +210,10 @@ export class SessionChannelProjectionAuthority {
     projection: Pick<SessionChannelProjection, "id" | "workspaceId">,
     readGeneration: number,
   ): boolean {
-    return this.recordReadObservation(projection, readGeneration, false);
+    return this.recordObservation(projection, readGeneration, false);
   }
 
-  private recordReadObservation(
+  private recordObservation(
     projection: Pick<SessionChannelProjection, "id" | "workspaceId"> &
       Partial<Pick<SessionChannelProjection, "channelId">>,
     readGeneration: number,
@@ -248,28 +221,24 @@ export class SessionChannelProjectionAuthority {
   ): boolean {
     if (readGeneration <= 0) return false;
     const key = sessionChannelProjectionKey(projection);
-    if (this.highestReadGeneration(key) > readGeneration) return false;
-    const committedMove = this.committedMoves.get(key);
+    if (this.highestGeneration(key) > readGeneration) return false;
+    const committedMove = this.moves.get(key);
     // Only accepted server evidence that started after settlement can choose
     // B, a genuinely newer C, or deletion and retire the persistent move
     // fence. Point/detail reads arrive here directly; current priority-0 list
-    // owners are promoted by replaceEvidence after the same causal check.
-    if (committedMove && readGeneration > committedMove.readGeneration) {
-      this.committedMoves.delete(key);
+    // owners are promoted by replaceOwner after the same causal check.
+    if (committedMove && readGeneration > committedMove[1]) {
+      this.moves.delete(key);
     }
     // Refresh iteration order when exact evidence for one session advances so
     // compaction considers genuinely older observations first.
-    for (const projections of this.projectionsByOwner.values()) {
+    for (const projections of this.owners.values()) {
       const candidate = projections.get(key);
-      if (candidate) candidate.retainsAcceptedRead = false;
+      if (candidate) candidate[3] = false;
     }
-    this.acceptedReads.delete(key);
-    this.acceptedReads.set(key, {
-      channelId: projection.channelId ?? null,
-      present,
-      readGeneration,
-    });
-    this.compactAcceptedReads();
+    this.reads.delete(key);
+    this.reads.set(key, [projection.channelId ?? null, present, readGeneration]);
+    this.compact();
     const accepted = present
       ? {
           id: projection.id,
@@ -278,13 +247,13 @@ export class SessionChannelProjectionAuthority {
           readGeneration,
         }
       : undefined;
-    this.publishAuthorityChange(accepted);
+    this.publish(accepted);
     return true;
   }
 
-  private publishAuthorityChange(accepted?: SessionChannelAcceptedRead): void {
-    this.acceptedReadRevision += 1;
-    for (const listener of this.acceptedReadListeners) listener(accepted);
+  private publish(accepted?: SessionChannelAcceptedRead): void {
+    this.revision += 1;
+    for (const listener of this.listeners) listener(accepted);
   }
 
   /**
@@ -293,24 +262,20 @@ export class SessionChannelProjectionAuthority {
    * Transfer its latest value before the marked key disappears; ordinary
    * expired list ownership and optimistic priority owners are never promoted.
    */
-  private retainCompactedOwnerEvidence(
+  private retainOwner(
     previous: ReadonlyMap<string, SessionChannelEvidence>,
     replacement: ReadonlyMap<string, SessionChannelEvidence> = new Map(),
   ): void {
     for (const [key, candidate] of previous) {
-      if (!candidate.retainsAcceptedRead) continue;
-      candidate.retainsAcceptedRead = false;
+      if (!candidate[3]) continue;
+      candidate[3] = false;
       const next = replacement.get(key);
-      if (next && next.priority === 0 && next.readGeneration >= candidate.readGeneration) {
-        next.retainsAcceptedRead = true;
+      if (next && next[1] === 0 && next[2] >= candidate[2]) {
+        next[3] = true;
         continue;
       }
-      if ((this.acceptedReads.get(key)?.readGeneration ?? -1) >= candidate.readGeneration) continue;
-      this.acceptedReads.set(key, {
-        channelId: candidate.channelId,
-        present: true,
-        readGeneration: candidate.readGeneration,
-      });
+      if ((this.reads.get(key)?.[2] ?? -1) >= candidate[2]) continue;
+      this.reads.set(key, [candidate[0], true, candidate[2]]);
     }
   }
 
@@ -321,76 +286,70 @@ export class SessionChannelProjectionAuthority {
    * new; otherwise retaining the winner is required for correctness. Workspace
    * transitions provide the hard lifecycle bound for unresolved evidence.
    */
-  private compactAcceptedReads(): void {
-    if (this.acceptedReads.size <= ACCEPTED_SESSION_CHANNEL_READ_SOFT_LIMIT) return;
-    for (const [key, accepted] of this.acceptedReads) {
-      const ownerEvidence = [...this.projectionsByOwner.values()]
+  private compact(): void {
+    if (this.reads.size <= ACCEPTED_SESSION_CHANNEL_READ_SOFT_LIMIT) return;
+    for (const [key, accepted] of this.reads) {
+      const ownerEvidence = [...this.owners.values()]
         .map((projections) => projections.get(key))
-        .filter((candidate): candidate is SessionChannelEvidence => candidate?.priority === 0);
+        .filter((candidate): candidate is SessionChannelEvidence => candidate?.[1] === 0);
       if (
         ownerEvidence.length === 0 ||
-        ownerEvidence.some((candidate) => candidate.readGeneration < accepted.readGeneration)
+        ownerEvidence.some((candidate) => candidate[2] < accepted[2])
       ) {
         continue;
       }
-      for (const candidate of ownerEvidence) candidate.retainsAcceptedRead = true;
-      this.acceptedReads.delete(key);
-      if (this.acceptedReads.size <= ACCEPTED_SESSION_CHANNEL_READ_SOFT_LIMIT) return;
+      for (const candidate of ownerEvidence) candidate[3] = true;
+      this.reads.delete(key);
+      if (this.reads.size <= ACCEPTED_SESSION_CHANNEL_READ_SOFT_LIMIT) return;
     }
   }
 
-  private highestReadGeneration(key: string): number {
-    let generation = this.acceptedReads.get(key)?.readGeneration ?? Number.NEGATIVE_INFINITY;
-    generation = Math.max(
-      generation,
-      this.committedMoves.get(key)?.readGeneration ?? Number.NEGATIVE_INFINITY,
-    );
-    for (const projections of this.projectionsByOwner.values()) {
+  private highestGeneration(key: string): number {
+    let generation = this.reads.get(key)?.[2] ?? Number.NEGATIVE_INFINITY;
+    generation = Math.max(generation, this.moves.get(key)?.[1] ?? Number.NEGATIVE_INFINITY);
+    for (const projections of this.owners.values()) {
       const candidate = projections.get(key);
-      if (candidate) generation = Math.max(generation, candidate.readGeneration);
+      if (candidate) generation = Math.max(generation, candidate[2]);
     }
     return generation;
   }
 
   project<T extends SessionChannelProjection>(projection: T, readGeneration: number): T {
     const key = sessionChannelProjectionKey(projection);
-    const committedMove = this.committedMoves.get(key);
-    if (committedMove && committedMove.channelId !== (projection.channelId ?? null)) {
-      return { ...projection, channelId: committedMove.channelId };
+    const committedMove = this.moves.get(key);
+    if (committedMove && committedMove[0] !== (projection.channelId ?? null)) {
+      return { ...projection, channelId: committedMove[0] };
     }
-    const accepted = this.acceptedReads.get(key);
+    const accepted = this.reads.get(key);
     if (
       !accepted ||
-      !accepted.present ||
-      accepted.readGeneration <= readGeneration ||
-      accepted.channelId === (projection.channelId ?? null)
+      !accepted[1] ||
+      accepted[2] <= readGeneration ||
+      accepted[0] === (projection.channelId ?? null)
     ) {
       return projection;
     }
-    return { ...projection, channelId: accepted.channelId };
+    return { ...projection, channelId: accepted[0] };
   }
 
   owns(projection: SessionChannelProjection | null): boolean {
     if (!projection) return false;
     const key = sessionChannelProjectionKey(projection);
     const channelId = projection.channelId ?? null;
-    const committedMove = this.committedMoves.get(key);
-    if (committedMove) return committedMove.channelId === channelId;
-    const accepted = this.acceptedReads.get(key);
+    const committedMove = this.moves.get(key);
+    if (committedMove) return committedMove[0] === channelId;
+    const accepted = this.reads.get(key);
     let highestPriority = accepted ? 0 : Number.NEGATIVE_INFINITY;
-    let highestGeneration = accepted?.readGeneration ?? Number.NEGATIVE_INFINITY;
-    let owned = accepted?.present === true && accepted.channelId === channelId;
-    for (const projections of this.projectionsByOwner.values()) {
+    let highestGeneration = accepted?.[2] ?? Number.NEGATIVE_INFINITY;
+    let owned = accepted?.[1] === true && accepted[0] === channelId;
+    for (const projections of this.owners.values()) {
       const candidate = projections.get(key);
-      if (!candidate || candidate.priority < highestPriority) continue;
-      if (candidate.priority > highestPriority || candidate.readGeneration > highestGeneration) {
-        highestPriority = candidate.priority;
-        highestGeneration = candidate.readGeneration;
-        owned = candidate.channelId === channelId;
-      } else if (
-        candidate.readGeneration === highestGeneration &&
-        candidate.channelId === channelId
-      ) {
+      if (!candidate || candidate[1] < highestPriority) continue;
+      if (candidate[1] > highestPriority || candidate[2] > highestGeneration) {
+        highestPriority = candidate[1];
+        highestGeneration = candidate[2];
+        owned = candidate[0] === channelId;
+      } else if (candidate[2] === highestGeneration && candidate[0] === channelId) {
         owned = true;
       }
     }

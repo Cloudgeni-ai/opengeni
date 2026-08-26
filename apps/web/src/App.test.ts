@@ -448,7 +448,7 @@ describe("rail session grouping", () => {
         "manager",
         {
           sessions: [cached],
-          channelReadGenerations: new Map(),
+          channelGenerations: new Map(),
           nextCursor: null,
           loading: false,
           failed: false,
@@ -502,15 +502,9 @@ describe("rail session grouping", () => {
     );
     pages = upsertSessionBranchChild(pages, detail);
     const evidence = authoritativeSessionBranchChannels(pages.get("manager-channel")!);
-    authority.replaceEvidence(
-      branchOwner,
-      evidence.map(({ session: projectedSession, readGeneration }) => ({
-        projection: projectedSession,
-        readGeneration,
-      })),
-    );
+    authority.replaceOwner(branchOwner, evidence);
 
-    expect(evidence).toEqual([{ session: moved, readGeneration: branchGeneration }]);
+    expect(evidence).toEqual([[moved, branchGeneration]]);
     expect(pages.get("manager-channel")?.sessions[0]?.channelId).toBe("channel-b");
     expect(authority.project(moved, branchGeneration).channelId).toBe("channel-b");
     expect(authority.owns(moved)).toBe(true);

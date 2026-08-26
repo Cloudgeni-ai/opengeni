@@ -107,6 +107,7 @@ describe("session control surface architecture", () => {
     const list = await source("components/rail/session-list.tsx");
     const move = await source("lib/session-channel-move.ts");
     const route = await source("routes/session.tsx");
+    const appContext = await source("context.tsx");
     const lineageHook = await source("../../../packages/react/src/hooks/use-session-lineage.ts");
     expect(list).toContain("applySessionChannelProjection(pinProjected, projected)");
     expect(list).toContain("channelMoveOverrides.has(openSessionId)");
@@ -120,7 +121,10 @@ describe("session control surface architecture", () => {
     expect(list).toContain("beginRead: context.sessionChannelProjectionAuthority.beginRead");
     expect(list).toContain("activeLineage.readGeneration");
     expect(lineageHook).toContain("getSessionLineage(workspaceId, sessionId, {");
-    expect(lineageHook).toContain("onRequestStart: () => {");
+    expect(lineageHook).toContain("onRequestStart: (sharedReadGeneration) => {");
+    expect(appContext).toContain(
+      "createOpenGeniClient(sessionChannelProjectionAuthority.beginRead)",
+    );
     expect(list).toContain(
       "const lineageProjected = context.sessionChannelProjectionAuthority.project(",
     );
@@ -135,23 +139,23 @@ describe("session control surface architecture", () => {
     );
     expect(list).toContain("sessionChannelProjectionAuthority.owns(authoritative)");
     expect(list).toContain("sessionChannelProjectionAuthority.clear(owner)");
-    expect(list).toContain("sessionChannelProjectionAuthority.beginMoveRequest(");
-    expect(list).toContain("sessionChannelProjectionAuthority.ownsMoveRequest(");
-    expect(list).toContain("sessionChannelProjectionAuthority.recordMoveResponse(");
+    expect(list).toContain("sessionChannelProjectionAuthority.beginMove(");
+    expect(list).toContain("sessionChannelProjectionAuthority.ownsMove(");
+    expect(list).toContain("sessionChannelProjectionAuthority.recordMove(");
     expect(list).toContain('if (disposition === "rejected")');
     expect(list).not.toContain('if (disposition === "verification-required")');
     expect(list).toContain("await verifySessionChannelMove(session.id, operation)");
-    expect(list).toContain("sessionChannelProjectionAuthority.finishMoveRequest(");
+    expect(list).toContain("sessionChannelProjectionAuthority.finishMove(");
     expect(list).toContain("context.client.updateSessionChannel(");
     expect(list).not.toContain("moveSession: requestMoveSession");
     expect(list).not.toContain("await requestMoveSession(");
     expect(list).not.toContain("const movingSessions = useRef(");
     expect(list).not.toContain("const channelMoveOperation = useRef(");
     expect(list).toContain("useSyncExternalStore(");
-    expect(list).toContain("subscribeToAcceptedReads,");
-    expect(list).toContain("getAcceptedReadRevision");
+    expect(list).toContain("subscribe,");
+    expect(list).toContain("getRevision");
     expect(list).toContain("acceptedChannelReadRevision");
-    expect(list).toContain("subscribeToAcceptedReads((accepted) =>");
+    expect(list).toContain("subscribe((accepted) =>");
     expect(list).toContain("override?.committed");
     expect(list).toContain("applySessionChannelProjection(current, accepted)");
     expect(list).toContain("reconcileSessionChannelMovePointRead(");

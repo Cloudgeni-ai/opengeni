@@ -11,21 +11,21 @@ export type SessionContinuationState = {
   nextCursor: string | null | undefined;
   failed: boolean;
   /** Page-one read revision whose snapshot produced the retained cursor chain. */
-  snapshotReadRevision: number;
+  snapshotRevision: number;
   /** Shared causal generation captured when that snapshot's page-one read started. */
-  snapshotReadGeneration: number;
+  snapshotGeneration: number;
   /** Root-hook snapshots and direct cursor-rebase snapshots have independent identities. */
-  snapshotSource: "root" | "rebase";
+  source: "root" | "rebase";
   /** Rows fetched from that snapshot, excluding display-only rows retained from older snapshots. */
-  authoritativeSessionIds: ReadonlySet<string>;
+  authoritativeIds: ReadonlySet<string>;
   /** Actual request-start generation for each accepted continuation row's live channel fields. */
-  channelReadGenerations: ReadonlyMap<string, number>;
+  channelGenerations: ReadonlyMap<string, number>;
 };
 
-export type SessionContinuationChannelEvidence = {
-  session: Session;
-  readGeneration: number;
-};
+export type SessionContinuationChannelEvidence = readonly [
+  session: Session,
+  readGeneration: number,
+];
 
 export function sessionPageKey(workspaceId: string, search: string): string {
   return `${workspaceId}\u0000${search}`;
@@ -49,11 +49,11 @@ export function emptySessionContinuation(generation: number): SessionContinuatio
     sessions: [],
     nextCursor: undefined,
     failed: false,
-    snapshotReadRevision: 0,
-    snapshotReadGeneration: 0,
-    snapshotSource: "root",
-    authoritativeSessionIds: new Set(),
-    channelReadGenerations: new Map(),
+    snapshotRevision: 0,
+    snapshotGeneration: 0,
+    source: "root",
+    authoritativeIds: new Set(),
+    channelGenerations: new Map(),
   };
 }
 
@@ -70,39 +70,39 @@ export function mergeSessionContinuation(
   activeGeneration: number,
   requestGeneration: number,
   page: { sessions: Session[]; nextCursor: string | null },
-  snapshotReadRevision: number,
-  snapshotReadGeneration = 0,
-  snapshotSource: "root" | "rebase" = "root",
-  pageReadGeneration = snapshotReadGeneration,
+  snapshotRevision: number,
+  snapshotGeneration = 0,
+  source: "root" | "rebase" = "root",
+  pageReadGeneration = snapshotGeneration,
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) {
     return state;
   }
   const active = activeSessionContinuation(state, activeGeneration);
   const rows = new Map(active.sessions.map((session) => [session.id, session]));
-  const authoritativeSessionIds =
-    active.snapshotSource === snapshotSource && active.snapshotReadRevision === snapshotReadRevision
-      ? new Set(active.authoritativeSessionIds)
+  const authoritativeIds =
+    active.source === source && active.snapshotRevision === snapshotRevision
+      ? new Set(active.authoritativeIds)
       : new Set<string>();
-  const channelReadGenerations =
-    active.snapshotSource === snapshotSource && active.snapshotReadRevision === snapshotReadRevision
-      ? new Map(active.channelReadGenerations)
+  const channelGenerations =
+    active.source === source && active.snapshotRevision === snapshotRevision
+      ? new Map(active.channelGenerations)
       : new Map<string, number>();
   for (const session of page.sessions) rows.set(session.id, session);
   for (const session of page.sessions) {
-    authoritativeSessionIds.add(session.id);
-    channelReadGenerations.set(session.id, pageReadGeneration);
+    authoritativeIds.add(session.id);
+    channelGenerations.set(session.id, pageReadGeneration);
   }
   return {
     generation: activeGeneration,
     sessions: [...rows.values()],
     nextCursor: page.nextCursor,
     failed: false,
-    snapshotReadRevision,
-    snapshotReadGeneration,
-    snapshotSource,
-    authoritativeSessionIds,
-    channelReadGenerations,
+    snapshotRevision,
+    snapshotGeneration,
+    source,
+    authoritativeIds,
+    channelGenerations,
   };
 }
 
@@ -113,9 +113,9 @@ function continuationRowHasCurrentChannelAuthority(
   currentReadGeneration: number,
 ): boolean {
   if (currentReadGeneration > 0) return readGeneration >= currentReadGeneration;
-  return state.snapshotSource === "root"
-    ? state.snapshotReadRevision === currentReadRevision
-    : state.snapshotReadGeneration >= currentReadGeneration;
+  return state.source === "root"
+    ? state.snapshotRevision === currentReadRevision
+    : state.snapshotGeneration >= currentReadGeneration;
 }
 
 /** Current continuation rows that may own channel filing, with each page's actual read start. */
@@ -128,10 +128,9 @@ export function authoritativeSessionContinuationChannels(
   const active = activeSessionContinuation(state, activeGeneration);
   const byId = new Map(active.sessions.map((session) => [session.id, session]));
   const evidence: SessionContinuationChannelEvidence[] = [];
-  for (const sessionId of active.authoritativeSessionIds) {
+  for (const sessionId of active.authoritativeIds) {
     const session = byId.get(sessionId);
-    const readGeneration =
-      active.channelReadGenerations.get(sessionId) ?? active.snapshotReadGeneration;
+    const readGeneration = active.channelGenerations.get(sessionId) ?? active.snapshotGeneration;
     if (
       session &&
       continuationRowHasCurrentChannelAuthority(
@@ -141,7 +140,7 @@ export function authoritativeSessionContinuationChannels(
         currentReadGeneration,
       )
     ) {
-      evidence.push({ session, readGeneration });
+      evidence.push([session, readGeneration]);
     }
   }
   return evidence;
@@ -159,7 +158,7 @@ export function authoritativeSessionContinuation(
     activeGeneration,
     currentReadRevision,
     currentReadGeneration,
-  ).map(({ session }) => session);
+  ).map(([session]) => session);
 }
 
 /**
@@ -174,10 +173,9 @@ export function reconcileRetainedSessionContinuationChannel(
   currentReadGeneration = 0,
 ): SessionContinuationState {
   if (!projected || state.generation !== activeGeneration) return state;
-  const rowReadGeneration =
-    state.channelReadGenerations.get(projected.id) ?? state.snapshotReadGeneration;
+  const rowReadGeneration = state.channelGenerations.get(projected.id) ?? state.snapshotGeneration;
   if (
-    state.authoritativeSessionIds.has(projected.id) &&
+    state.authoritativeIds.has(projected.id) &&
     continuationRowHasCurrentChannelAuthority(
       state,
       rowReadGeneration,
@@ -211,29 +209,29 @@ export function rebaseSessionContinuation(
   activeGeneration: number,
   requestGeneration: number,
   page: { sessions: Session[]; nextCursor: string | null },
-  snapshotReadRevision: number,
-  snapshotReadGeneration = 0,
-  snapshotSource: "root" | "rebase" = "root",
+  snapshotRevision: number,
+  snapshotGeneration = 0,
+  source: "root" | "rebase" = "root",
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) return state;
   const active = activeSessionContinuation(state, activeGeneration);
   const rows = new Map(active.sessions.map((session) => [session.id, session]));
-  const authoritativeSessionIds = new Set<string>();
-  const channelReadGenerations = new Map<string, number>();
+  const authoritativeIds = new Set<string>();
+  const channelGenerations = new Map<string, number>();
   for (const session of page.sessions) {
     rows.set(session.id, session);
-    authoritativeSessionIds.add(session.id);
-    channelReadGenerations.set(session.id, snapshotReadGeneration);
+    authoritativeIds.add(session.id);
+    channelGenerations.set(session.id, snapshotGeneration);
   }
   return {
     ...active,
     sessions: [...rows.values()],
     nextCursor: page.nextCursor,
     failed: false,
-    snapshotReadRevision,
-    snapshotReadGeneration,
-    snapshotSource,
-    authoritativeSessionIds,
-    channelReadGenerations,
+    snapshotRevision,
+    snapshotGeneration,
+    source,
+    authoritativeIds,
+    channelGenerations,
   };
 }
