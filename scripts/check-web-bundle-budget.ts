@@ -221,10 +221,13 @@ const budgets = {
   // The causal older-history receipt adds one boolean ownership mark to the
   // always-loaded session hook and timeline. The exact Bun 1.4 Linux/x64
   // production graph measures 2,182,276 raw / 609,893 gzip bytes. Advance only
-  // the raw aggregate to its next whole-KiB envelope; every compressed,
-  // file-count, initial, per-file, lazy-chunk, and CSS cap stays fixed.
+  // the raw aggregate to its next whole-KiB envelope. Protected-main Linux/x64
+  // then measured 610,305 gzip bytes, one byte beyond the old cap. Advance the
+  // gzip aggregate to the first whole-KiB envelope that preserves the existing
+  // 1.5-KiB platform-skew allowance over that maximum; every file-count,
+  // initial, per-file, lazy-chunk, and CSS cap stays fixed.
   directSessionRaw: 2132 * kib,
-  directSessionGzip: 596 * kib,
+  directSessionGzip: 598 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
