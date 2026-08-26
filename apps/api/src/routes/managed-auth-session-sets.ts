@@ -380,7 +380,10 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         operationType: "logout_all",
         mode: deps.settings.managedAuthSessionSetMode,
       });
-      deleteCookie(context, MANAGED_AUTH_SESSION_SET_COOKIE, authorityCookieOptions(deps));
+      // Keep the now-retired authority cookie until the next authoritative GET
+      // rotates it. If response headers commit but the body is lost, the SDK
+      // can still replay this exact operation and recover its durable receipt;
+      // every new command remains denied by the revoked server-side set.
       appendCookies(
         context,
         await requireAvailable(deps).adapter.createLegacySelectedSessionCookies(

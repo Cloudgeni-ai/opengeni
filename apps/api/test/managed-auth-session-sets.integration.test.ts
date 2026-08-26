@@ -177,6 +177,56 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       where user_id = (select id from auth_users where email = ${email})
     `;
     expect(sessionsAfterReplay?.count).toBe(sessionsAfterCompletion?.count);
+
+    const logoutBody = JSON.stringify({
+      operationId: crypto.randomUUID(),
+      expectedGeneration: completed.projection.generation,
+    });
+    const logout = await app.request("/v1/auth/session-set/logout-all", {
+      method: "POST",
+      headers: mutationHeaders(completed.projection, authorityCookie),
+      body: logoutBody,
+    });
+    expect(logout.status).toBe(200);
+    const logoutReceipt = await logout.json();
+    expect(logoutReceipt).toMatchObject({
+      actorEpoch: "2",
+      state: "logged_out",
+    });
+    expect(BigInt((logoutReceipt as { generation: string }).generation)).toBeGreaterThan(
+      BigInt(completed.projection.generation),
+    );
+    expect(
+      logout.headers
+        .getSetCookie()
+        .some((cookie) => cookie.startsWith(`${MANAGED_AUTH_SESSION_SET_COOKIE}=`)),
+    ).toBe(false);
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("retired");
+
+    // Model a lost response body after the browser retained the response
+    // headers. The retired cookie is deliberately still present, so the exact
+    // command can recover its append-only receipt without reviving authority.
+    const logoutReplay = await app.request("/v1/auth/session-set/logout-all", {
+      method: "POST",
+      headers: mutationHeaders(completed.projection, authorityCookie),
+      body: logoutBody,
+    });
+    expect(logoutReplay.status).toBe(200);
+    expect(await logoutReplay.json()).toEqual(logoutReceipt);
+    expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("retired");
+
+    const fresh = await app.request("/v1/auth/session-set", {
+      headers: { cookie: authorityCookie },
+    });
+    expect(fresh.status).toBe(200);
+    expect(await fresh.json()).toMatchObject({
+      generation: "1",
+      actorEpoch: "1",
+      selectedSlotId: null,
+      state: "ready",
+      slots: [],
+    });
+    expect(oneCookie(fresh, MANAGED_AUTH_SESSION_SET_COOKIE)).not.toBe(authorityCookie);
   });
 
   test("converges two pre-bootstrap tabs, replays exactly, and exposes no provider token", async () => {
