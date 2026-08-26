@@ -1,6 +1,8 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 
+import { DIRECT_SESSION_RAW_BUDGET, KIB as kib } from "./web-bundle-budget-policy";
+
 type ManifestEntry = {
   file: string;
   imports?: string[];
@@ -8,7 +10,6 @@ type ManifestEntry = {
   isEntry?: boolean;
 };
 
-const kib = 1024;
 const budgets = {
   // Shared consent, connector, and response-deduplication code remains in the
   // application shell while provider SDKs stay lazy. The Workspace hub densifies
@@ -240,7 +241,12 @@ const budgets = {
   // KiB gzip, preserving one KiB of raw headroom and the 1.5-KiB Linux/x64
   // platform-skew allowance. The measured 31,498-byte CSS asset and every
   // initial, per-file, file-count, lazy-chunk, and CSS cap stay fixed.
-  directSessionRaw: 2137 * kib,
+  // Shared lineage request-start identity relay on the exact current-main
+  // Linux/x64 Bun 1.4 production merge measures 2,188,272 raw bytes. Calibrate
+  // only this raw aggregate to the policy-derived 2,138-KiB envelope, retaining
+  // 1,040 bytes of headroom. Every compressed, file-count, initial, per-file,
+  // lazy-chunk, and CSS cap remains fixed.
+  directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 598 * kib,
   directSessionFiles: 24,
   lazyChunkRaw: 800 * kib,
