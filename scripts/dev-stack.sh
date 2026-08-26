@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Full local OpenGeni stack for one checkout / git worktree.
-# Isolates Docker Compose project + host ports so parallel worktrees do not share
-# Postgres/NATS/Temporal/Garage or race on :8000/:3000.
+# Isolates the infrastructure project + host ports so parallel worktrees do not
+# share Postgres/NATS/Temporal/object storage or race on :8000/:3000.
 set -euo pipefail
 
 case "${1:-}" in
@@ -26,6 +26,25 @@ set -a
 # shellcheck disable=SC1091
 . ./.env
 set +a
+
+# Docker remains the preferred local infrastructure backend when its daemon is
+# reachable. Restricted sandboxes commonly have no daemon (or only a dead CLI),
+# so auto falls back to equivalent native processes without changing `bun run
+# dev`. An explicit Docker request still fails closed.
+# shellcheck disable=SC1091
+. ./scripts/dev-stack-backend.sh
+OPENGENI_DEV_BACKEND="$(opengeni_resolve_dev_backend)"
+export OPENGENI_DEV_BACKEND
+
+# A native infrastructure host cannot provide the Docker sandbox provider. The
+# in-process local provider preserves sandbox execution without credentials or a
+# daemon. Preserve explicit remote providers such as Modal/OpenSandbox.
+if [ "$OPENGENI_DEV_BACKEND" = "native" ] &&
+  [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "docker" ]; then
+  OPENGENI_SANDBOX_BACKEND=local
+fi
+OPENGENI_SANDBOX_BACKEND="${OPENGENI_SANDBOX_BACKEND:-docker}"
+export OPENGENI_SANDBOX_BACKEND
 
 # Connected Machines are part of the normal localhost product surface. Keep the
 # deployment/config-library default fail-closed, but make `bun run dev`
@@ -179,7 +198,7 @@ else
   export OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
 fi
 
-# Compose project identity is shared with scripts/dev-stack-down.sh so
+# Infrastructure project identity is shared with scripts/dev-stack-down.sh so
 # `bun run dev:down` / `dev:clean` always target exactly this worktree's stack.
 # shellcheck disable=SC1091
 . ./scripts/dev-stack-project.sh
@@ -199,14 +218,27 @@ if [ "${OPENGENI_SANDBOX_BACKEND:-docker}" = "modal" ]; then
   export OPENGENI_MODAL_APP_NAME
 fi
 
-# A stopped host dev process intentionally leaves this worktree's dependency
-# containers running. Reuse the generated ports when those exact compose
-# services still exist; otherwise a restart mistakes its own containers for a
-# collision and needlessly moves Postgres/Temporal/object-storage to new ports.
+# A stopped host dev process intentionally leaves this worktree's dependencies
+# running. Reuse the generated ports only when the same recorded infrastructure
+# backend is still healthy; otherwise a restart must avoid stale port state.
 reuse_runtime_ports=0
+runtime_backend=""
+if [ -f .env.runtime ]; then
+  runtime_backend="$(sed -n 's/^OPENGENI_DEV_BACKEND=//p' .env.runtime | tail -1)"
+fi
+runtime_infrastructure_running=0
+if [ "$runtime_backend" = "$OPENGENI_DEV_BACKEND" ]; then
+  if [ "$OPENGENI_DEV_BACKEND" = "docker" ] &&
+    [ -n "$(docker compose ps -q 2>/dev/null)" ]; then
+    runtime_infrastructure_running=1
+  elif [ "$OPENGENI_DEV_BACKEND" = "native" ] &&
+    bash scripts/dev-native-infra.sh status --quiet >/dev/null 2>&1; then
+    runtime_infrastructure_running=1
+  fi
+fi
 if [ -f .env.runtime ] &&
   [ "$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env.runtime | tail -1)" = "$COMPOSE_PROJECT_NAME" ] &&
-  [ -n "$(docker compose ps -q 2>/dev/null)" ]; then
+  [ "$runtime_infrastructure_running" = "1" ]; then
   # Reuse only generated port assignments. Sourcing the whole runtime file
   # resurrects stale derived URLs and silently overrides newer operator values
   # from .env (notably remote-reachable Connected Machine endpoints).
@@ -215,6 +247,7 @@ if [ -f .env.runtime ] &&
     OPENGENI_NATS_HOST_PORT \
     OPENGENI_NATS_MONITOR_HOST_PORT \
     OPENGENI_TEMPORAL_HOST_PORT \
+    OPENGENI_TEMPORAL_UI_HOST_PORT \
     OPENGENI_GARAGE_HOST_PORT \
     OPENGENI_MINIO_HOST_PORT \
     OPENGENI_MINIO_CONSOLE_HOST_PORT \
@@ -378,7 +411,12 @@ choose_port OPENGENI_POSTGRES_HOST_PORT 5432
 choose_port OPENGENI_NATS_HOST_PORT 4222
 choose_port OPENGENI_NATS_MONITOR_HOST_PORT 8222
 choose_port OPENGENI_TEMPORAL_HOST_PORT 7233
-OPENGENI_OBJECT_STORAGE_FIXTURE="${OPENGENI_OBJECT_STORAGE_FIXTURE:-garage}"
+if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
+  choose_port OPENGENI_TEMPORAL_UI_HOST_PORT 8233
+  OPENGENI_OBJECT_STORAGE_FIXTURE=minio
+else
+  OPENGENI_OBJECT_STORAGE_FIXTURE="${OPENGENI_OBJECT_STORAGE_FIXTURE:-garage}"
+fi
 export OPENGENI_OBJECT_STORAGE_FIXTURE
 object_s3_host_port=""
 if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
@@ -695,6 +733,10 @@ else
     export OPENGENI_OBJECT_STORAGE_S3_PROVIDER="Minio"
   fi
 fi
+export OPENGENI_OBJECT_STORAGE_BACKEND="${OPENGENI_OBJECT_STORAGE_BACKEND:-s3-compatible}"
+export OPENGENI_OBJECT_STORAGE_BUCKET="${OPENGENI_OBJECT_STORAGE_BUCKET:-opengeni-files}"
+export OPENGENI_OBJECT_STORAGE_REGION="${OPENGENI_OBJECT_STORAGE_REGION:-us-east-1}"
+export OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE="${OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE:-true}"
 
 # API/workers run on the host in local development, so their authenticated
 # object-storage client must use the host endpoint. Compose DNS (`garage:3900` /
@@ -716,7 +758,9 @@ if [ -z "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT:-}" ] ||
   [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_sandbox_object_endpoint" ] ||
   [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_internal_object_endpoint_garage" ] ||
   [ "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}" = "$default_internal_object_endpoint_minio" ]; then
-  if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
+  if [ "$OPENGENI_SANDBOX_BACKEND" = "local" ]; then
+    export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
+  elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
     export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://minio:9000"
   else
     export OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT="http://garage:3900"
@@ -1021,6 +1065,8 @@ fi
 {
   printf '%s\n' "# Generated by scripts/dev-stack.sh for worktree stack ${COMPOSE_PROJECT_NAME}. Do not commit."
   printf 'COMPOSE_PROJECT_NAME=%s\n' "${COMPOSE_PROJECT_NAME}"
+  printf 'OPENGENI_DEV_BACKEND=%s\n' "${OPENGENI_DEV_BACKEND}"
+  printf 'OPENGENI_SANDBOX_BACKEND=%s\n' "${OPENGENI_SANDBOX_BACKEND}"
   printf 'OPENGENI_MODAL_APP_NAME=%s\n' "${OPENGENI_MODAL_APP_NAME:-opengeni-sandbox}"
   printf 'OPENGENI_DOCKER_NETWORK=%s\n' "${OPENGENI_DOCKER_NETWORK}"
   printf 'OPENGENI_DOCKER_IMAGE=%s\n' "${OPENGENI_DOCKER_IMAGE:-opengeni-sandbox:local}"
@@ -1032,6 +1078,9 @@ fi
   printf 'OPENGENI_NATS_MONITOR_HOST_PORT=%s\n' "${OPENGENI_NATS_MONITOR_HOST_PORT}"
   printf 'OPENGENI_NATS_CONFIG_FILE=%s\n' "${OPENGENI_NATS_CONFIG_FILE:-$(pwd)/deploy/nats/local-development.conf}"
   printf 'OPENGENI_TEMPORAL_HOST_PORT=%s\n' "${OPENGENI_TEMPORAL_HOST_PORT}"
+  if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
+    printf 'OPENGENI_TEMPORAL_UI_HOST_PORT=%s\n' "${OPENGENI_TEMPORAL_UI_HOST_PORT}"
+  fi
   printf 'OPENGENI_OBJECT_STORAGE_FIXTURE=%s\n' "${OPENGENI_OBJECT_STORAGE_FIXTURE}"
   if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
     printf 'OPENGENI_MINIO_HOST_PORT=%s\n' "${OPENGENI_MINIO_HOST_PORT}"
@@ -1076,9 +1125,13 @@ fi
   printf 'OPENGENI_OBJECT_STORAGE_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_INTERNAL_ENDPOINT}"
   printf 'OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT=%s\n' "${OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT}"
+  printf 'OPENGENI_OBJECT_STORAGE_BACKEND=%s\n' "${OPENGENI_OBJECT_STORAGE_BACKEND}"
+  printf 'OPENGENI_OBJECT_STORAGE_BUCKET=%s\n' "${OPENGENI_OBJECT_STORAGE_BUCKET}"
+  printf 'OPENGENI_OBJECT_STORAGE_REGION=%s\n' "${OPENGENI_OBJECT_STORAGE_REGION}"
   printf 'OPENGENI_OBJECT_STORAGE_S3_PROVIDER=%s\n' "${OPENGENI_OBJECT_STORAGE_S3_PROVIDER}"
   printf 'OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID=%s\n' "${OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID}"
   printf 'OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY=%s\n' "${OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY}"
+  printf 'OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE=%s\n' "${OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE}"
   printf 'OPENGENI_MCP_INTERNAL_URL=%s\n' "${OPENGENI_MCP_INTERNAL_URL}"
   if [ -n "${OPENGENI_MCP_URL:-}" ]; then
     printf 'OPENGENI_MCP_URL=%s\n' "${OPENGENI_MCP_URL}"
@@ -1101,14 +1154,19 @@ fi
   printf 'VITE_API_BASE_URL=%s\n' "${VITE_API_BASE_URL}"
 } >.env.runtime
 
-echo "OpenGeni worktree stack: compose project=${COMPOSE_PROJECT_NAME}"
+echo "OpenGeni worktree stack: project=${COMPOSE_PROJECT_NAME} backend=${OPENGENI_DEV_BACKEND} sandbox=${OPENGENI_SANDBOX_BACKEND}"
 echo "  api=${VITE_API_BASE_URL}  web=http://127.0.0.1:${OPENGENI_WEB_PORT}"
 echo "  postgres=127.0.0.1:${OPENGENI_POSTGRES_HOST_PORT}  nats=${OPENGENI_NATS_URL}"
 echo "  temporal=${OPENGENI_TEMPORAL_HOST}  object-storage=${OPENGENI_OBJECT_STORAGE_ENDPOINT} (${OPENGENI_OBJECT_STORAGE_FIXTURE})"
+if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
+  echo "  temporal-ui=http://127.0.0.1:${OPENGENI_TEMPORAL_UI_HOST_PORT}"
+fi
 echo "  artifact-materializer=http://127.0.0.1:${OPENGENI_ARTIFACT_MATERIALIZER_HTTP_PORT}  artifact-outbox=http://127.0.0.1:${OPENGENI_ARTIFACT_OUTBOX_HTTP_PORT}"
 echo "  Wrote .env.runtime (source it in sibling shells)."
 
-if [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
+if [ "$OPENGENI_DEV_BACKEND" = "native" ]; then
+  bash scripts/dev-native-infra.sh start
+elif [ "$OPENGENI_OBJECT_STORAGE_FIXTURE" = "minio" ]; then
   docker compose --profile minio up -d postgres nats temporal minio minio-init
 else
   docker compose up -d postgres nats temporal garage garage-init

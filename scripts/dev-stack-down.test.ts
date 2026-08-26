@@ -5,6 +5,8 @@ import { join } from "node:path";
 
 const scriptPath = new URL("./dev-stack-down.sh", import.meta.url).pathname;
 const projectHelperPath = new URL("./dev-stack-project.sh", import.meta.url).pathname;
+const backendHelperPath = new URL("./dev-stack-backend.sh", import.meta.url).pathname;
+const nativeHelperPath = new URL("./dev-native-infra.sh", import.meta.url).pathname;
 const devStackPath = new URL("./dev-stack.sh", import.meta.url).pathname;
 const temporaryRoots: string[] = [];
 
@@ -22,16 +24,23 @@ afterEach(async () => {
 async function runWithFakeDocker(
   args: string[],
   fakeDockerBody: string,
-  options: { runtimeProject?: string; environment?: Record<string, string> } = {},
+  options: {
+    runtimeProject?: string;
+    runtimeBackend?: "docker" | "native";
+    environment?: Record<string, string>;
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "opengeni-dev-stack-down-"));
   temporaryRoots.push(root);
   await mkdir(join(root, "scripts"));
   await copyFile(scriptPath, join(root, "scripts", "dev-stack-down.sh"));
   await copyFile(projectHelperPath, join(root, "scripts", "dev-stack-project.sh"));
-  if (options.runtimeProject) {
-    await writeFile(join(root, ".env.runtime"), `COMPOSE_PROJECT_NAME=${options.runtimeProject}\n`);
-  }
+  await copyFile(backendHelperPath, join(root, "scripts", "dev-stack-backend.sh"));
+  const runtimeBackend = options.runtimeBackend ?? "docker";
+  await writeFile(
+    join(root, ".env.runtime"),
+    `${options.runtimeProject ? `COMPOSE_PROJECT_NAME=${options.runtimeProject}\n` : ""}OPENGENI_DEV_BACKEND=${runtimeBackend}\n`,
+  );
   const bin = join(root, "bin");
   await mkdir(bin);
   const log = join(root, "docker.log");
@@ -44,11 +53,20 @@ exit 0
 `,
   );
   await chmod(join(bin, "docker"), 0o755);
+  const nativeLog = join(root, "native.log");
+  await writeFile(
+    join(root, "scripts", "dev-native-infra.sh"),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_NATIVE_LOG"
+`,
+  );
+  await chmod(join(root, "scripts", "dev-native-infra.sh"), 0o755);
   const child = Bun.spawn(["bash", join(root, "scripts", "dev-stack-down.sh"), ...args], {
     env: {
       ...Bun.env,
       PATH: `${bin}:${Bun.env.PATH ?? ""}`,
       FAKE_DOCKER_LOG: log,
+      FAKE_NATIVE_LOG: nativeLog,
       OPENGENI_COMPOSE_PROJECT: "Down Test Stack",
       ...options.environment,
     },
@@ -63,13 +81,17 @@ exit 0
   ]);
   const logFile = Bun.file(log);
   const calls = (await logFile.exists()) ? (await logFile.text()).trim().split("\n") : [];
+  const nativeLogFile = Bun.file(nativeLog);
+  const nativeCalls = (await nativeLogFile.exists())
+    ? (await nativeLogFile.text()).trim().split("\n")
+    : [];
   const runtimeRemains = await Bun.file(join(root, ".env.runtime")).exists();
-  return { exitCode, stdout, stderr, calls, runtimeRemains };
+  return { exitCode, stdout, stderr, calls, nativeCalls, runtimeRemains };
 }
 
 describe("dev-stack-down.sh", () => {
   test("is valid bash and shares the exact project derivation with dev-stack.sh", async () => {
-    for (const path of [scriptPath, projectHelperPath]) {
+    for (const path of [scriptPath, projectHelperPath, backendHelperPath, nativeHelperPath]) {
       const syntax = Bun.spawn(["bash", "-n", path], { stdout: "pipe", stderr: "pipe" });
       expect(await syntax.exited).toBe(0);
     }
@@ -96,7 +118,7 @@ esac`,
       "rm -f abc123",
       "compose --profile minio down --remove-orphans",
     ]);
-    expect(result.stdout).toContain("compose project=down-test-stack (down)");
+    expect(result.stdout).toContain("project=down-test-stack backend=docker (down)");
   });
 
   test("prefers the project recorded by the last `bun run dev`", async () => {
@@ -132,6 +154,20 @@ esac`,
     ]);
     expect(result.calls.join("\n")).not.toContain("prune");
     expect(result.runtimeRemains).toBe(false);
+  });
+
+  test("native down never touches Docker and clean delegates exact project data removal", async () => {
+    const result = await runWithFakeDocker(["--clean", "--yes"], "", {
+      runtimeProject: "native-test-stack",
+      runtimeBackend: "native",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.calls).toEqual([]);
+    expect(result.nativeCalls).toEqual(["down --clean"]);
+    expect(result.runtimeRemains).toBe(false);
+    expect(result.stdout).toContain("project=native-test-stack backend=native (clean)");
   });
 
   test("rejects unknown arguments before touching Docker", async () => {
