@@ -1501,6 +1501,19 @@ export function requiredRuntimeEnvVars(
   } else if (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey") {
     vars.push("OPENGENI_DELEGATION_SECRET");
   }
+  for (const key of [
+    "OPENGENI_PR_REVIEW_GITHUB_APP_ID",
+    "OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID",
+    "OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET",
+    "OPENGENI_PR_REVIEW_GITHUB_APP_SLUG",
+    "OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET",
+    "OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY",
+  ] as const) {
+    if (env[key]) vars.push(key);
+  }
+  if (contract.product.accessMode !== "managed" && env.OPENGENI_PR_REVIEW_GITHUB_APP_ID) {
+    vars.push("OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET", "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+  }
   if (env.OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS) {
     vars.push("OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS");
   }
@@ -2215,6 +2228,33 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
     valueEnv("OPENGENI_SLACK_BOT_DISPLAY_NAME", env.OPENGENI_SLACK_BOT_DISPLAY_NAME),
     valueEnv("OPENGENI_SLACK_COMMAND", env.OPENGENI_SLACK_COMMAND),
+    valueEnv("OPENGENI_PR_REVIEW_GITHUB_APP_ID", env.OPENGENI_PR_REVIEW_GITHUB_APP_ID),
+    valueEnv("OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID", env.OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID),
+    valueEnv(
+      "OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET",
+      env.OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET,
+    ),
+    valueEnv("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG", env.OPENGENI_PR_REVIEW_GITHUB_APP_SLUG),
+    valueEnv(
+      "OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET",
+      env.OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET,
+    ),
+    valueEnv(
+      "OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY",
+      env.OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY,
+    ),
+    ...(contract.product.accessMode !== "managed" && env.OPENGENI_PR_REVIEW_GITHUB_APP_ID
+      ? [
+          requiredEnv(
+            "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
+            env.OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET,
+          ),
+          requiredEnv(
+            "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+            env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
+          ),
+        ]
+      : []),
     ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
     ...(contract.product.accessMode === "managed" ||
     (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey")

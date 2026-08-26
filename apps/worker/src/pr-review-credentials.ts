@@ -78,7 +78,8 @@ async function resolveStandaloneGitCredentials(
     ...(request.providerHost ? { providerHost: request.providerHost } : {}),
   };
   if (request.purpose === "identity") {
-    return authority.credentialKind === "github_app"
+    return authority.credentialKind === "github_app" ||
+      authority.credentialKind === "managed_github_app"
       ? {
           ...echoes,
           identity: {
@@ -88,22 +89,35 @@ async function resolveStandaloneGitCredentials(
         }
       : echoes;
   }
-  if (authority.credentialKind === "github_app") {
+  if (
+    authority.credentialKind === "github_app" ||
+    authority.credentialKind === "managed_github_app"
+  ) {
     assertGitHubMintMatchesRepositoryRefs(request);
-    const encryptionKey = environmentsEncryptionKeyBytes(settings);
-    if (!encryptionKey || !authority.appId || !authority.credentialEncrypted) {
+    if (!authority.appId) {
       throw new Error("PR Review GitHub App credential is unavailable");
     }
-    const minted = await createGitHubAppInstallationTokenWithSigningSettings(
-      {
-        githubAppId: authority.appId,
-        githubAppPrivateKey: decryptVariableSetValue(encryptionKey, authority.credentialEncrypted),
-      },
-      {
-        installationId: request.installationId,
-        repositoryIds: request.repositoryIds,
-      },
-    );
+    const signingSettings =
+      authority.credentialKind === "managed_github_app"
+        ? {
+            githubAppId: settings.prReviewGithubAppId,
+            githubAppPrivateKey: settings.prReviewGithubAppPrivateKey,
+          }
+        : manualPrReviewGitHubSigningSettings(settings, {
+            appId: authority.appId,
+            credentialEncrypted: authority.credentialEncrypted,
+          });
+    if (
+      authority.credentialKind === "managed_github_app" &&
+      settings.prReviewGithubAppId !== authority.appId
+    ) {
+      throw new Error("OpenGeni Lens App identity no longer matches this registration");
+    }
+    const minted = await createGitHubAppInstallationTokenWithSigningSettings(signingSettings, {
+      installationId: request.installationId,
+      repositoryIds: request.repositoryIds,
+      permissions: { contents: "read", pull_requests: "write" },
+    });
     return {
       ...echoes,
       token: minted.token,
@@ -121,6 +135,20 @@ async function resolveStandaloneGitCredentials(
     ...echoes,
     token: decryptVariableSetValue(encryptionKey, authority.credentialEncrypted),
     ...(authority.expiresAt ? { expiresAt: authority.expiresAt } : {}),
+  };
+}
+
+function manualPrReviewGitHubSigningSettings(
+  settings: Settings,
+  authority: { appId: string; credentialEncrypted: string | null },
+) {
+  const encryptionKey = environmentsEncryptionKeyBytes(settings);
+  if (!encryptionKey || !authority.credentialEncrypted) {
+    throw new Error("PR Review GitHub App credential is unavailable");
+  }
+  return {
+    githubAppId: authority.appId,
+    githubAppPrivateKey: decryptVariableSetValue(encryptionKey, authority.credentialEncrypted),
   };
 }
 

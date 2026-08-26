@@ -335,6 +335,15 @@ describe("OpenGeni Review Bot provider boundary", () => {
     expect(
       CreatePrReviewAppRegistrationRequest.safeParse({
         ...common,
+        provider: "github",
+        credentialKind: "managed_github_app",
+        appId: "12345",
+        privateKey: "private-key-value",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreatePrReviewAppRegistrationRequest.safeParse({
+        ...common,
         provider: "gitlab",
         credentialKind: "provider_token",
         accessToken: "provider-token-value",

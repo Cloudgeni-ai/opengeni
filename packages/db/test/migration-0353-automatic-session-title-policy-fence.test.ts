@@ -18,6 +18,7 @@ import {
   FORCE_RLS_TABLES,
   inspectRuntimeDatabasePosture,
   PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_TABLE_PRIVILEGES,
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
 } from "../src/runtime-posture";
 import {
@@ -938,10 +939,26 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
       "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
     ]);
+    // This test deliberately freezes the database immediately after 0353. Keep
+    // today's evaluator strict for every table that existed at that boundary,
+    // while explicitly removing tables introduced by later migrations.
+    const post0353RuntimeTables = new Set([
+      "pr_review_managed_github_authority_nonces",
+      "pr_review_managed_github_routes",
+    ]);
     const postureOptions = (expectedRole: string) => ({
       rlsStrategy: "force" as const,
       expectedRole,
       targetSchema: "public",
+      protectedTables: FORCE_RLS_TABLES.filter((table) => !post0353RuntimeTables.has(table)),
+      tablePrivileges: Object.fromEntries(
+        Object.entries(RUNTIME_TABLE_PRIVILEGES).filter(
+          ([table]) => !post0353RuntimeTables.has(table),
+        ),
+      ),
+      protectedNoDirectDmlTables: PROTECTED_NO_DIRECT_DML_TABLES.filter(
+        (table) => !post0353RuntimeTables.has(table),
+      ),
     });
 
     try {

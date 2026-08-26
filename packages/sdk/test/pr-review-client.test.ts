@@ -30,6 +30,7 @@ describe("OpenGeni Review Bot SDK", () => {
     const workspaceId = "11111111-1111-4111-8111-111111111111";
 
     await client.listConfiguration(workspaceId);
+    await client.getManagedGitHubSetup(workspaceId);
     await client.createAppRegistration(workspaceId, {
       name: "PrReview",
       provider: "github",
@@ -52,6 +53,11 @@ describe("OpenGeni Review Bot SDK", () => {
       {
         method: "GET",
         path: `/v1/workspaces/${workspaceId}/pr-review/registrations`,
+        body: undefined,
+      },
+      {
+        method: "GET",
+        path: `/v1/workspaces/${workspaceId}/pr-review/github`,
         body: undefined,
       },
       {

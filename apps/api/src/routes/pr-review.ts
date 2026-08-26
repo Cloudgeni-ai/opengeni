@@ -44,9 +44,11 @@ import {
   PrReviewProviderRepositoryError,
   verifyPrReviewProviderRepository,
 } from "../integrations/pr-review-provider";
+import { registerPrReviewGitHubRoutes } from "./pr-review-github";
 
 export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings } = deps;
+  registerPrReviewGitHubRoutes(app, deps);
 
   app.get("/v1/workspaces/:workspaceId/pr-review/registrations", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -144,6 +146,24 @@ export function registerPrReviewRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, {
         message: "PR Review app registration not found",
       });
+    if (existing.credentialKind === "managed_github_app") {
+      if (
+        payload.accessToken !== undefined ||
+        payload.privateKey !== undefined ||
+        payload.webhookSecret !== undefined ||
+        payload.webhookUsername !== undefined ||
+        payload.accessTokenExpiresAt !== undefined
+      ) {
+        throw new HTTPException(422, {
+          message: "OpenGeni Lens credentials are managed by the deployment",
+        });
+      }
+      if (payload.status === "active") {
+        throw new HTTPException(409, {
+          message: "Reconnect OpenGeni Lens to reactivate and resync its repositories",
+        });
+      }
+    }
     if (payload.accessToken && existing.credentialKind !== "provider_token") {
       throw new HTTPException(422, {
         message: "GitHub App registrations accept private keys, not access tokens",
