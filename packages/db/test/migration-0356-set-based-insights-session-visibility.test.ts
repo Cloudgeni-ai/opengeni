@@ -430,6 +430,10 @@ describe("migration 0356 set-based Insights session visibility", () => {
     expect(owner.warmGroups).toEqual([]);
     expect(owner.facets).toEqual([{ provider: "test", model: "test-model" }]);
     expect(owner.recent).toHaveLength(2);
+    expect(owner.recent[0]?.occurredAt).toBeInstanceOf(Date);
+    expect(owner.recent[0]?.recordedAt).toBeInstanceOf(Date);
+    expect(typeof owner.recent[0]?.totalTokens).toBe("number");
+    expect(typeof owner.recent[0]?.pricedCostMicros).toBe("number");
     expect(owner.context.totalCalls).toBe(2);
 
     const unrelated = await read(`user:${crypto.randomUUID()}`);

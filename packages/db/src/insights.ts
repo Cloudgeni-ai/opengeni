@@ -144,6 +144,26 @@ function hourKeyUtc(value: Date): string {
   return `${value.toISOString().slice(0, 13)}:00`;
 }
 
+function insightsDate(value: unknown, field: string): Date {
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (!Number.isFinite(date.getTime())) {
+    throw new Error(`Workspace Insights returned an invalid ${field}`);
+  }
+  return date;
+}
+
+function insightsNumber(value: unknown, field: string): number {
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(number)) {
+    throw new Error(`Workspace Insights returned an invalid ${field}`);
+  }
+  return number;
+}
+
+function insightsNullableNumber(value: unknown, field: string): number | null {
+  return value === null ? null : insightsNumber(value, field);
+}
+
 function visibleUsageEventsSource(input: InsightsTimeWindow & { workspaceId: string }) {
   const usageEvents = alias(schema.usageEvents, "insights_visible_usage_events");
   return {
@@ -727,7 +747,22 @@ export async function listRecentModelCalls(
       .where(and(...clauses))
       .orderBy(desc(modelCallFacts.occurredAt), desc(modelCallFacts.id))
       .limit(Math.max(1, Math.min(input.limit ?? 50, 100)));
-    return rows;
+    return rows.map((row) => ({
+      ...row,
+      occurredAt: insightsDate(row.occurredAt, "model-call occurrence timestamp"),
+      recordedAt: insightsDate(row.recordedAt, "model-call recording timestamp"),
+      inputTokens: insightsNullableNumber(row.inputTokens, "input token count"),
+      outputTokens: insightsNullableNumber(row.outputTokens, "output token count"),
+      cachedTokens: insightsNullableNumber(row.cachedTokens, "cached token count"),
+      cacheWriteTokens: insightsNullableNumber(row.cacheWriteTokens, "cache-write token count"),
+      reasoningTokens: insightsNullableNumber(row.reasoningTokens, "reasoning token count"),
+      totalTokens: insightsNullableNumber(row.totalTokens, "total token count"),
+      pricedCostMicros: insightsNumber(row.pricedCostMicros, "priced cost"),
+      estimatedProviderCostMicros: insightsNullableNumber(
+        row.estimatedProviderCostMicros,
+        "estimated provider cost",
+      ),
+    }));
   });
 }
 
