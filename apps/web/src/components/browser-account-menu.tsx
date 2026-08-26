@@ -189,13 +189,13 @@ export function BrowserAccountMenu() {
         <DropdownMenuContent
           align="start"
           side={rail.collapsed ? "right" : "top"}
-          className="w-[min(22rem,calc(100vw-1rem))] forced-colors:border-[CanvasText] motion-reduce:[&_*]:animate-none"
+          className="w-[min(22rem,calc(100vw-1rem))] forced-colors:border-[CanvasText] forced-colors:text-[CanvasText]! motion-reduce:[&_*]:animate-none"
         >
-          <DropdownMenuLabel className="flex items-center gap-2">
+          <DropdownMenuLabel className="flex items-center gap-2 forced-colors:text-[CanvasText]!">
             <UsersIcon className="size-4" />
             Browser accounts
             {projection ? (
-              <span className="ml-auto text-xs font-normal text-popover-foreground">
+              <span className="ml-auto text-xs font-normal text-popover-foreground forced-colors:text-[CanvasText]!">
                 {projection.slots.length}/8
               </span>
             ) : null}
@@ -203,7 +203,7 @@ export function BrowserAccountMenu() {
           <DropdownMenuSeparator />
           {projection?.slots.map((slot) => (
             <DropdownMenuSub key={slot.id}>
-              <DropdownMenuSubTrigger className="min-h-11 whitespace-normal py-2">
+              <DropdownMenuSubTrigger className="min-h-11 whitespace-normal py-2 forced-colors:text-[CanvasText]!">
                 <span className="grid min-w-0 flex-1 gap-0.5">
                   <span className="flex min-w-0 items-center gap-1.5 font-medium">
                     {slot.id === projection.selectedSlotId ? (
@@ -211,15 +211,15 @@ export function BrowserAccountMenu() {
                     ) : null}
                     <span className="truncate">{slot.displayName}</span>
                   </span>
-                  <span className="truncate text-xs text-popover-foreground">
+                  <span className="truncate text-xs text-popover-foreground forced-colors:text-[CanvasText]!">
                     {slot.verifiedClaim.value}
                     {slot.state === "reauth_required" ? " · Re-authentication required" : ""}
                   </span>
                 </span>
               </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-[min(18rem,calc(100vw-1rem))]">
+              <DropdownMenuSubContent className="w-[min(18rem,calc(100vw-1rem))] forced-colors:text-[CanvasText]!">
                 <DropdownMenuItem
-                  className="min-h-11"
+                  className="min-h-11 forced-colors:text-[CanvasText]!"
                   disabled={
                     busy || slot.id === projection.selectedSlotId || slot.state !== "active"
                   }
@@ -237,7 +237,7 @@ export function BrowserAccountMenu() {
                   Re-authenticate
                 </DropdownMenuItem>
                 <DropdownMenuItem
-                  className="min-h-11"
+                  className="min-h-11 forced-colors:text-[CanvasText]!"
                   variant="destructive"
                   disabled={busy}
                   onSelect={() => requestLogout(slot)}
@@ -255,7 +255,7 @@ export function BrowserAccountMenu() {
           ) : null}
           <DropdownMenuSeparator />
           <DropdownMenuItem
-            className="min-h-11"
+            className="min-h-11 forced-colors:text-[CanvasText]!"
             disabled={busy || (projection?.slots.length ?? 8) >= 8}
             onSelect={() => authenticate("add")}
           >
@@ -269,7 +269,7 @@ export function BrowserAccountMenu() {
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
-            className="min-h-11"
+            className="min-h-11 forced-colors:text-[CanvasText]!"
             variant="destructive"
             disabled={busy || !projection?.slots.length}
             onSelect={() => setLogoutAllOpen(true)}
