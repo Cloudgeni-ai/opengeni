@@ -74,7 +74,7 @@ describe("web API auth helpers", () => {
 
   test("keeps an established response body actor-bound until the stream closes", async () => {
     const originalFetch = globalThis.fetch;
-    const observed: { signal?: AbortSignal | null } = {};
+    const observed: { cancelledWith?: unknown; signal?: AbortSignal | null } = {};
     let bodyController!: ReadableStreamDefaultController<Uint8Array>;
     globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
       observed.signal = init?.signal ?? null;
@@ -82,6 +82,9 @@ describe("web API auth helpers", () => {
         new ReadableStream<Uint8Array>({
           start(controller) {
             bodyController = controller;
+          },
+          cancel(reason) {
+            observed.cancelledWith = reason;
           },
         }),
         { headers: { "content-type": "text/event-stream" } },
@@ -97,7 +100,8 @@ describe("web API auth helpers", () => {
       await expect(read).resolves.toMatchObject({ done: false });
       const lateRead = reader.read();
       configureManagedActorEpoch("13");
-      expect(observed.signal?.aborted).toBe(true);
+      expect(observed.signal?.aborted).toBe(false);
+      expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
       await expect(lateRead).rejects.toMatchObject({ name: "AbortError" });
     } finally {
       configureManagedActorEpoch(null);
@@ -124,7 +128,7 @@ describe("web API auth helpers", () => {
       configureManagedActorEpoch("13");
       const response = await managedActorFetch("https://api.example.test/v1/workspaces");
       configureManagedActorEpoch("14");
-      expect(observed.signal?.aborted).toBe(true);
+      expect(observed.signal?.aborted).toBe(false);
       expect(observed.cancelledWith).toMatchObject({ name: "AbortError" });
       await expect(response.json()).rejects.toMatchObject({ name: "AbortError" });
     } finally {

@@ -25,7 +25,10 @@ const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
 let managedActorEpoch: string | null = null;
 let managedActorRevision = 0;
-const managedActorRequests = new Set<AbortController>();
+type ManagedActorRequest = {
+  abortActor: (reason: DOMException) => void;
+};
+const managedActorRequests = new Set<ManagedActorRequest>();
 const managedActorMutationListeners = new Set<() => void>();
 const managedActorInvalidationListeners = new Set<() => void>();
 let managedActorMutationCount = 0;
@@ -94,8 +97,9 @@ export function configureManagedActorEpoch(epoch: string | null): void {
   if (managedActorEpoch === epoch) return;
   managedActorEpoch = epoch;
   managedActorRevision += 1;
-  for (const controller of managedActorRequests) {
-    controller.abort(new DOMException("The browser account changed", "AbortError"));
+  const reason = new DOMException("The browser account changed", "AbortError");
+  for (const managedRequest of managedActorRequests) {
+    managedRequest.abortActor(reason);
   }
 }
 
@@ -148,7 +152,10 @@ export async function managedActorFetch(
   const abortFromCaller = () => controller.abort(inputSignal?.reason);
   if (inputSignal?.aborted) abortFromCaller();
   else inputSignal?.addEventListener("abort", abortFromCaller, { once: true });
-  managedActorRequests.add(controller);
+  const actorRequest: ManagedActorRequest = {
+    abortActor: (reason) => controller.abort(reason),
+  };
+  managedActorRequests.add(actorRequest);
   const tracksMutation =
     acceptedEpoch !== null && !new Set(["GET", "HEAD", "OPTIONS"]).has(requestMethod(input, init));
   if (tracksMutation) updateManagedActorMutationCount(1);
@@ -157,7 +164,7 @@ export async function managedActorFetch(
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
-    managedActorRequests.delete(controller);
+    managedActorRequests.delete(actorRequest);
     inputSignal?.removeEventListener("abort", abortFromCaller);
     if (tracksMutation) updateManagedActorMutationCount(-1);
   };
@@ -186,8 +193,17 @@ export async function managedActorFetch(
       throw new DOMException("Ignored a response from the previous browser account", "AbortError");
     }
     if (!response.body) return response;
+    // Before headers, actor rotation aborts the native fetch. Once a response
+    // body is admitted, transfer actor ownership to the wrapper reader instead
+    // of aborting the already-resolved native fetch signal. WebKit otherwise
+    // reclassifies that post-header abort as an unhandled access-control error,
+    // even when the SDK consumes the response rejection. Cancelling the source
+    // reader still aborts the old actor's body immediately and the downstream
+    // body remains fail-closed with the same AbortError.
+    const actorBodyController = new AbortController();
+    actorRequest.abortActor = (reason) => actorBodyController.abort(reason);
     responseOwnsCleanup = true;
-    return managedActorTrackedResponse(response, controller.signal, cleanup);
+    return managedActorTrackedResponse(response, actorBodyController.signal, cleanup);
   } finally {
     if (!responseOwnsCleanup) cleanup();
   }
