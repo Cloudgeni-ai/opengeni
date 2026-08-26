@@ -124,6 +124,16 @@ function sameSelectedActor(
   );
 }
 
+function isEmptyAuthorityReset(projection: ManagedAuthSessionSetProjection | null): boolean {
+  return (
+    projection?.generation === "1" &&
+    projection.actorEpoch === "1" &&
+    projection.selectedSlotId === null &&
+    projection.state === "ready" &&
+    projection.slots.length === 0
+  );
+}
+
 function compareCounter(left: string, right: string): number {
   const leftValue = BigInt(left);
   const rightValue = BigInt(right);
@@ -220,9 +230,17 @@ export function BrowserAccountsProvider({
     ): Promise<ManagedAuthSessionSetProjection | null> => {
       let target = accepted;
       if (from && target && isOlderProjection(target, from)) {
+        const first = target;
         target = await client.getSessionSet();
         if (sequenceRef.current !== sequence) return null;
-        if (isOlderProjection(target, from)) {
+        if (
+          isOlderProjection(target, from) &&
+          !(
+            isEmptyAuthorityReset(first) &&
+            isEmptyAuthorityReset(target) &&
+            sameActor(first, target)
+          )
+        ) {
           throw new Error("Browser account response regressed the accepted actor epoch");
         }
       }

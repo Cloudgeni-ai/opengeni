@@ -300,7 +300,7 @@ describe("BrowserAccountsProvider", () => {
   });
 
   test("settles logout-all from the fresh authoritative empty session set", async () => {
-    const before = projection();
+    const before = projection({ generation: "4", actorEpoch: "3" });
     const empty = projection({ selectedSlotId: null, slotIds: [] });
     let current = before;
     const requests: Array<{ operationId: string; expectedGeneration: string }> = [];
@@ -321,7 +321,7 @@ describe("BrowserAccountsProvider", () => {
 
     expect(await actRun(() => accounts.current.logoutAll())).toBe(true);
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.expectedGeneration).toBe("1");
+    expect(requests[0]?.expectedGeneration).toBe("4");
     expect(accounts.current.phase).toBe("ready");
     expect(accounts.current.projection).toMatchObject({
       selectedSlotId: null,
@@ -371,7 +371,7 @@ describe("BrowserAccountsProvider", () => {
   });
 
   test("lets logout-all own settlement when its SSE actor-loss signal arrives concurrently", async () => {
-    const before = projection();
+    const before = projection({ generation: "4", actorEpoch: "3" });
     const empty = projection({ selectedSlotId: null, slotIds: [] });
     let current = before;
     let announcePostStarted!: () => void;
@@ -421,6 +421,36 @@ describe("BrowserAccountsProvider", () => {
     expect(accounts.current.hasPendingTransition).toBe(false);
     expect(transitions.at(-1)?.kind).toBe("logout_all");
     expect(transitions.at(-1)?.to?.slots).toEqual([]);
+    await accounts.unmount();
+  });
+
+  test("double-confirms a fresh empty authority reset after cross-tab logout-all", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
+    const empty = projection({ selectedSlotId: null, slotIds: [] });
+    let current = before;
+    let reads = 0;
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => {
+          reads += 1;
+          return current;
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+      },
+    );
+    const initialReads = reads;
+    current = empty;
+
+    expect(await actRun(() => accounts.current.invalidateActor())).toEqual(empty);
+    expect(reads - initialReads).toBe(3);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection?.slots).toEqual([]);
+    expect(accounts.current.projection?.actorEpoch).toBe("1");
+    expect(transitions.at(-1)?.kind).toBe("cross_tab");
+    expect(transitions.at(-1)?.from?.actorEpoch).toBe("5");
     await accounts.unmount();
   });
 
