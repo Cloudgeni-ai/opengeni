@@ -161,18 +161,31 @@ BEGIN
       PERFORM pg_catalog.set_config(
         'opengeni.canonical_human_identity_lifecycle', 'active', true
       );
-      SELECT min(binding.id::text)::uuid, min(binding.revision), count(*)::integer
-      INTO exact_binding_id, exact_binding_revision, binding_count
-      FROM auth_identities auth_identity
-      INNER JOIN canonical_human_login_bindings binding
-        ON binding.identity_id = NEW.identity_id
-       AND binding.provider_id = lower(auth_identity.provider_id)
-       AND binding.provider_account_id = auth_identity.account_id
-       AND binding.status IN ('active', 'recovery_pending')
-      WHERE auth_identity.user_id = NEW.user_id
-        AND lower(auth_identity.provider_id) = 'credential';
+      IF NEW.login_binding_id IS NULL THEN
+        SELECT min(binding.id::text)::uuid, min(binding.revision), count(*)::integer
+        INTO exact_binding_id, exact_binding_revision, binding_count
+        FROM auth_identities auth_identity
+        INNER JOIN canonical_human_login_bindings binding
+          ON binding.identity_id = NEW.identity_id
+         AND binding.provider_id = lower(auth_identity.provider_id)
+         AND binding.provider_account_id = auth_identity.account_id
+         AND binding.status IN ('active', 'recovery_pending')
+        WHERE auth_identity.user_id = NEW.user_id
+          AND lower(auth_identity.provider_id) = 'credential';
+      ELSE
+        SELECT min(binding.id::text)::uuid, min(binding.revision), count(*)::integer
+        INTO exact_binding_id, exact_binding_revision, binding_count
+        FROM auth_identities auth_identity
+        INNER JOIN canonical_human_login_bindings binding
+          ON binding.id = NEW.login_binding_id
+         AND binding.identity_id = NEW.identity_id
+         AND binding.provider_id = lower(auth_identity.provider_id)
+         AND binding.provider_account_id = auth_identity.account_id
+         AND binding.status IN ('active', 'recovery_pending')
+        WHERE auth_identity.user_id = NEW.user_id;
+      END IF;
       IF binding_count <> 1 OR exact_binding_id IS NULL OR exact_binding_revision IS NULL THEN
-        RAISE EXCEPTION 'auth session must prove exactly one credential login binding'
+        RAISE EXCEPTION 'auth session must prove exactly one login binding'
           USING ERRCODE = '42501';
       END IF;
       IF NEW.login_binding_id IS NOT NULL AND NEW.login_binding_id <> exact_binding_id THEN

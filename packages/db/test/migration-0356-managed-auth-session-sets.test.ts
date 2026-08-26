@@ -72,17 +72,22 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-async function createLogin(input: { label: string; identityId?: string }): Promise<Login> {
+async function createLogin(input: {
+  label: string;
+  identityId?: string;
+  providerId?: string;
+}): Promise<Login> {
   if (!owned || !client) throw new Error("test database unavailable");
   const userId = `ope365-${crypto.randomUUID()}`;
   const email = `${userId}@example.test`;
+  const providerId = input.providerId ?? "credential";
   await owned.admin`
     insert into auth_users (id, name, email, email_verified)
     values (${userId}, ${input.label}, ${email}, true)
   `;
   await owned.admin`
     insert into auth_identities (id, user_id, provider_id, account_id, created_at, updated_at)
-    values (${crypto.randomUUID()}, ${userId}, 'credential', ${userId}, now(), now())
+    values (${crypto.randomUUID()}, ${userId}, ${providerId}, ${userId}, now(), now())
   `;
   if (input.identityId) {
     await owned.admin`
@@ -92,16 +97,16 @@ async function createLogin(input: { label: string; identityId?: string }): Promi
     await owned.admin`
       insert into canonical_human_login_bindings (
         identity_id, provider_id, provider_account_id, status
-      ) values (${input.identityId}::uuid, 'credential', ${userId}, 'active')
+      ) values (${input.identityId}::uuid, ${providerId}, ${userId}, 'active')
     `;
   } else {
     await synchronizeCanonicalHumanLoginBindings(client.db, userId);
   }
   const projection = await getCanonicalHumanIdentityProjection(client.db, userId);
   const binding = projection.loginBindings.find(
-    (candidate) => candidate.providerId === "credential" && candidate.providerAccountId === userId,
+    (candidate) => candidate.providerId === providerId && candidate.providerAccountId === userId,
   );
-  if (!binding) throw new Error("exact credential binding was not created");
+  if (!binding) throw new Error("exact login binding was not created");
   const sessionId = crypto.randomUUID();
   await owned.admin`
     insert into auth_sessions (
@@ -170,6 +175,51 @@ describe("migration 0356 managed browser session sets", () => {
       "42501",
     );
     expect(await getManagedAuthSessionSetAuthorityState(client!.db, hex("absent"))).toBe("absent");
+  });
+
+  test("validates an explicitly stamped provider-neutral login binding", async () => {
+    if (!owned || !client) return;
+    const github = await createLogin({ label: "GitHub Login", providerId: "github" });
+    const credential = await createLogin({ label: "Credential Login" });
+
+    const [stamped] = await owned.admin<Array<{ bindingId: string; bindingRevision: string }>>`
+      select login_binding_id as "bindingId",
+        login_binding_revision::text as "bindingRevision"
+      from auth_sessions where id = ${github.sessionId}
+    `;
+    expect(stamped).toEqual({
+      bindingId: github.bindingId,
+      bindingRevision: String(github.bindingRevision),
+    });
+
+    await expectSqlState(
+      () =>
+        owned!.admin`
+          insert into auth_sessions (
+            id, user_id, token, expires_at, identity_id, identity_revision, auth_revision,
+            login_binding_id, login_binding_revision
+          ) values (
+            ${crypto.randomUUID()}, ${github.userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+            ${github.identityId}::uuid, ${github.identityRevision}, ${github.authRevision},
+            ${credential.bindingId}::uuid, ${credential.bindingRevision}
+          )
+        `,
+      "42501",
+    );
+    await expectSqlState(
+      () =>
+        owned!.admin`
+          insert into auth_sessions (
+            id, user_id, token, expires_at, identity_id, identity_revision, auth_revision,
+            login_binding_id, login_binding_revision
+          ) values (
+            ${crypto.randomUUID()}, ${github.userId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+            ${github.identityId}::uuid, ${github.identityRevision}, ${github.authRevision},
+            ${github.bindingId}::uuid, ${github.bindingRevision + 1}
+          )
+        `,
+      "42501",
+    );
   });
 
   test("materializes an empty broker set only on the first fenced add transaction", async () => {
