@@ -1135,6 +1135,18 @@ const SettingsSchema = z.object({
     .positive()
     .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
     .default(60_000),
+  // A zero-holder drain may need substantially longer than a best-effort
+  // mid-turn/turn-end snapshot for a very large workspace. Keep that provider
+  // budget independent so increasing drain recovery headroom cannot pin an
+  // ordinary turn finalizer for the same duration. Unset preserves the legacy
+  // single-budget behavior. Knob:
+  // OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS.
+  sandboxDrainSnapshotTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(SANDBOX_SNAPSHOT_MAX_TIMEOUT_MS)
+    .optional(),
   // Begin a controlled snapshot/quiesce/drain/rematerialize transition this far
   // ahead of a finite provider deadline. Modal's 24h creation clock cannot be
   // extended; the logical sandbox outlives it by moving to one successor box.
@@ -2569,6 +2581,7 @@ export function getSettings(): Settings {
     sandboxIdleGraceMs: optional("OPENGENI_SANDBOX_IDLE_GRACE_MS"),
     sandboxSnapshotIntervalMs: optional("OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS"),
     sandboxSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS"),
+    sandboxDrainSnapshotTimeoutMs: optional("OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS"),
     sandboxRotationLeadMs: optional("OPENGENI_SANDBOX_ROTATION_LEAD_MS"),
     sandboxRotationBatchSize: optional("OPENGENI_SANDBOX_ROTATION_BATCH_SIZE"),
     sandboxLeaseTtlMs: optional("OPENGENI_SANDBOX_LEASE_TTL_MS"),
@@ -2783,10 +2796,23 @@ export function sandboxArchiveCaptureTimeoutMs(
   );
 }
 
-export function sandboxLifecycleTransitionWaitMs(
-  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxLeaseReaperPeriodMs">,
+/** Provider operation budget used only by zero-holder drain/rotation capture.
+ * Unset preserves the historical shared snapshot budget exactly. */
+export function effectiveSandboxDrainSnapshotTimeoutMs(
+  settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): number {
-  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs(settings);
+  return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
+}
+
+export function sandboxLifecycleTransitionWaitMs(
+  settings: Pick<
+    Settings,
+    "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs" | "sandboxLeaseReaperPeriodMs"
+  >,
+): number {
+  const captureTimeoutMs = sandboxArchiveCaptureTimeoutMs({
+    sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+  });
   return Math.min(
     SANDBOX_LIFECYCLE_TRANSITION_MAX_WAIT_MS,
     settings.sandboxLeaseReaperPeriodMs +
