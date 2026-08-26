@@ -161,6 +161,11 @@ Rules to keep in mind:
 - `sandboxBackend` selects the backend for a **managed** sandbox; for a machine
   target the backend is the machine itself, so leave it off and point at the
   machine with `targetSandboxId`.
+- A machine-primary session has no synthetic managed-home fleet target. Its
+  enrolled machine is the durable home and remains the selectable row. Moving
+  that session to a managed home requires a migration that is not implemented;
+  create a managed-home session and attach the machine when both targets are
+  required.
 - **A child spawn with `targetSandboxId` / `machineTarget` is an own-box
   machine-primary home**, even when the parent is `backend: none`. Omitted
   `sandbox` still shares the creator's box only when no machine is named.

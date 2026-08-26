@@ -286,10 +286,13 @@ export async function listFleet(
 
   const entries: FleetSandboxEntry[] = [];
 
-  if (ctx.sessionBackend !== "none") {
-    // The session's own group box (the default/home sandbox; null active pointer ==
-    // this box). A session/group row is not provider existence. Online requires a
-    // warm lease, observed provider existence, and verified workspace readiness.
+  if (ctx.sessionBackend !== "none" && ctx.sessionBackend !== "selfhosted") {
+    // The session's own managed group box (the default/home sandbox; null active
+    // pointer == this box). A selfhosted home is already represented by its real
+    // enrolled machine row; a synthetic enrollment-less copy is not a valid
+    // compute target. A session/group row is not provider existence. Online
+    // requires a warm lease, observed provider existence, and verified workspace
+    // readiness.
     const groupActive = pointer.activeSandboxId === null;
     const groupLease = await readLease(db, ctx.workspaceId, ctx.sessionGroupId);
     const groupOnline = Boolean(
@@ -322,12 +325,7 @@ export async function listFleet(
             : "wakeable";
     entries.push({
       id: ctx.sessionGroupId,
-      kind:
-        ctx.sessionBackend === "selfhosted"
-          ? "selfhosted"
-          : ctx.sessionBackend === "opensandbox"
-            ? "opensandbox"
-            : "modal",
+      kind: ctx.sessionBackend === "opensandbox" ? "opensandbox" : "modal",
       name: "session sandbox",
       liveness: groupOnline ? "online" : groupRecovering ? "reconnecting" : "offline",
       active: groupActive,
@@ -471,6 +469,14 @@ async function resolveTarget(
       return {
         ok: false,
         reason: "this session has no home sandbox; attach a Connected Machine",
+        code: "unsupported_backend_context",
+      };
+    }
+    if (ctx.sessionBackend === "selfhosted") {
+      return {
+        ok: false,
+        reason:
+          "this session's durable home is a Connected Machine; select an enrolled machine because managed-home migration is unavailable",
         code: "unsupported_backend_context",
       };
     }

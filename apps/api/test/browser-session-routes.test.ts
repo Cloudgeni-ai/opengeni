@@ -354,21 +354,40 @@ describe("BrowserSession route discipline", () => {
     expect(binding).toContain("isMissingLinkedComputerControllerSession(error)");
   });
 
-  test("uses a linked ComputerSession display without bootstrapping a standalone desktop", async () => {
-    expect(browserNeedsStandaloneDisplayStack({ headless: false, linkedComputer: true })).toBe(
-      false,
-    );
-    expect(browserNeedsStandaloneDisplayStack({ headless: false, linkedComputer: false })).toBe(
-      true,
-    );
-    expect(browserNeedsStandaloneDisplayStack({ headless: true, linkedComputer: false })).toBe(
-      false,
-    );
+  test("uses linked and native displays without bootstrapping a standalone desktop", async () => {
+    expect(
+      browserNeedsStandaloneDisplayStack({
+        headless: false,
+        linkedComputer: true,
+        nativeBrowserControl: false,
+      }),
+    ).toBe(false);
+    expect(
+      browserNeedsStandaloneDisplayStack({
+        headless: false,
+        linkedComputer: false,
+        nativeBrowserControl: true,
+      }),
+    ).toBe(false);
+    expect(
+      browserNeedsStandaloneDisplayStack({
+        headless: false,
+        linkedComputer: false,
+        nativeBrowserControl: false,
+      }),
+    ).toBe(true);
+    expect(
+      browserNeedsStandaloneDisplayStack({
+        headless: true,
+        linkedComputer: false,
+        nativeBrowserControl: false,
+      }),
+    ).toBe(false);
 
     const source = await readFile(routeUrl, "utf8");
     expect(source.match(/linkedComputer !== null,/gu)).toHaveLength(3);
     expect(source).toContain(
-      "if (!browserNeedsStandaloneDisplayStack({ headless, linkedComputer })) return;",
+      'nativeBrowserControl: typeof session.ensureBrowserControl === "function"',
     );
   });
 

@@ -445,6 +445,27 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     ]);
   }, 60_000);
 
+  test("a selfhosted-home session exposes its enrolled machine without a synthetic copy", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, session, sandbox, bus } = await seed({
+      sandboxBackend: "selfhosted",
+    });
+    const app = appFor(bus);
+    const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
+
+    const response = await app.request(
+      `/v1/workspaces/${workspaceId}/machines?sessionId=${session.id}`,
+      { headers: { authorization: auth } },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      machines: Array<{ sandboxId: string; isSessionGroup: boolean }>;
+    };
+    expect(body.machines).toEqual([
+      expect.objectContaining({ sandboxId: sandbox.id, isSessionGroup: false }),
+    ]);
+  }, 60_000);
+
   test("an online machine returns the contract shape with latest metrics; ?sessionId adds the synthetic group + active pointer", async () => {
     if (!available) return;
     const { accountId, workspaceId, session, enrollment, sandbox, bus } = await seed();

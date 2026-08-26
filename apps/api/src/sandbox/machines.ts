@@ -245,9 +245,11 @@ export async function listMachines(
 
   const machines: MachineView[] = [];
 
-  // The session's own group box (synthetic): the default/home sandbox a null
-  // active pointer routes to. A backend:none session has no home box.
-  if (session && session.sandboxBackend !== "none") {
+  // The session's own managed group box (synthetic): the default/home sandbox a
+  // null active pointer routes to. A backend:none session has no home box, while
+  // a selfhosted-home session is represented by its real enrolled machine row —
+  // inventing a second enrollment-less "selfhosted" target cannot be established.
+  if (session && session.sandboxBackend !== "none" && session.sandboxBackend !== "selfhosted") {
     const groupActive = activeSandboxId === null;
     const groupLease = await readLease(db, workspaceId, session.sandboxGroupId);
     machines.push(
@@ -255,7 +257,7 @@ export async function listMachines(
         sandboxId: session.sandboxGroupId,
         enrollmentId: null,
         name: "session sandbox",
-        kind: session.sandboxBackend === "selfhosted" ? "selfhosted" : "modal",
+        kind: "modal",
         state: "online",
         active: groupActive,
         isSessionGroup: true,

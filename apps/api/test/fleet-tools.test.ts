@@ -546,6 +546,32 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     );
   }, 60_000);
 
+  test("a selfhosted-home session neither invents nor accepts a managed-home target", async () => {
+    if (!available) return;
+    const { ctx, services, sandbox } = await seedFleet({
+      sandboxBackend: "selfhosted",
+    });
+
+    const attached = await swapActiveSandbox(services, ctx, sandbox.id);
+    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandbox.id });
+
+    const listed = await listFleet(services, ctx);
+    expect(listed.sandboxes).toHaveLength(1);
+    expect(listed.sandboxes[0]).toMatchObject({
+      id: sandbox.id,
+      active: true,
+      isSessionGroup: false,
+    });
+
+    const noManagedHome = await swapActiveSandbox(services, ctx, "session");
+    expect(noManagedHome).toMatchObject({
+      swapped: false,
+      activeSandboxId: sandbox.id,
+      code: "unsupported_backend_context",
+    });
+    expect(noManagedHome.reason).toMatch(/durable home.*Connected Machine/i);
+  }, 60_000);
+
   test("sandboxes_list: the session Modal box + the enrolled machine, each with liveness + active marker", async () => {
     if (!available) return;
     const { ctx, services, session, sandbox } = await seedFleet({
