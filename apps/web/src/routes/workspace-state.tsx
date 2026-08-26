@@ -1159,8 +1159,11 @@ function FocusedInstructions({
           <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-fg-muted">{content}</p>
         ) : (
           <p className="mt-3 text-xs leading-5 text-fg-muted">
-            No workspace instruction is active yet. Tell OpenGeni what agents should always do, or
-            add a concise instruction manually below.
+            {personalWorkspace && !canEdit
+              ? "No personal workspace instruction is active. Editing becomes available with the personal-policy authority."
+              : canEdit
+                ? "No workspace instruction is active yet. Tell OpenGeni what agents should always do, or add a concise instruction manually below."
+                : "No workspace instruction is active yet. A workspace administrator can add one."}
           </p>
         )}
       </section>

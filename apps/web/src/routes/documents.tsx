@@ -171,7 +171,9 @@ export function DocumentsRoute({
   const canAddKnowledge = authorityKind !== "organization" || canWriteOrganizationKnowledge;
   const dropAuthorityOptions = authorityKind
     ? DOCUMENT_AUTHORITY_OPTIONS.filter((option) => option.value === authorityKind)
-    : DOCUMENT_AUTHORITY_OPTIONS;
+    : DOCUMENT_AUTHORITY_OPTIONS.filter(
+        (option) => option.value !== "organization" || canWriteOrganizationKnowledge,
+      );
   const pageLive = usePageLiveActivity();
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
@@ -318,6 +320,7 @@ export function DocumentsRoute({
     const text = dropText.trim();
     if (!text || !canAddKnowledge) return;
     const selectedAuthorityKind = authorityKind ?? dropAuthorityKind;
+    if (selectedAuthorityKind === "organization" && !canWriteOrganizationKnowledge) return;
     setDropping(true);
     try {
       const document = await client.createKnowledgeDrop(workspaceId, {
@@ -342,6 +345,7 @@ export function DocumentsRoute({
   async function handleDropFiles(files: FileList | null) {
     if (!files || files.length === 0 || !canAddKnowledge) return;
     const selectedAuthorityKind = authorityKind ?? dropAuthorityKind;
+    if (selectedAuthorityKind === "organization" && !canWriteOrganizationKnowledge) return;
     setDropping(true);
     try {
       let last: IndexedDocument | null = null;

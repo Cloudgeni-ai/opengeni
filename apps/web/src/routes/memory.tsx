@@ -29,8 +29,8 @@ export function MemoryRoute({
         title={personalWorkspace ? "Your Memory" : "Memory"}
         description={
           personalWorkspace
-            ? "Review the private facts, incidents, decisions, and procedures agents remember inside your personal workspace."
-            : "Review and curate durable facts, preferences, decisions, and procedures agents carry across sessions."
+            ? "Review the private facts, incidents, decisions, and outcomes agents remember inside your personal workspace."
+            : "Review and curate durable facts, incidents, decisions, and outcomes agents carry across sessions."
         }
       />
       {returnToBrain ? (

@@ -365,6 +365,39 @@ describe("Documents scope-first UX", () => {
     }
   });
 
+  test("does not offer Company uploads to non-owners on the general page", async () => {
+    context.accessContext.accountGrants = [];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<DocumentsRoute workspaceId="workspace-a" />);
+        await Promise.resolve();
+      });
+      await settleRoute();
+
+      const authority = container.querySelector<HTMLSelectElement>('[aria-label="Drop authority"]');
+      expect(authority).not.toBeNull();
+      expect([...authority!.options].map((option) => option.value)).toEqual([
+        "workspace",
+        "personal",
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      context.accessContext.accountGrants = [
+        {
+          accountId: "account-a",
+          subjectId: "subject-a",
+          role: "owner",
+          permissions: ["account:admin"],
+        },
+      ];
+    }
+  });
+
   test("shows one upload surface and keeps internal collections out of the UI", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
