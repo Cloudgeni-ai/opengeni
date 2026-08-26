@@ -266,19 +266,22 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
-  test("retains the same idempotency key for an outcome-unknown switch retry", async () => {
+  test("replays an outcome-unknown switch with the exact original request", async () => {
     let selected = projection();
     let attempts = 0;
-    const operationIds: string[] = [];
+    const requests: Array<{ operationId: string; expectedGeneration: string }> = [];
     const client = scriptedClient({
       getSessionSet: async () => selected,
       selectLoginSlot: async (request) => {
         attempts += 1;
-        operationIds.push(request.operationId);
+        requests.push({
+          operationId: request.operationId,
+          expectedGeneration: request.expectedGeneration,
+        });
         if (attempts === 1) {
+          selected = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
           throw Object.assign(new Error("unknown"), { code: "operation_outcome_unknown" });
         }
-        selected = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
         return selected;
       },
     });
@@ -289,8 +292,80 @@ describe("BrowserAccountsProvider", () => {
     expect(accounts.current.phase).toBe("recoverable_error");
     expect(accounts.current.hasPendingTransition).toBe(true);
     expect(await actRun(() => accounts.current.continueTransition())).toBe(true);
-    expect(operationIds).toHaveLength(2);
-    expect(operationIds[1]).toBe(operationIds[0]);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    expect(requests[0]?.expectedGeneration).toBe("1");
+    expect(accounts.current.hasPendingTransition).toBe(false);
+    await accounts.unmount();
+  });
+
+  test("settles logout-all from the fresh authoritative empty session set", async () => {
+    const before = projection();
+    const empty = projection({ selectedSlotId: null, slotIds: [] });
+    let current = before;
+    const requests: Array<{ operationId: string; expectedGeneration: string }> = [];
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        logoutSessionSet: async (request) => {
+          requests.push(request);
+          current = empty;
+          return { generation: "2", actorEpoch: "2", state: "logged_out" };
+        },
+      }),
+      async (transition) => {
+        transitions.push(transition);
+      },
+    );
+
+    expect(await actRun(() => accounts.current.logoutAll())).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.expectedGeneration).toBe("1");
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection).toMatchObject({
+      selectedSlotId: null,
+      slots: [],
+      state: "ready",
+    });
+    expect(accounts.current.projection?.csrfToken).toHaveLength(43);
+    expect(transitions.at(-1)?.kind).toBe("logout_all");
+    expect(transitions.at(-1)?.to?.slots).toEqual([]);
+    await accounts.unmount();
+  });
+
+  test("replays response-lost logout-all with its original generation", async () => {
+    const before = projection();
+    const empty = projection({ selectedSlotId: null, slotIds: [] });
+    let current = before;
+    let attempts = 0;
+    const requests: Array<{ operationId: string; expectedGeneration: string }> = [];
+    const client = scriptedClient({
+      getSessionSet: async () => current,
+      logoutSessionSet: async (request) => {
+        attempts += 1;
+        requests.push(request);
+        current = empty;
+        if (attempts === 1) {
+          throw Object.assign(new Error("unknown"), { code: "operation_outcome_unknown" });
+        }
+        return { generation: "2", actorEpoch: "2", state: "logged_out" };
+      },
+    });
+    const accounts = await renderAccounts(client);
+
+    await expect(actRun(() => accounts.current.logoutAll())).rejects.toThrow("unknown");
+    await flush();
+    expect(accounts.current.phase).toBe("recoverable_error");
+    expect(accounts.current.projection?.slots).toEqual([]);
+    expect(accounts.current.hasPendingTransition).toBe(true);
+
+    expect(await actRun(() => accounts.current.continueTransition())).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    expect(requests[0]?.expectedGeneration).toBe("1");
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection?.slots).toEqual([]);
     expect(accounts.current.hasPendingTransition).toBe(false);
     await accounts.unmount();
   });

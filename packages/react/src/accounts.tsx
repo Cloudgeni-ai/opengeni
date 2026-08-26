@@ -62,9 +62,8 @@ type BlockerInspector = () => BrowserAccountTransitionBlocker | null;
 type PendingNonSecretTransition = {
   kind: Exclude<BrowserAccountTransitionKind, "add" | "reauth" | "cross_tab">;
   operationId: string;
-  execute: (
-    projection: ManagedAuthSessionSetProjection,
-  ) => Promise<ManagedAuthSessionSetProjection | null>;
+  expectedGeneration: string | null;
+  execute: (expectedGeneration: string) => Promise<ManagedAuthSessionSetProjection>;
 };
 
 export type BrowserAccountsContextValue = {
@@ -330,12 +329,14 @@ export function BrowserAccountsProvider({
       }
       const current = projectionRef.current;
       if (!current) throw new Error("Browser session set is not loaded");
+      const expectedGeneration = pending.expectedGeneration ?? current.generation;
+      pending.expectedGeneration = expectedGeneration;
       const sequence = ++sequenceRef.current;
       pendingRef.current = pending;
       setPhase("committing");
       setError(null);
       try {
-        const accepted = await pending.execute(current);
+        const accepted = await pending.execute(expectedGeneration);
         if (sequenceRef.current !== sequence) return false;
         pendingRef.current = null;
         if (sameSelectedActor(current, accepted)) {
@@ -564,10 +565,11 @@ export function BrowserAccountsProvider({
       return await executePending({
         kind: "select",
         operationId: id,
-        execute: async (current) =>
+        expectedGeneration: null,
+        execute: async (expectedGeneration) =>
           await client.selectLoginSlot({
             operationId: id,
-            expectedGeneration: current.generation,
+            expectedGeneration,
             slotId,
           }),
       });
@@ -581,10 +583,11 @@ export function BrowserAccountsProvider({
       return await executePending({
         kind: "logout_one",
         operationId: id,
-        execute: async (current) =>
+        expectedGeneration: null,
+        execute: async (expectedGeneration) =>
           await client.logoutLoginSlot({
             operationId: id,
-            expectedGeneration: current.generation,
+            expectedGeneration,
             slotId,
             replacementSlotId,
           }),
@@ -598,9 +601,10 @@ export function BrowserAccountsProvider({
     return await executePending({
       kind: "logout_all",
       operationId: id,
-      execute: async (current) => {
-        await client.logoutSessionSet({ operationId: id, expectedGeneration: current.generation });
-        return null;
+      expectedGeneration: null,
+      execute: async (expectedGeneration) => {
+        await client.logoutSessionSet({ operationId: id, expectedGeneration });
+        return await client.getSessionSet();
       },
     });
   }, [client, executePending]);

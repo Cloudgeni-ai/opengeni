@@ -114,4 +114,46 @@ describe("BrowserAccountsClient", () => {
       code: "operation_outcome_unknown",
     });
   });
+
+  test("re-reads the cookie-backed authority after logout-all", async () => {
+    const before = {
+      ...projection,
+      selectedSlotId: "22222222-2222-4222-8222-222222222222",
+      slots: [
+        {
+          id: "22222222-2222-4222-8222-222222222222",
+          displayName: "Person 1",
+          verifiedClaim: { kind: "email" as const, value: "person-1@example.test" },
+          state: "active" as const,
+        },
+      ],
+    };
+    const after = { ...projection, csrfToken: "d".repeat(43) };
+    const requests: Request[] = [];
+    const responses = [before, { generation: "2", actorEpoch: "2", state: "logged_out" }, after];
+    const client = new BrowserAccountsClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json(responses.shift());
+      },
+    });
+
+    await client.getSessionSet();
+    await client.logoutSessionSet({
+      operationId: "11111111-1111-4111-8111-111111111111",
+      expectedGeneration: "1",
+    });
+    expect(await client.getSessionSet()).toEqual(after);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        "GET /v1/auth/session-set",
+        "POST /v1/auth/session-set/logout-all",
+        "GET /v1/auth/session-set",
+      ],
+    );
+    expect(requests.every((request) => request.credentials === "include")).toBe(true);
+    expect(requests[1]?.headers.get("x-opengeni-session-csrf")).toBe(before.csrfToken);
+    expect(requests[2]?.headers.get("x-opengeni-session-csrf")).toBeNull();
+  });
 });
