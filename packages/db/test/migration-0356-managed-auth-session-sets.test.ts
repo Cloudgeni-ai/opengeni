@@ -51,7 +51,7 @@ const hex = (value: string) => createHash("sha256").update(value).digest("hex");
 beforeAll(async () => {
   owned = await acquireOwnerMigratedTestDatabase("migration-0356-managed-auth-session-sets");
   if (!owned) {
-    if (requireRealDatabase) throw new Error("migration 0356 requires real PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0360 requires real PostgreSQL");
     return;
   }
   await migrate(owned.ownerUrl);
@@ -153,7 +153,7 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
   expect(nestedPostgresSqlState(failure)).toBe(state);
 }
 
-describe("migration 0356 managed browser session sets", () => {
+describe("migration 0360 managed browser session sets", () => {
   test("pins the restricted runtime posture and exposes only definer routines", async () => {
     for (const table of [
       "managed_auth_browser_installations",
@@ -613,6 +613,89 @@ describe("migration 0356 managed browser session sets", () => {
     expect(loggedOut).toMatchObject({
       selectedSlotId: replacementSlot!.id,
       state: "ready",
+    });
+  });
+
+  test("projects an expired selected provider session as an actor change before mutation", async () => {
+    if (!owned || !client) return;
+    const login = await createLogin({ label: "Expired Selected Session" });
+    const authority = `authority-${crypto.randomUUID()}`;
+    const initial = await bootstrap(authority, login.sessionId);
+    await owned.admin`
+      update auth_sessions set expires_at = now() - interval '1 second'
+      where id = ${login.sessionId}
+    `;
+
+    const readOnly = await getManagedAuthSessionSetSnapshot(client.db, {
+      authorityHash: hex(authority),
+      mode: "broker",
+      includeInternal: true,
+      readOnly: true,
+    });
+    expect(readOnly).toMatchObject({
+      projection: {
+        generation: initial.generation,
+        actorEpoch: initial.actorEpoch,
+        selectedSlotId: null,
+        state: "actor_change_required",
+        slots: [{ id: initial.selectedSlotId, state: "reauth_required" }],
+      },
+      selected: null,
+      internalSlots: [],
+    });
+    const [unchanged] = await owned.admin<
+      Array<{
+        generation: string;
+        actorEpoch: string;
+        state: string;
+        slotStatus: string;
+        authSessionId: string | null;
+      }>
+    >`
+      select session_set.generation::text as generation,
+        session_set.actor_epoch::text as "actorEpoch", session_set.state,
+        slot.status as "slotStatus", slot.auth_session_id as "authSessionId"
+      from managed_auth_session_sets session_set
+      inner join managed_auth_login_slots slot on slot.id = session_set.selected_slot_id
+      where session_set.authority_hash = ${hex(authority)}
+    `;
+    expect(unchanged).toEqual({
+      generation: initial.generation,
+      actorEpoch: initial.actorEpoch,
+      state: "ready",
+      slotStatus: "active",
+      authSessionId: login.sessionId,
+    });
+
+    const converged = await getManagedAuthSessionSetSnapshot(client.db, {
+      authorityHash: hex(authority),
+      mode: "broker",
+      includeInternal: true,
+    });
+    expect(converged).toMatchObject({
+      projection: {
+        generation: String(BigInt(initial.generation) + 1n),
+        actorEpoch: String(BigInt(initial.actorEpoch) + 1n),
+        selectedSlotId: null,
+        state: "actor_change_required",
+        slots: [{ id: initial.selectedSlotId, state: "reauth_required" }],
+      },
+      selected: null,
+      internalSlots: [],
+    });
+    const [settled] = await owned.admin<
+      Array<{ slotStatus: string; authSessionId: string | null; sessionExists: boolean }>
+    >`
+      select slot.status as "slotStatus", slot.auth_session_id as "authSessionId",
+        exists(select 1 from auth_sessions where id = ${login.sessionId}) as "sessionExists"
+      from managed_auth_login_slots slot
+      inner join managed_auth_session_sets session_set on session_set.id = slot.session_set_id
+      where session_set.authority_hash = ${hex(authority)}
+    `;
+    expect(settled).toEqual({
+      slotStatus: "reauth_required",
+      authSessionId: null,
+      sessionExists: false,
     });
   });
 

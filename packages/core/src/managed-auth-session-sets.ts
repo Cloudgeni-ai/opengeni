@@ -222,6 +222,9 @@ export async function resolveManagedAuthSelectedSession(input: {
     readOnly: true,
   });
   if (!snapshot) return null;
+  if (snapshot.projection.state === "actor_change_required") {
+    throw new ManagedAuthActorChangeError();
+  }
   requireManagedAuthActorFence({
     mode: input.mode,
     actorEpoch: snapshot.projection.actorEpoch,

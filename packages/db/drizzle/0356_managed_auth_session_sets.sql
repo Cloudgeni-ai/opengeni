@@ -673,7 +673,7 @@ BEGIN
         WHERE session_set.id = set_row.id RETURNING * INTO set_row;
       END IF;
 
-      IF NOT p_read_only AND EXISTS (
+      SELECT EXISTS (
         SELECT 1
         FROM managed_auth_login_slots slot
         LEFT JOIN auth_sessions auth_session ON auth_session.id = slot.auth_session_id
@@ -684,13 +684,6 @@ BEGIN
          AND subject_row.identity_id = slot.identity_id
         WHERE slot.id = set_row.selected_slot_id AND slot.status = 'active'
           AND NOT (
-            identity_row.status = 'recovery_required'
-            AND binding.id = slot.login_binding_id
-            AND binding.identity_id = slot.identity_id
-            AND binding.status = 'recovery_pending'
-            AND subject_row.status = 'active'
-          )
-          AND NOT (
             auth_session.id IS NOT NULL
             AND auth_session.user_id = slot.auth_user_id
             AND auth_session.expires_at > pg_catalog.clock_timestamp()
@@ -699,15 +692,23 @@ BEGIN
             AND auth_session.auth_revision = slot.auth_revision
             AND auth_session.login_binding_id = slot.login_binding_id
             AND auth_session.login_binding_revision = slot.login_binding_revision
-            AND identity_row.status = 'active'
             AND identity_row.identity_revision = slot.identity_revision
             AND identity_row.auth_revision = slot.auth_revision
             AND binding.identity_id = slot.identity_id
-            AND binding.status = 'active'
             AND binding.revision = slot.login_binding_revision
             AND subject_row.status = 'active'
+            AND (
+              (identity_row.status = 'active' AND binding.status = 'active')
+              OR (
+                p_allow_recovery
+                AND identity_row.status = 'recovery_required'
+                AND binding.status = 'recovery_pending'
+              )
+            )
           )
-      ) THEN
+      ) INTO selected_lost;
+
+      IF NOT p_read_only AND selected_lost THEN
         DELETE FROM managed_auth_actor_mutation_leases
         WHERE session_set_id = set_row.id AND expires_at <= pg_catalog.clock_timestamp();
         IF EXISTS (
@@ -800,8 +801,11 @@ BEGIN
           'mode', p_mode,
           'generation', set_row.generation::text,
           'actorEpoch', set_row.actor_epoch::text,
-          'selectedSlotId', set_row.selected_slot_id,
-          'state', set_row.state,
+          'selectedSlotId', CASE
+            WHEN selected_lost AND NOT p_allow_recovery THEN NULL
+            ELSE set_row.selected_slot_id
+          END,
+          'state', CASE WHEN selected_lost THEN 'actor_change_required' ELSE set_row.state END,
           'slots', coalesce((
             SELECT pg_catalog.jsonb_agg(pg_catalog.jsonb_build_object(
               'id', slot.id,
@@ -811,16 +815,30 @@ BEGIN
               ),
               'state', CASE
                 WHEN slot.status = 'active'
+                  AND auth_session.id IS NOT NULL
+                  AND auth_session.user_id = slot.auth_user_id
+                  AND auth_session.expires_at > pg_catalog.clock_timestamp()
+                  AND auth_session.identity_id = slot.identity_id
+                  AND auth_session.identity_revision = slot.identity_revision
+                  AND auth_session.auth_revision = slot.auth_revision
+                  AND auth_session.login_binding_id = slot.login_binding_id
+                  AND auth_session.login_binding_revision = slot.login_binding_revision
                   AND identity_row.status = 'active'
                   AND binding.status = 'active'
                   AND identity_row.identity_revision = slot.identity_revision
                   AND identity_row.auth_revision = slot.auth_revision
+                  AND binding.identity_id = slot.identity_id
                   AND binding.revision = slot.login_binding_revision
+                  AND subject_row.status = 'active'
                 THEN 'active' ELSE 'reauth_required' END
             ) ORDER BY slot.created_at, slot.id)
             FROM managed_auth_login_slots slot
+            LEFT JOIN auth_sessions auth_session ON auth_session.id = slot.auth_session_id
             LEFT JOIN canonical_human_identities identity_row ON identity_row.id = slot.identity_id
             LEFT JOIN canonical_human_login_bindings binding ON binding.id = slot.login_binding_id
+            LEFT JOIN canonical_human_identity_subjects subject_row
+              ON subject_row.auth_user_id = slot.auth_user_id
+             AND subject_row.identity_id = slot.identity_id
             WHERE slot.session_set_id = set_row.id AND slot.status <> 'revoked'
           ), '[]'::jsonb)
         ),
@@ -841,6 +859,7 @@ BEGIN
            AND subject_row.identity_id = slot.identity_id
           WHERE slot.id = set_row.selected_slot_id AND slot.status = 'active'
             AND auth_session.user_id = slot.auth_user_id
+            AND auth_session.expires_at > pg_catalog.clock_timestamp()
             AND auth_session.identity_id = slot.identity_id
             AND auth_session.identity_revision = slot.identity_revision
             AND auth_session.auth_revision = slot.auth_revision
@@ -877,6 +896,7 @@ BEGIN
            AND subject_row.identity_id = slot.identity_id
           WHERE slot.session_set_id = set_row.id AND slot.status = 'active'
             AND auth_session.user_id = slot.auth_user_id
+            AND auth_session.expires_at > pg_catalog.clock_timestamp()
             AND auth_session.identity_id = slot.identity_id
             AND auth_session.identity_revision = slot.identity_revision
             AND auth_session.auth_revision = slot.auth_revision

@@ -43,7 +43,7 @@ export function createBetterAuthSessionAdapter(
 
     async resolveSelectedSession(input): Promise<ManagedAuthResolvedSession | null> {
       const resolved = await (await auth.$context).internalAdapter.findSession(input.token);
-      return resolved ? (resolved as ManagedAuthResolvedSession) : null;
+      return liveResolvedSession(resolved);
     },
 
     async resolveAmbientSession(headers): Promise<ManagedAuthResolvedSession | null> {
@@ -52,7 +52,7 @@ export function createBetterAuthSessionAdapter(
       const token = signed ? verifiedSignedCookieValue(signed, context.secret) : null;
       if (!token) return null;
       const resolved = await context.internalAdapter.findSession(token);
-      return resolved ? (resolved as ManagedAuthResolvedSession) : null;
+      return liveResolvedSession(resolved);
     },
 
     async refreshSelectedSession(input): Promise<ManagedAuthResolvedSession | null> {
@@ -100,6 +100,20 @@ export function createBetterAuthSessionAdapter(
       return headers;
     },
   };
+}
+
+function liveResolvedSession(value: unknown): ManagedAuthResolvedSession | null {
+  if (!value || typeof value !== "object") return null;
+  const session = (value as { session?: { expiresAt?: unknown } }).session;
+  const expiresAt = session?.expiresAt;
+  const expiryMillis =
+    expiresAt instanceof Date
+      ? expiresAt.getTime()
+      : typeof expiresAt === "string" || typeof expiresAt === "number"
+        ? new Date(expiresAt).getTime()
+        : Number.NaN;
+  if (!Number.isFinite(expiryMillis) || expiryMillis <= Date.now()) return null;
+  return value as ManagedAuthResolvedSession;
 }
 
 function cookieValue(header: string | null, name: string): string | null {

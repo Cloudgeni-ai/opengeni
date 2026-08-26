@@ -15,7 +15,7 @@ Canonical-human and verified-binding authority remains in
 the organizations, workspaces, sessions, and capabilities that the ordinary access
 resolver authorizes for that human.
 
-The repository defaults to `legacy`. Applying migration 0356 does not activate
+The repository defaults to `legacy`. Applying migration 0360 does not activate
 session sets, and repository delivery does not authorize a staging or production
 mode change.
 
@@ -140,8 +140,10 @@ actor epoch so binding-private state cannot survive.
   resources are indistinguishable before switching.
 - Wildcard provider routes use a fixed method/path allowlist, strip ambient
   request cookies and authorization, and remove provider secrets from JSON
-  responses. Selected product-session capabilities remain on the fenced product
-  routes.
+  responses. Broker mode clears provider cookies; dual mode preserves an active
+  set's exact selected compatibility mirror instead of accepting an unadopted
+  wildcard credential. Selected product-session capabilities remain on the
+  fenced product routes.
 - Session-set and provider-auth responses are `no-store`; secret material is
   excluded from operation evidence, errors, browser events, logs, and retained
   browser evidence.
@@ -160,7 +162,7 @@ actor epoch so binding-private state cannot survive.
 In `dual`, an existing legacy session may bootstrap exactly once into its
 installation set. Once an actor epoch has advanced, headerless requests fail
 closed: a stale pre-switch page and a fresh legacy page are otherwise
-indistinguishable. Old binaries can coexist while migration 0356 runs because its
+indistinguishable. Old binaries can coexist while migration 0360 runs because its
 insert trigger supplies the new non-null binding stamps, but all API replicas and
 the served web bundle must be on the session-set-capable release before selecting
 `dual` or `broker`.
@@ -175,7 +177,7 @@ legacy mirror; do not restart an arbitrary old image or run a down-migration.
 
 Repository readiness and deployment activation are separate approvals:
 
-1. Keep `OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply migration 0356
+1. Keep `OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply migration 0360
    through the owner migration job, provision the restricted runtime grants, and
    require migration-ordinal/schema-contract and runtime-posture checks.
 2. Deploy the same session-set-capable API and web generation to every replica.
@@ -188,7 +190,7 @@ Repository readiness and deployment activation are separate approvals:
    accepted. Only a separate fresh authorization may move every replica to
    `broker`.
 5. In `broker`, repeat the same acceptance from a browser with no legacy cookie.
-   Keep migration 0356 and its evidence tables; rollback is a mode/configuration
+   Keep migration 0360 and its evidence tables; rollback is a mode/configuration
    transition and fix-forward application release, never destructive SQL.
 
 No repository test, PR merge, or migration application authorizes step 3 or 4.
@@ -206,7 +208,7 @@ installation must additionally:
   `x-opengeni-api-contract`, `x-opengeni-session-csrf`, and
   `x-opengeni-actor-epoch` headers through the reverse proxy;
 - run every API replica with the same session-set mode and signing secret;
-- use the owner migration connection only for migration 0356 and keep the API on
+- use the owner migration connection only for migration 0360 and keep the API on
   the restricted, FORCE-RLS-checked runtime role;
 - retain popup capability and first-party same-origin navigation in browser/CSP
   policy; and

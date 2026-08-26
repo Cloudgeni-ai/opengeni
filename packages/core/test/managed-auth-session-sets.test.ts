@@ -6,6 +6,7 @@ import {
   ManagedAuthRequestAdmissionError,
   requireManagedAuthActorFence,
   requireManagedAuthMutationAdmission,
+  resolveManagedAuthSelectedSession,
 } from "../src/managed-auth-session-sets";
 
 describe("managed auth session-set request boundaries", () => {
@@ -88,5 +89,44 @@ describe("managed auth session-set request boundaries", () => {
     ]) {
       expect(() => requireManagedAuthActorFence(input)).toThrow(ManagedAuthActorChangeError);
     }
+  });
+
+  test("rejects a read-only neutral actor-change projection before provider resolution", async () => {
+    let adapterCalls = 0;
+    const projection = {
+      mode: "broker",
+      generation: "4",
+      actorEpoch: "8",
+      selectedSlotId: null,
+      state: "actor_change_required",
+      slots: [
+        {
+          id: "7438e162-ded0-45fe-94f1-f4548ca532f8",
+          displayName: "Expired actor",
+          verifiedClaim: { kind: "email", value: "expired@example.test" },
+          state: "reauth_required",
+        },
+      ],
+    } as const;
+    const db = {
+      execute: async () => [{ result: { projection, selected: null, internalSlots: [] } }],
+    };
+    const adapter = {
+      resolveSelectedSession: async () => {
+        adapterCalls += 1;
+        return null;
+      },
+    };
+
+    await expect(
+      resolveManagedAuthSelectedSession({
+        db: db as never,
+        adapter: adapter as never,
+        authority: "authority",
+        mode: "broker",
+        expectedActorEpoch: projection.actorEpoch,
+      }),
+    ).rejects.toBeInstanceOf(ManagedAuthActorChangeError);
+    expect(adapterCalls).toBe(0);
   });
 });

@@ -86,12 +86,184 @@ type CompletionResponseLoss = {
   statuses: number[];
 };
 
-const EXPECTED_HTTP_CONSOLE_ERRORS = [
-  /^Failed to load resource: the server responded with a status of 409 \(Conflict\) @ \/v1\/auth\/get-session$/u,
-  /^Failed to load resource: the server responded with a status of 409 \(Conflict\) @ \/v1\/auth\/session-set\/select$/u,
-  /^Failed to load resource: the server responded with a status of 403 \(Forbidden\) @ \/v1\/auth\/session-set\/logout-all$/u,
-  /^Failed to load resource: the server responded with a status of 404 \(Not Found\) @ \/v1\/workspaces\/[0-9a-f-]+\/machines$/u,
+const ACTOR_TRANSITION_PHASES = [
+  "cross-tab-select-race",
+  "late-old-epoch-setup-beta-to-alpha",
+  "late-old-epoch-alpha-to-beta",
+  "late-old-epoch-primary-settled-before-old-release",
+  "cross-slot-deep-link",
+  "slot-revocation-reauthentication",
+  "logout-one",
+  "csrf-fail-closed",
+  "logout-all-response-loss-replay",
+  "signed-out-settled",
 ] as const;
+
+const SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
+  ["add-response-loss-replay", new Set(["primary-set-sign-in", "add-response-loss-replay"])],
+  [
+    "cross-tab-select-race",
+    new Set([
+      "primary-set-sign-in",
+      "second-tab-bootstrap",
+      "add-response-loss-replay",
+      "cross-tab-select-race",
+    ]),
+  ],
+  [
+    "late-old-epoch-setup-beta-to-alpha",
+    new Set(["cross-tab-select-race", "late-old-epoch-setup-beta-to-alpha"]),
+  ],
+  [
+    "late-old-epoch-alpha-to-beta",
+    new Set(["late-old-epoch-setup-beta-to-alpha", "late-old-epoch-alpha-to-beta"]),
+  ],
+  [
+    "late-old-epoch-primary-settled-before-old-release",
+    new Set(["late-old-epoch-alpha-to-beta", "late-old-epoch-primary-settled-before-old-release"]),
+  ],
+  [
+    "cross-slot-deep-link",
+    new Set([
+      "late-old-epoch-alpha-to-beta",
+      "late-old-epoch-primary-settled-before-old-release",
+      "cross-slot-deep-link",
+    ]),
+  ],
+  [
+    "slot-revocation-reauthentication",
+    new Set(["cross-slot-deep-link", "slot-revocation-reauthentication"]),
+  ],
+  ["logout-one", new Set(["slot-revocation-reauthentication", "logout-one"])],
+  ["csrf-fail-closed", new Set(["logout-one", "csrf-fail-closed"])],
+  [
+    "logout-all-response-loss-replay",
+    new Set([
+      "slot-revocation-reauthentication",
+      "logout-one",
+      "csrf-fail-closed",
+      "logout-all-response-loss-replay",
+    ]),
+  ],
+  ["signed-out-settled", new Set(["logout-all-response-loss-replay", "signed-out-settled"])],
+  [
+    "independent-set-after-other-logout-all",
+    new Set(["independent-set-sign-in", "independent-set-after-other-logout-all"]),
+  ],
+]);
+
+const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string>>([
+  // These phases intentionally create or reload a whole document. React can
+  // cancel only its two bootstrap reads while replacing that document; keep
+  // the endpoint and same-phase checks exact so product/tenant reads stay red.
+  ["second-tab-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["cross-tab-select-race", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["late-old-epoch-setup-beta-to-alpha", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["cross-slot-deep-link", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+  ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
+]);
+
+const EXPECTED_HTTP_CONSOLE_ERRORS: ReadonlyArray<{
+  phases: ReadonlySet<string>;
+  pattern: RegExp;
+}> = [
+  {
+    phases: new Set([
+      ...ACTOR_TRANSITION_PHASES,
+      "responsive-evidence-bootstrap",
+      "second-tab-bootstrap",
+      "independent-set-after-other-logout-all",
+    ]),
+    pattern:
+      /^Failed to load resource: the server responded with a status of 409 \(Conflict\) @ \/v1\/auth\/get-session$/u,
+  },
+  {
+    phases: new Set(["cross-tab-select-race"]),
+    pattern:
+      /^Failed to load resource: the server responded with a status of 409 \(Conflict\) @ \/v1\/auth\/session-set\/select$/u,
+  },
+  {
+    phases: new Set(["csrf-fail-closed"]),
+    pattern:
+      /^Failed to load resource: the server responded with a status of 403 \(Forbidden\) @ \/v1\/auth\/session-set\/logout-all$/u,
+  },
+  {
+    phases: new Set([
+      "primary-set-sign-in",
+      "second-tab-bootstrap",
+      "add-response-loss-replay",
+      "responsive-accessibility-evidence",
+      "responsive-evidence-bootstrap",
+      "cross-tab-select-race",
+      "late-old-epoch-setup-beta-to-alpha",
+      "late-old-epoch-alpha-to-beta",
+      "late-old-epoch-primary-settled-before-old-release",
+      "cross-slot-deep-link",
+      "slot-revocation-reauthentication",
+      "logout-one",
+      "csrf-fail-closed",
+      "logout-all-response-loss-replay",
+      "independent-set-sign-in",
+      "independent-set-after-other-logout-all",
+    ]),
+    pattern:
+      /^Failed to load resource: the server responded with a status of 404 \(Not Found\) @ \/v1\/workspaces\/[0-9a-f-]+\/machines$/u,
+  },
+];
+
+type BrowserRequestFailureInput = {
+  actorEpoch: string | null;
+  dispatchPhase: string;
+  failure: string;
+  method: string;
+  responsePhase: string;
+  url: string;
+};
+
+function isExpectedHttpConsoleError(rendered: string, phase: string): boolean {
+  return EXPECTED_HTTP_CONSOLE_ERRORS.some(
+    (expected) => expected.phases.has(phase) && expected.pattern.test(rendered),
+  );
+}
+
+function requestFailureProblem(input: BrowserRequestFailureInput): string | null {
+  const pathname = new URL(input.url).pathname;
+  const isCancellation = /ERR_ABORTED|NS_BINDING_ABORTED|cancelled|canceled/iu.test(input.failure);
+  const isActorOwnedRead =
+    input.method === "GET" &&
+    (pathname === "/v1/auth/get-session" ||
+      pathname === "/v1/auth/session-set" ||
+      pathname === "/v1/workspaces" ||
+      pathname.startsWith("/v1/workspaces/"));
+  const allowedDispatchPhases = SCOPED_ACTOR_READ_CANCELLATION_DISPATCH_PHASES.get(
+    input.responsePhase,
+  );
+  const isExpectedScopedActorReadCancellation =
+    isCancellation &&
+    isActorOwnedRead &&
+    input.actorEpoch !== null &&
+    allowedDispatchPhases?.has(input.dispatchPhase) === true;
+  const isExpectedEvidenceCatalogCancellation =
+    isCancellation &&
+    input.method === "GET" &&
+    input.actorEpoch !== null &&
+    input.dispatchPhase === "responsive-evidence-bootstrap" &&
+    input.responsePhase === "responsive-evidence-bootstrap" &&
+    /^\/v1\/workspaces\/[0-9a-f-]+\/(?:realtime-)?model-catalog$/u.test(pathname);
+  const isExpectedDocumentBootstrapCancellation =
+    isCancellation &&
+    input.method === "GET" &&
+    input.dispatchPhase === input.responsePhase &&
+    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true;
+  if (
+    isExpectedScopedActorReadCancellation ||
+    isExpectedEvidenceCatalogCancellation ||
+    isExpectedDocumentBootstrapCancellation
+  ) {
+    return null;
+  }
+  return `[dispatch=${input.dispatchPhase}; actor=${input.actorEpoch ?? "missing"}; response=${input.responsePhase}] ${input.method} ${input.url}: ${input.failure}`;
+}
 
 let owned: OwnerMigratedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -248,7 +420,7 @@ function observeBrowser(page: Page): BrowserProblems {
       // The journey deliberately proves fail-closed 403/409 requests, while a
       // disabled Connected Machines surface deliberately returns 404. Keep
       // every other browser error strict.
-      if (!EXPECTED_HTTP_CONSOLE_ERRORS.some((pattern) => pattern.test(rendered))) {
+      if (!isExpectedHttpConsoleError(rendered, problems.phase)) {
         problems.consoleErrors.push(`[${problems.phase}] ${rendered}`);
       }
     }
@@ -257,11 +429,21 @@ function observeBrowser(page: Page): BrowserProblems {
     problems.pageErrors.push(`[${problems.phase}] ${error.message}`);
   });
   page.on("requestfailed", (request) => {
-    problems.pendingFiniteReads.delete(request);
+    const dispatch = requestPhases.get(request);
     const failure = request.failure()?.errorText ?? "unknown";
-    // Actor changes intentionally abort the preceding epoch's fetch/SSE work.
-    if (/ERR_ABORTED|NS_BINDING_ABORTED|cancelled|canceled/i.test(failure)) return;
-    problems.failedRequests.push(`${request.method()} ${request.url()}: ${failure}`);
+    const problem = requestFailureProblem({
+      actorEpoch: dispatch?.actorEpoch ?? null,
+      dispatchPhase: dispatch?.phase ?? "unknown",
+      failure,
+      method: request.method(),
+      responsePhase: problems.phase,
+      url: request.url(),
+    });
+    // A failed finite read is terminal whether expected or not. Remove it from
+    // quiescence tracking, but keep every non-transition failure in the strict
+    // final ledger—including canceled product mutations.
+    problems.pendingFiniteReads.delete(request);
+    if (problem !== null) problems.failedRequests.push(problem);
   });
   return problems;
 }
@@ -434,6 +616,9 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
       return {
         className: element.className.toString().slice(0, 160),
         left: Math.round(bounds.left),
+        outerHtml: element.outerHTML.replace(/\s+/gu, " ").slice(0, 240),
+        overflowX: style.overflowX,
+        position: style.position,
         right: Math.round(bounds.right),
         role: element.getAttribute("role"),
         tag: element.tagName.toLowerCase(),
@@ -442,7 +627,15 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
       };
     });
     return {
-      innerWidth,
+      body: {
+        clientWidth: document.body.clientWidth,
+        scrollWidth: document.body.scrollWidth,
+      },
+      document: {
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      },
+      viewportWidth: innerWidth,
       offenders: metrics
         .filter(
           ({ left, right, visuallyHidden, width }) =>
@@ -452,8 +645,16 @@ async function expectNoHorizontalOverflow(page: Page): Promise<void> {
         .slice(0, 20),
     };
   });
-  expect(evidence).toEqual({
-    innerWidth: evidence.innerWidth,
+  if (
+    evidence.viewportWidth !== page.viewportSize()?.width ||
+    evidence.document.scrollWidth > evidence.document.clientWidth ||
+    evidence.body.scrollWidth > evidence.body.clientWidth
+  ) {
+    throw new Error(`horizontal document overflow: ${JSON.stringify(evidence, null, 2)}`);
+  }
+  expect({
+    offenders: evidence.offenders,
+  }).toEqual({
     offenders: [],
   });
 }
@@ -600,7 +801,7 @@ function escapeRegExp(value: string): string {
 
 function accountMenuSurface(page: Page): Locator {
   return page
-    .locator('[data-slot="dropdown-menu-content"]')
+    .locator('[data-slot="dropdown-menu-content"][data-state="open"]')
     .filter({ hasText: "Browser accounts" })
     .last();
 }
@@ -639,11 +840,22 @@ async function openResponsiveAccountMenu(
   displayName: string,
   width: number,
 ): Promise<Locator> {
-  if (width < 1_024) {
-    await page.getByRole("button", { name: "Open navigation" }).click();
-    await page.getByRole("tab", { name: "Workspace" }).click();
+  const menu = accountMenuSurface(page);
+  if (await menu.isVisible()) {
+    await menu.getByRole("menuitem").first().waitFor();
+    return menu;
   }
-  return await openAccountMenu(page, displayName);
+  if (width < 1_024) {
+    const trigger = accountMenuTrigger(page, displayName);
+    if (!(await trigger.isVisible())) {
+      await page.getByRole("button", { name: "Open navigation" }).click();
+      await page.getByRole("tab", { name: "Workspace" }).click();
+      await trigger.waitFor();
+    }
+  }
+  const opened = await openAccountMenu(page, displayName);
+  await opened.getByRole("menuitem").first().waitFor();
+  return opened;
 }
 
 async function closeResponsiveAccountMenu(page: Page, width: number): Promise<void> {
@@ -876,9 +1088,9 @@ async function raceSelect(page: Page, projection: ManagedAuthSessionSetProjectio
 async function captureResponsiveEvidence(
   browser: Browser,
   context: BrowserContext,
-  page: Page,
   engine: EngineName,
 ): Promise<void> {
+  const storageState = await context.storageState();
   const captures = [
     { width: 320, height: 780, scheme: "light" as const },
     { width: 768, height: 900, scheme: "dark" as const },
@@ -886,76 +1098,114 @@ async function captureResponsiveEvidence(
     { width: 1440, height: 960, scheme: "dark" as const },
   ];
   for (const capture of captures) {
-    await page.setViewportSize({
-      width: capture.width,
-      height: capture.height,
-    });
-    await page.emulateMedia({
+    // Each artifact starts in its target viewport. Chromium can retain the old
+    // root scrollable-overflow width when a fixed overlay survives a live
+    // desktop-to-mobile resize, which made a nominal 320px full-page capture
+    // 718px wide even though every visible element fit the viewport.
+    const evidenceContext = await browser.newContext({
       colorScheme: capture.scheme,
+      storageState,
       reducedMotion: "reduce",
+      viewport: { width: capture.width, height: capture.height },
     });
-    await openResponsiveAccountMenu(page, alpha.displayName, capture.width);
-    await expectNoHorizontalOverflow(page);
-    await expectNoAxeViolations(page, '[data-slot="dropdown-menu-content"]');
-    await expectAccountMenuEvidenceVisible(page, alpha.displayName);
-    await page.screenshot({
-      path: `${EVIDENCE_DIR}/${engine}-accounts-${capture.width}-${capture.scheme}.png`,
-      fullPage: true,
-    });
-    await closeResponsiveAccountMenu(page, capture.width);
+    const evidencePage = await evidenceContext.newPage();
+    const evidenceProblems = observeBrowser(evidencePage);
+    setBrowserPhase(evidenceProblems, "responsive-evidence-bootstrap");
+    try {
+      await evidencePage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
+        waitUntil: "domcontentloaded",
+      });
+      await waitForFiniteReadQuiescence(evidenceProblems);
+      await openResponsiveAccountMenu(evidencePage, alpha.displayName, capture.width);
+      await expectNoHorizontalOverflow(evidencePage);
+      await openResponsiveAccountMenu(evidencePage, alpha.displayName, capture.width);
+      await expectNoAxeViolations(evidencePage, '[data-slot="dropdown-menu-content"]');
+      await openResponsiveAccountMenu(evidencePage, alpha.displayName, capture.width);
+      await expectAccountMenuEvidenceVisible(evidencePage, alpha.displayName);
+      const screenshot = await evidencePage.screenshot({
+        path: `${EVIDENCE_DIR}/${engine}-accounts-${capture.width}-${capture.scheme}.png`,
+        fullPage: true,
+      });
+      expect(screenshot.readUInt32BE(16)).toBe(capture.width);
+      await closeResponsiveAccountMenu(evidencePage, capture.width);
+      expectNoBrowserProblems(evidenceProblems);
+    } finally {
+      await evidenceContext.close();
+    }
   }
 
-  await page.setViewportSize({ width: 768, height: 900 });
-  await page.emulateMedia({
+  const forcedColors = await browser.newContext({
     colorScheme: "light",
     forcedColors: "active",
     reducedMotion: "reduce",
+    storageState,
+    viewport: { width: 768, height: 900 },
   });
-  await openResponsiveAccountMenu(page, alpha.displayName, 768);
-  await expectNoAxeViolations(page, '[data-slot="dropdown-menu-content"]');
-  await expectAccountMenuEvidenceVisible(page, alpha.displayName);
-  await page.screenshot({
-    path: `${EVIDENCE_DIR}/${engine}-accounts-forced-colors.png`,
-    fullPage: true,
-  });
-  await closeResponsiveAccountMenu(page, 768);
-  await page.emulateMedia({
-    colorScheme: "light",
-    forcedColors: "none",
-    reducedMotion: "reduce",
-  });
+  const forcedColorsPage = await forcedColors.newPage();
+  const forcedColorsProblems = observeBrowser(forcedColorsPage);
+  setBrowserPhase(forcedColorsProblems, "responsive-evidence-bootstrap");
+  try {
+    await forcedColorsPage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await waitForFiniteReadQuiescence(forcedColorsProblems);
+    await openResponsiveAccountMenu(forcedColorsPage, alpha.displayName, 768);
+    await expectNoHorizontalOverflow(forcedColorsPage);
+    await openResponsiveAccountMenu(forcedColorsPage, alpha.displayName, 768);
+    await expectNoAxeViolations(forcedColorsPage, '[data-slot="dropdown-menu-content"]');
+    await openResponsiveAccountMenu(forcedColorsPage, alpha.displayName, 768);
+    await expectAccountMenuEvidenceVisible(forcedColorsPage, alpha.displayName);
+    const forcedColorsScreenshot = await forcedColorsPage.screenshot({
+      path: `${EVIDENCE_DIR}/${engine}-accounts-forced-colors.png`,
+      fullPage: true,
+    });
+    expect(forcedColorsScreenshot.readUInt32BE(16)).toBe(768);
+    await closeResponsiveAccountMenu(forcedColorsPage, 768);
+    expectNoBrowserProblems(forcedColorsProblems);
+  } finally {
+    await forcedColors.close();
+  }
 
   const zoom = await browser.newContext({
-    storageState: await context.storageState(),
+    storageState,
     viewport: { width: 384, height: 450 },
     deviceScaleFactor: 2,
+    reducedMotion: "reduce",
   });
   const zoomPage = await zoom.newPage();
   const zoomProblems = observeBrowser(zoomPage);
+  setBrowserPhase(zoomProblems, "responsive-evidence-bootstrap");
   await zoomPage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
     waitUntil: "domcontentloaded",
   });
+  await waitForFiniteReadQuiescence(zoomProblems);
   await openResponsiveAccountMenu(zoomPage, alpha.displayName, 384);
   await expectNoHorizontalOverflow(zoomPage);
+  await openResponsiveAccountMenu(zoomPage, alpha.displayName, 384);
   await expectNoAxeViolations(zoomPage, '[data-slot="dropdown-menu-content"]');
+  await openResponsiveAccountMenu(zoomPage, alpha.displayName, 384);
   await expectAccountMenuEvidenceVisible(zoomPage, alpha.displayName);
-  await zoomPage.screenshot({
+  const zoomScreenshot = await zoomPage.screenshot({
     path: `${EVIDENCE_DIR}/${engine}-accounts-200-percent-zoom.png`,
     fullPage: true,
   });
+  expect(zoomScreenshot.readUInt32BE(16)).toBe(768);
   expectNoBrowserProblems(zoomProblems);
   await zoom.close();
 
   const touch = await browser.newContext({
-    storageState: await context.storageState(),
+    storageState,
     viewport: { width: 320, height: 780 },
     hasTouch: true,
     isMobile: true,
   });
   const touchPage = await touch.newPage();
+  const touchProblems = observeBrowser(touchPage);
+  setBrowserPhase(touchProblems, "responsive-evidence-bootstrap");
   await touchPage.goto(`${publicOrigin}/workspaces/${alpha.workspaceId}`, {
     waitUntil: "domcontentloaded",
   });
+  await waitForFiniteReadQuiescence(touchProblems);
   const touchTrigger = accountMenuTrigger(touchPage, alpha.displayName);
   await touchPage.getByRole("button", { name: "Open navigation" }).tap();
   await touchPage.getByRole("tab", { name: "Workspace" }).tap();
@@ -974,19 +1224,17 @@ async function captureResponsiveEvidence(
   );
   expect(menuTargetSizes.length).toBeGreaterThan(0);
   expect(menuTargetSizes.every(({ height, width }) => height >= 44 && width >= 44)).toBe(true);
+  await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
   await expectNoAxeViolations(touchPage, '[data-slot="dropdown-menu-content"]');
+  await openResponsiveAccountMenu(touchPage, alpha.displayName, 320);
   await expectAccountMenuEvidenceVisible(touchPage, alpha.displayName);
-  await touchPage.screenshot({
+  const touchScreenshot = await touchPage.screenshot({
     path: `${EVIDENCE_DIR}/${engine}-accounts-touch-320.png`,
     fullPage: true,
   });
+  expect(touchScreenshot.readUInt32BE(16)).toBe(320);
+  expectNoBrowserProblems(touchProblems);
   await touch.close();
-  await page.setViewportSize({ width: 1_440, height: 960 });
-  await page.emulateMedia({
-    colorScheme: "light",
-    forcedColors: "none",
-    reducedMotion: "no-preference",
-  });
 }
 
 async function delayedWorkspaceResponse(page: Page, oldActorEpoch: string) {
@@ -1198,6 +1446,151 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("the strict browser ledger only permits scoped old-actor read cancellations", () => {
+    const oldActorRead = {
+      actorEpoch: "old-actor-epoch",
+      dispatchPhase: "late-old-epoch-alpha-to-beta",
+      failure: "net::ERR_ABORTED",
+      method: "GET",
+      responsePhase: "late-old-epoch-primary-settled-before-old-release",
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
+    } satisfies BrowserRequestFailureInput;
+    expect(requestFailureProblem(oldActorRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        dispatchPhase: "add-response-loss-replay",
+        responsePhase: "cross-tab-select-race",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        dispatchPhase: "independent-set-sign-in",
+        responsePhase: "independent-set-after-other-logout-all",
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+        responsePhase: "late-old-epoch-alpha-to-beta",
+        url: `${publicOrigin}/v1/workspaces`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        dispatchPhase: "responsive-accessibility-evidence",
+      }),
+    ).toContain("responsive-accessibility-evidence");
+    expect(requestFailureProblem({ ...oldActorRead, method: "POST" })).toContain("POST");
+    expect(requestFailureProblem({ ...oldActorRead, actorEpoch: null })).toContain("actor=missing");
+    expect(
+      requestFailureProblem({
+        ...oldActorRead,
+        url: `${publicOrigin}/assets/app.js`,
+      }),
+    ).toContain("/assets/app.js");
+    const evidenceCatalogRead = {
+      ...oldActorRead,
+      dispatchPhase: "responsive-evidence-bootstrap",
+      responsePhase: "responsive-evidence-bootstrap",
+      url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/model-catalog`,
+    };
+    expect(requestFailureProblem(evidenceCatalogRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...evidenceCatalogRead,
+        url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
+      }),
+    ).toContain("/sessions");
+    const crossTabBootstrapRead = {
+      ...oldActorRead,
+      actorEpoch: null,
+      dispatchPhase: "cross-tab-select-race",
+      responsePhase: "cross-tab-select-race",
+      url: `${publicOrigin}/v1/config/client`,
+    };
+    expect(requestFailureProblem(crossTabBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({ ...crossTabBootstrapRead, actorEpoch: "current-actor" }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({ ...crossTabBootstrapRead, responsePhase: "cross-slot-deep-link" }),
+    ).toContain("/v1/config/client");
+    expect(
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        dispatchPhase: "late-old-epoch-setup-beta-to-alpha",
+        responsePhase: "late-old-epoch-setup-beta-to-alpha",
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        dispatchPhase: "second-tab-bootstrap",
+        responsePhase: "second-tab-bootstrap",
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        actorEpoch: "current-actor",
+        dispatchPhase: "cross-slot-deep-link",
+        responsePhase: "cross-slot-deep-link",
+        url: `${publicOrigin}/v1/config/client`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        dispatchPhase: "cross-slot-deep-link",
+        responsePhase: "cross-slot-deep-link",
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        dispatchPhase: "cross-slot-deep-link",
+        responsePhase: "cross-slot-deep-link",
+        url: `${publicOrigin}/v1/auth/session-set`,
+      }),
+    ).toContain("/v1/auth/session-set");
+    expect(
+      requestFailureProblem({
+        ...crossTabBootstrapRead,
+        dispatchPhase: "responsive-evidence-bootstrap",
+        responsePhase: "responsive-evidence-bootstrap",
+        url: `${publicOrigin}/v1/auth/get-session`,
+      }),
+    ).toBeNull();
+
+    const expectedRaceConsole =
+      "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/session-set/select";
+    expect(isExpectedHttpConsoleError(expectedRaceConsole, "cross-tab-select-race")).toBe(true);
+    expect(
+      isExpectedHttpConsoleError(expectedRaceConsole, "responsive-accessibility-evidence"),
+    ).toBe(false);
+    const expectedIndependentReloadConsole =
+      "Failed to load resource: the server responded with a status of 409 (Conflict) @ /v1/auth/get-session";
+    expect(
+      isExpectedHttpConsoleError(
+        expectedIndependentReloadConsole,
+        "independent-set-after-other-logout-all",
+      ),
+    ).toBe(true);
+    expect(isExpectedHttpConsoleError(expectedIndependentReloadConsole, "logout-one")).toBe(true);
+    expect(
+      isExpectedHttpConsoleError(expectedIndependentReloadConsole, "independent-set-sign-in"),
+    ).toBe(false);
+  });
+
   test("real users add, race, switch, re-authenticate, deep-link, and revoke without stale tenant state", async () => {
     if (!owned) throw new Error("database fixture unavailable");
     const engine = requestedEngine as EngineName;
@@ -1244,6 +1637,7 @@ describe("provider-neutral browser account acceptance", () => {
       // Wait until the React projection has incorporated the added slot before
       // exercising focus ownership. The authoritative GET above can lead the
       // cross-tab projection broadcast by one task.
+      await waitForFiniteReadQuiescence(pageProblems);
       const settledMenu = await openAccountMenu(page, alpha.displayName);
       await settledMenu.getByRole("menuitem", { name: new RegExp(beta.displayName) }).waitFor();
       const trigger = accountMenuTrigger(page, alpha.displayName);
@@ -1285,7 +1679,7 @@ describe("provider-neutral browser account acceptance", () => {
 
       if (engine === "chromium") {
         setBrowserPhase(pageProblems, "responsive-accessibility-evidence");
-        await captureResponsiveEvidence(browser, context, page, engine);
+        await captureResponsiveEvidence(browser, context, engine);
       }
 
       setBrowserPhase(pageProblems, "cross-tab-select-race");

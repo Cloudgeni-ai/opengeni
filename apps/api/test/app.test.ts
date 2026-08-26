@@ -1846,23 +1846,30 @@ describe("GET /v1/config/client", () => {
 });
 
 describe("managed session-set route ownership", () => {
-  function boundaryApp(providerHandler: (request: Request) => Response | Promise<Response>) {
+  function boundaryApp(
+    providerHandler: (request: Request) => Response | Promise<Response>,
+    options: {
+      mode?: "dual" | "broker";
+      db?: AppDependencies["db"];
+      adapter?: AppDependencies["managedAuthSessionAdapter"];
+    } = {},
+  ) {
     return createApp({
       settings: testSettings({
         environment: "production",
         productAccessMode: "managed",
-        managedAuthSessionSetMode: "dual",
+        managedAuthSessionSetMode: options.mode ?? "dual",
         publicBaseUrl: "https://opengeni.test",
         betterAuthSecret: "managed-session-set-boundary-secret-32-bytes",
       }),
-      db: {} as never,
+      db: options.db ?? ({} as never),
       bus: {} as never,
       workflowClient: {} as never,
       managedAuth: {
         handler: providerHandler,
         api: {},
       } as never,
-      managedAuthSessionAdapter: {} as never,
+      managedAuthSessionAdapter: options.adapter ?? ({} as never),
     });
   }
 
@@ -1917,6 +1924,163 @@ describe("managed session-set route ownership", () => {
     expect(providerCalls).toBe(1);
     expect(await signIn.json()).toEqual({ user: { id: "user-1", email: "user@example.test" } });
     expect(signIn.headers.get("set-cookie")).toContain("better-auth.session_token=");
+    expect(signIn.headers.get("cache-control")).toBe("no-store");
+    expect(signIn.headers.get("pragma")).toBe("no-cache");
+  });
+
+  test("clears provider cookies in broker mode for JSON and non-JSON auth responses", async () => {
+    const clearCookie =
+      "better-auth.session_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly";
+    let responseKind: "json" | "redirect" = "json";
+    const app = boundaryApp(
+      (request) => {
+        expect(request.headers.get("cookie")).toBeNull();
+        return responseKind === "json"
+          ? Response.json(
+              { token: "unselected-token", user: { id: "user-1" } },
+              { headers: { "set-cookie": "better-auth.session_token=unselected; Path=/" } },
+            )
+          : new Response(null, {
+              status: 302,
+              headers: {
+                location: "https://opengeni.test/",
+                "set-cookie": "better-auth.session_token=unselected; Path=/",
+              },
+            });
+      },
+      {
+        mode: "broker",
+        adapter: {
+          createLegacySelectedSessionCookies: async (selected, currentCookies) => {
+            expect(selected).toBeNull();
+            expect(currentCookies).toContain("better-auth.session_token=old-selected");
+            return [clearCookie];
+          },
+        } as never,
+      },
+    );
+    const request = () =>
+      app.request("/v1/auth/sign-in/email", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          cookie: "better-auth.session_token=old-selected",
+        },
+        body: JSON.stringify({ email: "user@example.test", password: "password1234" }),
+      });
+
+    const json = await request();
+    expect(await json.json()).toEqual({ user: { id: "user-1" } });
+    expect(json.headers.getSetCookie()).toEqual([clearCookie]);
+    expect(json.headers.get("cache-control")).toBe("no-store");
+    expect(json.headers.get("pragma")).toBe("no-cache");
+
+    responseKind = "redirect";
+    const redirect = await request();
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.getSetCookie()).toEqual([clearCookie]);
+    expect(redirect.headers.get("cache-control")).toBe("no-store");
+    expect(redirect.headers.get("pragma")).toBe("no-cache");
+  });
+
+  test("keeps an active dual set's exact selected mirror across wildcard sign-in", async () => {
+    const slotId = "7438e162-ded0-45fe-94f1-f4548ca532f8";
+    const selected = {
+      slotId,
+      authSessionId: "selected-session",
+      authUserId: "selected-user",
+      token: "selected-token",
+      email: "selected@example.test",
+      name: "Selected user",
+      emailVerified: true,
+    };
+    const exactMirror = "better-auth.session_token=selected-mirror; Path=/; HttpOnly";
+    const app = boundaryApp(
+      () =>
+        Response.json(
+          { token: "unadopted-token", user: { id: "unadopted-user" } },
+          { headers: { "set-cookie": "better-auth.session_token=unadopted; Path=/" } },
+        ),
+      {
+        db: {
+          execute: async () => [
+            {
+              result: {
+                projection: {
+                  mode: "dual",
+                  generation: "3",
+                  actorEpoch: "2",
+                  selectedSlotId: slotId,
+                  state: "ready",
+                  slots: [
+                    {
+                      id: slotId,
+                      displayName: selected.name,
+                      verifiedClaim: { kind: "email", value: selected.email },
+                      state: "active",
+                    },
+                  ],
+                },
+                selected,
+                internalSlots: [selected],
+              },
+            },
+          ],
+        } as never,
+        adapter: {
+          createLegacySelectedSessionCookies: async (candidate) => {
+            expect(candidate).toEqual(selected);
+            return [exactMirror];
+          },
+        } as never,
+      },
+    );
+    const response = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: `opengeni.session_set=${"a".repeat(43)}; better-auth.session_token=selected-mirror`,
+      },
+      body: JSON.stringify({ email: "other@example.test", password: "password1234" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ user: { id: "unadopted-user" } });
+    expect(response.headers.getSetCookie()).toEqual([exactMirror]);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  test("clears wildcard provider cookies when a dual authority is unknown", async () => {
+    const clearCookie =
+      "better-auth.session_token=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly";
+    const app = boundaryApp(
+      () =>
+        Response.json(
+          { token: "unadopted-token", user: { id: "unadopted-user" } },
+          { headers: { "set-cookie": "better-auth.session_token=unadopted; Path=/" } },
+        ),
+      {
+        db: { execute: async () => [] } as never,
+        adapter: {
+          createLegacySelectedSessionCookies: async (candidate) => {
+            expect(candidate).toBeNull();
+            return [clearCookie];
+          },
+        } as never,
+      },
+    );
+    const response = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: `opengeni.session_set=${"a".repeat(43)}`,
+      },
+      body: JSON.stringify({ email: "other@example.test", password: "password1234" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ user: { id: "unadopted-user" } });
+    expect(response.headers.getSetCookie()).toEqual([clearCookie]);
   });
 });
 

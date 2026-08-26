@@ -454,18 +454,31 @@ export function requireManagedAuthProviderRouteAllowed(method: string, pathname:
   if (!allowed) throw managedAuthApiError(409, "provider_route_blocked");
 }
 
-/** Remove provider bearer/session material from all browser-visible JSON. */
-export async function scrubManagedAuthProviderResponse(response: Response): Promise<Response> {
+/** Remove provider bearer/session material and enforce browser-auth cache/cookie policy. */
+export async function scrubManagedAuthProviderResponse(
+  response: Response,
+  options: { replacementCookies?: readonly string[] | undefined } = {},
+): Promise<Response> {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  if (!contentType.includes("application/json")) return response;
-  const value = await response
-    .clone()
-    .json()
-    .catch(() => undefined);
-  if (value === undefined) return response;
   const headers = new Headers(response.headers);
-  headers.delete("content-length");
-  return new Response(JSON.stringify(removeProviderSecrets(value)), {
+  headers.set("cache-control", "no-store");
+  headers.set("pragma", "no-cache");
+  if (options.replacementCookies !== undefined) {
+    headers.delete("set-cookie");
+    for (const cookie of options.replacementCookies) headers.append("set-cookie", cookie);
+  }
+  let body: BodyInit | null = response.body;
+  if (contentType.includes("application/json")) {
+    const value = await response
+      .clone()
+      .json()
+      .catch(() => undefined);
+    if (value !== undefined) {
+      headers.delete("content-length");
+      body = JSON.stringify(removeProviderSecrets(value));
+    }
+  }
+  return new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers,

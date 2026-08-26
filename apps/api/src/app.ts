@@ -36,6 +36,7 @@ import {
   configureChildLifecycleNotices,
   configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
+  getManagedAuthSessionSetSnapshot,
   getWorkspace,
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
@@ -51,6 +52,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
+import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -69,7 +71,11 @@ import {
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
-import { ManagedAuthActorChangeError } from "@opengeni/core/managed-auth-session-sets";
+import {
+  MANAGED_AUTH_SESSION_SET_COOKIE,
+  ManagedAuthActorChangeError,
+  managedAuthSha256,
+} from "@opengeni/core/managed-auth-session-sets";
 import { createBetterAuthSessionAdapter } from "./auth/managed-auth-session-adapter";
 import { createManagedEmailTransport } from "./auth/managed-email";
 import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
@@ -583,7 +589,29 @@ export function createAppComposition(deps: AppDependencies): {
       headers.delete("authorization");
       headers.delete("x-forwarded-user");
       const providerRequest = new Request(c.req.raw, { headers });
-      return await scrubManagedAuthProviderResponse(await managedAuth.handler(providerRequest));
+      const providerResponse = await managedAuth.handler(providerRequest);
+      let replacementCookies: readonly string[] | undefined;
+      if (deps.settings.managedAuthSessionSetMode === "broker") {
+        replacementCookies = await managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
+          null,
+          c.req.header("cookie") ?? null,
+        );
+      } else {
+        const authority = getCookie(c, MANAGED_AUTH_SESSION_SET_COOKIE);
+        if (authority) {
+          const snapshot = await getManagedAuthSessionSetSnapshot(deps.db, {
+            authorityHash: managedAuthSha256(authority),
+            mode: "dual",
+            includeInternal: true,
+            readOnly: true,
+          });
+          replacementCookies = await managedAuthSessionAdapter!.createLegacySelectedSessionCookies(
+            snapshot?.selected ?? null,
+            c.req.header("cookie") ?? null,
+          );
+        }
+      }
+      return await scrubManagedAuthProviderResponse(providerResponse, { replacementCookies });
     });
   }
 

@@ -342,6 +342,53 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(after).toEqual(before);
 
     await shared.admin`
+      update auth_sessions set expires_at = now() - interval '1 second'
+      where id = ${before!.id}
+    `;
+    const expiredProjectionResponse = await app.request("/v1/auth/session-set", {
+      headers: { cookie: authorityB },
+    });
+    expect(expiredProjectionResponse.status).toBe(200);
+    expect(await expiredProjectionResponse.json()).toMatchObject({
+      generation: projectionB.generation,
+      actorEpoch: projectionB.actorEpoch,
+      selectedSlotId: null,
+      state: "actor_change_required",
+      slots: [{ id: projectionB.selectedSlotId, state: "reauth_required" }],
+    });
+    const expiredSelectedRead = await app.request("/v1/auth/get-session", {
+      headers: {
+        cookie: `${ambient}; ${authorityB}`,
+        [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projectionB.actorEpoch,
+      },
+    });
+    expect(expiredSelectedRead.status).toBe(409);
+    expect(expiredSelectedRead.headers.get("x-opengeni-actor-state")).toBe("changed");
+    const [readOnlyState] = await shared.admin<
+      Array<{
+        generation: string;
+        actorEpoch: string;
+        state: string;
+        slotStatus: string;
+        authSessionId: string | null;
+      }>
+    >`
+      select session_set.generation::text as generation,
+        session_set.actor_epoch::text as "actorEpoch", session_set.state,
+        slot.status as "slotStatus", slot.auth_session_id as "authSessionId"
+      from managed_auth_session_sets session_set
+      inner join managed_auth_login_slots slot on slot.id = session_set.selected_slot_id
+      where session_set.authority_hash = ${managedAuthSha256(authorityValue(authorityB))}
+    `;
+    expect(readOnlyState).toEqual({
+      generation: projectionB.generation,
+      actorEpoch: projectionB.actorEpoch,
+      state: "ready",
+      slotStatus: "active",
+      authSessionId: before!.id,
+    });
+
+    await shared.admin`
       update managed_auth_session_sets set actor_epoch = actor_epoch + 1
       where authority_hash = ${managedAuthSha256(authorityValue(authorityB))}
     `;
