@@ -22,11 +22,12 @@ const version: RigVersion = {
   active: true,
   createdAt: "2026-08-10T00:00:00.000Z",
 };
+const DEPLOYMENT_BASE = "registry.example.com/opengeni-desktop@sha256:platform";
 
 function readyImage(definition: RigVersion = version): RigProviderImage {
   const contentHash = rigProviderImageContentHash({
     backend: "modal",
-    sourceImage: definition.image,
+    sourceImage: DEPLOYMENT_BASE,
     definition,
   });
   return {
@@ -35,7 +36,7 @@ function readyImage(definition: RigVersion = version): RigProviderImage {
     status: "ready",
     contentHash,
     setupHash: rigProviderImageSetupHash(definition),
-    sourceImage: definition.image,
+    sourceImage: DEPLOYMENT_BASE,
     buildRequestId: rigProviderImageBuildRequestId({
       targetId: definition.id,
       backend: "modal",
@@ -57,23 +58,31 @@ function readyImage(definition: RigVersion = version): RigProviderImage {
 }
 
 describe("rig provider image identity", () => {
-  test("is deterministic for unchanged exact content and invalidates on setup/content changes", () => {
+  test("is deterministic, ignores retired Rig image metadata, and invalidates setup/content", () => {
     const firstHash = rigProviderImageContentHash({
       backend: "modal",
-      sourceImage: version.image,
+      sourceImage: DEPLOYMENT_BASE,
       definition: version,
     });
     const secondHash = rigProviderImageContentHash({
       backend: "modal",
-      sourceImage: version.image,
+      sourceImage: DEPLOYMENT_BASE,
       definition: version,
     });
     expect(secondHash).toBe(firstHash);
 
+    expect(
+      rigProviderImageContentHash({
+        backend: "modal",
+        sourceImage: DEPLOYMENT_BASE,
+        definition: { ...version, image: "historical.example/ignored:latest" },
+      }),
+    ).toBe(firstHash);
+
     const changed = { ...version, setupScript: `${version.setupScript}\necho changed` };
     const changedHash = rigProviderImageContentHash({
       backend: "modal",
-      sourceImage: changed.image,
+      sourceImage: DEPLOYMENT_BASE,
       definition: changed,
     });
     expect(changedHash).not.toBe(firstHash);

@@ -16588,7 +16588,15 @@ export class RigChangeAlreadyVerifyingError extends Error {
   }
 }
 
+export class RigImageOverrideUnsupportedError extends Error {
+  constructor() {
+    super("Rig image overrides are unsupported; Rigs use the deployment platform sandbox image");
+    this.name = "RigImageOverrideUnsupportedError";
+  }
+}
+
 export type RigVersionContentInput = {
+  /** @deprecated Rig versions always use the deployment platform sandbox image. */
   image?: string | null;
   setupScript?: string | null;
   checks?: RigCheck[];
@@ -16597,6 +16605,12 @@ export type RigVersionContentInput = {
   changelog?: string | null;
   createdBy?: string | null;
 };
+
+function assertRigUsesPlatformImage(input: RigVersionContentInput | undefined): void {
+  if (input?.image != null) {
+    throw new RigImageOverrideUnsupportedError();
+  }
+}
 
 function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion {
   return {
@@ -16833,6 +16847,7 @@ export async function createRig(
     initialVersion?: RigVersionContentInput;
   },
 ): Promise<Rig> {
+  assertRigUsesPlatformImage(input.initialVersion);
   if (input.scope !== undefined || input.subjectId !== undefined) {
     return await withRlsContext(
       db,
@@ -16846,7 +16861,7 @@ export async function createRig(
             ${input.accountId}::uuid, ${input.workspaceId}::uuid,
             ${input.scope ?? "workspace"}, ${input.name}, ${input.description ?? null},
             ${input.createdBy ?? null}, ${JSON.stringify({
-              image: content.image ?? null,
+              image: null,
               setupScript: content.setupScript ?? null,
               checks: content.checks ?? [],
               credentialHooks: content.credentialHooks ?? [],
@@ -16886,7 +16901,7 @@ export async function createRig(
           workspaceId: input.workspaceId,
           rigId: rigRow.id,
           version: 1,
-          image: content.image ?? null,
+          image: null,
           setupScript: content.setupScript ?? null,
           checks: content.checks ?? [],
           credentialHooks: content.credentialHooks ?? [],
@@ -17898,6 +17913,7 @@ export async function createRigVersion(
   input: RigVersionContentInput,
   options: { activate?: boolean } = {},
 ): Promise<RigVersion> {
+  assertRigUsesPlatformImage(input);
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [rig] = await scopedDb
       .select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
@@ -17936,7 +17952,7 @@ export async function createRigVersion(
         workspaceId,
         rigId,
         version: nextVersion,
-        image: input.image ?? null,
+        image: null,
         setupScript: input.setupScript ?? null,
         checks: input.checks ?? [],
         credentialHooks: input.credentialHooks ?? [],
@@ -17968,6 +17984,7 @@ export async function createRigVersionForChangePromotion(
     providerImages?: RigProviderImages;
   },
 ): Promise<{ version: RigVersion; change: RigChange }> {
+  assertRigUsesPlatformImage(input);
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [rig] = await scopedDb
       .select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
@@ -18052,7 +18069,7 @@ export async function createRigVersionForChangePromotion(
         workspaceId,
         rigId,
         version: nextVersion,
-        image: input.image ?? null,
+        image: null,
         setupScript: input.setupScript ?? null,
         checks: input.checks ?? [],
         credentialHooks: input.credentialHooks ?? [],
@@ -18373,9 +18390,9 @@ async function retainRigProviderImageArtifacts(
 
 /**
  * Claim the one provider-image build slot for an existing immutable rig
- * version. A finalized ready image is never overwritten in place: if the
- * effective base/content identity changed, callers must mint/verify a new rig
- * version and runtime setup remains the truthful fallback for this one.
+ * version. The setup hash fences definition drift. Deployment base-image and
+ * provider-image protocol rotations may replace operational metadata for the
+ * same setup; late finalizers remain fenced by the build request id.
  */
 export async function claimRigVersionProviderImageBuild(
   db: Database,
@@ -18412,22 +18429,24 @@ export async function claimRigVersionProviderImageBuild(
         existing.contentHash === candidate.contentHash &&
         existing.setupHash === candidate.setupHash &&
         existing.sourceImage === candidate.sourceImage;
+      const sameSetup = existing.setupHash === candidate.setupHash;
       if (existing.status === "ready") {
-        if (!sameContent) return { status: "conflict", image: existing };
-        const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
-          [existing.backend]: existing,
-        });
-        if (retained[existing.backend] && existing.coldBootValidation?.version === 1) {
-          return { status: "ready", image: existing };
+        if (sameContent) {
+          const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
+            [existing.backend]: existing,
+          });
+          if (retained[existing.backend] && existing.coldBootValidation?.version === 1) {
+            return { status: "ready", image: existing };
+          }
         }
       }
       if (existing.status === "unsupported" && sameContent && !input.retryUnsupported) {
         return { status: "unsupported", image: existing };
       }
-      if (!sameContent) {
+      if (!sameContent && !sameSetup) {
         return { status: "conflict", image: existing };
       }
-      if (existing.status === "building") {
+      if (sameContent && existing.status === "building") {
         const startedAtMs = Date.parse(existing.startedAt);
         if (
           Number.isFinite(startedAtMs) &&

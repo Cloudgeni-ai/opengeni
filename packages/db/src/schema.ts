@@ -12393,6 +12393,8 @@ export const rigVersions = pgTable(
       .notNull()
       .references(() => rigs.id, { onDelete: "cascade" }),
     version: integer("version").notNull(),
+    // Legacy audit field only. Migration 0356 rejects new non-null values;
+    // runtime always uses the deployment platform sandbox image.
     image: text("image"),
     setupScript: text("setup_script"),
     // Self-declared health checks: [{ name, command }].

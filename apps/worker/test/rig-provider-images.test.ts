@@ -16,7 +16,6 @@ import { testSettings } from "@opengeni/testing";
 import {
   resolveRigProviderImageSelection,
   rigProviderImageSourceImage,
-  settingsWithRigImage,
   settingsWithRigProviderImage,
 } from "../src/activities/packs";
 import {
@@ -33,6 +32,15 @@ const PROVIDER_BINDING_KEY = JSON.stringify({
   workspaceName: "workspace-a",
   environment: "main",
 });
+const PLATFORM_IMAGE = "registry.example.com/opengeni-desktop@sha256:platform";
+
+function platformSettings(overrides: Partial<Settings> = {}): Settings {
+  return testSettings({
+    sandboxBackend: "modal",
+    modalImageRef: PLATFORM_IMAGE,
+    ...overrides,
+  });
+}
 
 function version(overrides: Partial<RigVersion> = {}): RigVersion {
   return {
@@ -136,7 +144,7 @@ describe("build-once rig provider image runtime", () => {
     };
     const checkedAt = await verifyRigProviderImageColdBoot(
       {
-        settings: testSettings({ sandboxBackend: "modal" }),
+        settings: platformSettings(),
         db: {} as never,
         observability: {} as never,
         accountId: "11111111-1111-4111-8111-111111111111",
@@ -163,18 +171,15 @@ describe("build-once rig provider image runtime", () => {
     );
 
     expect(checkedAt).toBe("2026-08-10T00:00:00.500Z");
-    expect(commands).toEqual([
-      `test -f '/var/opengeni/rig-setup-content-${"a".repeat(64)}.done'`,
-      "bash --version",
-      "git --version",
-    ]);
+    expect(commands[0]).toBe(`test -f '/var/opengeni/rig-setup-content-${"a".repeat(64)}.done'`);
+    expect(commands.some((command) => command.includes("opengeni-browserd-up"))).toBe(true);
+    expect(commands.some((command) => command.includes("opengeni-terminal-up"))).toBe(true);
+    expect(commands.at(-2)).toBe("bash --version");
+    expect(commands.at(-1)).toBe("git --version");
   });
 
   test("two fresh boxes select the same immutable image and skip setup from its content marker", async () => {
-    const logicalSettings = settingsWithRigImage(
-      testSettings({ sandboxBackend: "modal" }),
-      "ubuntu:24.04",
-    );
+    const logicalSettings = platformSettings();
     const base = version();
     const image = readyImage(logicalSettings, base);
     const verified = { ...base, providerImages: { modal: image } };
@@ -224,10 +229,7 @@ describe("build-once rig provider image runtime", () => {
   });
 
   test("a planted old image record cannot survive changed setup content", async () => {
-    const logicalSettings = settingsWithRigImage(
-      testSettings({ sandboxBackend: "modal" }),
-      "ubuntu:24.04",
-    );
+    const logicalSettings = platformSettings();
     const oldVersion = version();
     const oldImage = readyImage(logicalSettings, oldVersion);
     const changedVersion = version({
@@ -265,10 +267,7 @@ describe("build-once rig provider image runtime", () => {
   });
 
   test("a legacy ready image is not selected until an independent cold boot validates it", () => {
-    const settings = settingsWithRigImage(
-      testSettings({ sandboxBackend: "modal" }),
-      "ubuntu:24.04",
-    );
+    const settings = platformSettings();
     const base = version();
     const { coldBootValidation: _legacyMissing, ...legacyImage } = readyImage(settings, base);
     const selected = resolveRigProviderImageSelection(
@@ -326,10 +325,7 @@ describe("build-once rig provider image runtime", () => {
   });
 
   test("provider binding rotation falls back before passing a stale Modal image ID", async () => {
-    const logicalSettings = settingsWithRigImage(
-      testSettings({ sandboxBackend: "modal" }),
-      "ubuntu:24.04",
-    );
+    const logicalSettings = platformSettings();
     const base = version();
     const image = readyImage(logicalSettings, base);
     const verified = { ...base, providerImages: { modal: image } };
@@ -388,10 +384,10 @@ describe("build-once rig provider image runtime", () => {
       },
     );
     expect(unavailable.modalImageId).toBeUndefined();
-    expect(unavailable.modalImageRef).toBe("ubuntu:24.04");
+    expect(unavailable.modalImageRef).toBe(PLATFORM_IMAGE);
   });
 
-  test("verification resolves the same pack then rig image precedence as real turns", () => {
+  test("verification always uses the deployment platform base", () => {
     const deployment = testSettings({
       sandboxBackend: "modal",
       modalImageRef: "deployment:latest",
@@ -404,12 +400,12 @@ describe("build-once rig provider image runtime", () => {
     };
 
     const verification = settingsForRigVerification(deployment, packRuntime, null);
-    expect(verification.modalImageRef).toBe("pack:stable");
-    expect(verification.modalImageId).toBe("im-pack");
-    expect(rigProviderImageSourceImage(verification, "modal")).toBe("im-pack");
+    expect(verification).toBe(deployment);
+    expect(verification.modalImageRef).toBe("deployment:latest");
+    expect(verification.modalImageId).toBe("im-deployment");
+    expect(rigProviderImageSourceImage(verification, "modal")).toBe("im-deployment");
 
     const rigOverride = settingsForRigVerification(deployment, packRuntime, "rig:pinned");
-    expect(rigOverride.modalImageRef).toBe("rig:pinned");
-    expect(rigOverride.modalImageId).toBeUndefined();
+    expect(rigOverride).toBe(deployment);
   });
 });
