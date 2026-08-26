@@ -11,11 +11,14 @@ test("uses the granted workspace subject for synthetic turn execution", async ()
   expect(source).toContain("const profileSubjectId = `operator:turn-density-profile:${runId}`;");
   expect(source.match(/subjectId: profileSubjectId/g)).toHaveLength(2);
   expect(source).not.toContain('subjectId: "turn-density-profile"');
+  expect(source.match(/export async function deleteDensityProfileAccount\(/g)).toHaveLength(1);
   expect(
-    source.match(
-      /\.delete\(schema\.managedAccounts\)\s*\.where\(eq\(schema\.managedAccounts\.id,\s*accountId!?\)\)/g,
-    ),
+    source.match(/deleteDensityProfileAccount\(dbClient\.db, accountId!, workspaceId!\)/g),
   ).toHaveLength(2);
+  expect(source.match(/\.delete\(schema\.managedAccounts\)/g)).toHaveLength(1);
+  expect(source).toMatch(
+    /deleteDensityProfileAccount[\s\S]*?withWorkspaceRls\(db, workspaceId,[\s\S]*?\.delete\(schema\.managedAccounts\)/u,
+  );
 });
 
 test("isolates first-party MCP setup from the deployment access mode", async () => {

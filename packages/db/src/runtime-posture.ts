@@ -73,7 +73,13 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_self_organization_invitation(text, uuid)",
   "list_organization_invitations(uuid, text, uuid, integer)",
   "list_organization_members(uuid, text)",
+  "list_organization_administration_members(uuid, text)",
   "get_organization_administration_overview(uuid, text)",
+  "get_workspace_kind(uuid, uuid)",
+  "organization_workspace_command(jsonb)",
+  "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
+  "prepare_organization_workspace_member_removal(jsonb)",
+  "record_organization_workspace_member_removal(jsonb, uuid, uuid)",
   "create_managed_organization(text, text, text, uuid)",
   "assert_organization_shared_workspace_administrator(uuid, uuid, text)",
   "open_organization_shared_workspace_administration_capability(uuid, uuid, text)",
@@ -85,6 +91,15 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "bind_pending_organization_invitations_for_verified_email(text, text)",
   "has_pending_organization_invitation_for_subject(text)",
   "accept_organization_invitation_v2(jsonb)",
+  "complete_self_service_organization_setup(jsonb)",
+  "ensure_organization_user_setup_intent(jsonb)",
+  "claim_organization_user_setup_delivery(jsonb)",
+  "prepare_organization_user_setup_delivery(jsonb)",
+  "settle_organization_user_setup_delivery(jsonb)",
+  "preview_organization_user_setup(text)",
+  "get_organization_invitation_for_administration(uuid, text, uuid)",
+  "preflight_organization_user_setup(text)",
+  "complete_organization_user_setup(jsonb)",
   "organization_membership_command(jsonb)",
   "prepare_organization_membership_protocol_settlements(jsonb)",
   "assert_active_managed_human_organization_membership(uuid, text)",
@@ -108,6 +123,9 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_memberships",
   "organization_profile_events",
   "organization_shared_workspace_administration_capabilities",
+  "organization_user_setup_deliveries",
+  "organization_user_setup_delivery_attempts",
+  "organization_user_setup_intents",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
   "organization_user_retention_deletion_events",
@@ -115,6 +133,9 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_user_retention_object_deletion_receipts",
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "organization_workspace_lifecycle_events",
+  "organization_workspace_operation_receipts",
+  "self_service_organization_setup_receipts",
 ] as const;
 const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE =
@@ -179,10 +200,14 @@ const USER_RESOURCE_LIFECYCLE_ROUTINES = [
   "revoke_self_user_resource_grant(uuid, uuid, uuid)",
   "authorize_session_attempt_personal_resource_reads(uuid, uuid, uuid)",
 ] as const;
+const CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE =
+  "connection_authority_convergence_audit_capability_active(uuid)";
 const CONNECTION_AUTHORITY_ROUTINES = [
+  CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
   "resolve_personal_connection_authority_selection(uuid, uuid, text, uuid, jsonb)",
   "resolve_accepted_connection_use(uuid, uuid, uuid, uuid, uuid, integer, uuid, text, text, uuid, text, text, text, text)",
   "resolve_connection_use_authority(uuid, uuid, uuid, jsonb)",
+  "inspect_organization_connection_authority_convergence(uuid, integer, uuid)",
 ] as const;
 const PERSONAL_GITHUB_REPOSITORY_AUTHORITY_ROUTINES = [
   "get_self_personal_github_repository_selection(uuid, uuid, text, uuid)",
@@ -235,6 +260,13 @@ const DOCUMENT_MIGRATION_AUTHORITY_ROUTINES = [
   "list_document_authority_reclassifications(uuid, uuid, text, uuid, integer, timestamp with time zone, uuid)",
   "reclassify_document_authority(jsonb)",
   "run_document_default_collection_backfill(jsonb)",
+  "list_document_default_collection_backfill_runs(jsonb)",
+  "get_document_default_collection_backfill_audit(jsonb)",
+  "list_organization_document_authority_reclassifications(jsonb)",
+] as const;
+const DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES = [
+  "document_migration_audit_capability_active(text)",
+  "assert_document_migration_audit_authority(jsonb)",
 ] as const;
 const VARIABLE_SET_AUTHORITY_ROUTINES = [
   "create_scoped_variable_set(uuid, uuid, text, text, text, jsonb, boolean)",
@@ -382,6 +414,8 @@ const SESSION_TENANCY_QUIESCENCE_ROUTINE =
   "assert_session_tenancy_quiescent(uuid, uuid, uuid, boolean)";
 const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
   "check_tenancy_backfill_activation_evidence(uuid)";
+const GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE =
+  "activate_greenfield_session_tenancy_from_setup(text)";
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
@@ -471,11 +505,26 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   XAI_SNAPSHOT_VALIDATOR_ROUTINE,
 ] as const;
 
+/**
+ * Boolean-only predicates that shared-table RLS policies must be able to
+ * evaluate under table owners and SECURITY DEFINER roles unknown at migration
+ * time. The capability ledger and the routine that mints its opaque token stay
+ * private; only these exact policy predicates may be PUBLIC-executable.
+ */
+export const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES = [
+  CONNECTION_CONVERGENCE_AUDIT_CAPABILITY_ROUTINE,
+] as const;
+const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string>(
+  RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
+);
+
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
+  GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
   TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE,
+  ...DOCUMENT_MIGRATION_AUDIT_INTERNAL_ROUTINES,
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
@@ -657,6 +706,11 @@ export const FORCE_RLS_TABLES = [
   "organization_user_retention_object_deletion_receipts",
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "organization_user_setup_deliveries",
+  "organization_user_setup_delivery_attempts",
+  "organization_user_setup_intents",
+  "organization_workspace_lifecycle_events",
+  "organization_workspace_operation_receipts",
   "pack_installation_components",
   "pack_installations",
   "personal_document_once_consumption_receipts",
@@ -695,6 +749,7 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_run_personal_resource_snapshots",
   "scheduled_task_runs",
   "scheduled_tasks",
+  "self_service_organization_setup_receipts",
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
@@ -724,6 +779,7 @@ export const FORCE_RLS_TABLES = [
   "session_system_update_outbox",
   "session_system_updates",
   "session_tenancy_activations",
+  "session_tenancy_greenfield_activation_evidence",
   "session_turn_attempts",
   "session_turn_startup_milestones",
   "session_turns",
@@ -1138,6 +1194,11 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_user_retention_object_deletion_receipts",
   "organization_user_retention_object_obligations",
   "organization_user_retention_policies",
+  "organization_user_setup_deliveries",
+  "organization_user_setup_delivery_attempts",
+  "organization_user_setup_intents",
+  "organization_workspace_lifecycle_events",
+  "organization_workspace_operation_receipts",
   "personal_document_once_consumption_receipts",
   "personal_github_repository_selection_heads",
   "personal_github_repository_selection_operations",
@@ -1154,11 +1215,13 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "scheduled_task_run_personal_resource_admissions",
   "scheduled_task_run_personal_resource_once_receipts",
   "scheduled_task_run_personal_resource_snapshots",
+  "self_service_organization_setup_receipts",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
+  "session_tenancy_greenfield_activation_evidence",
   "session_visibility_write_capabilities",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
@@ -2263,7 +2326,12 @@ export function evaluateRuntimeDatabasePosture(
     if (!routine.execute) {
       violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
-    if (routine.publicExecute) {
+    const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(
+      routine.name,
+    );
+    if (publicPolicyPredicate && !routine.publicExecute) {
+      violations.push(`PUBLIC lacks required shared-policy predicate ${routine.name}`);
+    } else if (!publicPolicyPredicate && routine.publicExecute) {
       violations.push(`PUBLIC has forbidden target-schema capability ${routine.name}`);
     }
   }

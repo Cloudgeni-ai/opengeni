@@ -30,6 +30,17 @@ async function acquireMigrationTestDatabase(label: string) {
   return blank;
 }
 
+async function acquireSessionTenancyFence(
+  sql: postgres.Sql | postgres.TransactionSql,
+  workspaceId: string,
+) {
+  await sql`
+    select pg_advisory_xact_lock_shared(hashtextextended(
+      ${`session-tenancy:${workspaceId}`}, 0
+    ))
+  `;
+}
+
 describe("migration 0241 atomic personal-resource delegation", () => {
   test("freezes the complete admission, snapshot, consumption, and runtime posture", async () => {
     const source = await readFile(migrationUrl, "utf8");
@@ -479,6 +490,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         sandboxBackend: "modal",
       });
       await sql.begin(async (tx) => {
+        await acquireSessionTenancyFence(tx, workspace!.id);
         await tx.unsafe("set local opengeni.session_inference_claim = '1'");
         await tx`
           insert into session_turns (
@@ -594,11 +606,14 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       `;
       expect(mismatchedVersion?.id).toBeTruthy();
 
-      await app`
-        update sessions
-        set rig_version_id = ${mismatchedVersion!.id}
-        where id = ${ids.session}
-      `;
+      await app.begin(async (tx) => {
+        await acquireSessionTenancyFence(tx, ids.targetWorkspace);
+        await tx`
+          update sessions
+          set rig_version_id = ${mismatchedVersion!.id}
+          where id = ${ids.session}
+        `;
+      });
       await insertAttempt(
         app,
         ids,
@@ -895,6 +910,16 @@ describe("migration 0241 atomic personal-resource delegation", () => {
           ${"0".repeat(64)}, ${"1".repeat(64)}, 'migration-0241-test'
         )
       `;
+      await admin.begin(async (tx) => {
+        await tx.unsafe(
+          "set local opengeni.organization_tenancy_lifecycle = 'organization_private_session_settings'",
+        );
+        await tx`
+          insert into organization_private_session_settings (
+            account_id, enabled, version, updated_by_membership_id
+          ) values (${drift.account}::uuid, true, 1, ${drift.membership}::uuid)
+        `;
+      });
 
       const transition = async () =>
         await withWorkspaceSubjectSessionActivityRls(
@@ -920,6 +945,7 @@ describe("migration 0241 atomic personal-resource delegation", () => {
       }
       expect(nestedPostgresSqlState(transitionFailure)).toBe("55P03");
       await admin.begin(async (tx) => {
+        await acquireSessionTenancyFence(tx, drift.targetWorkspace);
         await tx.unsafe("set local opengeni.session_inference_claim = '1'");
         await tx`
           update session_turn_attempts
@@ -1030,9 +1056,15 @@ describe("migration 0241 atomic personal-resource delegation", () => {
 
       const resolveAttemptError =
         "personal-resource resolve requires the exact current uninterrupted attempt";
-      await sql`update sessions set active_turn_id = null where id = ${ids.session}`;
+      await sql.begin(async (tx) => {
+        await acquireSessionTenancyFence(tx, ids.targetWorkspace);
+        await tx`update sessions set active_turn_id = null where id = ${ids.session}`;
+      });
       await expect(resolve()).rejects.toThrow(resolveAttemptError);
-      await sql`update sessions set active_turn_id = ${ids.turn} where id = ${ids.session}`;
+      await sql.begin(async (tx) => {
+        await acquireSessionTenancyFence(tx, ids.targetWorkspace);
+        await tx`update sessions set active_turn_id = ${ids.turn} where id = ${ids.session}`;
+      });
 
       await sql`update session_turns set execution_generation = 2 where id = ${ids.turn}`;
       await expect(resolve()).rejects.toThrow(resolveAttemptError);
@@ -1388,6 +1420,7 @@ async function insertAttemptWithLifecycle(
   const attemptExecutionGeneration = options.attemptExecutionGeneration ?? 1;
   const turnStatus = options.turnStatus ?? "running";
   return await sql.begin(async (tx) => {
+    await acquireSessionTenancyFence(tx, ids.targetWorkspace);
     await tx.unsafe("set local opengeni.session_inference_claim = '1'");
     await tx`
       update sessions

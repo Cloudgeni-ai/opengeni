@@ -364,7 +364,7 @@ describe("useSessionEvents", () => {
       store.length,
     );
     expect(hook.result.current.hasOlder).toBe(false);
-    expect(owner[0]).toBe(0);
+    expect(owner[0]).toBe("");
 
     await hook.unmount();
   });

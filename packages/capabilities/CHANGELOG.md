@@ -1,5 +1,12 @@
 # @opengeni/capabilities
 
+## 0.3.1
+
+### Patch Changes
+
+- Updated dependencies [16387c3]
+  - @opengeni/network@0.2.3
+
 ## 0.3.0
 
 ### Minor Changes

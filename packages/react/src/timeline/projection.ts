@@ -397,6 +397,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
       case "agent.message.completed": {
         const text = stringValue(payload.text);
+        const phase = assistantMessagePhase(payload.phase);
         // Reconcile the most recent same-turn agent message — even when
         // activity (tool calls, reasoning) landed after its deltas — so the
         // completed text never duplicates the streamed one.
@@ -420,6 +421,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             open.text = text || open.text;
           }
           open.streaming = false;
+          // A phase-less settlement mirror (the worker's final-output receipt)
+          // must not erase the provider-declared phase captured by the SDK item.
+          if (phase) open.phase = phase;
           // Completion time is what the footer shows ("finished at"); keep the
           // first-delta stamp only until this event arrives.
           open.occurredAt = event.occurredAt;
@@ -451,6 +455,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             id: event.id,
             turnId,
             text,
+            ...(phase ? { phase } : {}),
             streaming: false,
             occurredAt: event.occurredAt,
             annotationSource: {
@@ -1675,7 +1680,12 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   }
 
   const finalMessage = extractFinalAgentMessage(collected, turnEnd);
-  const body = finalMessage ? collected.slice(0, -1) : collected;
+  const fallbackMessage =
+    finalMessage || hasOrdinaryFinalAgentMessage(collected, turnEnd)
+      ? null
+      : extractLatestCompletedCommentary(collected, turnEnd);
+  const visibleMessage = finalMessage ?? fallbackMessage;
+  const body = visibleMessage ? collected.filter((group) => group !== visibleMessage) : collected;
   if (body.length === 0) {
     return;
   }
@@ -1704,7 +1714,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   groups.splice(
     startIndex,
     collected.length,
-    ...(finalMessage ? [turnGroup, finalMessage] : [turnGroup]),
+    ...(visibleMessage ? [turnGroup, visibleMessage] : [turnGroup]),
   );
 }
 
@@ -1761,6 +1771,43 @@ function extractFinalAgentMessage(
   return tail;
 }
 
+function hasOrdinaryFinalAgentMessage(groups: TimelineGroup[], turnEnd: TurnEndItem): boolean {
+  return groups.some((group) => {
+    if (group.kind !== "item" || group.item.kind !== "agent-message") return false;
+    const message = group.item;
+    return (
+      !message.streaming &&
+      message.phase !== "commentary" &&
+      message.text.trim().length > 0 &&
+      belongsToTurn(message, turnEnd.turnId)
+    );
+  });
+}
+
+function extractLatestCompletedCommentary(
+  groups: TimelineGroup[],
+  turnEnd: TurnEndItem,
+): Extract<TimelineGroup, { kind: "item" }> | null {
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index];
+    if (group?.kind !== "item" || group.item.kind !== "agent-message") continue;
+    const message = group.item;
+    if (
+      !message.streaming &&
+      message.phase === "commentary" &&
+      message.text.trim().length > 0 &&
+      belongsToTurn(message, turnEnd.turnId)
+    ) {
+      return group;
+    }
+  }
+  return null;
+}
+
+function belongsToTurn(message: AgentMessageItem, turnId: string | null): boolean {
+  return !message.turnId || !turnId || message.turnId === turnId;
+}
+
 function groupStartedAt(group: TimelineGroup | undefined): string | undefined {
   if (!group) {
     return undefined;
@@ -1781,6 +1828,10 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function assistantMessagePhase(value: unknown): AgentMessageItem["phase"] {
+  return value === "commentary" || value === "final_answer" ? value : undefined;
 }
 
 function numberOrNull(value: unknown): number | null {

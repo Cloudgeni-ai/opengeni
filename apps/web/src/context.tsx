@@ -40,6 +40,7 @@ import {
   signUpEmail,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -122,12 +123,6 @@ import type {
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
     default: module.AnalyticsManager,
-  })),
-);
-
-const ManagedWorkspaceOnboardingPanel = lazy(() =>
-  import("@/components/managed-workspace-onboarding").then((module) => ({
-    default: module.ManagedWorkspaceOnboardingPanel,
   })),
 );
 
@@ -583,8 +578,11 @@ export function RootRouteComponent() {
   // always public; DEV visual harnesses are public and need no session.
   const isPublicDevHarness =
     import.meta.env.DEV &&
-    (pathname === "/dev/composer-chrome" || pathname === "/dev/agent-topology");
-  const isPublicAuthRoute = pathname === "/reset-password" || isPublicDevHarness;
+    (pathname === "/dev/composer-chrome" ||
+      pathname === "/dev/agent-topology" ||
+      pathname === "/dev/onboarding");
+  const isPublicAuthRoute =
+    pathname === "/reset-password" || pathname === "/setup-account" || isPublicDevHarness;
   useEffect(() => {
     if (
       invalidSlackLinkQueryWorkspaceId &&
@@ -2062,28 +2060,19 @@ export function RootRouteComponent() {
             </Button>
           }
         />
+      ) : managedAuthRequired &&
+        !accessLoading &&
+        accessContext &&
+        !defaultWorkspaceId &&
+        !slackLinkContinuationWorkspaceId ? (
+        <OrganizationOnboardingPanel client={client} onComplete={revalidatePrincipalAccess} />
       ) : accessLoading || !appContext ? (
         <LoadingPanel label="Loading workspace access" />
       ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
-        managedAuthRequired ? (
-          <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
-            <ManagedWorkspaceOnboardingPanel
-              client={client}
-              onAccessChanged={revalidatePrincipalAccess}
-              onOpenWorkspace={async (workspaceId) => {
-                await navigate({
-                  to: "/workspaces/$workspaceId/sessions",
-                  params: { workspaceId },
-                });
-              }}
-            />
-          </Suspense>
-        ) : (
-          <ProblemPanel
-            title="No workspace access"
-            description="You don't have access to any workspace yet."
-          />
-        )
+        <ProblemPanel
+          title="No workspace access"
+          description="You don't have access to any workspace yet."
+        />
       ) : (
         <AppContext.Provider value={appContext}>
           <Outlet />

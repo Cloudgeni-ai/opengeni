@@ -238,13 +238,21 @@ const PIN_THRESHOLD_PX = 48;
  */
 const OLDER_PREFETCH_MARGIN_PX = 400;
 const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
+const PRIMARY_ACTION_CLASS =
+  "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto";
+const MESSAGE_BUBBLE_CLASS =
+  "w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg";
+const WAITING_PILL_CLASS =
+  "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting";
+const LOADING_CHIP_CLASS =
+  "pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur";
 
 // State: 0 underfill, 1 prefetch pending, 2 prefetch settled.
 // The tuple identity is the exact request ownership fence. The boundary may rebase
 // forward while that request is pending when a bounded live-tail append evicts
 // its former oldest row. First-party loaders mark the exact owner when their
 // older page commits; retained direction is the fallback for other hosts.
-type OlderLoadAttempt = [boundary: string | undefined | 0, state?: number];
+type OlderLoadAttempt = [boundary: string | undefined, state?: number];
 
 function invokeOlderLoad(
   load: () => unknown,
@@ -1109,14 +1117,12 @@ export function MessageTimeline({
     if (!attempt) {
       return;
     }
-    if (attempt[0] !== 0) {
-      if (attempt[0] === olderBoundaryKey) {
-        return;
-      }
-      if (attempt[0] != null && !sourceItems?.find((entry) => entry.id === attempt[0])) {
-        attempt[0] = olderBoundaryKey;
-        return;
-      }
+    if (attempt[0] === olderBoundaryKey) {
+      return;
+    }
+    if (attempt[0] && !sourceItems?.find((entry) => entry.id === attempt[0])) {
+      attempt[0] = olderBoundaryKey;
+      return;
     }
     if (!attempt[1] || !hasOlder) {
       setUnderfillSettledAttempt((olderLoadAttemptRef.current = null));
@@ -1678,7 +1684,7 @@ export function MessageTimeline({
                         className="absolute inset-x-0 top-3 z-10 flex justify-center"
                       >
                         {loadingOlder || loadingOldest ? (
-                          <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
+                          <span className={LOADING_CHIP_CLASS}>
                             <span className="og-shimmer-text">
                               {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
                             </span>
@@ -1690,8 +1696,8 @@ export function MessageTimeline({
                         (underfillRetryReady || onJumpToStart) ? (
                           <button
                             type="button"
-                            data-og-retry={underfillRetryReady ? "" : undefined}
-                            data-og-jump-to-start={underfillRetryReady ? undefined : ""}
+                            data-og-retry={underfillRetryReady || undefined}
+                            data-og-jump-to-start={!underfillRetryReady || undefined}
                             onClick={() => {
                               const node = scrollRef.current;
                               if (underfillRetryReady) {
@@ -1754,7 +1760,7 @@ export function MessageTimeline({
                         aria-live="polite"
                         className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
                       >
-                        <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
+                        <span className={LOADING_CHIP_CLASS}>
                           <span className="og-shimmer-text">Loading later activity…</span>
                         </span>
                       </motion.div>
@@ -2552,7 +2558,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
     item.phase === "skipped" && item.skipReason === "summarization_failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.phase === "started"
-        ? "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting"
+        ? WAITING_PILL_CLASS
         : "border-og-border bg-og-surface-1 text-og-fg-muted";
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
@@ -2632,7 +2638,7 @@ function UserMessageRow({
           className="w-fit max-w-full min-w-0"
           trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
-          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
+          <div className={MESSAGE_BUBBLE_CLASS}>
             {item.text ? (
               <div data-og-annotation-source-key={item.annotationSource?.eventId}>
                 {renderMessageText ? (
@@ -2754,7 +2760,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
           className="w-fit max-w-[90%] min-w-0 sm:max-w-[82%]"
           trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
-          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
+          <div className={MESSAGE_BUBBLE_CLASS}>
             <p className="text-og-xs font-medium text-og-fg-subtle">{settledLabel}</p>
             {item.response.outcome === "answered" ? (
               <div className="mt-1.5 space-y-3">
@@ -3063,14 +3069,14 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   },
   paused: {
     label: "Goal paused",
-    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    pill: WAITING_PILL_CLASS,
     icon: PauseIcon,
   },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
   cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
   held: {
     label: "Goal held",
-    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    pill: WAITING_PILL_CLASS,
     icon: PauseCircleIcon,
   },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
@@ -3268,7 +3274,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.tone === "waiting"
-        ? "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting"
+        ? WAITING_PILL_CLASS
         : "border-og-border bg-og-surface-1 text-og-fg-muted";
   return (
     <div
@@ -3401,7 +3407,7 @@ function AuthNeededRow({
             onClick={() => void start()}
             disabled={busy}
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
+              PRIMARY_ACTION_CLASS,
               "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
             )}
           >
@@ -3414,7 +3420,7 @@ function AuthNeededRow({
             rel="noreferrer"
             target="_blank"
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
+              PRIMARY_ACTION_CLASS,
               "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
             )}
           >

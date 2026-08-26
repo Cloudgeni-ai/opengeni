@@ -363,7 +363,7 @@ function Harness() {
 
   const replaceWithFullOlderPage = useCallback(() => {
     const owner = pendingLoadRef.current?.owner ?? overlappingLoadsRef.current.get(1)?.owner;
-    if (owner) owner[0] = 0;
+    if (owner) owner[0] = "";
     flushSync(() => setItems(prefetchWindow()));
   }, []);
 

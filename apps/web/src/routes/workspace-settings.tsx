@@ -6,8 +6,6 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
   BrainCircuitIcon,
-  CheckIcon,
-  ChevronDownIcon,
   CopyIcon,
   KeyRoundIcon,
   Loader2Icon,
@@ -63,9 +61,8 @@ import {
   defaultWorkspaceMemberPermissions,
   delegableApiKeyPermissions,
   hasWorkspacePermission,
-  workspaceMemberPermissionGroups,
 } from "@/lib/permissions";
-import type { ApiKey, SlackUserLinkAccessRequest, WorkspaceMember } from "@/types";
+import type { ApiKey, SlackUserLinkAccessRequest } from "@/types";
 
 export function WorkspaceSettingsRoute({
   workspaceId,
@@ -730,7 +727,7 @@ function PersonalWorkspaceNotice({ organizationLabel }: { organizationLabel: str
   );
 }
 
-/** "People with access": the workspace's USER members, with add/edit/remove. */
+/** Organization-owned access entry point plus the separate Slack-link approval queue. */
 export function MembersSection(props: { workspaceId: string; canManage: boolean }) {
   return <MembersSectionContent key={props.workspaceId} {...props} />;
 }
@@ -744,16 +741,9 @@ function MembersSectionContent({
 }) {
   const context = useAppContext();
   const client = context.client;
-  const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [slackAccessRequests, setSlackAccessRequests] = useState<SlackUserLinkAccessRequest[]>([]);
   const [slackAccessRequestsError, setSlackAccessRequestsError] = useState<Error | null>(null);
-  const [error, setError] = useState<Error | null>(null);
-  const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [editing, setEditing] = useState<string | null>(null);
-  const [editPermissions, setEditPermissions] = useState<Set<string>>(() => new Set());
-  const [removingMember, setRemovingMember] = useState<WorkspaceMember | null>(null);
-  const callerSubjectId = context.accessContext.subjectId;
   const refreshGenerationRef = useRef(0);
   const currentRefreshScopeRef = useRef<{
     canManage: boolean;
@@ -761,10 +751,6 @@ function MembersSectionContent({
     workspaceId: string;
   }>({ canManage, client, workspaceId });
   currentRefreshScopeRef.current = { canManage, client, workspaceId };
-
-  // Only USER subjects are people; api_key subjects belong to the API keys
-  // section above and are excluded here.
-  const userMembers = members.filter((member) => member.subjectId.startsWith("user:"));
 
   const refresh = useCallback(async () => {
     const currentScope = currentRefreshScopeRef.current;
@@ -786,133 +772,28 @@ function MembersSectionContent({
         nextScope.client === client
       );
     };
-    setMembers([]);
     setSlackAccessRequests([]);
     setSlackAccessRequestsError(null);
-    setError(null);
-    setLoaded(false);
-
-    // The member roster is primary; pending Slack requests are a manager-only
-    // auxiliary surface. Start both concurrently, but settle their UI state independently.
-    const membersPromise = Promise.resolve().then(() => client.listWorkspaceMembers(workspaceId));
-    const slackAccessRequestsOutcomePromise = canManage
-      ? Promise.resolve()
-          .then(() => client.listSlackUserLinkAccessRequests(workspaceId))
-          .then(
-            (value) => ({ status: "fulfilled", value }) as const,
-            (reason) => ({ status: "rejected", reason }) as const,
-          )
-      : null;
-
-    if (slackAccessRequestsOutcomePromise) {
-      void slackAccessRequestsOutcomePromise.then((outcome) => {
-        if (!isCurrentRefresh()) {
-          return;
-        }
-        if (outcome.status === "fulfilled") {
-          setSlackAccessRequests(outcome.value);
-          setSlackAccessRequestsError(null);
-        } else {
-          setSlackAccessRequests([]);
-          setSlackAccessRequestsError(
-            outcome.reason instanceof Error ? outcome.reason : new Error(String(outcome.reason)),
-          );
-        }
-      });
-    }
-
+    if (!canManage) return;
     try {
-      const nextMembers = await membersPromise;
-      if (!isCurrentRefresh()) {
-        return;
-      }
-      setMembers(nextMembers);
-      setError(null);
+      const requests = await client.listSlackUserLinkAccessRequests(workspaceId);
+      if (!isCurrentRefresh()) return;
+      setSlackAccessRequests(requests);
     } catch (caught) {
-      if (!isCurrentRefresh()) {
-        return;
-      }
-      setMembers([]);
-      setError(caught instanceof Error ? caught : new Error(String(caught)));
-      return;
-    } finally {
-      if (isCurrentRefresh()) {
-        setLoaded(true);
-      }
+      if (!isCurrentRefresh()) return;
+      setSlackAccessRequestsError(caught instanceof Error ? caught : new Error(String(caught)));
     }
   }, [canManage, client, workspaceId]);
 
   useEffect(() => {
     refreshGenerationRef.current += 1;
-    setMembers([]);
     setSlackAccessRequests([]);
     setSlackAccessRequestsError(null);
-    setError(null);
-    setLoaded(false);
-    setEditing(null);
-    setEditPermissions(new Set());
-    setRemovingMember(null);
     void refresh();
     return () => {
       refreshGenerationRef.current += 1;
     };
   }, [refresh]);
-
-  function startEditing(member: WorkspaceMember) {
-    setEditing(member.subjectId);
-    setEditPermissions(new Set(member.permissions));
-  }
-
-  function toggleEditPermission(permission: string) {
-    setEditPermissions((current) => {
-      const next = new Set(current);
-      if (next.has(permission)) {
-        next.delete(permission);
-      } else {
-        next.add(permission);
-      }
-      return next;
-    });
-  }
-
-  async function saveEditing(member: WorkspaceMember) {
-    setBusy(true);
-    try {
-      const updated = await client.updateWorkspaceMember(workspaceId, member.subjectId, {
-        permissions: [...editPermissions],
-      });
-      setMembers((current) =>
-        current.map((existing) => (existing.subjectId === updated.subjectId ? updated : existing)),
-      );
-      setEditing(null);
-      toast.success("Permissions updated");
-    } catch (caught) {
-      toast.error("Failed to update member", {
-        description: caught instanceof Error ? caught.message : String(caught),
-      });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function removeMember(member: WorkspaceMember) {
-    setBusy(true);
-    try {
-      await client.removeWorkspaceMember(workspaceId, member.subjectId);
-      setMembers((current) =>
-        current.filter((existing) => existing.subjectId !== member.subjectId),
-      );
-      toast.success("Member removed");
-      return true;
-    } catch (caught) {
-      toast.error("Failed to remove member", {
-        description: caught instanceof Error ? caught.message : String(caught),
-      });
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function approveSlackAccess(request: SlackUserLinkAccessRequest) {
     setBusy(true);
@@ -959,18 +840,12 @@ function MembersSectionContent({
           <UsersIcon className="size-3.5 text-brand" />
           People with access
         </h2>
-        <span className="text-2xs text-fg-subtle">
-          {!loaded
-            ? ""
-            : userMembers.length === 0
-              ? "just you"
-              : `${userMembers.length} member${userMembers.length === 1 ? "" : "s"}`}
-        </span>
       </div>
 
-      {canManage ? (
-        <Notice title="Workspace access is managed from the organization">
-          Invite people to the organization first, then choose which workspaces they can access.
+      <Notice title="Workspace access is managed from the organization">
+        The organization member list is the single place to assign named workspace roles. Personal
+        workspaces are never administered from this page.
+        {canManage ? (
           <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
             <Link
               to="/workspaces/$workspaceId/organization"
@@ -980,15 +855,15 @@ function MembersSectionContent({
               Manage organization workspaces
             </Link>
           </Button>
-        </Notice>
-      ) : null}
+        ) : null}
+      </Notice>
 
       {canManage && slackAccessRequests.length > 0 ? (
         <div className="grid gap-2 rounded-lg border border-border bg-surface-2/35 p-3">
           <div>
             <p className="text-xs font-medium text-fg">Pending Slack access requests</p>
             <p className="mt-0.5 text-2xs text-fg-subtle">
-              Approval grants the standard collaborator role and completes Slack identity linking.
+              Approval grants the standard member permissions and completes Slack identity linking.
             </p>
           </div>
           {slackAccessRequests.map((request) => (
@@ -1040,115 +915,6 @@ function MembersSectionContent({
           {slackAccessRequestsError.message}
         </Notice>
       ) : null}
-
-      {error ? (
-        <LoadErrorState
-          title="Couldn't load members"
-          error={error}
-          onRetry={() => void refresh()}
-        />
-      ) : !loaded ? (
-        <div className="flex items-center gap-2 text-xs text-fg-muted">
-          <Loader2Icon className="size-3.5 animate-spin" />
-          Loading members
-        </div>
-      ) : userMembers.length === 0 ? (
-        <p className="text-2xs text-fg-subtle">
-          Only you right now
-          {canManage ? " — add a teammate above." : "."}
-        </p>
-      ) : (
-        <div className="divide-y divide-border/70 overflow-hidden rounded-lg border border-border">
-          {userMembers.map((member) => (
-            <div key={member.subjectId} className="grid gap-2 px-3 py-2">
-              <div className="flex min-w-0 items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">
-                    {member.subjectLabel ?? member.subjectId}
-                    {member.subjectId === callerSubjectId ? (
-                      <span className="ml-1.5 text-fg-subtle">(you)</span>
-                    ) : null}
-                  </div>
-                  <div className="truncate text-2xs text-fg-subtle">
-                    {member.role} · {member.permissions.length} permission
-                    {member.permissions.length === 1 ? "" : "s"}
-                  </div>
-                </div>
-                {canManage ? (
-                  <div className="flex shrink-0 items-center gap-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() =>
-                        editing === member.subjectId ? setEditing(null) : startEditing(member)
-                      }
-                    >
-                      <ChevronDownIcon
-                        className={`size-3.5 transition-transform ${editing === member.subjectId ? "rotate-180" : ""}`}
-                      />
-                      Edit
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      disabled={busy || member.subjectId === callerSubjectId}
-                      aria-label={`Remove ${member.subjectLabel ?? member.subjectId}`}
-                      onClick={() => setRemovingMember(member)}
-                    >
-                      <Trash2Icon className="size-3.5" />
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-              {canManage && editing === member.subjectId ? (
-                <div className="grid gap-3 border-t border-border pt-2">
-                  <PermissionGroupPicker
-                    groups={workspaceMemberPermissionGroups()}
-                    selected={editPermissions}
-                    onToggle={toggleEditPermission}
-                  />
-                  <div className="flex justify-end gap-2">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => setEditing(null)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={busy}
-                      onClick={() => void saveEditing(member)}
-                    >
-                      {busy ? (
-                        <Loader2Icon className="size-3.5 animate-spin" />
-                      ) : (
-                        <CheckIcon className="size-3.5" />
-                      )}
-                      Save
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          ))}
-        </div>
-      )}
-
-      <ConfirmDialog
-        open={removingMember !== null}
-        onOpenChange={(next) => setRemovingMember(next ? removingMember : null)}
-        title={`Remove ${removingMember?.subjectLabel ?? removingMember?.subjectId ?? ""} from this workspace?`}
-        description="They lose access to this workspace immediately. You can add them again later."
-        confirmLabel="Remove access"
-        onConfirm={() => (removingMember ? removeMember(removingMember) : false)}
-      />
     </section>
   );
 }

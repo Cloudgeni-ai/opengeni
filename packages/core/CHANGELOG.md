@@ -1,5 +1,48 @@
 # @opengeni/core
 
+## 2.2.0
+
+### Minor Changes
+
+- f30555c: Add atomic same-workspace session forks with an explicit private or workspace destination. Private-to-workspace copies require a durable acknowledgement, workspace members may fork a shared source into fresh authority of their own, and private sources remain owner-only. Exact applied receipts remain recoverable by the same live workspace actor after mutable source authority changes, while changed requests conflict and fresh keys still require current source authority. Every fork receives fresh authority, provenance, root, and sandbox-group identity without inheriting live grants, credentials, Connections, turns, goals, MCP, resource attachments, processes, or pins. The managed web control now exposes the generic Fork dialog to authorized shared-session members and verifies the returned owned destination before navigation.
+- 47ccfab: Workspaces can persist exact default MCP servers and first-party OpenGeni tools for new sessions. Session creation, workspace-default policy updates, and scheduled session creation apply that policy while preserving the previous deployment defaults for workspaces without an override.
+- b74e557: Add an explicit, replay-safe Document authority-reclassification lifecycle and
+  a resumable organization Default-collection backfill. Reclassification requires
+  the exact expected authority tuple, updates the Document and every chunk in one
+  transaction, and retains immutable before/after receipts. The SDK and API expose
+  the account-admin and actor-fenced operations, bounded cursor-paginated receipt
+  history, and same-organization portable-personal behavior without making
+  collections an authority boundary.
+
+### Patch Changes
+
+- Updated dependencies [1b21135]
+- Updated dependencies [f30555c]
+- Updated dependencies [a78124f]
+- Updated dependencies [4d83368]
+- Updated dependencies [47ccfab]
+- Updated dependencies [cb116e0]
+- Updated dependencies [b74e557]
+- Updated dependencies [16387c3]
+- Updated dependencies [b2cd0f0]
+- Updated dependencies [fc80fdf]
+- Updated dependencies [1789977]
+- Updated dependencies [4e48785]
+- Updated dependencies [e720d3e]
+- Updated dependencies [3e3b09a]
+- Updated dependencies [64d8d2c]
+- Updated dependencies [ad6acbe]
+- Updated dependencies [92324b5]
+  - @opengeni/contracts@2.3.0
+  - @opengeni/db@3.2.0
+  - @opengeni/runtime@1.3.1
+  - @opengeni/observability@0.8.4
+  - @opengeni/documents@0.7.0
+  - @opengeni/config@0.19.1
+  - @opengeni/events@0.3.124
+  - @opengeni/storage@0.2.106
+  - @opengeni/codex@0.2.19
+
 ## 2.1.0
 
 ### Minor Changes

@@ -1004,6 +1004,43 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("held-turn commentary stays readable outside the disclosure without duplication", async () => {
+    resetTimelineEvents();
+    const fallback = "The child is still running; I will resume when it finishes.";
+    const events = [
+      timelineEvent("user.message", { text: "Wait for the child" }),
+      timelineEvent("agent.message.completed", {
+        text: fallback,
+        phase: "commentary",
+      }),
+      timelineEvent("agent.toolCall.created", {
+        id: "goal-wait-1",
+        name: "goal_wait",
+        arguments: { reason: "child still running", untilSeconds: 900 },
+      }),
+      timelineEvent("goal.held", { actor: "agent", reason: "child still running" }),
+      timelineEvent("agent.toolCall.output", { id: "goal-wait-1", output: { status: "held" } }),
+      timelineEvent("turn.completed", {}),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent?.split(fallback)).toHaveLength(2);
+
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(r.container.textContent?.split(fallback)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Goal wait");
+
+    await r.unmount();
+  });
+
   test("live turn activity keeps an open TurnSummary shell (no remount on settle)", async () => {
     resetTimelineEvents();
     const events = [

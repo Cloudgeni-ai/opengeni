@@ -53,7 +53,7 @@ async function expectPostgresRejection(query: PromiseLike<unknown>, label: strin
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0277-writer-authority");
-});
+}, 180_000);
 
 afterAll(async () => {
   await shared?.release();

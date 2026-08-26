@@ -477,7 +477,7 @@ export function useSessionEvents(
         }
         const retainedNewest = retained.events.at(-1)?.sequence ?? null;
         eventWindowRef.current = retained;
-        if (attempt) attempt[0] = 0;
+        if (attempt) attempt[0] = "";
         setEventWindow(retained);
         oldestSequenceRef.current = retainedOldest;
         newestSequenceRef.current = retainedNewest;

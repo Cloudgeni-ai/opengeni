@@ -398,6 +398,7 @@ function workspace() {
   return {
     id: workspaceId,
     accountId,
+    kind: "shared",
     name: "Slack Browser Workspace",
     slug: "slack-browser",
     externalSource: null,

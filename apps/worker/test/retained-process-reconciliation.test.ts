@@ -1041,8 +1041,13 @@ describe("retained-process terminal-owner reconciliation", () => {
       });
       expect(result.functions).toHaveLength(4);
       for (const fn of result.functions) {
-        expect(fn.config).toContain("search_path=pg_catalog");
-        expect(fn.definition).not.toContain("pg_temp");
+        if (fn.name === "claim_terminal_retained_processes") {
+          expect(fn.config).toEqual(["search_path=pg_catalog, public, pg_temp"]);
+          expect(fn.definition).toContain("SET search_path TO 'pg_catalog', 'public', 'pg_temp'");
+        } else {
+          expect(fn.config).toEqual(["search_path=pg_catalog"]);
+          expect(fn.definition).not.toContain("pg_temp");
+        }
       }
       expect(result.owners).toContainEqual({
         ownerState: "direct",

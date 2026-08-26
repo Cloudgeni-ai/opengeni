@@ -295,6 +295,9 @@ function mapSessionTenancyPersistenceError(
   if (state === "23505") {
     throw new SessionTenancyConflictError("operation_reuse", null, { cause: error });
   }
+  if (state === "55000") {
+    throw new SessionTenancyNotActivatedError({ cause: error });
+  }
   if (state === "42501" || state === "P0002") {
     throw new SessionTenancyAccessError({ cause: error });
   }
@@ -418,6 +421,8 @@ export async function transitionSessionVisibility(
         if (!result) throw new Error("Session visibility transition returned no result");
         return result;
       },
+      undefined,
+      "none",
     );
   } catch (error) {
     mapSessionTenancyPersistenceError(error, { authorityEpochConflict: true });
@@ -470,6 +475,8 @@ export async function forkSessionContent(
         if (!result) throw new Error("Session fork returned no result");
         return result;
       },
+      undefined,
+      "none",
     );
   } catch (error) {
     // A private destination inside a shared workspace carries the same

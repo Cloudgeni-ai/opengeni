@@ -108,7 +108,8 @@ describe("migration 0254 scoped variable-set authority", () => {
     }
     if (!blank) return;
 
-    const appPassword = `app-${crypto.randomUUID()}`;
+    const appPassword = blank.appPassword;
+    if (!appPassword) throw new Error("shared PostgreSQL app password is unavailable");
     let admin: postgres.Sql | undefined;
     let app: postgres.Sql | undefined;
     let db: ReturnType<typeof createDb> | undefined;

@@ -11,7 +11,7 @@ let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0321-slack-display-name");
-});
+}, 180_000);
 
 afterAll(async () => shared?.release());
 

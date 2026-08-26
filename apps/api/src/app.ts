@@ -63,6 +63,8 @@ import {
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
+import { createManagedEmailTransport } from "./auth/managed-email";
+import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
@@ -132,6 +134,7 @@ import { registerEditableArtifactRoutes } from "./routes/editable-artifacts";
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
 import { registerUserResourceAuthorityRoutes } from "./routes/user-resource-authorities";
 import { registerConnectionAuthorityRoutes } from "./routes/connection-authorities";
 import { projectClientModel } from "./model-catalog";
@@ -193,7 +196,11 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
-  const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
+  const managedEmailTransport =
+    deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
+  assertManagedEmailTransportMetadata(managedEmailTransport);
+  const managedAuth =
+    deps.managedAuth ?? createManagedAuth(deps.settings, deps.db, managedEmailTransport);
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -296,6 +303,7 @@ export function createAppComposition(deps: AppDependencies): {
     githubStateSecret:
       deps.githubStateSecret ?? deps.settings.githubAppManifestStateSecret ?? crypto.randomUUID(),
     managedAuth,
+    managedEmailTransport,
     objectStorage,
     documentIndexer,
     getDocumentServices,
@@ -486,6 +494,9 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  // These product-owned auth routes must be registered before Better Auth's
+  // wildcard handler or the provider returns its own 404 first.
+  registerManagedOnboardingRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", (c) => managedAuth.handler(c.req.raw));
   }
@@ -1462,6 +1473,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/events",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/turns$/,
+    label: "/v1/workspaces/:workspaceId/sessions/:id/turns",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/queue\/[^/]+\/(move|edit|steer|delete)$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/queue/:turnId/:action",
   },
@@ -1925,6 +1940,10 @@ const routeLabelPatterns: Array<{
     pattern: /^\/v1\/github\/oauth\/callback$/,
     label: "/v1/github/oauth/callback",
   },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId",
+  },
 ];
 
 export function routeLabel(pathname: string): string {
@@ -1948,6 +1967,12 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   }
   if (!pathname.startsWith("/v1/")) {
     return false;
+  }
+  if (
+    pathname === "/v1/auth/organization-onboarding" ||
+    pathname === "/v1/auth/organization-setup"
+  ) {
+    return true;
   }
   if (
     pathname.startsWith("/v1/auth/") ||

@@ -20,6 +20,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   failOrganizationRetentionDeletion,
   finalizeOrganizationRetentionDeletion,
+  getOrganizationPrivateSessionSettings,
   getSelfOrganizationInvitation,
   getBillingBalance,
   listOrganizationMembers,
@@ -34,6 +35,7 @@ import {
   settleSessionAttemptInterruptions,
   transitionSessionVisibility,
   updateOrganizationMember,
+  updateOrganizationPrivateSessionSettings,
   updateOrganizationRetentionPolicy,
   runMigrations,
   type DbClient,
@@ -1016,6 +1018,17 @@ describe("migration 0263 organization membership lifecycle", () => {
     await shared.admin`
       insert into workspace_memberships (account_id, workspace_id, subject_id, role)
       values (${owner!.organizationId}, ${sharedWorkspaceId}, ${targetSubject}, 'member')`;
+    const privateSessionSettings = await getOrganizationPrivateSessionSettings(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+    });
+    await updateOrganizationPrivateSessionSettings(client.db, {
+      organizationId: owner!.organizationId,
+      actorSubjectId: ownerSubject,
+      enabled: true,
+      expectedVersion: privateSessionSettings.version,
+      operationId: crypto.randomUUID(),
+    });
     const privateSession = await createSession(client.db, {
       accountId: owner!.organizationId,
       workspaceId: sharedWorkspaceId,
@@ -1884,12 +1897,38 @@ describe("migration 0263 organization membership lifecycle", () => {
         operationId,
       }),
     ).toEqual(claim);
-    const databaseFinalized = await finalizeOrganizationRetentionDeletion(client.db, {
-      organizationId: owner!.organizationId,
-      membershipId: member.id,
-      operationId,
-      objectBucket: retentionObjectBucket,
-    });
+    const fenceHolder = postgres(shared.adminUrl, { max: 1 });
+    const fenceConnection = await fenceHolder.reserve();
+    let databaseFinalized: Awaited<ReturnType<typeof finalizeOrganizationRetentionDeletion>>;
+    try {
+      await fenceConnection`begin`;
+      await fenceConnection`select pg_advisory_xact_lock(hashtextextended(
+        ${`session-tenancy:${personalWorkspaceId}`}, 0
+      ))`;
+      const pendingFinalization = finalizeOrganizationRetentionDeletion(client.db, {
+        organizationId: owner!.organizationId,
+        membershipId: member.id,
+        operationId,
+        objectBucket: retentionObjectBucket,
+      });
+      const pending = Symbol("pending");
+      expect(
+        await Promise.race([
+          pendingFinalization.then(() => "settled"),
+          Bun.sleep(250).then(() => pending),
+        ]),
+      ).toBe(pending);
+      const [beforeCascade] = await shared.admin<Array<{ count: number }>>`
+        select count(*)::int as count from workspaces
+        where id = ${personalWorkspaceId}`;
+      expect(beforeCascade?.count).toBe(1);
+      await fenceConnection`commit`;
+      databaseFinalized = await pendingFinalization;
+    } finally {
+      await fenceConnection`rollback`.catch(() => undefined);
+      fenceConnection.release();
+      await fenceHolder.end({ timeout: 5 });
+    }
     expect(databaseFinalized).toMatchObject({
       outcome: "cleanup_pending",
       objectCount: 1,

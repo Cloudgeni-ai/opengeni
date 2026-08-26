@@ -219,6 +219,17 @@ record whether an existing Default was adopted or a missing one was created.
 This changes grouping only. It does not reclassify a Document or widen
 retrieval, ranking, citation, or file access.
 
+Migration 0346 exposes that retained evidence through bounded organization-admin
+read APIs and SDK methods. Administrators can page account-scoped backfill runs,
+then independently page one run's operation and workspace receipts, and can page
+authority-reclassification receipts across actors and workspaces in the same
+account. Opaque cursors are bound to the account, evidence kind, and run where
+applicable. The database uses a target-schema-local exact-token capability with
+SELECT-only policies, so a read cannot reuse the destructive migration
+capability, cannot write an evidence table, and cannot collide with another
+OpenGeni schema in the same database. Expected scope, cursor, limit, and missing
+run failures are mapped to typed HTTP errors.
+
 One run writes a receipt for **every** workspace in the account, so those
 receipts - and the reclassification receipts - are workspace-owned evidence that
 cascades with its workspace rather than pinning it. `deleteWorkspaceIfQuiescent`
@@ -241,6 +252,14 @@ any `SELECT ... FOR SHARE`/`FOR KEY SHARE`/`FOR UPDATE`, and every read policy o
 zero rows. The referential pin is taken by the
 `organization_user_resource_authorities` foreign-key check instead, which bypasses
 row security. See [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md).
+
+Migration `0343_personal_document_force_rls_lock_repair.sql` removes the shipped
+0258 locks from both creation and exact-attempt admission and adds SQLSTATE
+`55000` control assertions for future visibility drift. It deliberately does
+not bulk-convert Documents already written on the wrong lane: their stored
+authority shape is identical to an intentional legacy personal Document.
+Migration 0339's explicit original-owner-fenced reclassification is the
+supported repair when a human chooses to make one portable.
 
 Personal Document ownership never becomes ambient agent authority. The exact
 attempt-admission transaction freezes only Documents covered by a live

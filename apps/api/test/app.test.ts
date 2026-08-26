@@ -71,6 +71,9 @@ describe("API helpers", () => {
     expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/mcp")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/webhooks/stripe")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/enrollments/device/poll")).toBe(false);
+    expect(isApiContractProtectedMutation("POST", "/v1/auth/organization-onboarding")).toBe(true);
+    expect(isApiContractProtectedMutation("POST", "/v1/auth/organization-setup")).toBe(true);
+    expect(isApiContractProtectedMutation("POST", "/v1/auth/sign-in/email")).toBe(false);
   });
 
   test("leaves only route-specific workspace protocols outside ordinary actor middleware", () => {
@@ -520,6 +523,10 @@ describe("API helpers", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}`)).toBe("/v1/workspaces/:workspaceId");
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/turns`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/turns",
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/lineage`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/lineage",
@@ -1655,6 +1662,22 @@ describe("GET /v1/config/client", () => {
       code: "API_CONTRACT_CHANGED",
       apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
     });
+
+    for (const pathname of ["/v1/auth/organization-onboarding", "/v1/auth/organization-setup"]) {
+      const productAuthMutation = await appFor(settings).request(pathname, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: "stale-contract",
+        },
+        body: "{}",
+      });
+      expect(productAuthMutation.status).toBe(409);
+      expect(await productAuthMutation.json()).toMatchObject({
+        code: "API_CONTRACT_CHANGED",
+        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+      });
+    }
   });
 
   test("returns a models[] whose ids match configuredAllowedModels", async () => {

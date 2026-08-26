@@ -6,7 +6,11 @@ import {
   type WorkspaceSlackReactionSummonSettings,
 } from "@opengeni/contracts";
 import { OPENGENI_SLACK_BOT_REQUESTED_SCOPES } from "@opengeni/contracts/slack-bot-scopes";
-import type { MemorySlackPublicationConfiguration, SlackReactionChannel } from "@opengeni/sdk";
+import type {
+  MemorySlackPublicationConfiguration,
+  SlackChannelRoute,
+  SlackReactionChannel,
+} from "@opengeni/sdk";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -18,6 +22,7 @@ import type {
   IntegrationOption,
   IntegrationViewModel,
 } from "@/components/capabilities/integration-view-model";
+import { SlackChannelRoutingDialog } from "@/components/capabilities/slack-channel-routing-dialog";
 import { SlackReactionChannelsDialog } from "@/components/capabilities/slack-reaction-channels-dialog";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -239,6 +244,11 @@ export function useSlackIntegration({
   const [reactionEnableIntent, setReactionEnableIntent] = useState(false);
   const [publicationOpen, setPublicationOpen] = useState(false);
   const [invitedChannels, setInvitedChannels] = useState<SlackReactionChannel[] | null>(null);
+  const [channelRoutes, setChannelRoutes] = useState<SlackChannelRoute[] | null>(null);
+  // Null until the read succeeds. With routing off the stored routes are inert,
+  // so the sheet must not advertise a control that changes nothing.
+  const [routingEnabled, setRoutingEnabled] = useState<boolean | null>(null);
+  const [routingOpen, setRoutingOpen] = useState(false);
   const [publication, setPublication] = useState<MemorySlackPublicationConfiguration | null>(null);
   const [publicationLoaded, setPublicationLoaded] = useState(false);
 
@@ -325,6 +335,31 @@ export function useSlackIntegration({
       cancelled = true;
     };
   }, [botConnectionId, botHealthy, client, isAdmin, readOnly, sheetOpen, workspaceId]);
+
+  useEffect(() => {
+    if (!sheetOpen || !botConnectionId || !botHealthy || readOnly) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await client.listOpenGeniSlackChannelRoutes(workspaceId, botConnectionId);
+        if (!cancelled) {
+          setChannelRoutes(result.routes);
+          setRoutingEnabled(result.routingEnabled);
+        }
+      } catch {
+        // A workspace with routing switched off has no routes to show, and a
+        // reader without `connections:read` should see the rest of the sheet
+        // rather than an error.
+        if (!cancelled) {
+          setChannelRoutes(null);
+          setRoutingEnabled(null);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [botConnectionId, botHealthy, client, readOnly, sheetOpen, workspaceId]);
 
   useEffect(() => {
     if (!sheetOpen || !isAdmin || !botConnectionId || readOnly || publicationLoaded) return;
@@ -594,14 +629,40 @@ export function useSlackIntegration({
       botConnection && botMetadata
         ? {
             title: "What OpenGeni can see",
+            ...(canManageReaction && botActive && !readOnly && routingEnabled === true
+              ? {
+                  editLabel: "Manage routing",
+                  onEdit: () => setRoutingOpen(true),
+                }
+              : {}),
             items: [
               { name: "All public channels", meta: "searchable without joining" },
-              ...(invitedChannels ?? []).map((channel) => ({
-                name: channel.isPrivate
-                  ? (channel.name ?? channel.id)
-                  : `#${channel.name ?? channel.id}`,
-                meta: channel.isPrivate ? "private, invited" : "invited",
-              })),
+              ...(invitedChannels ?? []).map((channel) => {
+                const route = (channelRoutes ?? []).find(
+                  (candidate) => candidate.slackChannelId === channel.id,
+                );
+                const invited = channel.isPrivate ? "private, invited" : "invited";
+                // With routing off the stored routes do not apply, so saying
+                // where work goes would be untrue.
+                if (routingEnabled !== true) {
+                  return {
+                    name: channel.isPrivate
+                      ? (channel.name ?? channel.id)
+                      : `#${channel.name ?? channel.id}`,
+                    meta: invited,
+                  };
+                }
+                return {
+                  name: channel.isPrivate
+                    ? (channel.name ?? channel.id)
+                    : `#${channel.name ?? channel.id}`,
+                  // A channel with no route asks the person once and remembers
+                  // the answer, so say that rather than leaving it blank.
+                  meta: route
+                    ? `${invited} · starts work in ${route.targetWorkspaceName ?? "another workspace"}`
+                    : `${invited} · asks once, then remembers`,
+                };
+              }),
               { name: "Anywhere else", meta: "tag @OpenGeni there to invite it" },
             ],
           }
@@ -877,6 +938,22 @@ export function useSlackIntegration({
       />
       {isAdmin ? (
         <>
+          <SlackChannelRoutingDialog
+            workspaceId={workspaceId}
+            connectionId={botConnectionId}
+            open={routingOpen}
+            canManage={canManageReaction && !readOnly}
+            onOpenChange={setRoutingOpen}
+            onSaved={() => {
+              // Re-read rather than patching local state: the server decides
+              // which routes actually exist after a save.
+              if (!botConnectionId) return;
+              void client
+                .listOpenGeniSlackChannelRoutes(workspaceId, botConnectionId)
+                .then((result) => setChannelRoutes(result.routes))
+                .catch(() => setChannelRoutes(null));
+            }}
+          />
           <SlackReactionChannelsDialog
             workspaceId={workspaceId}
             connectionId={botConnectionId}

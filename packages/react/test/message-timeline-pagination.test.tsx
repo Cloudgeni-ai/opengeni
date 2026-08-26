@@ -1751,7 +1751,7 @@ describe("MessageTimeline pagination affordances", () => {
     // source with zero overlap. Marking A's exact owner as committed releases
     // it and permits exactly one follow-on underfill request for page B.
     const olderReplacement = [reasoningItem("full-window-older", "older collapsed page")];
-    owners[0]![0] = 0;
+    owners[0]![0] = "";
     await r.rerender(
       <MessageTimeline items={olderReplacement} status="idle" hasOlder onLoadOlder={onLoadOlder} />,
     );
@@ -1784,7 +1784,7 @@ describe("MessageTimeline pagination affordances", () => {
     await drainFrames(frames);
     expect(calls).toBe(3);
 
-    owners[2]![0] = 0;
+    owners[2]![0] = "";
     await r.rerender(
       <MessageTimeline
         items={[reasoningItem("durable-start", "durable start")]}

@@ -16,6 +16,7 @@ afterAll(() => {
 
 const workspace = {
   id: "ws-1",
+  kind: "shared",
   name: "cloudgeni",
   inferenceControl: { state: "active" },
 } as Workspace;
@@ -32,7 +33,7 @@ describe("WorkspaceSwitcherTrigger", () => {
           ref={ref}
           activeWorkspace={workspace}
           activeOrganizationLabel="Org 049d0b24"
-          personal={false}
+          personal={workspace.kind === "personal"}
           collapsed={false}
         />,
       );

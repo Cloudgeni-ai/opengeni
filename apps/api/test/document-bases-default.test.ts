@@ -12,6 +12,9 @@ const listInputs: unknown[] = [];
 const reclassificationInputs: unknown[] = [];
 const reclassificationListInputs: unknown[] = [];
 const backfillInputs: unknown[] = [];
+const backfillRunListInputs: unknown[] = [];
+const backfillAuditInputs: unknown[] = [];
+const organizationReclassificationInputs: unknown[] = [];
 const defaultBase = {
   id: "33333333-3333-4333-8333-333333333333",
   workspaceId: WORKSPACE_ID,
@@ -50,6 +53,45 @@ const backfillResult = {
   adoptedCount: 0,
   completedAt: "2026-08-24T12:00:00.000Z",
 };
+const backfillRunAudit = {
+  runId: backfillResult.runId,
+  actorSubjectId: SUBJECT_ID,
+  status: backfillResult.status,
+  lastWorkspaceId: backfillResult.lastWorkspaceId,
+  processedCount: backfillResult.processedCount,
+  createdCount: backfillResult.createdCount,
+  adoptedCount: backfillResult.adoptedCount,
+  startedAt: "2026-08-24T11:59:00.000Z",
+  updatedAt: "2026-08-24T12:00:00.000Z",
+  completedAt: backfillResult.completedAt,
+};
+const backfillAudit = {
+  run: backfillRunAudit,
+  operations: [
+    {
+      operationId: backfillResult.operationId,
+      result: backfillResult,
+      createdAt: "2026-08-24T12:00:00.000Z",
+    },
+  ],
+  receipts: [
+    {
+      workspaceId: WORKSPACE_ID,
+      baseId: defaultBase.id,
+      outcome: "created" as const,
+      createdAt: "2026-08-24T12:00:00.000Z",
+    },
+  ],
+  operationsHasMore: false,
+  operationsNextCursor: null,
+  receiptsHasMore: false,
+  receiptsNextCursor: null,
+};
+const organizationAuthorityReceipt = {
+  ...authorityReceipt,
+  actorSubjectId: "user:other-document-admin",
+  requestWorkspaceId: WORKSPACE_ID,
+};
 mock.module("@opengeni/documents", () => ({
   ...realDocuments,
   listDocumentBasesEnsuringDefault: mock(
@@ -85,6 +127,48 @@ mock.module("@opengeni/documents", () => ({
     }
     backfillInputs.push(input);
     return backfillResult;
+  }),
+  listDocumentDefaultCollectionBackfillRuns: mock(async (db: unknown, input: unknown) => {
+    if (db !== fakeDb) {
+      return await realDocuments.listDocumentDefaultCollectionBackfillRuns(
+        db as never,
+        input as never,
+      );
+    }
+    backfillRunListInputs.push(input);
+    if ((input as { cursor?: string }).cursor === "domain-error") {
+      throw new Error("Failed query: SELECT audit", {
+        cause: new Error("invalid document migration audit cursor"),
+      });
+    }
+    return { runs: [backfillRunAudit], hasMore: false, nextCursor: null };
+  }),
+  getDocumentDefaultCollectionBackfillAudit: mock(async (db: unknown, input: unknown) => {
+    if (db !== fakeDb) {
+      return await realDocuments.getDocumentDefaultCollectionBackfillAudit(
+        db as never,
+        input as never,
+      );
+    }
+    backfillAuditInputs.push(input);
+    if ((input as { runId: string }).runId === "99999999-9999-4999-8999-999999999999") {
+      throw new Error("document Default collection backfill audit run is unavailable");
+    }
+    return backfillAudit;
+  }),
+  listOrganizationDocumentAuthorityReclassifications: mock(async (db: unknown, input: unknown) => {
+    if (db !== fakeDb) {
+      return await realDocuments.listOrganizationDocumentAuthorityReclassifications(
+        db as never,
+        input as never,
+      );
+    }
+    organizationReclassificationInputs.push(input);
+    return {
+      receipts: [organizationAuthorityReceipt],
+      hasMore: false,
+      nextCursor: null,
+    };
   }),
 }));
 
@@ -265,4 +349,115 @@ test("requires exact account administration for organization reclassification an
       },
     },
   ]);
+});
+
+test("requires account administration and exposes typed migration audit pages", async () => {
+  const settings = testSettings({ productAccessMode: "managed" });
+  const app = createApp({
+    settings,
+    db: fakeDb as never,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+  });
+  const denied = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills`,
+    { headers: { authorization: await bearer(["documents:manage"]) } },
+  );
+  expect(denied.status).toBe(403);
+
+  const adminAuthorization = await bearer(["documents:manage", "account:admin"]);
+  const runList = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills?limit=1&cursor=run-cursor`,
+    { headers: { authorization: adminAuthorization } },
+  );
+  expect(runList.status).toBe(200);
+  expect(await runList.json()).toEqual({
+    runs: [backfillRunAudit],
+    hasMore: false,
+    nextCursor: null,
+  });
+  expect(backfillRunListInputs.at(-1)).toEqual({
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    actorSubjectId: SUBJECT_ID,
+    accountAdminAuthorization: {
+      authorizationId: expect.any(String),
+      accountId: ACCOUNT_ID,
+      actorSubjectId: SUBJECT_ID,
+      permission: "account:admin",
+    },
+    limit: 1,
+    cursor: "run-cursor",
+  });
+
+  const detail = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills/${backfillResult.runId}?limit=2&operationCursor=operation-cursor&receiptCursor=receipt-cursor`,
+    { headers: { authorization: adminAuthorization } },
+  );
+  expect(detail.status).toBe(200);
+  expect(await detail.json()).toEqual(backfillAudit);
+  expect(backfillAuditInputs.at(-1)).toEqual({
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    actorSubjectId: SUBJECT_ID,
+    accountAdminAuthorization: {
+      authorizationId: expect.any(String),
+      accountId: ACCOUNT_ID,
+      actorSubjectId: SUBJECT_ID,
+      permission: "account:admin",
+    },
+    runId: backfillResult.runId,
+    limit: 2,
+    operationCursor: "operation-cursor",
+    receiptCursor: "receipt-cursor",
+  });
+
+  const organizationReceipts = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-authority-reclassifications?limit=3`,
+    { headers: { authorization: adminAuthorization } },
+  );
+  expect(organizationReceipts.status).toBe(200);
+  expect(await organizationReceipts.json()).toEqual({
+    receipts: [organizationAuthorityReceipt],
+    hasMore: false,
+    nextCursor: null,
+  });
+  expect(organizationReclassificationInputs.at(-1)).toEqual({
+    accountId: ACCOUNT_ID,
+    workspaceId: WORKSPACE_ID,
+    actorSubjectId: SUBJECT_ID,
+    accountAdminAuthorization: {
+      authorizationId: expect.any(String),
+      accountId: ACCOUNT_ID,
+      actorSubjectId: SUBJECT_ID,
+      permission: "account:admin",
+    },
+    limit: 3,
+  });
+
+  const malformedQuery = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills?limit=101`,
+    { headers: { authorization: adminAuthorization } },
+  );
+  expect(malformedQuery.status).toBe(400);
+  expect(await malformedQuery.text()).toContain("invalid document migration audit query");
+  const malformedRun = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills/not-a-uuid`,
+    { headers: { authorization: adminAuthorization } },
+  );
+  expect(malformedRun.status).toBe(400);
+
+  const cursorError = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills?cursor=domain-error`,
+    { headers: { authorization: adminAuthorization } },
+  );
+  expect(cursorError.status).toBe(400);
+  expect(await cursorError.text()).toContain("invalid document migration audit cursor");
+  const missingRun = await app.request(
+    `/v1/workspaces/${WORKSPACE_ID}/document-default-collection-backfills/99999999-9999-4999-8999-999999999999`,
+    { headers: { authorization: adminAuthorization } },
+  );
+  expect(missingRun.status).toBe(404);
+  expect(await missingRun.text()).toContain("audit run is unavailable");
 });

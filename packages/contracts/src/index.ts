@@ -1546,6 +1546,7 @@ export type ManagedAccount = z.infer<typeof ManagedAccount>;
 export const Workspace = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
+  kind: z.enum(["personal", "shared"]),
   name: z.string(),
   slug: z.string().nullable(),
   externalSource: z.string().nullable(),
@@ -1997,6 +1998,43 @@ export const SlackReactionChannelListResponse = z.object({
   nextCursor: z.string().max(1_024).nullable(),
 });
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
+
+/** Where one Slack channel starts work. */
+export const SlackChannelRoute = z.object({
+  slackChannelId: z.string().min(1).max(64),
+  targetWorkspaceId: z.string().uuid(),
+  // Unbounded like `Workspace.name` itself: a cap here would reject a row the
+  // database happily holds.
+  targetWorkspaceName: z.string().min(1).nullable(),
+  source: z.enum(["picker", "admin"]),
+  updatedAt: z.string(),
+});
+export type SlackChannelRoute = z.infer<typeof SlackChannelRoute>;
+
+export const SlackChannelRouteListResponse = z.object({
+  /** Every stored route. Bounded in practice by the channels the bot is in. */
+  routes: z.array(SlackChannelRoute),
+  /**
+   * Whether routing is switched on for this deployment. With it off the stored
+   * routes are inert, so the surface says so instead of implying they apply.
+   */
+  routingEnabled: z.boolean(),
+});
+export type SlackChannelRouteListResponse = z.infer<typeof SlackChannelRouteListResponse>;
+
+export const UpdateSlackChannelRoutesRequest = z.object({
+  connectionId: z.string().uuid(),
+  routes: z
+    .array(
+      z.object({
+        slackChannelId: z.string().min(1).max(64),
+        /** Null clears the route, so the channel asks once again. */
+        targetWorkspaceId: z.string().uuid().nullable(),
+      }),
+    )
+    .max(200),
+});
+export type UpdateSlackChannelRoutesRequest = z.infer<typeof UpdateSlackChannelRoutesRequest>;
 
 export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   enabled: false,
@@ -4913,6 +4951,107 @@ export const DocumentDefaultCollectionBackfill = z.object({
   completedAt: z.string().datetime({ offset: true }).nullable(),
 });
 export type DocumentDefaultCollectionBackfill = z.infer<typeof DocumentDefaultCollectionBackfill>;
+
+export const DocumentDefaultCollectionBackfillRunAudit = DocumentDefaultCollectionBackfill.omit({
+  operationId: true,
+}).extend({
+  actorSubjectId: z.string().min(1),
+  startedAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type DocumentDefaultCollectionBackfillRunAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillRunAudit
+>;
+
+export const DocumentDefaultCollectionBackfillOperationAudit = z.object({
+  operationId: z.string().uuid(),
+  result: DocumentDefaultCollectionBackfill,
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type DocumentDefaultCollectionBackfillOperationAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillOperationAudit
+>;
+
+export const DocumentDefaultCollectionBackfillReceiptAudit = z.object({
+  workspaceId: z.string().uuid(),
+  baseId: z.string().uuid(),
+  outcome: z.enum(["created", "adopted"]),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type DocumentDefaultCollectionBackfillReceiptAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillReceiptAudit
+>;
+
+export const ListDocumentMigrationAuditQuery = ListDocumentAuthorityReclassificationsQuery;
+export type ListDocumentMigrationAuditQuery = z.infer<typeof ListDocumentMigrationAuditQuery>;
+
+export const ListDocumentDefaultCollectionBackfillRunsResponse = z.object({
+  runs: z.array(DocumentDefaultCollectionBackfillRunAudit),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+});
+export type ListDocumentDefaultCollectionBackfillRunsResponse = z.infer<
+  typeof ListDocumentDefaultCollectionBackfillRunsResponse
+>;
+
+export const GetDocumentDefaultCollectionBackfillAuditQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
+    .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
+  operationCursor: z
+    .string()
+    .min(1)
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .optional(),
+  receiptCursor: z
+    .string()
+    .min(1)
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .optional(),
+});
+export type GetDocumentDefaultCollectionBackfillAuditQuery = z.infer<
+  typeof GetDocumentDefaultCollectionBackfillAuditQuery
+>;
+
+export const DocumentDefaultCollectionBackfillAudit = z.object({
+  run: DocumentDefaultCollectionBackfillRunAudit,
+  operations: z.array(DocumentDefaultCollectionBackfillOperationAudit),
+  receipts: z.array(DocumentDefaultCollectionBackfillReceiptAudit),
+  operationsHasMore: z.boolean(),
+  operationsNextCursor: z
+    .string()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .nullable(),
+  receiptsHasMore: z.boolean(),
+  receiptsNextCursor: z
+    .string()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .nullable(),
+});
+export type DocumentDefaultCollectionBackfillAudit = z.infer<
+  typeof DocumentDefaultCollectionBackfillAudit
+>;
+
+export const OrganizationDocumentAuthorityReclassification =
+  DocumentAuthorityReclassification.extend({
+    actorSubjectId: z.string().min(1),
+    requestWorkspaceId: z.string().uuid(),
+  });
+export type OrganizationDocumentAuthorityReclassification = z.infer<
+  typeof OrganizationDocumentAuthorityReclassification
+>;
+
+export const ListOrganizationDocumentAuthorityReclassificationsResponse = z.object({
+  receipts: z.array(OrganizationDocumentAuthorityReclassification),
+  hasMore: z.boolean(),
+  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+});
+export type ListOrganizationDocumentAuthorityReclassificationsResponse = z.infer<
+  typeof ListOrganizationDocumentAuthorityReclassificationsResponse
+>;
 
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
@@ -15443,7 +15582,8 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-atomic-session-fork-visibility-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION =
+  "2026-08-personal-only-organization-setup-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
