@@ -215,6 +215,19 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     expect(await logoutReplay.json()).toEqual(logoutReceipt);
     expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("retired");
 
+    const distinctLogout = await app.request("/v1/auth/session-set/logout-all", {
+      method: "POST",
+      headers: mutationHeaders(completed.projection, authorityCookie),
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        expectedGeneration: completed.projection.generation,
+      }),
+    });
+    expect(distinctLogout.status).toBe(401);
+    expect(await distinctLogout.json()).toMatchObject({
+      error: { details: { managedAuthCode: "browser_session_set_required" } },
+    });
+
     const fresh = await app.request("/v1/auth/session-set", {
       headers: { cookie: authorityCookie },
     });
