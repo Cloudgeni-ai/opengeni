@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ab93e41563072a09adba74d96cd824cdb3680c5cffa6878a2a465b79561b4e54"
+      "sha256": "3d8ec4775bc4c0b4a2174393def9e47896e6d5391184009409255c136d905304"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -709,7 +709,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "c5654a8fbce26ca93c0f42308c8ec77bec4f02dc63db52db5c40f53041f2b25d"
+      "sha256": "20a914e98aea4f6c8ff25ad17e14a0a5523db1faeeafcb8cf14aa8dc63ca10a8"
     },
     {
       "workflow": ".github/workflows/ci.yml",

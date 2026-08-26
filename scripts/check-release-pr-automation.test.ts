@@ -3698,6 +3698,14 @@ describe("workflow contracts", () => {
     ]) {
       expect(source.steps.some((step: any) => step.name === stepName)).toBe(true);
     }
+    const releasePlan = source.steps.find(
+      (step: any) => step.name === "Validate changeset release plan",
+    ).run;
+    expect(releasePlan).toContain('version_base_ref="$AUTOMATION_BASE_SHA"');
+    expect(releasePlan).toContain('git worktree add --detach "$expected" "$version_base_ref"');
+    expect(releasePlan).not.toContain(
+      '[ "$(git rev-parse refs/remotes/origin/main)" = "$AUTOMATION_BASE_SHA" ]',
+    );
     expect(
       source.steps.find((step: any) => step.name === "Profile impacted TypeScript 7 projects").run,
     ).toContain("scripts/ci/run-typecheck-plan.ts");
