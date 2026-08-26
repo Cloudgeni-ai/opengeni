@@ -3832,7 +3832,7 @@ describe("workflow contracts", () => {
         "Browser account session-set acceptance",
         {
           lane: "accounts",
-          run: "bun test --max-concurrency=1 --timeout 180000 \\\n  ./packages/db/test/migration-0356-managed-auth-session-sets.test.ts \\\n  ./apps/api/test/managed-auth-session-sets.integration.test.ts\nbun scripts/run-browser-e2e.ts \\\n  ./test/e2e/browser-accounts-acceptance.e2e.ts\n",
+          run: "bun test --max-concurrency=1 --timeout 180000 \\\n  ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \\\n  ./apps/api/test/managed-auth-session-sets.integration.test.ts\nbun scripts/run-browser-e2e.ts \\\n  ./test/e2e/browser-accounts-acceptance.e2e.ts\n",
         },
       ],
       [

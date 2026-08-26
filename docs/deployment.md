@@ -453,9 +453,9 @@ needed to unstick them. `OPENGENI_PUBLIC_BASE_URL` and
 `OPENGENI_BETTER_AUTH_SECRET` become required for invitation creation, which is
 checked before the invitation row commits and reported as `503`.
 
-### Browser login session-set rollout (0360)
+### Browser login session-set rollout (0362)
 
-`0356_managed_auth_session_sets.sql` is rolling and deliberately activation-free.
+`0362_managed_auth_session_sets.sql` is rolling and deliberately activation-free.
 It backfills exact Better Auth login-binding stamps, installs hash-only/FORCE-RLS
 browser session-set authority, and leaves
 `OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply it with the owner migration

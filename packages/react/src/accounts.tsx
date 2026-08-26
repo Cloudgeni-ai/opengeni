@@ -151,6 +151,12 @@ function accountError(error: unknown): Error {
   return error instanceof Error ? error : new Error("Browser account operation failed");
 }
 
+function supersededOperationError(): Error {
+  const error = new Error("Browser account operation was superseded by an actor change");
+  error.name = "AbortError";
+  return error;
+}
+
 function errorCode(error: unknown): string | null {
   if (!error || typeof error !== "object") return null;
   const code = (error as { code?: unknown }).code;
@@ -239,6 +245,15 @@ export function BrowserAccountsProvider({
     });
   }, []);
 
+  const clearLoginTransactionState = useCallback(() => {
+    transactionRef.current = null;
+    beginOperationRef.current = null;
+    completionOperationRef.current = null;
+    cancelOperationRef.current = null;
+    transactionTargetSlotIdRef.current = null;
+    setTransaction(null);
+  }, []);
+
   const settleActorTransition = useCallback(
     async (
       kind: BrowserAccountTransitionKind,
@@ -248,6 +263,7 @@ export function BrowserAccountsProvider({
       publish: boolean,
       authorityResetConfirmed = false,
     ): Promise<ManagedAuthSessionSetProjection | null> => {
+      let source = from;
       let target = accepted;
       if (!authorityResetConfirmed && from && target && isOlderProjection(target, from)) {
         target = await client.getSessionSet();
@@ -256,37 +272,44 @@ export function BrowserAccountsProvider({
           throw new Error("Browser account response regressed the accepted actor epoch");
         }
       }
-      if (sameSelectedActor(from, target)) {
+      if (sameSelectedActor(source, target)) {
         setProjection(target);
         setPhase("ready");
         setError(null);
         return target;
       }
-      transitionAbortRef.current?.abort();
-      const controller = new AbortController();
-      transitionAbortRef.current = controller;
-      // The accepted mutation is already server authority. Notify peers now,
-      // before this tab waits for its own auth/access reload, so they can hide
-      // and abort old-actor work throughout that entire window.
-      if (publish) publishActorHint(target);
-      setPhase("loading");
-      await onActorTransition({ kind, from, to: target, signal: controller.signal });
-      if (controller.signal.aborted || sequenceRef.current !== sequence) return null;
-      if (!target) {
-        setProjection(null);
-        setPhase("ready");
-        setError(null);
-        return null;
+      while (true) {
+        transitionAbortRef.current?.abort();
+        const controller = new AbortController();
+        transitionAbortRef.current = controller;
+        // The accepted mutation is already server authority. Notify peers now,
+        // before this tab waits for its own auth/access reload, so they can hide
+        // and abort old-actor work throughout that entire window.
+        if (publish) publishActorHint(target);
+        setPhase("loading");
+        await onActorTransition({ kind, from: source, to: target, signal: controller.signal });
+        if (controller.signal.aborted || sequenceRef.current !== sequence) return null;
+        if (!target) {
+          setProjection(null);
+          setPhase("ready");
+          setError(null);
+          return null;
+        }
+        const confirmed = await client.reconcileSessionSetAuthority();
+        if (controller.signal.aborted || sequenceRef.current !== sequence) return null;
+        if (sameActor(target, confirmed) || sameSelectedActor(target, confirmed)) {
+          setProjection(confirmed);
+          setPhase("ready");
+          setError(null);
+          return confirmed;
+        }
+        // Tenant state was loaded for an authority that rotated again while
+        // the host callback was pending. The explicit two-probe result is the
+        // new authority even when its counters are lower, so keep the actor
+        // hidden and settle that authority before exposing ready state.
+        source = target;
+        target = confirmed;
       }
-      const confirmed = await client.getSessionSet();
-      if (controller.signal.aborted || sequenceRef.current !== sequence) return null;
-      if (isOlderProjection(confirmed, target) || !sameActor(target, confirmed)) {
-        throw new Error("Browser actor changed again while tenant state was loading");
-      }
-      setProjection(confirmed);
-      setPhase("ready");
-      setError(null);
-      return confirmed;
     },
     [client, onActorTransition, publishActorHint],
   );
@@ -327,20 +350,16 @@ export function BrowserAccountsProvider({
           bootstrapOperationRef.current = null;
         }
       }
-      if (before && isOlderProjection(first, before)) {
-        setProjection(before);
-        setPhase("ready");
-        return before;
-      }
       if (sameActor(before, first) || sameSelectedActor(before, first)) {
         setProjection(first);
         setPhase("ready");
         setError(null);
         return first;
       }
+      if (kind === "cross_tab") clearLoginTransactionState();
       return await settleActorTransition(kind, before, first, sequence, publish, true);
     },
-    [bootstrapLegacySession, client, settleActorTransition],
+    [bootstrapLegacySession, clearLoginTransactionState, client, settleActorTransition],
   );
 
   const fail = useCallback(
@@ -456,6 +475,7 @@ export function BrowserAccountsProvider({
       transitionAbortRef.current = controller;
       projectionRef.current = null;
       setProjection(null);
+      clearLoginTransactionState();
       setPhase("loading");
       setError(null);
       // Do not wait for the authority reread before asking the host to remove
@@ -469,7 +489,7 @@ export function BrowserAccountsProvider({
       });
       return controller;
     },
-    [onActorTransition],
+    [clearLoginTransactionState, onActorTransition],
   );
 
   const invalidateActor = useCallback(async () => {
@@ -524,6 +544,7 @@ export function BrowserAccountsProvider({
         setPhase("blocked");
         throw new Error("Settle account transition blockers before re-authenticating");
       }
+      const sequence = ++sequenceRef.current;
       setPhase("committing");
       setError(null);
       const signature = JSON.stringify([
@@ -537,24 +558,37 @@ export function BrowserAccountsProvider({
           ? beginOperationRef.current.operationId
           : operationId();
       beginOperationRef.current = { signature, operationId: beginOperation };
+      let next: ManagedAuthLoginTransaction;
       try {
-        const next = await client.beginLoginTransaction({
+        next = await client.beginLoginTransaction({
           operationId: beginOperation,
           expectedGeneration: current.generation,
           kind,
           ...(slotId ? { slotId } : {}),
           ...(returnIntent ? { returnIntent } : {}),
         });
-        beginOperationRef.current = null;
-        transactionTargetSlotIdRef.current = slotId ?? null;
-        completionOperationRef.current = null;
-        cancelOperationRef.current = null;
-        setTransaction(next);
-        setPhase("ready");
-        return next;
       } catch (caught) {
+        if (sequenceRef.current !== sequence) {
+          if (beginOperationRef.current?.operationId === beginOperation) {
+            beginOperationRef.current = null;
+          }
+          throw supersededOperationError();
+        }
         return await fail(caught, kind);
       }
+      if (sequenceRef.current !== sequence) {
+        if (beginOperationRef.current?.operationId === beginOperation) {
+          beginOperationRef.current = null;
+        }
+        throw supersededOperationError();
+      }
+      beginOperationRef.current = null;
+      transactionTargetSlotIdRef.current = slotId ?? null;
+      completionOperationRef.current = null;
+      cancelOperationRef.current = null;
+      setTransaction(next);
+      setPhase("ready");
+      return next;
     },
     [client, fail, inspectBlockers],
   );
@@ -650,29 +684,41 @@ export function BrowserAccountsProvider({
     const current = projectionRef.current;
     const activeTransaction = transactionRef.current;
     if (!current || !activeTransaction) return;
+    const sequence = ++sequenceRef.current;
     setPhase("committing");
     const cancelOperation = cancelOperationRef.current ?? {
       operationId: operationId(),
       expectedGeneration: current.generation,
     };
     cancelOperationRef.current = cancelOperation;
+    let next: ManagedAuthSessionSetProjection;
     try {
-      const next = await client.cancelLoginTransaction({
+      next = await client.cancelLoginTransaction({
         operationId: cancelOperation.operationId,
         expectedGeneration: cancelOperation.expectedGeneration,
         transactionId: activeTransaction.id,
       });
-      completionOperationRef.current = null;
-      cancelOperationRef.current = null;
-      transactionTargetSlotIdRef.current = null;
-      setTransaction(null);
-      setProjection(next);
-      setPhase("ready");
-      setError(null);
     } catch (caught) {
+      if (sequenceRef.current !== sequence) {
+        if (cancelOperationRef.current?.operationId === cancelOperation.operationId) {
+          cancelOperationRef.current = null;
+        }
+        throw supersededOperationError();
+      }
       await fail(caught, activeTransaction.kind);
+      return;
     }
-  }, [client, fail]);
+    if (sequenceRef.current !== sequence) {
+      if (cancelOperationRef.current?.operationId === cancelOperation.operationId) {
+        cancelOperationRef.current = null;
+      }
+      throw supersededOperationError();
+    }
+    clearLoginTransactionState();
+    setProjection(next);
+    setPhase("ready");
+    setError(null);
+  }, [clearLoginTransactionState, client, fail]);
 
   const selectSlot = useCallback(
     async (slotId: string) => {

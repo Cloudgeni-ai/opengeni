@@ -51,9 +51,9 @@ type Login = {
 const hex = (value: string) => createHash("sha256").update(value).digest("hex");
 
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("migration-0356-managed-auth-session-sets");
+  owned = await acquireOwnerMigratedTestDatabase("migration-0362-managed-auth-session-sets");
   if (!owned) {
-    if (requireRealDatabase) throw new Error("migration 0360 requires real PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0362 requires real PostgreSQL");
     return;
   }
   await migrate(owned.ownerUrl);
@@ -155,7 +155,7 @@ async function expectSqlState(action: () => Promise<unknown>, state: string): Pr
   expect(nestedPostgresSqlState(failure)).toBe(state);
 }
 
-describe("migration 0360 managed browser session sets", () => {
+describe("migration 0362 managed browser session sets", () => {
   test("pins the restricted runtime posture and exposes only definer routines", async () => {
     for (const table of [
       "managed_auth_browser_installations",

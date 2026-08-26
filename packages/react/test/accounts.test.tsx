@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { act, useEffect } from "react";
 import type {
   BrowserAccountsClientLike,
+  ManagedAuthLoginTransaction,
   ManagedAuthSessionSetProjection,
 } from "@opengeni/sdk/accounts";
 import {
@@ -247,27 +248,6 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
-  test("ignores a delayed lower actor epoch instead of transitioning backwards", async () => {
-    const current = projection({ generation: "3", actorEpoch: "3", selectedSlotId: SLOT_B });
-    const stale = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_A });
-    const reads = [current, current, stale];
-    let transitions = 0;
-    const accounts = await renderAccounts(
-      scriptedClient({ getSessionSet: async () => reads.shift() ?? stale }),
-      async () => {
-        transitions += 1;
-      },
-    );
-    const initialTransitions = transitions;
-
-    await actRun(() => accounts.current.refresh());
-    expect(accounts.current.phase).toBe("ready");
-    expect(accounts.current.projection?.actorEpoch).toBe("3");
-    expect(accounts.current.projection?.selectedSlotId).toBe(SLOT_B);
-    expect(transitions).toBe(initialTransitions);
-    await accounts.unmount();
-  });
-
   test("automatically replays an outcome-unknown switch with the exact original request", async () => {
     let selected = projection();
     let attempts = 0;
@@ -507,6 +487,61 @@ describe("BrowserAccountsProvider", () => {
     await accounts.unmount();
   });
 
+  test("refresh adopts an explicitly reconciled lower authority from a ready actor", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
+    const replacement = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_A });
+    let current = before;
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+      }),
+      async (transition) => {
+        transitions.push(transition);
+      },
+    );
+    current = replacement;
+
+    expect(await actRun(() => accounts.current.refresh())).toEqual(replacement);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection).toEqual(replacement);
+    expect(transitions.at(-1)).toMatchObject({
+      kind: "cross_tab",
+      from: { generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B },
+      to: { generation: "2", actorEpoch: "2", selectedSlotId: SLOT_A },
+    });
+    await accounts.unmount();
+  });
+
+  test("settles a second authority rotation that arrives while tenant state is loading", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
+    const first = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_A });
+    const second = projection({ selectedSlotId: null, slotIds: [] });
+    let current = before;
+    const transitions: BrowserAccountTransition[] = [];
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+      }),
+      async (transition) => {
+        transitions.push(transition);
+        if (transition.from === before && transition.to === first) current = second;
+      },
+    );
+    current = first;
+
+    expect(await actRun(() => accounts.current.refresh())).toEqual(second);
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.projection).toEqual(second);
+    expect(transitions.slice(-2)).toEqual([
+      expect.objectContaining({ from: before, to: first }),
+      expect.objectContaining({ from: first, to: second }),
+    ]);
+    await accounts.unmount();
+  });
+
   test("retries explicit authority reconciliation after a failed invalidation probe", async () => {
     const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
     const replacement = projection({ selectedSlotId: null, slotIds: [] });
@@ -567,6 +602,7 @@ describe("BrowserAccountsProvider", () => {
         },
       }),
     );
+    const initialReconciliationCount = reconciliationCount;
 
     let selection!: Promise<boolean>;
     await act(async () => {
@@ -582,7 +618,7 @@ describe("BrowserAccountsProvider", () => {
       expect(await selection).toBe(true);
     });
 
-    expect(reconciliationCount).toBe(2);
+    expect(reconciliationCount - initialReconciliationCount).toBe(2);
     expect(accounts.current.phase).toBe("ready");
     expect(accounts.current.projection).toEqual(replacement);
     await accounts.unmount();
@@ -883,6 +919,107 @@ describe("BrowserAccountsProvider", () => {
     await expect(actRun(() => accounts.current.beginAdd())).rejects.toThrow("generation changed");
     await flush();
     expect(transitions.at(-1)?.kind).toBe("add");
+    await accounts.unmount();
+  });
+
+  test("discards a delayed begin result after actor invalidation", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
+    const replacement = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_A });
+    let current = before;
+    let announceBegin!: () => void;
+    let releaseBegin!: (transaction: ManagedAuthLoginTransaction) => void;
+    const beginStarted = new Promise<void>((resolve) => {
+      announceBegin = resolve;
+    });
+    const delayedBegin = new Promise<ManagedAuthLoginTransaction>((resolve) => {
+      releaseBegin = resolve;
+    });
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+        beginLoginTransaction: async () => {
+          announceBegin();
+          return await delayedBegin;
+        },
+      }),
+    );
+
+    let beginning!: Promise<ManagedAuthLoginTransaction>;
+    await act(async () => {
+      beginning = accounts.current.beginAdd();
+      await beginStarted;
+    });
+    current = replacement;
+    expect(await actRun(() => accounts.current.invalidateActor())).toEqual(replacement);
+
+    let staleError: unknown;
+    await act(async () => {
+      releaseBegin({
+        id: crypto.randomUUID(),
+        kind: "add",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        returnIntentId: null,
+      });
+      try {
+        await beginning;
+      } catch (caught) {
+        staleError = caught;
+      }
+    });
+    expect(staleError).toMatchObject({ name: "AbortError" });
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.transaction).toBeNull();
+    expect(accounts.current.projection).toEqual(replacement);
+    await accounts.unmount();
+  });
+
+  test("discards a delayed cancel result after actor invalidation", async () => {
+    const before = projection({ generation: "7", actorEpoch: "5", selectedSlotId: SLOT_B });
+    const replacement = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_A });
+    const staleCancel = projection({ generation: "8", actorEpoch: "6", selectedSlotId: SLOT_B });
+    let current = before;
+    let announceCancel!: () => void;
+    let releaseCancel!: (projection: ManagedAuthSessionSetProjection) => void;
+    const cancelStarted = new Promise<void>((resolve) => {
+      announceCancel = resolve;
+    });
+    const delayedCancel = new Promise<ManagedAuthSessionSetProjection>((resolve) => {
+      releaseCancel = resolve;
+    });
+    const accounts = await renderAccounts(
+      scriptedClient({
+        getSessionSet: async () => current,
+        reconcileSessionSetAuthority: async () => current,
+        cancelLoginTransaction: async () => {
+          announceCancel();
+          return await delayedCancel;
+        },
+      }),
+    );
+    await actRun(() => accounts.current.beginAdd());
+
+    let cancelling!: Promise<void>;
+    await act(async () => {
+      cancelling = accounts.current.cancelLoginTransaction();
+      await cancelStarted;
+    });
+    current = replacement;
+    expect(await actRun(() => accounts.current.invalidateActor())).toEqual(replacement);
+
+    let staleError: unknown;
+    await act(async () => {
+      releaseCancel(staleCancel);
+      try {
+        await cancelling;
+      } catch (caught) {
+        staleError = caught;
+      }
+    });
+    expect(staleError).toMatchObject({ name: "AbortError" });
+    expect(accounts.current.phase).toBe("ready");
+    expect(accounts.current.transaction).toBeNull();
+    expect(accounts.current.projection).toEqual(replacement);
     await accounts.unmount();
   });
 

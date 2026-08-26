@@ -392,6 +392,58 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     });
     expect(selectedRead.status).toBe(200);
     expect(await selectedRead.json()).toMatchObject({ user: { email } });
+
+    const brokerApp = createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        managedAuthSessionSetMode: "broker",
+        betterAuthSecret: "managed-session-set-integration-secret-32-bytes",
+        publicBaseUrl: "http://opengeni.test",
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+    const cutoverCookies = `${authority}; ${selectedCookie}`;
+    const brokerRead = await brokerApp.request("/v1/auth/session-set", {
+      headers: { cookie: cutoverCookies },
+    });
+    expect(brokerRead.status).toBe(200);
+    const brokerProjection = (await brokerRead.json()) as ManagedAuthSessionSetProjection;
+    expect(brokerProjection).toMatchObject({
+      mode: "broker",
+      selectedSlotId: projection.selectedSlotId,
+    });
+    expect(oneCookie(brokerRead, "better-auth.session_token")).toBe("better-auth.session_token=");
+
+    const brokerBegin = await brokerApp.request("/v1/auth/session-set/transactions", {
+      method: "POST",
+      headers: mutationHeaders(brokerProjection, cutoverCookies),
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        expectedGeneration: brokerProjection.generation,
+        kind: "add",
+      }),
+    });
+    expect(brokerBegin.status).toBe(200);
+    expect(oneCookie(brokerBegin, "better-auth.session_token")).toBe("better-auth.session_token=");
+    const brokerTransaction = (await brokerBegin.json()) as { id: string };
+    const brokerTransactionCookie = oneCookie(brokerBegin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
+    const brokerCancel = await brokerApp.request(
+      `/v1/auth/session-set/transactions/${brokerTransaction.id}`,
+      {
+        method: "DELETE",
+        headers: mutationHeaders(brokerProjection, `${cutoverCookies}; ${brokerTransactionCookie}`),
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          expectedGeneration: brokerProjection.generation,
+          transactionId: brokerTransaction.id,
+        }),
+      },
+    );
+    expect(brokerCancel.status).toBe(200);
+    expect(oneCookie(brokerCancel, "better-auth.session_token")).toBe("better-auth.session_token=");
   });
 
   test("denies stale-tab authority transfer, replays exactly, and exposes no provider token", async () => {

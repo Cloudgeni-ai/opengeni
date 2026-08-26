@@ -111,10 +111,11 @@ const budgets = {
   // initial-raw and 564 KiB direct-session-gzip envelopes, plus every unrelated
   // graph and per-file cap, stay fixed.
   initialGzip: 405 * kib,
-  // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
-  // bun chunking with the channels/For-you rail code; the graph totals above
-  // still bound the aggregate.
-  initialFileGzip: 77 * kib,
+  // The current-main browser-account Linux/x64 Bun 1.4 graph measures the largest
+  // initial shared chunk at 78,985 gzip bytes. Its 79-KiB envelope preserves
+  // 1,911 bytes of platform-skew headroom; the graph totals still bind the
+  // aggregate.
+  initialFileGzip: 79 * kib,
   initialFiles: 17,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
@@ -254,14 +255,16 @@ const budgets = {
   // bytes of headroom); the existing 600-KiB gzip envelope retains 2,866 bytes
   // of headroom, above the 1.5-KiB platform-skew allowance. Every file-count,
   // initial, per-file, lazy-chunk, and CSS cap remains fixed.
-  // Multi-account browser isolation adds actor-fenced transport state and two
-  // small direct-session bridge chunks while account controls and the
-  // credential popup remain lazy. Current main's larger raw/gzip envelopes
-  // remain authoritative; only the measured direct-session file-count boundary
-  // advances from 24 to 26.
+  // Multi-account browser isolation adds actor-fenced transport state while
+  // account controls and the credential popup remain lazy. On exact current
+  // main, the Linux/x64 Bun 1.4 direct-session graph measures 2,197,257 raw /
+  // 615,476 gzip bytes across 31 files. The policy-derived 2,147-KiB raw
+  // envelope retains 1,271 bytes of headroom; 603 KiB gzip retains 1,996 bytes,
+  // above the established 1.5-KiB platform-skew allowance. Initial aggregate,
+  // lazy-chunk, CSS, and unrelated per-file caps remain fixed.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
-  directSessionGzip: 600 * kib,
-  directSessionFiles: 26,
+  directSessionGzip: 603 * kib,
+  directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 31 * kib,

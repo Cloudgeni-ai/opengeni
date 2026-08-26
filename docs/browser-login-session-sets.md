@@ -15,13 +15,13 @@ Canonical-human and verified-binding authority remains in
 the organizations, workspaces, sessions, and capabilities that the ordinary access
 resolver authorizes for that human.
 
-The repository defaults to `legacy`. Applying migration 0360 does not activate
+The repository defaults to `legacy`. Applying migration 0362 does not activate
 session sets, and repository delivery does not authorize a staging or production
 mode change.
 
 ## Authority and persistence
 
-Migration `packages/db/drizzle/0356_managed_auth_session_sets.sql` is a rolling
+Migration `packages/db/drizzle/0362_managed_auth_session_sets.sql` is a rolling
 migration. It stamps every Better Auth session with the exact canonical login
 binding and its revision, then adds:
 
@@ -192,7 +192,7 @@ installation set. A stale tab holding the same provider cookie cannot bootstrap 
 second authority, rotate the original installation/set hashes, or inherit its
 other slots; it must reconcile from current browser authority. Once an actor epoch
 has advanced, headerless requests fail closed: a stale pre-switch page and a fresh
-legacy page are otherwise indistinguishable. Old binaries can coexist while migration 0360 runs because its
+legacy page are otherwise indistinguishable. Old binaries can coexist while migration 0362 runs because its
 insert trigger supplies the new non-null binding stamps, but all API replicas and
 the served web bundle must be on the session-set-capable release before selecting
 `dual` or `broker`.
@@ -207,7 +207,7 @@ legacy mirror; do not restart an arbitrary old image or run a down-migration.
 
 Repository readiness and deployment activation are separate approvals:
 
-1. Keep `OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply migration 0360
+1. Keep `OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`. Apply migration 0362
    through the owner migration job, provision the restricted runtime grants, and
    require migration-ordinal/schema-contract and runtime-posture checks.
 2. Deploy the same session-set-capable API and web generation to every replica.
@@ -220,7 +220,7 @@ Repository readiness and deployment activation are separate approvals:
    accepted. Only a separate fresh authorization may move every replica to
    `broker`.
 5. In `broker`, repeat the same acceptance from a browser with no legacy cookie.
-   Keep migration 0360 and its evidence tables; rollback is a mode/configuration
+   Keep migration 0362 and its evidence tables; rollback is a mode/configuration
    transition and fix-forward application release, never destructive SQL.
 
 No repository test, PR merge, or migration application authorizes step 3 or 4.
@@ -238,7 +238,7 @@ installation must additionally:
   `x-opengeni-api-contract`, `x-opengeni-session-csrf`, and
   `x-opengeni-actor-epoch` headers through the reverse proxy;
 - run every API replica with the same session-set mode and signing secret;
-- use the owner migration connection only for migration 0360 and keep the API on
+- use the owner migration connection only for migration 0362 and keep the API on
   the restricted, FORCE-RLS-checked runtime role;
 - retain popup capability and first-party same-origin navigation in browser/CSP
   policy; and
@@ -250,7 +250,7 @@ Better Auth/Hono integration, API/SSE tests, and the `accounts` browser-acceptan
 CI lane. That lane must fail instead of skip when PostgreSQL, a migrated
 restricted role, production web build, or Chromium/Firefox/WebKit is absent.
 
-Canonical source: `packages/db/drizzle/0356_managed_auth_session_sets.sql`,
+Canonical source: `packages/db/drizzle/0362_managed_auth_session_sets.sql`,
 `packages/core/src/managed-auth-session-sets.ts`,
 `packages/core/src/managed-session.ts`,
 `apps/api/src/routes/managed-auth-session-sets.ts`,

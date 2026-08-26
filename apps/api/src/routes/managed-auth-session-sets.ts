@@ -67,6 +67,15 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   const noStore = async (context: Context, next: () => Promise<void>) => {
     context.header("cache-control", "no-store");
     context.header("pragma", "no-cache");
+    if (deps.settings.managedAuthSessionSetMode === "broker") {
+      appendCookies(
+        context,
+        await requireAvailable(deps).adapter.createLegacySelectedSessionCookies(
+          null,
+          context.req.header("cookie") ?? null,
+        ),
+      );
+    }
     await next();
   };
   app.use("/v1/auth/session-set", noStore);
@@ -79,6 +88,15 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     }
     context.header("cache-control", "no-store");
     const available = requireAvailable(deps);
+    if (deps.settings.managedAuthSessionSetMode === "broker") {
+      appendCookies(
+        context,
+        await available.adapter.createLegacySelectedSessionCookies(
+          null,
+          context.req.header("cookie") ?? null,
+        ),
+      );
+    }
     const authority = getAuthority(context);
     try {
       if (authority) {
