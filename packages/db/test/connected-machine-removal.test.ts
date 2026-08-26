@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { AUTOMATIC_SESSION_TITLE_FALLBACK } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import {
@@ -14,6 +15,7 @@ import {
   MachineRemovalRevisionConflictError,
   setActiveSandbox,
   touchEnrollmentLastSeen,
+  updateSessionTitle,
   type DbClient,
   type Database,
 } from "../src/index";
@@ -246,7 +248,14 @@ describe("connected machine removal lifecycle", () => {
       latencyMode: "standard" as const,
       sandboxBackend: "selfhosted",
     });
-    await admin`update sessions set title = 'Machine home session' where id = ${session.id}`;
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: session.id,
+        title: "Machine home session",
+        source: "agent",
+      }),
+    ).toMatchObject({ updated: true, title: "Machine home session" });
     const routed = await setActiveSandbox(db, {
       accountId,
       workspaceId,
@@ -336,7 +345,7 @@ describe("connected machine removal lifecycle", () => {
     expect(removed).toMatchObject({
       outcome: "removed",
       removed: true,
-      dependentSessions: [{ id: session.id, title: null }],
+      dependentSessions: [{ id: session.id, title: AUTOMATIC_SESSION_TITLE_FALLBACK }],
     });
     const [pointer] = await admin<
       { active_sandbox_id: string | null; active_epoch: number; sandbox_backend: string }[]
@@ -469,7 +478,14 @@ describe("connected machine removal lifecycle", () => {
       latencyMode: "standard" as const,
       sandboxBackend: "modal",
     });
-    await admin`update sessions set title = 'Second routed session' where id = ${secondSession.id}`;
+    expect(
+      await updateSessionTitle(db, {
+        workspaceId,
+        sessionId: secondSession.id,
+        title: "Second routed session",
+        source: "agent",
+      }),
+    ).toMatchObject({ updated: true, title: "Second routed session" });
     const secondRouted = await setActiveSandbox(db, {
       accountId,
       workspaceId,
@@ -494,7 +510,7 @@ describe("connected machine removal lifecycle", () => {
       removed: false,
       code: "active_commands",
       dependentSessions: [
-        { id: session.id, title: null },
+        { id: session.id, title: AUTOMATIC_SESSION_TITLE_FALLBACK },
         { id: secondSession.id, title: "Second routed session" },
       ],
     });
@@ -540,7 +556,7 @@ describe("connected machine removal lifecycle", () => {
       outcome: "removed",
       removed: true,
       dependentSessions: [
-        { id: session.id, title: null },
+        { id: session.id, title: AUTOMATIC_SESSION_TITLE_FALLBACK },
         { id: secondSession.id, title: "Second routed session" },
       ],
     });

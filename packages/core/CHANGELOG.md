@@ -1,5 +1,42 @@
 # @opengeni/core
 
+## 2.3.1
+
+### Patch Changes
+
+- Updated dependencies [8fabf12]
+- Updated dependencies [8fabf12]
+  - @opengeni/db@3.3.1
+  - @opengeni/documents@0.8.1
+  - @opengeni/events@0.3.126
+
+## 2.3.0
+
+### Minor Changes
+
+- 47b88d3: Add explicit managed onboarding: ordinary verified signup completes an organization-name-only setup that creates only the owner membership and canonical Personal workspace, while unregistered invitees can use a digest-only one-time account setup link before signing in normally.
+
+### Patch Changes
+
+- 977fa0f: Add durable provider-neutral invited-user email delivery with scope-bound retention fences, ambiguity-preserving retries, digest-only setup preview, and explicit delivery state across the API, SDK, and organization administration experience.
+- Updated dependencies [47b88d3]
+- Updated dependencies [d47da57]
+- Updated dependencies [c5e4684]
+- Updated dependencies [977fa0f]
+- Updated dependencies [ba29352]
+- Updated dependencies [9d251cb]
+- Updated dependencies [dc10a36]
+- Updated dependencies [dc6cfff]
+- Updated dependencies [c10f396]
+  - @opengeni/contracts@2.4.0
+  - @opengeni/db@3.3.0
+  - @opengeni/documents@0.8.0
+  - @opengeni/config@0.20.0
+  - @opengeni/runtime@1.3.2
+  - @opengeni/events@0.3.125
+  - @opengeni/observability@0.8.5
+  - @opengeni/storage@0.2.107
+
 ## 2.2.0
 
 ### Minor Changes

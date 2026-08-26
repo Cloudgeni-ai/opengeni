@@ -34,6 +34,7 @@ const ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E =
   "test/e2e/organization-workspace-administration.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -99,7 +100,12 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
-    expect(sdk.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(sdk.browserAcceptanceLanes).toEqual([
+      "interaction",
+      "knowledge",
+      "onboarding",
+      "workbench",
+    ]);
     expect(sdk.artifactRuntimeRequired).toBe(false);
     expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
 
@@ -205,11 +211,29 @@ describe("fail-closed change impact", () => {
       ]),
     );
     for (const path of CURATED_ARTIFACT_BROWSER_E2E) expect(plan.e2eTests).not.toContain(path);
-    expect(plan.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(plan.browserAcceptanceLanes).toEqual([
+      "interaction",
+      "knowledge",
+      "onboarding",
+      "workbench",
+    ]);
     expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual(
       expect.arrayContaining(["@opengeni/react", "@opengeni/sdk"]),
     );
+  });
+
+  test("timeline pagination changes select protected interaction browser coverage", () => {
+    for (const path of [
+      "packages/react/src/components/message-timeline.tsx",
+      "packages/react/demo/timeline-collapsed-history-test-harness.tsx",
+      TIMELINE_SCROLL_BROWSER_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode).toBe("focused");
+      expect(plan.browserAcceptanceLanes).toContain("interaction");
+      expect(plan.e2eTests).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
+    }
   });
 
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
@@ -273,6 +297,12 @@ describe("fail-closed change impact", () => {
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
     expect(OPT_IN_TESTS["test/e2e/codex-overview.e2e.ts"]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain(TIMELINE_SCROLL_BROWSER_E2E);
+    expect(OPT_IN_TESTS[TIMELINE_SCROLL_BROWSER_E2E]).toContain("browser-acceptance");
+    expect(tests.e2e).not.toContain("test/e2e/organization-onboarding-acceptance.e2e.ts");
+    expect(OPT_IN_TESTS["test/e2e/organization-onboarding-acceptance.e2e.ts"]).toContain(
+      "onboarding",
+    );
     expect(tests.e2e).not.toContain("test/e2e/opstream-runner.e2e.ts");
   });
 
@@ -291,7 +321,12 @@ describe("fail-closed change impact", () => {
     expect(plan.unitTests).toEqual(tests.unit);
     expect(plan.integrationTests).toEqual(tests.integration);
     expect(plan.e2eTests).toEqual(tests.e2e);
-    expect(plan.browserAcceptanceLanes).toEqual(["interaction", "knowledge", "workbench"]);
+    expect(plan.browserAcceptanceLanes).toEqual([
+      "interaction",
+      "knowledge",
+      "onboarding",
+      "workbench",
+    ]);
     expect(plan.artifactRuntimeRequired).toBe(true);
     expect(plan.typecheckProjects).toEqual(typecheckProjects());
     expect(plan.typecheckProjects).toEqual(

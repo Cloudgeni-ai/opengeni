@@ -43,7 +43,7 @@ import { CODEX_APPS_MCP_URL } from "@opengeni/codex";
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue, type Database } from "@opengeni/db";
 import { createSignedState } from "@opengeni/github";
-import { testSettings } from "@opengeni/testing";
+import { MemoryEventBus, testSettings } from "@opengeni/testing";
 import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
@@ -808,7 +808,7 @@ describe("API helpers", () => {
     const app = createApp({
       settings: testSettings(),
       db: {} as never,
-      bus: { isConnected: () => true } as never,
+      bus: new MemoryEventBus(),
       workflowClient: {} as never,
       managedAuth: null,
       readinessChecks: {
@@ -832,6 +832,27 @@ describe("API helpers", () => {
     expect(JSON.stringify(body)).not.toContain(sentinel);
   });
 
+  test("readyz rejects an EventBus without durable subscriber recovery", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: { isConnected: () => true } as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      readinessChecks: {
+        db: async () => {},
+        temporal: async () => {},
+      },
+    });
+
+    const response = await app.request("/readyz");
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      checks: { nats: { ok: false, error: "dependency_unavailable" } },
+    });
+  });
+
   test("traffic-readyz stays routable through a NATS or Temporal outage", async () => {
     let natsChecks = 0;
     let temporalChecks = 0;
@@ -843,7 +864,7 @@ describe("API helpers", () => {
         authAllowHealth: true,
       },
       db: {} as never,
-      bus: { isConnected: () => false } as never,
+      bus: new MemoryEventBus(),
       workflowClient: {} as never,
       managedAuth: null,
       readinessChecks: {

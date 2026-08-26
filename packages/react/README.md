@@ -272,7 +272,7 @@ function OpsChannel({ sessionId }: { sessionId: string }) {
         status={sessionStatus}
         hasOlder={hasOlder}
         loadingOlder={loadingOlder}
-        onLoadOlder={() => void loadOlder()}
+        onLoadOlder={loadOlder}
         className="min-h-0 flex-1"
       />
       <QueueSurface queue={queue} composer={composer} />
@@ -511,7 +511,14 @@ state remains application-owned; durable draft and session state remain in
   `events`, projected `timeline`, latest `sessionStatus`, connection state, and
   older-history controls (`hasOlder`, `loadingOlder`, `loadOlder`). Pass
   `replay: "full"` to opt back into full replay; a nonzero `after` keeps the
-  previous resume semantics.
+  previous resume semantics. `loadOlder()` remains await-compatible and resolves
+  to the existing `boolean`, while its promise also carries the causal
+  `committed` receipt used by `MessageTimeline`. Pass it directly or through an
+  existing wrapper, including `onLoadOlder={() => void loadOlder()}`; synchronous
+  receipt capture preserves the commit signal without narrowing the historical
+  callback return type. Custom loaders can use `createOlderHistoryLoadReceipt`
+  and call `markCommitted` immediately before publishing their accepted older
+  window.
 - `useComposer(sessionId, { sendExtras, effectiveControl })` — revisioned private
   draft, Send, Steer, and workstream Pause/Resume state. `send()` appends in
   visible queue order (including while paused); `steer()` puts the new direction

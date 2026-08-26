@@ -62,6 +62,7 @@ import { SessionVisibilityPicker } from "@/components/session-visibility-picker"
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1066,7 +1067,7 @@ function RecentSessionRow({
   session: Session;
   catalogRows: readonly PickerModelRow[];
 }) {
-  const title = session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
+  const title = sessionDisplayTitle(session);
   const model = recentSessionModelPresentation(session.model, catalogRows);
   const repo = sessionRepoLabel(session);
   const metaBits = [model.label, repo].filter(Boolean);

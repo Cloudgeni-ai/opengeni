@@ -37,7 +37,7 @@ describe("0257 governed goal revision authority migration", () => {
     if (!blank) return;
     try {
       await expect(migrate(blank.databaseUrl, "goal_revision_scoped")).rejects.toThrow(
-        "Migration 0257 requires the exact application database roles",
+        "the exact application database roles",
       );
     } finally {
       await blank.release();

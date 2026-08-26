@@ -153,7 +153,12 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 - **Post-sign-in organization setup activates at maintenance migration 0348.** Stop every old API, control-worker, and turn-worker before applying `0348_named_signup_and_user_setup.sql`; supply the exact old/new runtime login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or `applicationDatabaseRoles`). A live listed identity aborts activation with SQLSTATE `55000`. After commit, never restart a pre-0348 image: old access writers still synthesize the retired `better-auth:user` fallback organization and `Default workspace`, and old clients do not speak the Personal-only setup contract. Public signup is an ordinary Better Auth account create; a separate authenticated organization-name-only lifecycle creates exactly one active owner membership plus its canonical Personal workspace and control row - never a shared/`Default` workspace, never a Personal `workspace_memberships` row, and never a second organization for a human who already holds a membership. A bound invitation always wins over self-service creation. Because managed-access convergence no longer self-heals, that lifecycle **adopts** an orphaned legacy `better-auth:user` account (one carrying no organization membership at all) instead of refusing it, and defers the adoption rename until after the canonical workspace prefix; an account that already has a membership is refused rather than reinterpreted. Invited-user setup is a separate signed-out digest-only bearer: hashed at rest, single-use, expiry-bounded, rate-limited and preflighted before any password hashing, minting no session and no plaintext or temporary password. See `docs/organization-tenancy.md` and `docs/deployment.md`.
 - Browser streaming uses `GET /v1/workspaces/:workspaceId/sessions/:id/events/stream` with SSE.
 - Session goals support `GET`, `PATCH(status paused|active)`, and idempotent `DELETE` clear on `/v1/workspaces/:workspaceId/sessions/:id/goal`; clearing removes the goal row and emits `goal.cleared`.
-- Core NATS is the realtime bus between producers and API instances.
+- Core NATS is the realtime bus between producers and API instances. Every supported
+  `EventBus` must pair accepted durable session-event publication with versioned
+  subscriber-recovery notification so an API instance performs one bounded Postgres
+  catch-up after reconnect; a publish-only embedded bus is supported only when it
+  provides that recovery capability, and missing capability fails readiness/startup
+  before durable outbox acknowledgement.
 - Postgres is the durable event store and replay source.
 - Workspace-control events are compact invalidations, not evidence blobs: control reasons and
   actors have canonical UTF-8 ingress/storage bounds, legacy rows carry explicit loss facts, and
@@ -250,9 +255,7 @@ then keep the exact head frozen while CI and review run. Ordinary PRs into
   because `main` advanced. Candidate/version numbers count substantive source
   changes only.
 - Run independent review as soon as the candidate is ready; CI and review may
-  proceed concurrently, while merge still waits for both. After two substantive
-  repair revisions, pause for an explicit incident/scope review before creating
-  another source revision.
+  proceed concurrently, while merge still waits for both.
 
 Promote `main` → `production` with a merge-commit PR (never squash / never
 GitHub rebase-and-merge). Hotfix PRs into `production` keep freeze-head

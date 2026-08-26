@@ -14,6 +14,8 @@ const ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION = "0338_atomic_connected_machin
 const NAMED_SIGNUP_CUTOVER_MIGRATION = "0348_named_signup_and_user_setup.sql";
 const SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION =
   "0352_session_variable_set_attachments.sql";
+const AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION =
+  "0353_automatic_session_title_policy_fence.sql";
 const MAX_MIGRATION_APPLICATION_ROLES = 16;
 const batchedBackfillDirective =
   /^-- opengeni:batched-backfill batch-size=(\d+) lock-timeout=(\d+(?:ms|s|min)) statement-timeout=(\d+(?:ms|s|min))$/;
@@ -42,7 +44,9 @@ export type MigrationRuntimeOptions = {
   /**
    * Exact database login roles that may run an OpenGeni API or worker against
    * this target. Maintenance cutovers use this list to reject a live mixed-
-   * version fleet. Dedicated-schema and custom-role deployments must supply it.
+   * version fleet, and rolling ACL migrations use it to preserve old-binary
+   * readiness until later role provisioning converges. Dedicated-schema and
+   * custom-role deployments must supply it.
    */
   applicationDatabaseRoles?: string[];
 };
@@ -177,7 +181,16 @@ async function executeMigrationFile(
     await sql`select set_config('statement_timeout', ${batchedBackfill.statementTimeout}, false)`;
     try {
       for (;;) {
-        const result = await sql.unsafe(batchedBackfill.statement);
+        const result = await sql.begin(async (transaction) => {
+          await transaction`select
+            pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+            pg_catalog.set_config(
+              'opengeni.session_variable_set_attachments_v1',
+              '1',
+              true
+            )`;
+          return await transaction.unsafe(batchedBackfill.statement);
+        });
         if (result.length === 0) break;
       }
     } finally {
@@ -193,9 +206,12 @@ async function executeMigrationFile(
     // query as the migration body: setting it in a prior statement would end
     // that implicit transaction and silently lose the LOCAL value. This also
     // makes a fresh database capable of applying maintenance migration 0138
+    // and later migrations capable of crossing the 0352 sessions policy
     // without a process-global PGOPTIONS escape hatch.
     await sql.unsafe(
-      `SELECT pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true);\n${sqlText}`,
+      `SELECT
+  pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+  pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${sqlText}`,
     );
     return;
   }
@@ -265,7 +281,7 @@ function migrationApplicationRoles(
     ].filter((role): role is string => Boolean(role) && role !== DEFAULT_APPLICATION_DATABASE_ROLE);
     if (schema || configuredRuntimeRoles.length > 0) {
       throw new Error(
-        "Migration 0257 requires the exact application database roles via " +
+        "Pending migrations require the exact application database roles via " +
           "MigrationRuntimeOptions.applicationDatabaseRoles or " +
           "OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES for dedicated-schema or custom-role deployments",
       );
@@ -383,7 +399,8 @@ export async function migrate(
       !applied.has(UNREGISTERED_INVITATION_CUTOVER_MIGRATION) ||
       !applied.has(ATOMIC_CONNECTED_MACHINE_CUTOVER_MIGRATION) ||
       !applied.has(NAMED_SIGNUP_CUTOVER_MIGRATION) ||
-      !applied.has(SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION)
+      !applied.has(SESSION_VARIABLE_SET_ATTACHMENTS_CUTOVER_MIGRATION) ||
+      !applied.has(AUTOMATIC_SESSION_TITLE_POLICY_FENCE_MIGRATION)
     ) {
       const applicationRoles = migrationApplicationRoles(schema, runtimeOptions);
       await sql`select set_config(

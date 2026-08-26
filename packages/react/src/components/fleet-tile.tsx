@@ -1,11 +1,13 @@
 import type { Session } from "@opengeni/sdk";
 import { cn } from "../lib/cn";
-import { formatRelativeTime, truncate } from "../lib/format";
+import { formatRelativeTime } from "../lib/format";
 import { SessionStatus } from "./session-status";
+
+const AUTOMATIC_SESSION_TITLE_FALLBACK = "New conversation";
 
 export type FleetTileProps = {
   session: Session;
-  /** Overrides the derived title (metadata.title/name, else the initial message). */
+  /** Overrides the derived title (session title, metadata title/name, or safe fallback). */
   title?: string | undefined;
   /** Extra line under the title — e.g. "drift check" or the worker's task. */
   subtitle?: string | undefined;
@@ -15,8 +17,8 @@ export type FleetTileProps = {
 
 /** Best-effort display title for a session. */
 export function sessionDisplayTitle(session: Session): string {
-  // A set title (agent-generated or user-renamed) wins over metadata + the
-  // initial-message fallback.
+  // A set title (agent-generated or user-renamed) wins over metadata and the
+  // prompt-free fallback.
   if (typeof session.title === "string" && session.title.trim().length > 0) {
     return session.title;
   }
@@ -26,7 +28,7 @@ export function sessionDisplayTitle(session: Session): string {
       return value;
     }
   }
-  return truncate(session.initialMessage, 100) || session.id.slice(0, 8);
+  return AUTOMATIC_SESSION_TITLE_FALLBACK;
 }
 
 /**

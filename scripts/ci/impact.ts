@@ -15,7 +15,7 @@ import {
 import { changesetIgnoreSet } from "../publishable-workspaces";
 
 export type ImpactReason = { path: string; reason: string };
-export type BrowserAcceptanceLane = "interaction" | "knowledge" | "workbench";
+export type BrowserAcceptanceLane = "interaction" | "knowledge" | "onboarding" | "workbench";
 export type ImpactPlan = {
   schemaVersion: 1;
   mode: "focused" | "full" | "docs";
@@ -234,12 +234,22 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/source-packages-control-center.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/timeline-scroll.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/knowledge-surfaces.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
     "@opengeni/contracts",
     "@opengeni/db",
     "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/organization-onboarding-acceptance.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
@@ -269,11 +279,13 @@ const BROWSER_ACCEPTANCE_TESTS: Readonly<Record<BrowserAcceptanceLane, readonly 
     "test/e2e/codex-overview.e2e.ts",
     "test/e2e/custom-api-control-center.browser.e2e.ts",
     "test/e2e/queue-surface.browser.e2e.ts",
+    "test/e2e/timeline-scroll.browser.e2e.ts",
     "test/e2e/user-message-disclosure.browser.e2e.ts",
     "test/e2e/realtime-demo.browser.e2e.ts",
     "test/e2e/source-packages-control-center.browser.e2e.ts",
   ],
   knowledge: ["test/e2e/session-pins.browser.e2e.ts", "test/e2e/knowledge-surfaces.browser.e2e.ts"],
+  onboarding: ["test/e2e/organization-onboarding-acceptance.e2e.ts"],
   workbench: [
     "test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
     "test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
@@ -449,7 +461,7 @@ function fullPlan(
     unitTests: tests.unit,
     integrationTests: tests.integration,
     e2eTests: tests.e2e,
-    browserAcceptanceLanes: ["interaction", "knowledge", "workbench"],
+    browserAcceptanceLanes: ["interaction", "knowledge", "onboarding", "workbench"],
     artifactRuntimeRequired: true,
     buildPackages: graph.packages
       .filter((pkg) => pkg.name.startsWith("@opengeni/") && pkg.packageJson.private !== true)

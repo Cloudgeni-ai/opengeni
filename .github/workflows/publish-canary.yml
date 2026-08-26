@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: "Exact 40-character main SHA to publish as canary (default: this ref)."
-        required: false
+        description: "Exact lowercase 40-character protected-main SHA to publish as canary."
+        required: true
         type: string
 
 concurrency:
@@ -24,11 +24,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Admit protected main source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$SOURCE_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/publish-canary.yml@refs/heads/main" ]]
+
       - name: Check out source
         uses: actions/checkout@v6
         with:
-          ref: "${{ inputs.source_sha || github.sha }}"
+          ref: "${{ github.sha }}"
           persist-credentials: false
+
+      - name: Verify exact source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2

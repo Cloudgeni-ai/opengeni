@@ -7,7 +7,6 @@ import type {
 import {
   ArrowDownIcon,
   ArrowRightIcon,
-  ArrowUpToLineIcon,
   BotIcon,
   CheckCircle2Icon,
   CheckIcon,
@@ -43,6 +42,11 @@ import {
 import { cn } from "../lib/cn";
 import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
+import {
+  invokeOlderHistoryLoaderWithReceiptCapture,
+  type OlderHistoryLoadReceipt,
+  type OlderHistoryLoader,
+} from "../older-history";
 import { Markdown } from "./markdown";
 import {
   UserMessageBody,
@@ -181,8 +185,12 @@ export type MessageTimelineProps = {
   hasOlder?: boolean | undefined;
   /** An older window is being fetched; shows the quiet top shimmer. */
   loadingOlder?: boolean | undefined;
-  /** Called when the reader nears the top and older history should backfill. */
-  onLoadOlder?: (() => void) | undefined;
+  /**
+   * Called when older history should backfill. Existing void, synchronous-value,
+   * and arbitrary-promise callbacks remain supported. Receipt-aware loaders
+   * preserve committed-page direction through wrappers and bounded windows.
+   */
+  onLoadOlder?: OlderHistoryLoader | undefined;
   /** Jump to the durable session start (bounded oldest window, no middle). */
   onJumpToStart?: (() => void | Promise<void>) | undefined;
   /** True while the oldest window is loading. */
@@ -235,6 +243,63 @@ const PIN_THRESHOLD_PX = 48;
  */
 const OLDER_PREFETCH_MARGIN_PX = 400;
 const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
+const PRIMARY_ACTION_CLASS =
+  "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto";
+const MESSAGE_BUBBLE_CLASS =
+  "w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg";
+const WAITING_PILL_CLASS =
+  "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting";
+const LOADING_CHIP_CLASS =
+  "pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur";
+
+// State: 0 underfill retry, 1 prefetch pending, 2 compatibility-settled,
+// 3 explicit no-progress waiting to become an underfill retry.
+// The tuple identity is the exact request ownership fence. The boundary may rebase
+// forward while that request is pending when a bounded live-tail append evicts
+// its former oldest row. First-party loaders mark the exact owner when their
+// older page commits; retained direction is the fallback for other hosts.
+type OlderLoadAttempt = [
+  boundary: string | undefined,
+  state?: number,
+  receipt?: OlderHistoryLoadReceipt,
+];
+
+function invokeOlderLoad(
+  load: OlderHistoryLoader,
+  noProgress: () => void,
+  attempt: OlderLoadAttempt,
+): 1 | undefined {
+  try {
+    // Receipt creation is captured synchronously through legacy wrappers such
+    // as `() => void loadOlder()`, even when the wrapper discards the return.
+    const result = invokeOlderHistoryLoaderWithReceiptCapture(load, (receipt) => {
+      attempt[2] = receipt;
+    }) as OlderHistoryLoadReceipt | PromiseLike<unknown> | unknown;
+    const receipt =
+      attempt[2] ??
+      (typeof (result as { committed?: unknown } | undefined)?.committed === "boolean"
+        ? (result as OlderHistoryLoadReceipt)
+        : undefined);
+    if (receipt) {
+      attempt[2] = receipt;
+      void receipt.then(
+        (value) => value === false && !receipt.committed && noProgress(),
+        noProgress,
+      );
+      return 1;
+    }
+    if (typeof (result as PromiseLike<unknown> | undefined)?.then != "function") {
+      return;
+    }
+    void (result as PromiseLike<unknown>).then(
+      (value) => value === false && noProgress(),
+      noProgress,
+    );
+  } catch {
+    noProgress();
+  }
+  return 1;
+}
 
 /**
  * Pinned = the viewport bottom is within PIN_THRESHOLD_PX of the content
@@ -245,7 +310,8 @@ const OLDER_PREFETCH_ROOT_MARGIN = `${OLDER_PREFETCH_MARGIN_PX}px 0px 0px 0px`;
  * cannot scroll at all is always pinned.
  */
 function maxScrollOf(node: HTMLElement): number {
-  return Math.max(0, node.scrollHeight - node.clientHeight);
+  // Browser layout guarantees scrollHeight is at least clientHeight.
+  return node.scrollHeight - node.clientHeight;
 }
 
 /**
@@ -334,12 +400,16 @@ export function MessageTimeline({
   className,
 }: MessageTimelineProps) {
   const resolvedItems = useMemo(() => {
-    const projected = items ?? buildTimeline(events ?? []);
+    const projectedItems = items ?? buildTimeline(events ?? []);
     if (!shouldRenderAuthNeeded) {
-      return projected;
+      return projectedItems;
     }
-    return projected.filter((item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item));
+    return projectedItems.filter(
+      (item) => item.kind !== "auth-needed" || shouldRenderAuthNeeded(item),
+    );
   }, [items, events, shouldRenderAuthNeeded]);
+  const sourceItems = items || events;
+  const olderBoundaryKey = sourceItems?.[0]?.id;
   const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
   const annotationSources = useMemo(() => {
     const sources = new Map<string, TimelineAnnotationSourceDescriptor>();
@@ -367,15 +437,18 @@ export function MessageTimeline({
   // history forever while the reader sits at the tip. Arm on first scroll-up.
   const olderPrefetchArmedRef = useRef(false);
   const [olderPrefetchArmed, setOlderPrefetchArmed] = useState(false);
-  // One loadOlder per visit to the top band. Re-arm only after the reader
-  // leaves that band (scrolls down / sentinel exits) — never from scrolling
-  // further toward y=0 (that was the batch-top load loop).
-  const olderLoadGateRef = useRef<"armed" | "cooling">("armed");
   // A collapsed history tail can be shorter than the viewport. In that state
   // there is no upward scroll range, so reader intent can never arm the top
   // sentinel. Request one older page per loaded window until history either
-  // fills the viewport or the host reports that no older rows remain.
-  const underfillLoadWindowRef = useRef<string | null>(null);
+  // fills the viewport or the host reports that no older rows remain. Each
+  // attempt owns the oldest loaded item boundary across BOTH the automatic
+  // underfill and reader-driven sentinel paths. Live-tail appends do not
+  // advance older pagination or release that exact owner.
+  const olderLoadAttemptRef = useRef<OlderLoadAttempt | null>(null);
+  const [underfillSettledAttempt, setUnderfillSettledAttempt] = useState<OlderLoadAttempt | null>(
+    null,
+  );
+  const underfillRetryReadyRef = useRef(false);
   const resizeFollowRafRef = useRef<number | null>(null);
   const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
   // Content stays invisible until the tip is hard-parked across a short
@@ -449,11 +522,21 @@ export function MessageTimeline({
   const foldMemoryRef = useRef<Map<string, FoldRestingState>>(new Map());
   const userMessageDisclosureMemoryRef = useRef<Map<string, boolean>>(new Map());
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
-  const groupKeyByItemIdRef = useRef<Map<string, string>>(new Map());
+  const firstItemGroupKeyRef = useRef<string | null>(null);
   const groupOffsetByKeyRef = useRef<Map<string, number>>(new Map());
+  const firstItemContentTopRef = useRef<number | null>(null);
   const firstItemId = resolvedItems[0]?.id ?? null;
-  const lastItemId = resolvedItems.at(-1)?.id ?? null;
-  const loadedWindowKey = JSON.stringify([firstItemId, lastItemId, resolvedItems.length]);
+  // Pagination ownership follows the oldest committed input, before host
+  // filtering and grouping. A page containing only suppressed auth notices
+  // still advances this receipt, while live-tail appends leave it unchanged.
+  // Promise fulfillment alone does neither, so delayed prepends stay fenced.
+  const underfillRetryReady = (underfillRetryReadyRef.current = !!(
+    underfillSettledAttempt &&
+    underfillSettledAttempt === olderLoadAttemptRef.current &&
+    hasOlder &&
+    onLoadOlder &&
+    !loadingOlder
+  ));
   // Bulk paints (the initial tail window, a prepended older window — detected
   // by the first group key changing) must not run per-row entrance animations.
   const firstKeyChangedForBulk =
@@ -468,6 +551,15 @@ export function MessageTimeline({
     if (pinnedRef.current !== value) {
       pinnedRef.current = value;
       setPinned(value);
+    }
+  }, []);
+
+  const rearmOlderPrefetchAfterLeavingTop = useCallback((node: HTMLElement) => {
+    if (node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+      const state = olderLoadAttemptRef.current?.[1];
+      if (state === 2 || state === 3) {
+        olderLoadAttemptRef.current = null;
+      }
     }
   }, []);
 
@@ -502,7 +594,7 @@ export function MessageTimeline({
   }, []);
 
   const cancelLeaveFallback = useCallback(() => {
-    if (leaveFallbackRafRef.current !== null) {
+    if (leaveFallbackRafRef.current != null) {
       cancelFrame(leaveFallbackRafRef.current);
       leaveFallbackRafRef.current = null;
     }
@@ -515,7 +607,7 @@ export function MessageTimeline({
 
   const stopFollow = useCallback(() => {
     followRef.current = tipFollowCancel(followRef.current);
-    if (followFrameRef.current !== null) {
+    if (followFrameRef.current != null) {
       cancelFrame(followFrameRef.current);
       followFrameRef.current = null;
     }
@@ -558,7 +650,7 @@ export function MessageTimeline({
       if (programmaticScrollRef.current > 0) {
         return;
       }
-      if (followRef.current.running || followFrameRef.current !== null) {
+      if (followRef.current.running || followFrameRef.current != null) {
         return;
       }
       if (isNearBottom(node) || maxScrollOf(node) <= 1) {
@@ -566,11 +658,9 @@ export function MessageTimeline({
         return;
       }
       releasePinFromReader(node);
-      if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
-        olderLoadGateRef.current = "armed";
-      }
+      rearmOlderPrefetchAfterLeavingTop(node);
     },
-    [autoFollow, clearPendingReaderLeave, releasePinFromReader],
+    [autoFollow, clearPendingReaderLeave, rearmOlderPrefetchAfterLeavingTop, releasePinFromReader],
   );
 
   const scheduleLeaveFallback = useCallback(() => {
@@ -620,7 +710,7 @@ export function MessageTimeline({
     target: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
-    if (event.button !== 0 && event.pointerType === "mouse") {
+    if (event.button && event.pointerType === "mouse") {
       return;
     }
     // Clicks on chips/buttons/links must not arm — their settle collapse
@@ -730,39 +820,61 @@ export function MessageTimeline({
   );
 
   const requestOlderIfUnderfilled = useCallback(
-    (node: HTMLElement) => {
-      if (
-        underfillLoadWindowRef.current !== null &&
-        underfillLoadWindowRef.current !== loadedWindowKey
-      ) {
-        // The requested page landed. Ordinary sentinel prefetch may own the
-        // next approach to the top once this window has a usable scroll range.
-        olderLoadGateRef.current = "armed";
+    (node: HTMLElement, retry?: OlderLoadAttempt) => {
+      let currentAttempt = olderLoadAttemptRef.current;
+      if (retry && (currentAttempt !== retry || retry[0] !== olderBoundaryKey)) {
+        // AnimatePresence may retain the exiting button briefly. Its stale
+        // handler cannot replace a newer exact owner.
+        return;
+      }
+      const underfilled = maxScrollOf(node) <= 1;
+      if (!retry && underfilled && currentAttempt?.[1] === 3) {
+        // A receipted prefetch already declined or failed while the viewport
+        // was still scrollable. Collapse may later remove the scroll range;
+        // promote that exact owner to Retry without issuing another request.
+        currentAttempt[1] = 0;
+        setUnderfillSettledAttempt(currentAttempt);
+        return;
+      }
+      if (!retry && underfilled && currentAttempt?.[1] === 2) {
+        // A settled ordinary prefetch owns only this visit to the top band.
+        // If its resulting window cannot scroll, yield to automatic underfill
+        // so the reader is not stranded behind a cooldown they cannot exit.
+        currentAttempt = olderLoadAttemptRef.current = null;
       }
       // clientHeight=0 is pre-layout/headless, not evidence that the rendered
       // history underfills a real viewport.
       if (
         node.clientHeight <= 1 ||
-        maxScrollOf(node) > 1 ||
+        (!retry && !underfilled) ||
         !hasOlder ||
         loadingOlder ||
         !onLoadOlder ||
-        underfillLoadWindowRef.current === loadedWindowKey
+        (currentAttempt && !retry)
       ) {
         return;
       }
-      underfillLoadWindowRef.current = loadedWindowKey;
-      // If the reader had already armed ordinary prefetch, do not let its
-      // sentinel duplicate this request while the same short page is loading.
-      if (olderPrefetchArmedRef.current) {
-        olderLoadGateRef.current = "cooling";
-      }
-      onLoadOlder();
+      const attempt: OlderLoadAttempt = (olderLoadAttemptRef.current = [olderBoundaryKey]);
+      setUnderfillSettledAttempt(null);
+      // Every underfill request owns the ordinary sentinel too, even if reader
+      // intent had not armed it yet when this short-window request began.
+      const noProgress = () => {
+        if (scrollRef.current && olderLoadAttemptRef.current === attempt) {
+          setUnderfillSettledAttempt(attempt);
+        }
+      };
+      // Legacy fire-and-forget callbacks keep the one-shot behavior. Hosts
+      // that return the real promise opt into safe rejection/no-progress retry;
+      // exact `false` is the first-party request-not-accepted receipt.
+      // All other fulfillment retains this exact owner until its prepend
+      // boundary commits; promise settlement alone cannot prove progress.
+      invokeOlderLoad(onLoadOlder, noProgress, attempt);
     },
-    [hasOlder, loadedWindowKey, loadingOlder, onLoadOlder],
+    [hasOlder, loadingOlder, olderBoundaryKey, onLoadOlder],
   );
-
-  const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(() => undefined);
+  const driveFollowRef = useRef<(node: HTMLElement, now?: number) => void>(
+    requestOlderIfUnderfilled as (node: HTMLElement, now?: number) => void,
+  );
   const driveFollow = useCallback(
     (node: HTMLElement, nowMs?: number) => {
       if (!pinnedRef.current || hasNewerRef.current) {
@@ -820,7 +932,7 @@ export function MessageTimeline({
           // A direct glue write re-based the camera — drop any stale fraction.
           cameraTop: null,
         };
-        if (followFrameRef.current === null) {
+        if (followFrameRef.current == null) {
           followFrameRef.current = requestFrame((frameNow) => {
             followFrameRef.current = null;
             const current = scrollRef.current;
@@ -854,7 +966,7 @@ export function MessageTimeline({
       syncScrollBaseline(node);
       if (result.state.running) {
         cancelLeaveFallback();
-        if (followFrameRef.current === null) {
+        if (followFrameRef.current == null) {
           followFrameRef.current = requestFrame((frameNow) => {
             followFrameRef.current = null;
             const current = scrollRef.current;
@@ -863,7 +975,7 @@ export function MessageTimeline({
             }
           });
         }
-      } else if (followFrameRef.current !== null) {
+      } else if (followFrameRef.current != null) {
         cancelFrame(followFrameRef.current);
         followFrameRef.current = null;
       }
@@ -886,12 +998,65 @@ export function MessageTimeline({
       return;
     }
     const previousFirstItemId = previousFirstItemIdRef.current;
-    const previousGroupKeyByItemId = groupKeyByItemIdRef.current;
+    const previousFirstItemGroupKey = firstItemGroupKeyRef.current;
     const previousGroupOffsetByKey = groupOffsetByKeyRef.current;
+    const previousItemContentTop = firstItemContentTopRef.current;
     const previousScrollTop = lastScrollTopRef.current;
-    const firstItemChanged = previousFirstItemId !== null && firstItemId !== previousFirstItemId;
+    const previousMaxScroll = lastMaxScrollRef.current;
+    const wasAtLiveTailBeforeCommit =
+      previousMaxScroll <= 1 ||
+      previousMaxScroll - previousScrollTop < Math.min(PIN_THRESHOLD_PX, previousMaxScroll);
+    const firstItemChanged = !!previousFirstItemId && firstItemId !== previousFirstItemId;
     const prepended =
       firstItemChanged && resolvedItems.some((item) => item.id === previousFirstItemId);
+    const attempt = olderLoadAttemptRef.current;
+    const committedZeroOverlapOlderReplacement = !!(
+      attempt?.[2]?.committed &&
+      firstItemChanged &&
+      !prepended
+    );
+    const restorePrependAnchor = () => {
+      // Keep the reader on the same retained rows. Prefer the exact first-item
+      // content coordinate (needed when a prepend merges inside one group),
+      // then the retained group offset, then scrollHeight as a final fallback.
+      // If native anchoring already applied the same shift, leave scrollTop.
+      let delta: number | null = null;
+      if (previousFirstItemId && previousItemContentTop != null) {
+        const itemEl = node.querySelector(
+          `[data-og-item="${cssEscapeAttribute(previousFirstItemId)}"]`,
+        );
+        if (itemEl instanceof HTMLElement) {
+          const scrollerTop = node.getBoundingClientRect().top;
+          const currentItemTop = itemEl.getBoundingClientRect().top - scrollerTop + node.scrollTop;
+          delta = Math.round(currentItemTop - previousItemContentTop);
+        }
+      }
+      const anchorKey = previousFirstItemGroupKey;
+      const previousAnchorTop =
+        anchorKey != null ? previousGroupOffsetByKey.get(anchorKey) : undefined;
+      const anchorEl =
+        anchorKey != null
+          ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(anchorKey)}"]`)
+          : null;
+      if (delta == null && anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
+        const moved = Math.round(anchorEl.offsetTop - previousAnchorTop);
+        if (moved) {
+          delta = moved;
+        }
+      }
+      if (delta == null) {
+        const heightDelta = Math.round(node.scrollHeight - previousScrollHeightRef.current);
+        if (heightDelta > 0) {
+          delta = heightDelta;
+        }
+      }
+      if (delta != null) {
+        const expected = previousScrollTop + delta;
+        if (Math.abs(node.scrollTop - expected) > 2) {
+          writeScrollTop(node, expected);
+        }
+      }
+    };
     if (pendingJumpToStartRef.current && firstItemChanged) {
       // The oldest window landed — jump against the NEW DOM, and skip the
       // prepend correction (it would shift the reader away from the top).
@@ -907,6 +1072,42 @@ export function MessageTimeline({
         applyPinned(true);
         snapToBottom(node);
       }
+    } else if (committedZeroOverlapOlderReplacement) {
+      // An oldest-directed bounded page can replace every previously mounted
+      // row. Its receipt is the only causal proof that this is backward
+      // progress rather than live-tail forward eviction. Anchor at the bottom
+      // seam before recording this window's scroll baselines so an unpinned
+      // reader stays adjacent to the history they were reading.
+      clearPendingReaderLeave();
+      stopFollow();
+      writeScrollTop(node, maxScrollOf(node));
+      if (attempt?.[1] === 1 && pinnedRef.current) {
+        applyPinned(false);
+      }
+    } else if (prepended) {
+      if (
+        autoFollow &&
+        pinnedRef.current &&
+        !hasNewer &&
+        !pendingReaderLeaveRef.current &&
+        (wasAtLiveTailBeforeCommit || olderLoadAttemptRef.current)
+      ) {
+        // A pending short-window load owns the prepend even when live growth
+        // has left its still-pinned camera with raw geometry debt. Unrelated
+        // prepends retain the prior-tip fallback so a stale pin after an
+        // extension/programmatic history jump still restores its row anchor.
+        clearPendingReaderLeave();
+        snapToBottom(node);
+      } else {
+        restorePrependAnchor();
+        if (autoFollow && pinnedRef.current && !hasNewer) {
+          // Geometry or a pending extension/programmatic leave proves the
+          // reader was browsing history even if the pin ref has not settled.
+          stopFollow();
+          clearPendingReaderLeave();
+          applyPinned(false);
+        }
+      }
     } else if (autoFollow && pinnedRef.current && !hasNewer) {
       // Load/remount (still hidden): hard-park. Live tip after reveal: ease.
       // Pending unarmed leave: tip *growth* must not yank (Vimium during stream).
@@ -921,66 +1122,25 @@ export function MessageTimeline({
       } else {
         driveFollow(node);
       }
-    } else if (prepended) {
-      // Keep the reader on the same retained rows. Prefer the offsetTop delta
-      // of the group that still holds the previous first item — that stays
-      // correct when loadOlder also truncates the tip (height delta then lies).
-      // If native anchoring already applied the same shift, leave scrollTop.
-      const anchorKey =
-        previousFirstItemId !== null
-          ? previousGroupKeyByItemId.get(previousFirstItemId)
-          : undefined;
-      const previousAnchorTop =
-        anchorKey !== undefined ? previousGroupOffsetByKey.get(anchorKey) : undefined;
-      const anchorEl =
-        anchorKey !== undefined
-          ? node.querySelector(`[data-og-group-key="${cssEscapeAttribute(anchorKey)}"]`)
-          : null;
-      let delta: number | null = null;
-      if (anchorEl instanceof HTMLElement && previousAnchorTop !== undefined) {
-        const moved = Math.round(anchorEl.offsetTop - previousAnchorTop);
-        if (moved !== 0) {
-          delta = moved;
-        }
-      }
-      if (delta === null) {
-        const heightDelta = Math.round(node.scrollHeight - previousScrollHeightRef.current);
-        if (heightDelta > 0) {
-          delta = heightDelta;
-        }
-      }
-      if (delta !== null) {
-        const expected = previousScrollTop + delta;
-        if (Math.abs(node.scrollTop - expected) > 2) {
-          writeScrollTop(node, expected);
-        }
-      }
     }
     // After a prepend, if restore left us below the top prefetch band,
     // re-arm so a later approach can load again. Still cooling while parked
     // inside the band (short pages) — that stops the y=0 load loop.
-    if (
-      prepended &&
-      !pinnedRef.current &&
-      olderLoadGateRef.current === "cooling" &&
-      node.scrollTop > OLDER_PREFETCH_MARGIN_PX
-    ) {
-      olderLoadGateRef.current = "armed";
+    if (prepended && !pinnedRef.current && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+      rearmOlderPrefetchAfterLeavingTop(node);
     }
     previousFirstItemIdRef.current = firstItemId;
     previousScrollHeightRef.current = node.scrollHeight;
     syncScrollBaseline(node);
-    // Item→group keys are cheap (data only). offsetTop queries are O(groups)
-    // layout reads — skip while pinned at the live tip (every stream token
-    // used to remeasure the whole timeline; that was the long-run lag).
-    const nextKeyByItemId = new Map<string, string>();
-    for (const { group, key } of groups) {
-      for (const itemId of timelineGroupItemIds(group)) {
-        nextKeyByItemId.set(itemId, key);
-      }
-    }
-    groupKeyByItemIdRef.current = nextKeyByItemId;
-    const needOffsets = prepended || firstItemChanged || !pinnedRef.current || Boolean(hasNewer);
+    // offsetTop queries are O(groups); skip while pinned at the live tip
+    // (every stream token used to remeasure the whole timeline).
+    firstItemGroupKeyRef.current = groups[0]?.key ?? null;
+    const needOffsets =
+      prepended ||
+      firstItemChanged ||
+      !pinnedRef.current ||
+      hasNewer ||
+      firstItemContentTopRef.current == null;
     if (needOffsets) {
       const nextOffsetByKey = new Map<string, number>();
       for (const { key } of groups) {
@@ -990,14 +1150,52 @@ export function MessageTimeline({
         }
       }
       groupOffsetByKeyRef.current = nextOffsetByKey;
+      const firstItemEl = firstItemId
+        ? node.querySelector(`[data-og-item="${cssEscapeAttribute(firstItemId)}"]`)
+        : null;
+      firstItemContentTopRef.current =
+        firstItemId && firstItemEl instanceof HTMLElement
+          ? firstItemEl.getBoundingClientRect().top -
+            node.getBoundingClientRect().top +
+            node.scrollTop
+          : null;
     }
+
+    // Promise settlement is not itself permission to retry. A receipt-marked
+    // accepted page retires its exact owner on this commit even when projection
+    // is empty or merges into the same first item. Without that mark, retain
+    // the compatibility fallback: a retained prior boundary proves prepend,
+    // while a missing prior boundary is forward eviction and merely rebases.
+    if (!attempt) {
+      return;
+    }
+    if (!attempt[2]?.committed && attempt[0] === olderBoundaryKey) {
+      return;
+    }
+    if (
+      !attempt[2]?.committed &&
+      attempt[0] &&
+      !sourceItems?.find((entry) => entry.id === attempt[0])
+    ) {
+      attempt[0] = olderBoundaryKey;
+      return;
+    }
+    if (!attempt[1] || !hasOlder) {
+      setUnderfillSettledAttempt((olderLoadAttemptRef.current = null));
+      return;
+    }
+    // Boundary progress retires the request owner. A late settlement from
+    // that completed prefetch cannot mutate the new window's cooldown owner.
+    olderLoadAttemptRef.current = [olderBoundaryKey, 2];
+    rearmOlderPrefetchAfterLeavingTop(node);
+    requestOlderIfUnderfilled(node);
   });
 
   // First paint / session remount: keep the scroller hidden, snap to tip for
   // two animation frames (late sync layout), then reveal. Does not change the
   // tip-follow ease law used once `revealed` is true.
   useLayoutEffect(() => {
-    if (revealed || allGroups.length === 0) {
+    if (revealed || !allGroups.length) {
       return;
     }
     let cancelled = false;
@@ -1025,7 +1223,7 @@ export function MessageTimeline({
     return () => {
       cancelled = true;
       cancelFrame(frame1);
-      if (frame2 !== 0) {
+      if (frame2) {
         cancelFrame(frame2);
       }
     };
@@ -1044,7 +1242,6 @@ export function MessageTimeline({
       olderPrefetchArmedRef.current = false;
       setOlderPrefetchArmed(false);
     }
-    olderLoadGateRef.current = "armed";
     wantPinRef.current = false;
     pendingJumpToStartRef.current = false;
     previousFirstItemIdRef.current = null;
@@ -1053,12 +1250,12 @@ export function MessageTimeline({
     lastMaxScrollRef.current = 0;
     lastScrollHeightRef.current = 0;
     lastClientHeightRef.current = 0;
-    groupKeyByItemIdRef.current = new Map();
+    firstItemGroupKeyRef.current = null;
     groupOffsetByKeyRef.current = new Map();
+    firstItemContentTopRef.current = null;
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
-    underfillLoadWindowRef.current = null;
     seenActivityIdsRef.current.clear();
     applyPinned(true);
   }, [allGroups.length, revealed, applyPinned]);
@@ -1107,21 +1304,60 @@ export function MessageTimeline({
       (entries) => {
         const intersecting = entries.some((entry) => entry.isIntersecting);
         if (!intersecting) {
-          // Left the top band — next approach may load once.
-          olderLoadGateRef.current = "armed";
+          // Left the top band. A settled ordinary prefetch releases its exact
+          // owner here; a still-pending request remains cooling so a quick
+          // leave/re-enter cannot overlap it.
+          const attempt = olderLoadAttemptRef.current;
+          if (attempt?.[1] === 2 || attempt?.[1] === 3) {
+            olderLoadAttemptRef.current = null;
+          }
           return;
         }
-        if (olderLoadGateRef.current !== "armed") {
+        // Both automatic underfill and ordinary prefetch use one boundary
+        // owner. In particular, live growth cannot arm a second sentinel load
+        // while the short-window request that preceded it is still pending.
+        if (olderLoadAttemptRef.current) {
           return;
         }
-        olderLoadGateRef.current = "cooling";
-        onLoadOlder();
+        const attempt: OlderLoadAttempt = (olderLoadAttemptRef.current = [olderBoundaryKey, 1]);
+        const noProgress = () => {
+          if (!scrollRef.current || olderLoadAttemptRef.current !== attempt) {
+            return;
+          }
+          attempt[1] = 3;
+          if (root.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
+            olderLoadAttemptRef.current = null;
+          } else if (maxScrollOf(root) <= 1) {
+            attempt[1] = 0;
+            setUnderfillSettledAttempt(attempt);
+          }
+        };
+        // Preserve legacy fire-and-forget top-band retries: the callback has
+        // synchronously returned, but this visit remains cooling until exit.
+        // Only rejection/throw/exact `false` is a no-progress receipt. Other
+        // fulfillment retains the pending owner until boundary commit;
+        // otherwise a delayed prepend could overlap a same-boundary request.
+        if (
+          !invokeOlderLoad(onLoadOlder, noProgress, attempt) &&
+          olderLoadAttemptRef.current === attempt
+        ) {
+          olderLoadAttemptRef.current[1] = 2;
+          requestOlderIfUnderfilled(root);
+        }
       },
       { root, rootMargin: OLDER_PREFETCH_ROOT_MARGIN },
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [olderPrefetchArmed, hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
+  }, [
+    firstGroupKey,
+    hasOlder,
+    loadingOlder,
+    olderBoundaryKey,
+    olderPrefetchArmed,
+    onLoadOlder,
+    requestOlderIfUnderfilled,
+  ]);
 
   // History view: page forward when the reader nears the bottom of the current
   // non-tip window. Does not pull the whole gap — one density-bounded page.
@@ -1161,7 +1397,7 @@ export function MessageTimeline({
       return;
     }
     const observer = new ResizeObserver(() => {
-      if (resizeFollowRafRef.current !== null) {
+      if (resizeFollowRafRef.current != null) {
         return;
       }
       resizeFollowRafRef.current = requestFrame(() => {
@@ -1188,7 +1424,7 @@ export function MessageTimeline({
     observer.observe(node);
     return () => {
       observer.disconnect();
-      if (resizeFollowRafRef.current !== null) {
+      if (resizeFollowRafRef.current != null) {
         cancelFrame(resizeFollowRafRef.current);
         resizeFollowRafRef.current = null;
       }
@@ -1289,9 +1525,7 @@ export function MessageTimeline({
       if (readerArmed && readerUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
         readerIntentArmRef.current = false;
         releasePinFromReader(node);
-        if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
-          olderLoadGateRef.current = "armed";
-        }
+        rearmOlderPrefetchAfterLeavingTop(node);
         return;
       }
       // Tip grew under a still viewport (no reader-up): ease back to the tip.
@@ -1341,9 +1575,7 @@ export function MessageTimeline({
     }
     // Re-arm older prefetch only after leaving the top band (scroll down into
     // content). Never re-arm/load from continued scroll toward y=0.
-    if (olderLoadGateRef.current === "cooling" && node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
-      olderLoadGateRef.current = "armed";
-    }
+    rearmOlderPrefetchAfterLeavingTop(node);
   };
 
   const onScrollEnd = () => {
@@ -1407,7 +1639,7 @@ export function MessageTimeline({
                     )}
                   >
                     <div className="relative mx-auto flex w-full max-w-3xl flex-col gap-5">
-                      {groups.length === 0
+                      {!groups.length
                         ? (emptyState ?? (
                             <p className="py-10 text-center text-og-menu text-og-fg-subtle">
                               No activity yet.
@@ -1494,7 +1726,8 @@ export function MessageTimeline({
                   <AnimatePresence>
                     {loadingOlder ||
                     loadingOldest ||
-                    (hasOlder && onJumpToStart && olderPrefetchArmed) ? (
+                    (hasOlder && onJumpToStart && olderPrefetchArmed) ||
+                    underfillRetryReady ? (
                       // Floating over the scroller (not a timeline row) so showing and
                       // hiding it never reflows history under the reader.
                       <motion.div
@@ -1504,26 +1737,38 @@ export function MessageTimeline({
                         transition={{ duration: 0.15, ease: "easeOut" }}
                         data-og-loading-older=""
                         aria-live="polite"
-                        className="absolute inset-x-0 top-3 z-10 flex justify-center gap-2"
+                        className="absolute inset-x-0 top-3 z-10 flex justify-center"
                       >
                         {loadingOlder || loadingOldest ? (
-                          <span className="pointer-events-none inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
+                          <span className={LOADING_CHIP_CLASS}>
                             <span className="og-shimmer-text">
                               {loadingOldest ? "Jumping to start…" : "Loading earlier activity…"}
                             </span>
                           </span>
                         ) : null}
-                        {hasOlder && onJumpToStart && !loadingOldest ? (
+                        {hasOlder &&
+                        !loadingOlder &&
+                        !loadingOldest &&
+                        (underfillRetryReady || onJumpToStart) ? (
                           <button
                             type="button"
-                            data-og-jump-to-start=""
-                            disabled={loadingOlder}
+                            data-og-retry={underfillRetryReady || undefined}
+                            data-og-jump-to-start={!underfillRetryReady || undefined}
                             onClick={() => {
+                              const node = scrollRef.current;
+                              if (underfillRetryReady) {
+                                if (node && underfillRetryReadyRef.current) {
+                                  // AnimatePresence retains this handler during
+                                  // exit. Current authorization plus the exact
+                                  // attempt check prevent stale dispatch.
+                                  requestOlderIfUnderfilled(node, underfillSettledAttempt!);
+                                }
+                                return;
+                              }
                               applyPinned(false);
                               pendingJumpToStartRef.current = true;
                               const seq = ++jumpToStartSeqRef.current;
-                              const node = scrollRef.current;
-                              void Promise.resolve(onJumpToStart()).then(
+                              void Promise.resolve(onJumpToStart!()).then(
                                 () => {
                                   // The commit that swaps in the oldest window consumes
                                   // the flag against the new DOM; this write covers the
@@ -1552,14 +1797,9 @@ export function MessageTimeline({
                                 },
                               );
                             }}
-                            className={cn(
-                              "inline-flex items-center gap-1.5 rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1.5",
-                              "text-og-control font-medium text-og-fg shadow-og-md backdrop-blur",
-                              "hover:border-og-border-strong disabled:opacity-60",
-                            )}
+                            className="rounded-full border border-og-border px-3 py-1.5 text-og-control"
                           >
-                            <ArrowUpToLineIcon className="size-3.5" />
-                            Jump to start
+                            {underfillRetryReady ? "Retry earlier activity" : "Jump to start"}
                           </button>
                         ) : null}
                       </motion.div>
@@ -1576,7 +1816,7 @@ export function MessageTimeline({
                         aria-live="polite"
                         className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center"
                       >
-                        <span className="inline-flex items-center rounded-full border border-og-border bg-og-surface-3/90 px-3 py-1 text-og-control font-medium shadow-og-md backdrop-blur">
+                        <span className={LOADING_CHIP_CLASS}>
                           <span className="og-shimmer-text">Loading later activity…</span>
                         </span>
                       </motion.div>
@@ -1862,8 +2102,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
   // turn that is the second layer — quiet nested chips under the outer turn
   // summary when contiguous activity naturally clusters (≥2 only).
   const activityShouldFold =
-    group.kind === "activity" &&
-    Boolean(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
+    group.kind === "activity" && !!(group.outcome || (foldLiveCluster && clusterIsSettled(group)));
   const containsGeneratedImage = timelineGroupContainsGeneratedImage(group);
   // Latch live→folded so a top-level shell that was already mounted open can
   // start the settle beat without remounting bare rail → wrapper.
@@ -1884,7 +2123,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
     );
   }
   const settleFold =
-    group.kind === "turn" ? Boolean(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
+    group.kind === "turn" ? !!(enter && !insideTurn && !turnDefaultOpen) : liveActivitySettle;
   switch (group.kind) {
     case "activity":
       if (insideTurn) {
@@ -2246,7 +2485,7 @@ export function trailingAgentTextAfterTurn(
   if (next?.kind === "item" && next.item.kind === "agent-message") {
     const turnIds = collectTurnIdsFromGroups(group.groups);
     // Degenerate body with no turnIds: do not guess — safer than lifting wrong.
-    if (turnIds.size === 0) {
+    if (!turnIds.size) {
       return undefined;
     }
     if (!next.item.turnId || !turnIds.has(next.item.turnId)) {
@@ -2265,7 +2504,7 @@ function collectTurnCopyText(
   const parts = [collectAgentMessageText(groups), trailingAgentText?.trim() ?? ""].filter(
     (part) => part.length > 0,
   );
-  if (parts.length === 0) {
+  if (!parts.length) {
     return undefined;
   }
   return parts.join("\n\n");
@@ -2350,11 +2589,11 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   const trigger =
     item.trigger && item.phase !== "started" ? COMPACTION_TRIGGER_LABEL[item.trigger] : null;
   const before =
-    item.estimatedTokensBefore !== null
+    item.estimatedTokensBefore != null
       ? Math.round(item.estimatedTokensBefore).toLocaleString("en-US")
       : null;
   const after =
-    item.estimatedTokensAfter !== null
+    item.estimatedTokensAfter != null
       ? Math.round(item.estimatedTokensAfter).toLocaleString("en-US")
       : null;
   const title =
@@ -2375,7 +2614,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
     item.phase === "skipped" && item.skipReason === "summarization_failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.phase === "started"
-        ? "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting"
+        ? WAITING_PILL_CLASS
         : "border-og-border bg-og-surface-1 text-og-fg-muted";
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
@@ -2455,7 +2694,7 @@ function UserMessageRow({
           className="w-fit max-w-full min-w-0"
           trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
-          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
+          <div className={MESSAGE_BUBBLE_CLASS}>
             {item.text ? (
               <div data-og-annotation-source-key={item.annotationSource?.eventId}>
                 {renderMessageText ? (
@@ -2577,7 +2816,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
           className="w-fit max-w-[90%] min-w-0 sm:max-w-[82%]"
           trailing={<MessageFooterTime occurredAt={item.occurredAt} />}
         >
-          <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
+          <div className={MESSAGE_BUBBLE_CLASS}>
             <p className="text-og-xs font-medium text-og-fg-subtle">{settledLabel}</p>
             {item.response.outcome === "answered" ? (
               <div className="mt-1.5 space-y-3">
@@ -2747,9 +2986,7 @@ function WorkerCompletionRow({
   // payloads can carry a leftover pausedReason/rationale from earlier in the
   // worker's life, and a "Worker completed" card must not show a pause section.
   const showPausedReason =
-    item.childStatus !== "failed" &&
-    item.goalStatus === "paused" &&
-    Boolean(item.pausedReason?.trim());
+    item.childStatus !== "failed" && item.goalStatus === "paused" && !!item.pausedReason?.trim();
   const details: { label: string; value: string; muted?: boolean }[] = [
     ...(item.text.trim() ? [{ label: "Report", value: item.text.trim() }] : []),
     ...(item.evidence?.trim()
@@ -2888,14 +3125,14 @@ const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
   },
   paused: {
     label: "Goal paused",
-    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    pill: WAITING_PILL_CLASS,
     icon: PauseIcon,
   },
   resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
   cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
   held: {
     label: "Goal held",
-    pill: "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting",
+    pill: WAITING_PILL_CLASS,
     icon: PauseCircleIcon,
   },
   continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
@@ -3093,7 +3330,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
     item.tone === "failed"
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.tone === "waiting"
-        ? "border-og-status-waiting/35 bg-og-status-waiting/10 text-og-status-waiting"
+        ? WAITING_PILL_CLASS
         : "border-og-border bg-og-surface-1 text-og-fg-muted";
   return (
     <div
@@ -3226,7 +3463,7 @@ function AuthNeededRow({
             onClick={() => void start()}
             disabled={busy}
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
+              PRIMARY_ACTION_CLASS,
               "transition-colors hover:bg-og-accent-strong disabled:opacity-70 pointer-coarse:min-h-9",
             )}
           >
@@ -3239,7 +3476,7 @@ function AuthNeededRow({
             rel="noreferrer"
             target="_blank"
             className={cn(
-              "inline-flex w-full shrink-0 items-center justify-center gap-1.5 rounded-og-md bg-og-accent px-3 py-1.5 text-og-menu font-medium text-og-accent-fg sm:w-auto",
+              PRIMARY_ACTION_CLASS,
               "transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-9",
             )}
           >
@@ -3302,7 +3539,7 @@ function AuthProviderLogo({ src, label }: { src: string | null; label: string })
     `capabilityMonogram` so the reconnect tile reads like every other logo tile. */
 function monogram(label: string): string {
   const words = label.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) {
+  if (!words.length) {
     return "?";
   }
   if (words.length === 1) {

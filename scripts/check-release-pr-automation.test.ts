@@ -3750,13 +3750,16 @@ describe("workflow contracts", () => {
         "Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
         "Long user-message disclosure browser acceptance",
+        "Timeline pagination browser regressions",
         "Public realtime SDK demo browser acceptance",
         "Session pin browser acceptance",
         "Responsive knowledge surfaces browser acceptance",
+        "Organization onboarding lifecycle acceptance",
         "Workbench browser acceptance",
         "Upload session pin visual evidence",
         "Upload Codex quota visual evidence",
         "Upload responsive knowledge-surface evidence",
+        "Upload organization onboarding evidence",
         "Upload workbench visual evidence",
         "Upload editable artifact visual evidence",
       ],
@@ -3812,6 +3815,13 @@ describe("workflow contracts", () => {
         },
       ],
       [
+        "Timeline pagination browser regressions",
+        {
+          lane: "interaction",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/timeline-scroll.browser.e2e.ts",
+        },
+      ],
+      [
         "Public realtime SDK demo browser acceptance",
         {
           lane: "interaction",
@@ -3830,6 +3840,13 @@ describe("workflow contracts", () => {
         {
           lane: "knowledge",
           run: "bun test --max-concurrency=1 --timeout 300000 ./test/e2e/knowledge-surfaces.browser.e2e.ts",
+        },
+      ],
+      [
+        "Organization onboarding lifecycle acceptance",
+        {
+          lane: "onboarding",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/organization-onboarding-acceptance.e2e.ts",
         },
       ],
       [
@@ -3927,6 +3944,14 @@ describe("workflow contracts", () => {
       expect(browser.steps.find((step: any) => step.name === stepName).env).toEqual({
         OPENGENI_REQUIRE_REAL_DB: "1",
       });
+    expect(
+      browser.steps.find(
+        (step: any) => step.name === "Organization onboarding lifecycle acceptance",
+      ).env,
+    ).toEqual({
+      OPENGENI_REQUIRE_REAL_DB: "1",
+      OPENGENI_ONBOARDING_EVIDENCE_DIR: "/tmp/opengeni-onboarding-evidence",
+    });
 
     const expectedEvidence = {
       "Upload session pin visual evidence": {
@@ -3981,6 +4006,16 @@ describe("workflow contracts", () => {
           "/tmp/workbench-tablet-light-offline.png",
           "/tmp/workbench-desktop-dark-changes.png",
           "/tmp/workbench-desktop-light-files.png",
+        ],
+      },
+      "Upload organization onboarding evidence": {
+        if: "${{ always() && matrix.lane == 'onboarding' && (steps.organization_onboarding.outcome == 'success' || steps.organization_onboarding.outcome == 'failure') }}",
+        name: "organization-onboarding-acceptance-evidence",
+        path: [
+          "/tmp/opengeni-onboarding-evidence/organization-onboarding-evidence.json",
+          "/tmp/opengeni-onboarding-evidence/onboarding-owner-desktop-1440.png",
+          "/tmp/opengeni-onboarding-evidence/onboarding-setup-mobile-390.png",
+          "/tmp/opengeni-onboarding-evidence/onboarding-registered-mobile-320.png",
         ],
       },
     } as const;

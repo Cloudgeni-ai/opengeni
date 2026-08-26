@@ -53,6 +53,8 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
     "is retained for dedicated fleet-policy acceptance outside default CI",
   "test/e2e/knowledge-surfaces.browser.e2e.ts":
     "requires dedicated responsive visual evidence and is owned by the curated browser-acceptance gate",
+  "test/e2e/organization-onboarding-acceptance.e2e.ts":
+    "requires a real FORCE-RLS PostgreSQL boundary and browser evidence and is owned by the curated onboarding gate",
   "test/e2e/queue-surface.browser.e2e.ts":
     "requires dedicated queue-surface evidence and is owned by the curated browser-acceptance gate",
   "test/e2e/react-demo-mobile.browser.e2e.ts":
@@ -72,7 +74,7 @@ export const OPT_IN_TESTS: Readonly<Record<string, string>> = {
   "test/e2e/slack-oauth.browser.e2e.ts":
     "requires dedicated Slack OAuth acceptance outside default CI",
   "test/e2e/timeline-scroll.browser.e2e.ts":
-    "is retained for dedicated timeline visual acceptance outside default CI",
+    "requires dedicated timeline interaction acceptance and is owned by the curated browser-acceptance gate",
   "test/e2e/timeline-tip-follow.browser.e2e.ts":
     "is retained for dedicated timeline-tip acceptance outside default CI",
   "test/e2e/transcription.browser.e2e.ts":

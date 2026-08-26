@@ -30,6 +30,7 @@ export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
+export * from "./session-titles";
 
 export {
   CreateWorkspaceArtifactRequest,

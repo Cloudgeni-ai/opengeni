@@ -37,6 +37,7 @@ import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
+import { sessionDisplayTitle } from "@/lib/session-rename";
 import type {
   ScheduledTask,
   Session,
@@ -802,10 +803,10 @@ export function VariableSetCard(props: {
                       sessionId: session.id,
                     }}
                     className="min-w-0 max-w-full rounded-md hover:text-fg"
-                    title={session.initialMessage}
+                    title={sessionDisplayTitle(session)}
                   >
                     <MetaChip className="hover:border-border-strong">
-                      session · {session.initialMessage}
+                      session · {sessionDisplayTitle(session)}
                     </MetaChip>
                   </Link>
                 ))}

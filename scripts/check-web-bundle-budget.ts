@@ -214,9 +214,17 @@ const budgets = {
   // and ordered session Variable Set surfaces all retain methods on the shared
   // OpenGeni client graph. The exact Bun 1.4 Linux/x64 production graph measures
   // 2,184,325 raw / 608,446 gzip bytes, leaving 4,987 raw and 3,906 gzip bytes of
-  // headroom. Initial, per-file, file-count, lazy-chunk, and CSS limits remain
-  // unchanged. The separately tracked structural fix is to make the client
-  // tree-shakeable instead of continuing to grow this shared class.
+  // headroom before the causal older-history receipt from current main adds one
+  // boolean ownership mark to the always-loaded session hook and timeline.
+  // That main graph measured 2,182,276 raw / 609,893 gzip bytes, and protected
+  // main later measured 610,305 gzip bytes. Its restored 598-KiB gzip envelope
+  // therefore matches this merged head's existing cap.
+  // Preserve the higher merged 2,138-KiB raw and 598-KiB gzip envelopes so both
+  // independently measured growths remain covered; exact-head package CI
+  // verifies the combined graph. Initial, per-file, file-count, lazy-chunk, and
+  // CSS limits remain unchanged. The separately tracked structural fix is to
+  // make the client tree-shakeable instead of continuing to grow this shared
+  // class.
   directSessionRaw: 2138 * kib,
   directSessionGzip: 598 * kib,
   directSessionFiles: 24,
