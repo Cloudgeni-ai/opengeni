@@ -1,5 +1,24 @@
 # @opengeni/core
 
+## 2.4.0
+
+### Minor Changes
+
+- b5071cf: Require every Rig to layer setup and checks on the deployment-managed platform sandbox, reject new explicit Rig image overrides, keep provider-native image ids out of durable lease identity, and verify Browser, Terminal, and Computer services before publishing a Rig provider image.
+
+### Patch Changes
+
+- Updated dependencies [76d6396]
+- Updated dependencies [b5071cf]
+  - @opengeni/contracts@2.5.0
+  - @opengeni/db@3.4.0
+  - @opengeni/events@0.4.0
+  - @opengeni/runtime@1.4.0
+  - @opengeni/config@0.20.1
+  - @opengeni/documents@0.8.2
+  - @opengeni/observability@0.8.6
+  - @opengeni/storage@0.2.108
+
 ## 2.3.1
 
 ### Patch Changes
