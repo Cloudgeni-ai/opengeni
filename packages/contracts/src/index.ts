@@ -9676,7 +9676,11 @@ export const OPENGENI_PR_REVIEW_SESSION_ROLE = "pull_request_review" as const;
 export const PrReviewProvider = GitCredentialProvider;
 export type PrReviewProvider = z.infer<typeof PrReviewProvider>;
 
-export const PrReviewCredentialKind = /* @__PURE__ */ z.enum(["github_app", "provider_token"]);
+export const PrReviewCredentialKind = /* @__PURE__ */ z.enum([
+  "github_app",
+  "managed_github_app",
+  "provider_token",
+]);
 export type PrReviewCredentialKind = z.infer<typeof PrReviewCredentialKind>;
 
 export const PrReviewWebhookAuthKind = /* @__PURE__ */ z.enum([
@@ -9797,6 +9801,9 @@ export const PrReviewAppRegistration = /* @__PURE__ */ (() =>
     provider: PrReviewProvider,
     providerBaseUrl: z.string().url(),
     appId: z.string().nullable(),
+    installationId: z.string().nullable(),
+    providerAccountLogin: z.string().nullable(),
+    providerAccountType: z.enum(["User", "Organization"]).nullable(),
     credentialKind: PrReviewCredentialKind,
     hasCredential: z.boolean(),
     accessTokenExpiresAt: z.string().nullable(),
@@ -9810,6 +9817,27 @@ export const PrReviewAppRegistration = /* @__PURE__ */ (() =>
     updatedAt: z.string(),
   }))();
 export type PrReviewAppRegistration = z.infer<typeof PrReviewAppRegistration>;
+
+export const PrReviewManagedGitHubInstallation = /* @__PURE__ */ (() =>
+  z.object({
+    registrationId: z.string().uuid(),
+    installationId: z.string(),
+    accountLogin: z.string().nullable(),
+    configureUrl: z.string().url().nullable(),
+    repositoryCount: z.number().int().nonnegative(),
+  }))();
+export type PrReviewManagedGitHubInstallation = z.infer<typeof PrReviewManagedGitHubInstallation>;
+
+export const PrReviewManagedGitHubSetup = /* @__PURE__ */ (() =>
+  z.object({
+    configured: z.boolean(),
+    status: z.enum(["unavailable", "not_connected", "connected"]),
+    appName: z.literal("OpenGeni Lens"),
+    connectUrl: z.string().url().nullable(),
+    installations: z.array(PrReviewManagedGitHubInstallation),
+    missing: z.array(z.string()),
+  }))();
+export type PrReviewManagedGitHubSetup = z.infer<typeof PrReviewManagedGitHubSetup>;
 
 export const CreatePrReviewRepositoryBindingRequest = /* @__PURE__ */ (() =>
   z

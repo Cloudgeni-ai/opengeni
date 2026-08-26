@@ -335,6 +335,12 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     githubAppSlug: undefined,
     githubWebhookSecret: undefined,
     githubAppPrivateKey: undefined,
+    prReviewGithubAppId: undefined,
+    prReviewGithubClientId: undefined,
+    prReviewGithubClientSecret: undefined,
+    prReviewGithubAppSlug: undefined,
+    prReviewGithubWebhookSecret: undefined,
+    prReviewGithubAppPrivateKey: undefined,
     mcpServers: [],
     ...overrides,
   };
