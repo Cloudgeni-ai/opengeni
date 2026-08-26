@@ -1984,10 +1984,12 @@ export function useComposer(
         },
         canRetry: true,
       };
-      replaceOptimisticSends((current) => [...current, operation]);
-      queueMicrotask(processOptimisticSends);
-      setError(null);
-      onSubmitted?.(sendText, input);
+      // The local submission acknowledgement owns the composer before any
+      // host callback or queued processor can observe it. Hosts commonly use
+      // onSubmitted to remove attachment/repository state, and those updates
+      // may synchronously re-render the controlled composer. Clear the refs
+      // first so that handoff cannot re-project the submitted text as the next
+      // draft. The immutable operation above still owns the exact retry input.
       if (explicit === undefined) {
         valueRef.current = "";
         annotationsRef.current = [];
@@ -1998,6 +2000,10 @@ export function useComposer(
         setAnnotationReviewTargetId(null);
         setRestoredResources([]);
       }
+      replaceOptimisticSends((current) => [...current, operation]);
+      queueMicrotask(processOptimisticSends);
+      setError(null);
+      onSubmitted?.(sendText, input);
       return true;
     },
     [
