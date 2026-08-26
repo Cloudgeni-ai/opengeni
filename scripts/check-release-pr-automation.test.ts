@@ -4004,10 +4004,10 @@ describe("workflow contracts", () => {
         if: "${{ always() && matrix.lane == 'onboarding' && (steps.organization_onboarding.outcome == 'success' || steps.organization_onboarding.outcome == 'failure') }}",
         name: "organization-onboarding-acceptance-evidence",
         path: [
-          "/tmp/opengeni-onboarding-evidence/ope306-onboarding-evidence.json",
-          "/tmp/opengeni-onboarding-evidence/ope306-owner-desktop-1440.png",
-          "/tmp/opengeni-onboarding-evidence/ope306-setup-mobile-390.png",
-          "/tmp/opengeni-onboarding-evidence/ope306-registered-mobile-320.png",
+          "/tmp/opengeni-onboarding-evidence/organization-onboarding-evidence.json",
+          "/tmp/opengeni-onboarding-evidence/onboarding-owner-desktop-1440.png",
+          "/tmp/opengeni-onboarding-evidence/onboarding-setup-mobile-390.png",
+          "/tmp/opengeni-onboarding-evidence/onboarding-registered-mobile-320.png",
         ],
       },
     } as const;

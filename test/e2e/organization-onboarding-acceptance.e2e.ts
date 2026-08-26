@@ -29,13 +29,17 @@ import {
   InMemoryManagedEmailTransport,
   type CapturedManagedEmail,
 } from "../../apps/api/src/auth/managed-email";
+import {
+  isExpectedDisabledMachinesConsoleError,
+  isExpectedDisabledMachinesResponse,
+} from "./knowledge-surfaces.diagnostics";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
 const EVIDENCE_DIR =
   process.env.OPENGENI_ONBOARDING_EVIDENCE_DIR ?? "/tmp/opengeni-onboarding-evidence";
-const PASSWORD = "Ope306-password-1234";
-const RESET_PASSWORD = "Ope306-reset-password-5678";
+const PASSWORD = "Onboarding-password-1234";
+const RESET_PASSWORD = "Onboarding-reset-password-5678";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 type ScriptedOutcome = Exclude<ManagedEmailDeliveryResult, { status: "sent" }>;
@@ -152,8 +156,35 @@ function observeBrowser(page: Page): BrowserProblems {
     pageErrors: [],
     failedRequests: [],
   };
+  const expectedDisabledMachinesResponseUrls = new Set<string>();
+  page.on("response", (response) => {
+    if (
+      isExpectedDisabledMachinesResponse(
+        {
+          status: response.status(),
+          method: response.request().method(),
+          url: response.url(),
+        },
+        false,
+      )
+    ) {
+      expectedDisabledMachinesResponseUrls.add(response.url());
+    }
+  });
   page.on("console", (message) => {
-    if (message.type() === "error") problems.consoleErrors.push(message.text());
+    if (message.type() !== "error") return;
+    const locationUrl = message.location().url;
+    if (
+      isExpectedDisabledMachinesConsoleError(
+        { text: message.text(), locationUrl },
+        false,
+        expectedDisabledMachinesResponseUrls,
+      )
+    ) {
+      expectedDisabledMachinesResponseUrls.delete(locationUrl);
+      return;
+    }
+    problems.consoleErrors.push(`${message.text()}${locationUrl ? ` @ ${locationUrl}` : ""}`);
   });
   page.on("pageerror", (error) => problems.pageErrors.push(error.message));
   page.on("requestfailed", (request) => {
@@ -268,12 +299,12 @@ async function databaseUserId(email: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  owned = await acquireOwnerMigratedTestDatabase("ope306-onboarding-acceptance");
+  owned = await acquireOwnerMigratedTestDatabase("organization-onboarding-acceptance");
   if (!owned) {
     throw new Error(
       requireRealDatabase
-        ? "OPE-306 onboarding acceptance requires PostgreSQL"
-        : "OPE-306 onboarding acceptance is opt-in and never skips a missing PostgreSQL fixture",
+        ? "Organization onboarding acceptance requires PostgreSQL"
+        : "Organization onboarding acceptance is opt-in and never skips a missing PostgreSQL fixture",
     );
   }
   await migrate(owned.ownerUrl);
@@ -289,14 +320,14 @@ beforeAll(async () => {
   const witnessAccountId = crypto.randomUUID();
   await owned.admin`
     insert into managed_accounts (id, name)
-    values (${witnessAccountId}, 'OPE-306 committed activation witness')`;
+    values (${witnessAccountId}, 'Onboarding committed activation witness')`;
   await owned.admin`
     insert into session_tenancy_activations (
       account_id, activation_version, inventory_digest, parity_digest,
       activated_by, backfill_receipt_ids
     ) values (
       ${witnessAccountId}, 1, ${"0".repeat(64)}, ${"1".repeat(64)},
-      'test:ope306-committed-product-witness', array[]::uuid[]
+      'test:onboarding-committed-product-witness', array[]::uuid[]
     )`;
 
   publicOrigin = `http://127.0.0.1:${await freePort()}`;
@@ -308,7 +339,7 @@ beforeAll(async () => {
     rlsStrategy: "force",
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
-    betterAuthSecret: "ope306-browser-better-auth-secret-at-least-32-bytes",
+    betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
     sandboxBackend: "none",
   });
   const api = createApp({
@@ -330,7 +361,7 @@ beforeAll(async () => {
   });
   if ((await extensionBuild.exited) !== 0) {
     throw new Error(
-      `OPE-306 browser extension build failed: ${await new Response(extensionBuild.stderr).text()}`,
+      `Onboarding browser extension build failed: ${await new Response(extensionBuild.stderr).text()}`,
     );
   }
   const build = Bun.spawn(["bun", "run", "vite", "build"], {
@@ -344,7 +375,7 @@ beforeAll(async () => {
     stderr: "pipe",
   });
   if ((await build.exited) !== 0) {
-    throw new Error(`OPE-306 web build failed: ${await new Response(build.stderr).text()}`);
+    throw new Error(`Onboarding web build failed: ${await new Response(build.stderr).text()}`);
   }
   const webDist = `${repoRoot}/apps/web/dist`;
   edge = Bun.serve({
@@ -378,7 +409,7 @@ afterAll(async () => {
   await owned?.release();
 }, 180_000);
 
-describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptance", () => {
+describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQL", () => {
   test("named signup creates only owner + Personal, activates private sessions, and administers shared workspaces", async () => {
     if (!browser || !owned) throw new Error("acceptance harness unavailable");
     const context = await browser.newContext({
@@ -386,14 +417,14 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     });
     const page = await context.newPage();
     const problems = observeBrowser(page);
-    const ownerEmail = `ope306-owner-${RUN_ID}@example.test`;
+    const ownerEmail = `onboarding-owner-${RUN_ID}@example.test`;
 
-    await signUpAndVerify(page, { name: "OPE-306 Owner", email: ownerEmail });
+    await signUpAndVerify(page, { name: "Onboarding Owner", email: ownerEmail });
     await page.getByRole("heading", { name: "Create your organization" }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(1);
     expect(await page.getByLabel(/workspace/i).count()).toBe(0);
     expect(await page.getByText(/create another organization/i).count()).toBe(0);
-    await page.getByLabel("Organization name").fill("OPE-306 Greenfield Org");
+    await page.getByLabel("Organization name").fill("Onboarding Greenfield Org");
     await page.getByRole("button", { name: "Create organization" }).click();
 
     const ownerCookie = await cookieHeader(context);
@@ -444,7 +475,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     });
 
     const session = await owner.createSession(personalWorkspaceId, {
-      initialMessage: "OPE-306 immediate private session",
+      initialMessage: "Onboarding immediate private session",
       visibility: "private",
       idempotencyKey: crypto.randomUUID(),
       sandboxBackend: "none",
@@ -485,7 +516,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     const peopleUrl = `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`;
     await page.goto(peopleUrl, { waitUntil: "domcontentloaded" });
     await page.getByRole("heading", { name: "People", exact: true }).waitFor();
-    const soleOwnerRole = page.getByLabel("Organization role for OPE-306 Owner (you)");
+    const soleOwnerRole = page.getByLabel("Organization role for Onboarding Owner (you)");
     expect(await soleOwnerRole.isDisabled()).toBe(true);
     expect(await soleOwnerRole.getAttribute("aria-describedby")).toMatch(/^sole-owner-reason-/);
     await page.getByText(/Assign another active owner/i).waitFor();
@@ -495,7 +526,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       true,
     );
     await page.screenshot({
-      path: `${EVIDENCE_DIR}/ope306-owner-desktop-1440.png`,
+      path: `${EVIDENCE_DIR}/onboarding-owner-desktop-1440.png`,
       fullPage: true,
     });
     expectNoBrowserProblems(problems);
@@ -522,14 +553,14 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     ]);
     const ownerPage = await ownerContext.newPage();
     const ownerProblems = observeBrowser(ownerPage);
-    const invitedEmail = `ope306-invited-${RUN_ID}@example.test`;
+    const invitedEmail = `onboarding-invited-${RUN_ID}@example.test`;
     await ownerPage.goto(
       `${publicOrigin}/workspaces/${personalWorkspaceId}/organization?section=people`,
       { waitUntil: "domcontentloaded" },
     );
     await ownerPage.getByRole("heading", { name: "People & invitations", level: 2 }).waitFor();
     await ownerPage.getByLabel("Email address").fill(invitedEmail);
-    await ownerPage.getByLabel("Name", { exact: true }).fill("OPE-306 Invited");
+    await ownerPage.getByLabel("Name", { exact: true }).fill("Onboarding Invited");
     await ownerPage.getByText("Launch Operations", { exact: true }).last().click();
     await ownerPage.getByRole("button", { name: "Invite", exact: true }).click();
     await ownerPage.getByText("Invitation sent", { exact: true }).waitFor();
@@ -559,7 +590,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     ).toMatchObject({
       state: "pending",
       organizationId,
-      organizationName: "OPE-306 Greenfield Org",
+      organizationName: "Onboarding Greenfield Org",
       targetEmail: invitedEmail,
       organizationRole: "member",
       sharedWorkspaceAccess: [
@@ -603,7 +634,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     expect(await setupPage.locator("body").textContent()).not.toContain(token);
     const setupCopy = await setupPage.locator("body").textContent();
     expect(setupCopy).toContain("Launch Operations: Member");
-    expect(setupCopy).toContain("OPE-306 Greenfield Org");
+    expect(setupCopy).toContain("Onboarding Greenfield Org");
     expect(setupCopy).toContain(invitedEmail);
     await setupPage.getByText("This does not share anyone's Personal workspace.").waitFor();
     await expectNoAxeViolations(setupPage, "body");
@@ -611,10 +642,10 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       true,
     );
     await setupPage.screenshot({
-      path: `${EVIDENCE_DIR}/ope306-setup-mobile-390.png`,
+      path: `${EVIDENCE_DIR}/onboarding-setup-mobile-390.png`,
       fullPage: true,
     });
-    await setupPage.getByLabel("Your name").fill("OPE-306 Invited");
+    await setupPage.getByLabel("Your name").fill("Onboarding Invited");
     await setupPage.getByLabel("Password", { exact: true }).fill(PASSWORD);
     await setupPage.getByLabel("Confirm password").fill(PASSWORD);
     await setupPage.getByRole("button", { name: "Create account" }).click();
@@ -692,7 +723,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       headers: replayHeaders,
       body: JSON.stringify({
         token,
-        name: "OPE-306 Invited",
+        name: "Onboarding Invited",
         password: PASSWORD,
         operationId: completion.operationId,
       }),
@@ -726,7 +757,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     const setupPreviewClient = sdk(requiredState("ownerCookie"), "198.51.100.41");
     const invited = sdk(requiredState("invitedCookie"));
     const admittedSharedSession = await invited.createSession(sharedWorkspaceId, {
-      initialMessage: "OPE-306 authority-revocation fence",
+      initialMessage: "Onboarding authority-revocation fence",
       idempotencyKey: crypto.randomUUID(),
       sandboxBackend: "none",
     });
@@ -782,7 +813,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
 
     const exactOperationId = crypto.randomUUID();
     const exactRequest = {
-      email: `ope306-replay-${RUN_ID}@example.test`,
+      email: `onboarding-replay-${RUN_ID}@example.test`,
       name: "Replay Target",
       role: "member" as const,
       initialWorkspaceIds: [sharedWorkspaceId],
@@ -815,7 +846,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
 
     transport.enqueue({ status: "failed", errorClass: "injected_refusal" });
     const failed = await owner.createOrganizationInvitation(organizationId, {
-      email: `ope306-failed-${RUN_ID}@example.test`,
+      email: `onboarding-failed-${RUN_ID}@example.test`,
       role: "member",
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
       operationId: crypto.randomUUID(),
@@ -836,7 +867,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       errorClass: "injected_timeout",
     });
     const uncertain = await owner.createOrganizationInvitation(organizationId, {
-      email: `ope306-unknown-${RUN_ID}@example.test`,
+      email: `onboarding-unknown-${RUN_ID}@example.test`,
       role: "member",
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
       operationId: crypto.randomUUID(),
@@ -865,7 +896,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       ).state,
     ).toBe("revoked");
 
-    const expiredEmail = `ope306-expired-${RUN_ID}@example.test`;
+    const expiredEmail = `onboarding-expired-${RUN_ID}@example.test`;
     const expiredInvite = await owner.createOrganizationInvitation(organizationId, {
       email: expiredEmail,
       role: "member",
@@ -898,7 +929,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       owner.getOrganizationAdministrationOverview(crypto.randomUUID()),
     ).rejects.toMatchObject({ status: 404 });
 
-    const alternateOwnerEmail = `ope306-alternate-owner-${RUN_ID}@example.test`;
+    const alternateOwnerEmail = `onboarding-alternate-owner-${RUN_ID}@example.test`;
     const alternateContext = await browser.newContext({
       viewport: { width: 1024, height: 768 },
       extraHTTPHeaders: { "x-forwarded-for": "198.51.100.50" },
@@ -906,16 +937,16 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     const alternatePage = await alternateContext.newPage();
     const alternateProblems = observeBrowser(alternatePage);
     await signUpAndVerify(alternatePage, {
-      name: "OPE-306 Alternate Owner",
+      name: "Onboarding Alternate Owner",
       email: alternateOwnerEmail,
     });
     await alternatePage.getByRole("heading", { name: "Create your organization" }).waitFor();
     const alternateOwner = sdk(await cookieHeader(alternateContext));
     const alternateCreated = await alternateOwner.createOrganization({
-      name: "OPE-306 Alternate Org",
+      name: "Onboarding Alternate Org",
       operationId: crypto.randomUUID(),
     });
-    expect(alternateCreated.organization.name).toBe("OPE-306 Alternate Org");
+    expect(alternateCreated.organization.name).toBe("Onboarding Alternate Org");
     const alternateMemberships = await alternateOwner.listOrganizationMemberships();
     expect(alternateMemberships.memberships).toHaveLength(1);
     const alternateOrganizationId = alternateCreated.organization.id;
@@ -927,7 +958,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       alternateOwner.getOrganizationAdministrationOverview(organizationId),
     ).rejects.toMatchObject({ status: 403 });
 
-    const registeredEmail = `ope306-registered-${RUN_ID}@example.test`;
+    const registeredEmail = `onboarding-registered-${RUN_ID}@example.test`;
     const registeredContext = await browser.newContext({
       viewport: { width: 320, height: 780 },
       extraHTTPHeaders: { "x-forwarded-for": "198.51.100.51" },
@@ -935,13 +966,13 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     const registeredPage = await registeredContext.newPage();
     const registeredProblems = observeBrowser(registeredPage);
     await signUpAndVerify(registeredPage, {
-      name: "OPE-306 Registered",
+      name: "Onboarding Registered",
       email: registeredEmail,
     });
     await registeredPage.getByRole("heading", { name: "Create your organization" }).waitFor();
     const registeredInvite = await owner.createOrganizationInvitation(organizationId, {
       email: registeredEmail,
-      name: "OPE-306 Registered",
+      name: "Onboarding Registered",
       role: "member",
       initialWorkspaceIds: [sharedWorkspaceId],
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
@@ -952,7 +983,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
       alternateOrganizationId,
       {
         email: registeredEmail,
-        name: "OPE-306 Registered",
+        name: "Onboarding Registered",
         role: "member",
         expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
         operationId: crypto.randomUUID(),
@@ -961,8 +992,8 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     expect(alternateInvite.targetEmail).toBe(registeredEmail);
     await registeredPage.reload({ waitUntil: "domcontentloaded" });
     await registeredPage.getByRole("heading", { name: "Invitation pending" }).waitFor();
-    await registeredPage.getByText("OPE-306 Greenfield Org").waitFor();
-    await registeredPage.getByText("OPE-306 Alternate Org").waitFor();
+    await registeredPage.getByText("Onboarding Greenfield Org").waitFor();
+    await registeredPage.getByText("Onboarding Alternate Org").waitFor();
     const invitationChoices = registeredPage.locator("article");
     expect(await invitationChoices.count()).toBe(2);
     expect(
@@ -970,11 +1001,11 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     ).toBe(true);
     await expectNoAxeViolations(registeredPage, "body");
     await registeredPage.screenshot({
-      path: `${EVIDENCE_DIR}/ope306-registered-mobile-320.png`,
+      path: `${EVIDENCE_DIR}/onboarding-registered-mobile-320.png`,
       fullPage: true,
     });
     await invitationChoices
-      .filter({ hasText: "OPE-306 Greenfield Org" })
+      .filter({ hasText: "Onboarding Greenfield Org" })
       .getByRole("button", { name: "Join organization" })
       .click();
     await registeredPage.waitForURL(/\/workspaces\//, { timeout: 20_000 });
@@ -1125,7 +1156,7 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
     expect(leak?.count).toBe(0);
 
     await writeFile(
-      `${EVIDENCE_DIR}/ope306-onboarding-evidence.json`,
+      `${EVIDENCE_DIR}/organization-onboarding-evidence.json`,
       `${JSON.stringify(
         {
           runId: RUN_ID,
@@ -1137,9 +1168,9 @@ describe("OPE-306 real Better Auth / Hono / SDK / PostgreSQL onboarding acceptan
           externalEmailCalls: 0,
           capturedEmailCountBound: 80,
           screenshots: [
-            "ope306-owner-desktop-1440.png",
-            "ope306-setup-mobile-390.png",
-            "ope306-registered-mobile-320.png",
+            "onboarding-owner-desktop-1440.png",
+            "onboarding-setup-mobile-390.png",
+            "onboarding-registered-mobile-320.png",
           ],
         },
         null,
