@@ -79,6 +79,18 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       bus: new MemoryEventBus(),
       workflowClient: {} as never,
     });
+    const email = `managed-session-set-broker-${crypto.randomUUID()}@example.test`;
+    const password = "password1234";
+    expect(
+      (
+        await app.request("/v1/auth/sign-up/email", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: "Broker Session Set User", email, password }),
+        })
+      ).status,
+    ).toBeLessThan(300);
+    await shared.admin`update auth_users set email_verified = true where email = ${email}`;
     const initialResponse = await app.request("/v1/auth/session-set");
     expect(initialResponse.status).toBe(200);
     const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
@@ -107,9 +119,8 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     const transaction = (await begin.json()) as Record<string, unknown>;
     expect(transaction).toMatchObject({ kind: "add", returnIntentId: null });
     expect(transaction.id).toBeString();
-    expect(oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE)).toContain(
-      String(transaction.id),
-    );
+    const transactionCookie = oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
+    expect(transactionCookie).toContain(String(transaction.id));
     expect(await getManagedAuthSessionSetAuthorityState(client.db, authorityHash)).toBe("active");
 
     const replay = await app.request("/v1/auth/session-set/transactions", {
@@ -119,6 +130,53 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     });
     expect(replay.status).toBe(200);
     expect(await replay.json()).toEqual(transaction);
+
+    const completionBody = JSON.stringify({
+      operationId: crypto.randomUUID(),
+      expectedGeneration: initial.generation,
+      transactionId: transaction.id,
+      email,
+      password,
+    });
+    const completion = await app.request("/v1/auth/session-set/transactions/email-password", {
+      method: "POST",
+      headers: mutationHeaders(initial, `${authorityCookie}; ${transactionCookie}`),
+      body: completionBody,
+    });
+    expect(completion.status).toBe(200);
+    const completed = (await completion.json()) as {
+      projection: ManagedAuthSessionSetProjection;
+      returnIntent: string | null;
+    };
+    expect(completed).toMatchObject({
+      projection: {
+        generation: "2",
+        actorEpoch: "1",
+        selectedSlotId: null,
+        slots: [{ displayName: "Broker Session Set User", state: "active" }],
+      },
+      returnIntent: null,
+    });
+    expect(oneCookie(completion, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE)).toBe(
+      `${MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE}=`,
+    );
+    const [sessionsAfterCompletion] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from auth_sessions
+      where user_id = (select id from auth_users where email = ${email})
+    `;
+
+    const completionReplay = await app.request("/v1/auth/session-set/transactions/email-password", {
+      method: "POST",
+      headers: mutationHeaders(initial, authorityCookie),
+      body: completionBody,
+    });
+    expect(completionReplay.status).toBe(200);
+    expect(await completionReplay.json()).toEqual(completed);
+    const [sessionsAfterReplay] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::integer as count from auth_sessions
+      where user_id = (select id from auth_users where email = ${email})
+    `;
+    expect(sessionsAfterReplay?.count).toBe(sessionsAfterCompletion?.count);
   });
 
   test("converges two pre-bootstrap tabs, replays exactly, and exposes no provider token", async () => {

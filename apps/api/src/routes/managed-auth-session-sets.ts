@@ -43,6 +43,7 @@ import {
   beginManagedAuthLoginTransaction,
   bootstrapManagedAuthSessionSet,
   getManagedAuthAdoptedSessionSnapshot,
+  getManagedAuthSessionSetOperationReceipt,
   getManagedAuthSessionSetSnapshot,
   getManagedAuthSessionSetAuthorityState,
   ManagedAuthLoginSlotLimitError,
@@ -236,25 +237,38 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   app.post("/v1/auth/session-set/transactions/email-password", async (context) => {
     const body = await bodyAs(context, CompleteManagedAuthEmailPasswordTransactionRequest);
     const { authority, actorEpoch } = await requireMutation(context, deps, body.expectedGeneration);
-    const transactionSecret = requireTransactionSecret(context, body.transactionId);
     const available = requireAvailable(deps);
+    const requestDigest = digest(deps, body);
     try {
-      const completed = await authenticateAndAdoptManagedAuthSession({
-        db: deps.db,
-        adapter: available.adapter,
-        isolatedHeaders: isolatedManagedAuthHeaders(context.req.raw),
-        authority,
-        csrfHash: managedAuthCsrfHash(authority),
-        operationId: body.operationId,
-        requestDigest: digest(deps, body),
-        expectedGeneration: body.expectedGeneration,
-        expectedActorEpoch: actorEpoch,
-        transactionId: body.transactionId,
-        transactionSecret,
-        email: body.email,
-        password: body.password,
-        mode: deps.settings.managedAuthSessionSetMode,
-      });
+      let completed: Awaited<ReturnType<typeof getManagedAuthSessionSetOperationReceipt>>;
+      try {
+        completed = await getManagedAuthSessionSetOperationReceipt(deps.db, {
+          authorityHash: managedAuthSha256(authority),
+          operationId: body.operationId,
+          requestDigest,
+        });
+      } catch (error) {
+        throw new ManagedAuthCompletionOutcomeUnknownError({ cause: error });
+      }
+      if (!completed) {
+        const transactionSecret = requireTransactionSecret(context, body.transactionId);
+        completed = await authenticateAndAdoptManagedAuthSession({
+          db: deps.db,
+          adapter: available.adapter,
+          isolatedHeaders: isolatedManagedAuthHeaders(context.req.raw),
+          authority,
+          csrfHash: managedAuthCsrfHash(authority),
+          operationId: body.operationId,
+          requestDigest,
+          expectedGeneration: body.expectedGeneration,
+          expectedActorEpoch: actorEpoch,
+          transactionId: body.transactionId,
+          transactionSecret,
+          email: body.email,
+          password: body.password,
+          mode: deps.settings.managedAuthSessionSetMode,
+        });
+      }
       deleteCookie(context, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE, transactionCookieOptions(deps));
       await mirrorCurrentSelection(context, deps, authority);
       return jsonWithActorEpoch(
