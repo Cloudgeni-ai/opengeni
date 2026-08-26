@@ -53,6 +53,38 @@ describe("organization workspace administration in Chromium", () => {
   }, 30_000);
 
   test("uses named roles, exact CAS requests, explicit custom access, and destructive revoke", async () => {
+    const soleOwnerPause = page.getByRole("button", { name: "Pause access", exact: true }).first();
+    expect(await soleOwnerPause.isDisabled()).toBe(true);
+    expect(await page.getByText(/Assign another active owner before changing/).count()).toBe(1);
+    expect(
+      await page
+        .getByText("Provider outcome unknown — safe retry available · 1 attempt", { exact: true })
+        .count(),
+    ).toBe(1);
+    expect(
+      await page
+        .getByText("Provider outcome requires reconciliation — do not resend · 1 attempt", {
+          exact: true,
+        })
+        .count(),
+    ).toBe(1);
+    expect(
+      await page
+        .getByRole("button", { name: "Retry delivery to reconcile-member@example.test" })
+        .count(),
+    ).toBe(0);
+    expect(
+      await page
+        .getByText("Delivery failed — invitation expired · 1 attempt", { exact: true })
+        .count(),
+    ).toBe(1);
+    await page.getByRole("button", { name: "Retry delivery" }).click();
+    await expectReceipt(page, {
+      action: "retry-delivery",
+      invitationId: "77777777-7777-4777-8777-777777777777",
+    });
+    await page.getByText("Email sent · 2 attempts", { exact: true }).waitFor();
+
     const workspaceSummary = page.locator("summary").filter({ hasText: "Product engineering" });
     await workspaceSummary.focus();
     await page.keyboard.press("Enter");
@@ -111,6 +143,7 @@ describe("organization workspace administration in Chromium", () => {
     await page.getByText("Product engineering", { exact: true }).first().waitFor();
     const email = page.getByLabel("Email address");
     await email.fill("new-member@example.test");
+    await page.getByLabel("Name", { exact: true }).fill("New Member");
     const sharedWorkspace = page.getByRole("checkbox", { name: "Product engineering" });
     expect(await page.getByText("Personal workspace", { exact: false }).count()).toBeGreaterThan(0);
     expect(await page.getByRole("checkbox", { name: /Personal/ }).count()).toBe(0);
@@ -123,13 +156,16 @@ describe("organization workspace administration in Chromium", () => {
     await expectReceipt(page, {
       action: "invite",
       email: "new-member@example.test",
+      name: "New Member",
       initialWorkspaceIds: ["22222222-2222-4222-8222-222222222222"],
     });
     await page
-      .getByText("Invitation created for new-member@example.test. It is available in OpenGeni.", {
+      .getByText("Invitation sent to new-member@example.test.", {
         exact: true,
       })
       .waitFor();
+    await page.getByText("New Member · new-member@example.test", { exact: true }).waitFor();
+    await page.getByText("Email sent · 1 attempt", { exact: true }).last().waitFor();
 
     await page.screenshot({
       path: "/tmp/opengeni-organization-administration-narrow.png",

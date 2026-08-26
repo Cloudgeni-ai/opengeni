@@ -897,6 +897,32 @@ export async function listOrganizationInvitations(
   );
 }
 
+export async function getOrganizationInvitationForAdministration(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    invitationId: string;
+  },
+): Promise<OrganizationInvitationType> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select get_organization_invitation_for_administration(
+          ${input.organizationId}::uuid,
+          ${input.actorSubjectId},
+          ${input.invitationId}::uuid
+        ) as result`,
+      );
+      return OrganizationInvitation.parse(row?.result);
+    },
+  );
+}
+
 export async function createOrganizationInvitation(
   db: Database,
   input: CommandBase & {

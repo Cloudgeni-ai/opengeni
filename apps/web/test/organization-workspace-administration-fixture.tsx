@@ -142,6 +142,84 @@ const initialOverview: OrganizationAdministrationOverview = {
   ],
 };
 
+const invitations: OrganizationInvitation[] = [
+  {
+    id: "77777777-7777-4777-8777-777777777777",
+    organizationId,
+    organizationName: "Acme Engineering",
+    targetEmail: "retry-member@example.test",
+    targetName: "Retry Member",
+    initialWorkspaceIds: [workspaceId],
+    role: "member",
+    status: "pending",
+    revision: 1,
+    expiresAt: "2026-09-01T10:00:00.000Z",
+    acceptedMembershipId: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    delivery: {
+      id: "88888888-8888-4888-8888-888888888888",
+      state: "outcome_unknown",
+      attemptCount: 1,
+      revision: 3,
+      errorClass: "provider_ambiguous",
+      retryState: "available",
+      sentAt: null,
+      updatedAt: timestamp,
+    },
+  },
+  {
+    id: "aaaaaaaa-7777-4777-8777-777777777777",
+    organizationId,
+    organizationName: "Acme Engineering",
+    targetEmail: "reconcile-member@example.test",
+    targetName: "Reconcile Member",
+    initialWorkspaceIds: [workspaceId],
+    role: "member",
+    status: "pending",
+    revision: 1,
+    expiresAt: "2026-09-01T10:00:00.000Z",
+    acceptedMembershipId: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    delivery: {
+      id: "bbbbbbbb-8888-4888-8888-888888888888",
+      state: "outcome_unknown",
+      attemptCount: 1,
+      revision: 3,
+      errorClass: "provider_ambiguous",
+      retryState: "reconciliation_required",
+      sentAt: null,
+      updatedAt: timestamp,
+    },
+  },
+  {
+    id: "cccccccc-7777-4777-8777-777777777777",
+    organizationId,
+    organizationName: "Acme Engineering",
+    targetEmail: "expired-member@example.test",
+    targetName: "Expired Member",
+    initialWorkspaceIds: [],
+    role: "member",
+    status: "expired",
+    revision: 1,
+    expiresAt: "2026-08-20T10:00:00.000Z",
+    acceptedMembershipId: null,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    delivery: {
+      id: "dddddddd-8888-4888-8888-888888888888",
+      state: "failed",
+      attemptCount: 1,
+      revision: 3,
+      errorClass: "provider_refused",
+      retryState: "available",
+      sentAt: null,
+      updatedAt: timestamp,
+    },
+  },
+];
+
 function Fixture() {
   const overviewRef = useRef(structuredClone(initialOverview));
   const [receipt, setReceipt] = useState<Record<string, unknown>>({});
@@ -149,9 +227,11 @@ function Fixture() {
 
   clientRef.current ??= {
     getOrganizationAdministrationOverview: async () => structuredClone(overviewRef.current),
-    listOrganizationMembers: async () => ({ members: structuredClone(members) }),
+    listOrganizationAdministrationMembers: async () => ({
+      members: structuredClone(members),
+    }),
     listOrganizationInvitationsForOrganization: async () => ({
-      invitations: [],
+      invitations: structuredClone(invitations),
       nextCursor: null,
     }),
     listOrganizationInvitations: async () => ({ invitations: [], nextCursor: null }),
@@ -224,7 +304,7 @@ function Fixture() {
         organizationId,
         organizationName: "Acme Engineering",
         targetEmail: request.email,
-        targetName: null,
+        targetName: request.name ?? null,
         initialWorkspaceIds: request.initialWorkspaceIds,
         role: request.role,
         status: "pending",
@@ -233,7 +313,39 @@ function Fixture() {
         acceptedMembershipId: null,
         createdAt: timestamp,
         updatedAt: timestamp,
+        delivery: {
+          id: "99999999-9999-4999-8999-999999999999",
+          state: "sent",
+          attemptCount: 1,
+          revision: 3,
+          errorClass: null,
+          retryState: "unavailable",
+          sentAt: timestamp,
+          updatedAt: timestamp,
+        },
       } satisfies OrganizationInvitation;
+    },
+    requestJson: async (_method: string, path: string, request: unknown) => {
+      const match = path.match(
+        /^\/v1\/organizations\/[^/]+\/invitations\/([^/]+)\/delivery\/retry$/,
+      );
+      if (!match) throw new Error(`unexpected fixture request: ${path}`);
+      const invitationId = match[1]!;
+      const retry = request as { operationId: string };
+      const invitation = invitations.find((candidate) => candidate.id === invitationId);
+      if (!invitation?.delivery) throw new Error("invitation delivery not found");
+      invitation.delivery = {
+        ...invitation.delivery,
+        state: "sent",
+        attemptCount: 2,
+        revision: invitation.delivery.revision + 2,
+        errorClass: null,
+        retryState: "unavailable",
+        sentAt: "2026-08-25T10:00:04.000Z",
+        updatedAt: "2026-08-25T10:00:04.000Z",
+      };
+      setReceipt({ action: "retry-delivery", invitationId, ...retry });
+      return structuredClone(invitation.delivery);
     },
   } as unknown as OpenGeniCoreClient;
 

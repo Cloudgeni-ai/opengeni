@@ -433,6 +433,8 @@ describe("embedded worker lifecycle contract", () => {
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
           "canonical_human_identity_operations",
+          "organization_user_setup_deliveries",
+          "organization_user_setup_delivery_attempts",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -582,6 +584,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
       tablePrivileges: {},
       protectedNoDirectDmlTables: [
@@ -589,6 +593,8 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
+        "organization_user_setup_deliveries",
+        "organization_user_setup_delivery_attempts",
       ],
     })();
     expect((catalogResults[8] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
