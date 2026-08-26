@@ -367,30 +367,32 @@ export function useChatComposerController({
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
   const controlOperationRef = useRef(false);
+  const deliveryValue = delivery.value;
+  const setDeliveryValue = delivery.setValue;
   const mountedRef = useRef(true);
-  const deliveredValueRef = useRef(delivery.value);
-  const liveValueRef = useRef(delivery.value);
-  const [renderedValue, setRenderedValue] = useState(delivery.value);
-  const deliveryChanged = delivery.value !== deliveredValueRef.current;
+  const deliveredValueRef = useRef(deliveryValue);
+  const liveValueRef = useRef(deliveryValue);
+  const [renderedValue, setRenderedValue] = useState(deliveryValue);
+  const deliveryChanged = deliveryValue !== deliveredValueRef.current;
   if (deliveryChanged) {
-    deliveredValueRef.current = delivery.value;
-    liveValueRef.current = delivery.value;
+    deliveredValueRef.current = deliveryValue;
+    liveValueRef.current = deliveryValue;
   }
   const setComposerValue = useCallback(
     (next: string) => {
       liveValueRef.current = next;
       setRenderedValue(next);
-      delivery.setValue(next);
+      setDeliveryValue(next);
     },
-    [delivery.setValue],
+    [setDeliveryValue],
   );
-  const visibleValue = deliveryChanged ? delivery.value : renderedValue;
+  const visibleValue = deliveryChanged ? deliveryValue : renderedValue;
 
   useLayoutEffect(() => {
     if (renderedValue !== liveValueRef.current) {
       setRenderedValue(liveValueRef.current);
     }
-  }, [delivery.value, renderedValue]);
+  }, [deliveryValue, renderedValue]);
 
   useEffect(() => {
     mountedRef.current = true;
