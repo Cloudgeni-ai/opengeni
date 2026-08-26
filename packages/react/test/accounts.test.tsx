@@ -513,6 +513,9 @@ describe("BrowserAccountsProvider", () => {
     });
     expect(accounts.current.phase).toBe("loading");
     expect(accounts.current.projection).toBeNull();
+    expect(transitions.at(-1)?.kind).toBe("cross_tab");
+    expect(transitions.at(-1)?.from?.selectedSlotId).toBe(SLOT_A);
+    expect(transitions.at(-1)?.to).toBeNull();
 
     release(invalidated);
     await act(async () => await settlement);
@@ -521,6 +524,72 @@ describe("BrowserAccountsProvider", () => {
     expect(transitions.at(-1)?.from?.selectedSlotId).toBe(SLOT_A);
     expect(transitions.at(-1)?.to?.selectedSlotId).toBeNull();
     await accounts.unmount();
+  });
+
+  test("publishes an accepted actor hint before the local transition settles", async () => {
+    const originalBroadcastChannel = globalThis.BroadcastChannel;
+    const messages: unknown[] = [];
+    class RecordingBroadcastChannel {
+      onmessage: ((event: MessageEvent<unknown>) => void) | null = null;
+
+      constructor(readonly _name: string) {}
+
+      postMessage(value: unknown): void {
+        messages.push(value);
+      }
+
+      close(): void {}
+    }
+    Object.defineProperty(globalThis, "BroadcastChannel", {
+      configurable: true,
+      value: RecordingBroadcastChannel,
+    });
+
+    let current = projection();
+    let releaseTransition!: () => void;
+    const transitionSettled = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    let accounts: Awaited<ReturnType<typeof renderAccounts>> | null = null;
+    try {
+      accounts = await renderAccounts(
+        scriptedClient({
+          getSessionSet: async () => current,
+          selectLoginSlot: async () => {
+            current = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
+            return current;
+          },
+        }),
+        async (transition) => {
+          if (transition.from !== null && transition.to?.selectedSlotId === SLOT_B) {
+            await transitionSettled;
+          }
+        },
+        "accounts-publish-test",
+      );
+
+      let selection!: Promise<boolean>;
+      await act(async () => {
+        selection = accounts!.current.selectSlot(SLOT_B);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(messages).toEqual([{ type: "actor-epoch-changed", generation: "2", actorEpoch: "2" }]);
+      expect(accounts.current.phase).toBe("loading");
+
+      await act(async () => {
+        releaseTransition();
+        expect(await selection).toBe(true);
+      });
+      expect(messages).toHaveLength(1);
+    } finally {
+      releaseTransition();
+      await accounts?.unmount();
+      Object.defineProperty(globalThis, "BroadcastChannel", {
+        configurable: true,
+        value: originalBroadcastChannel,
+      });
+    }
   });
 
   test("reports add reconciliation with the add transition kind", async () => {
@@ -669,18 +738,18 @@ describe("BrowserAccountsProvider", () => {
     });
 
     let current = projection();
-    let transitionCount = 0;
+    const transitions: BrowserAccountTransition[] = [];
     let accounts: Awaited<ReturnType<typeof renderAccounts>> | null = null;
     const peer = new FakeBroadcastChannel("accounts-test");
     try {
       accounts = await renderAccounts(
         scriptedClient({ getSessionSet: async () => current }),
-        async () => {
-          transitionCount += 1;
+        async (transition) => {
+          transitions.push(transition);
         },
         "accounts-test",
       );
-      const initialTransitions = transitionCount;
+      const initialTransitions = transitions.length;
       current = projection({ generation: "2", actorEpoch: "2", selectedSlotId: SLOT_B });
 
       await actRun(() =>
@@ -696,7 +765,9 @@ describe("BrowserAccountsProvider", () => {
 
       expect(accounts.current.projection?.selectedSlotId).toBe(SLOT_B);
       expect(accounts.current.projection?.actorEpoch).toBe("2");
-      expect(transitionCount).toBe(initialTransitions + 1);
+      expect(transitions).toHaveLength(initialTransitions + 2);
+      expect(transitions.at(-2)?.to).toBeNull();
+      expect(transitions.at(-1)?.to?.selectedSlotId).toBe(SLOT_B);
     } finally {
       peer.close();
       await accounts?.unmount();

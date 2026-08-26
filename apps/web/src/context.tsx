@@ -1874,6 +1874,10 @@ export function RootRouteComponent() {
       setAccessKeyVersion((version) => version + 1);
     });
     configureManagedActorEpoch(transition.to?.actorEpoch ?? null);
+    // A cross-tab/server hint first requests only the neutral fence. Do not
+    // install or load any principal until the controller has reread authority
+    // and invokes us again with the accepted projection.
+    if (transition.to === null) return;
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       !transition.signal.aborted &&

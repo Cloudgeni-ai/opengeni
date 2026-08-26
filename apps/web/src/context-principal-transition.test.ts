@@ -115,6 +115,9 @@ describe("principal transition contract", () => {
     expect(transition.indexOf("flushSync(() => {")).toBeLessThan(
       transition.indexOf("configureManagedActorEpoch("),
     );
+    expect(transition.indexOf("if (transition.to === null) return;")).toBeLessThan(
+      transition.indexOf("const acceptedPrincipal"),
+    );
     for (const requiredClear of [
       "invalidatePrincipalWorkspaceState();",
       "setAuthSession(undefined);",

@@ -49,6 +49,9 @@ export type BrowserAccountsProviderProps = {
   /**
    * Hide the authenticated tree, abort old actor work, clear tenant-bound
    * state, recreate credentials/clients, and refetch principal access here.
+   * Cross-tab/server invalidation first calls this with `to: null` as a
+   * neutral fence before authority is reread, then calls it with the accepted
+   * projection after the new actor is known.
    */
   onActorTransition: (transition: BrowserAccountTransition) => Promise<void>;
   children?: ReactNode;
@@ -253,6 +256,10 @@ export function BrowserAccountsProvider({
       transitionAbortRef.current?.abort();
       const controller = new AbortController();
       transitionAbortRef.current = controller;
+      // The accepted mutation is already server authority. Notify peers now,
+      // before this tab waits for its own auth/access reload, so they can hide
+      // and abort old-actor work throughout that entire window.
+      if (publish) publishActorHint(target);
       setPhase("loading");
       await onActorTransition({ kind, from, to: target, signal: controller.signal });
       if (controller.signal.aborted || sequenceRef.current !== sequence) return null;
@@ -270,7 +277,6 @@ export function BrowserAccountsProvider({
       setProjection(confirmed);
       setPhase("ready");
       setError(null);
-      if (publish) publishActorHint(confirmed);
       return confirmed;
     },
     [client, onActorTransition, publishActorHint],
@@ -411,23 +417,40 @@ export function BrowserAccountsProvider({
     }
   }, [reconcile]);
 
-  const invalidateActor = useCallback(async () => {
-    if (pendingCommitSequenceRef.current !== null) {
-      invalidatedDuringPendingCommitRef.current = true;
+  const beginNeutralActorInvalidation = useCallback(
+    async (before: ManagedAuthSessionSetProjection | null): Promise<AbortController> => {
+      transitionAbortRef.current?.abort();
+      const controller = new AbortController();
+      transitionAbortRef.current = controller;
       projectionRef.current = null;
       setProjection(null);
       setPhase("loading");
       setError(null);
+      // Do not wait for the authority reread before asking the host to remove
+      // and abort the prior actor. A response that was already in flight can
+      // otherwise commit old tenant state during the cross-tab hint/read race.
+      await onActorTransition({
+        kind: "cross_tab",
+        from: before,
+        to: null,
+        signal: controller.signal,
+      });
+      return controller;
+    },
+    [onActorTransition],
+  );
+
+  const invalidateActor = useCallback(async () => {
+    if (pendingCommitSequenceRef.current !== null) {
+      invalidatedDuringPendingCommitRef.current = true;
+      await beginNeutralActorInvalidation(projectionRef.current);
       return null;
     }
     const sequence = ++sequenceRef.current;
     const before = projectionRef.current;
-    transitionAbortRef.current?.abort();
-    projectionRef.current = null;
-    setProjection(null);
-    setPhase("loading");
-    setError(null);
     try {
+      const neutral = await beginNeutralActorInvalidation(before);
+      if (neutral.signal.aborted || sequenceRef.current !== sequence) return null;
       const accepted = await client.getSessionSet();
       if (sequenceRef.current !== sequence) return null;
       return await settleActorTransition("cross_tab", before, accepted, sequence, false);
@@ -438,7 +461,7 @@ export function BrowserAccountsProvider({
       setPhase("recoverable_error");
       throw nextError;
     }
-  }, [client, settleActorTransition]);
+  }, [beginNeutralActorInvalidation, client, settleActorTransition]);
 
   const registerTransitionBlocker = useCallback((id: string, inspect: BlockerInspector) => {
     if (!id.trim()) throw new Error("Browser account transition blocker id is required");
