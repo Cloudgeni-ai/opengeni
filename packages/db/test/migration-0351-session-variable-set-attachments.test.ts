@@ -1,12 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { sql } from "drizzle-orm";
-import postgres from "postgres";
-import { createDb, provisionRoles, type DbClient } from "../src";
+import { provisionRoles } from "../src";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
-let client: DbClient | null = null;
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("migration-0351-runtime-protocol");
@@ -14,11 +12,9 @@ beforeAll(async () => {
     available = false;
     return;
   }
-  client = createDb(shared.appUrl);
 }, 180_000);
 
 afterAll(async () => {
-  await client?.close();
   await shared?.release();
 }, 180_000);
 
@@ -138,38 +134,46 @@ describe("migration 0351 ordered session Variable Set attachments", () => {
 
   test("rejects a pre-0351 transaction and admits the current runtime receipt", async () => {
     if (!available) return;
-    const legacy = postgres(shared!.appUrl, { max: 1, prepare: false });
-    try {
-      await expect(
-        legacy`select opengeni_private.session_variable_set_attachments_protocol_v1_active()`,
-      ).rejects.toThrow("0351-or-newer runtime");
-
-      await expect(
-        client!.db.execute<{ active: boolean; applicationName: string }>(
-          sql`select
-            opengeni_private.session_variable_set_attachments_protocol_v1_active() as active,
-            current_setting('application_name') as "applicationName"`,
-        ),
-      ).resolves.toEqual([
-        {
-          active: true,
-          applicationName: "opengeni-lossless-v1-session-variable-sets-v1",
-        },
-      ]);
-
-      const injectedReceipt = await legacy.begin(async (tx) => {
-        await tx`select set_config(
-          'opengeni.session_variable_set_attachments_v1', '1', true
-        )`;
-        return await tx<{ active: boolean }[]>`
+    await expect(
+      shared!.admin.begin(async (tx) => {
+        await tx.unsafe('SET LOCAL ROLE "opengeni_app"');
+        await tx`select set_config('application_name', 'opengeni-lossless-v1', true)`;
+        return await tx`
           select opengeni_private.session_variable_set_attachments_protocol_v1_active()
-            as active
         `;
-      });
-      expect([...injectedReceipt]).toEqual([{ active: true }]);
-    } finally {
-      await legacy.end();
-    }
+      }),
+    ).rejects.toThrow("0351-or-newer runtime");
+
+    const currentReceipt = await shared!.admin.begin(async (tx) => {
+      await tx.unsafe('SET LOCAL ROLE "opengeni_app"');
+      await tx`select set_config(
+        'application_name', ${LOSSLESS_CONTENT_WRITER_APPLICATION_NAME}, true
+      )`;
+      return await tx<Array<{ active: boolean; applicationName: string }>>`
+        select
+          opengeni_private.session_variable_set_attachments_protocol_v1_active() as active,
+          current_setting('application_name') as "applicationName"
+      `;
+    });
+    expect([...currentReceipt]).toEqual([
+      {
+        active: true,
+        applicationName: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
+      },
+    ]);
+
+    const injectedReceipt = await shared!.admin.begin(async (tx) => {
+      await tx.unsafe('SET LOCAL ROLE "opengeni_app"');
+      await tx`select set_config('application_name', 'opengeni-lossless-v1', true)`;
+      await tx`select set_config(
+        'opengeni.session_variable_set_attachments_v1', '1', true
+      )`;
+      return await tx<{ active: boolean }[]>`
+        select opengeni_private.session_variable_set_attachments_protocol_v1_active()
+          as active
+      `;
+    });
+    expect([...injectedReceipt]).toEqual([{ active: true }]);
   }, 180_000);
 
   test("provisionRoles converges all runtime EXECUTE grants for a role created after migration", async () => {
