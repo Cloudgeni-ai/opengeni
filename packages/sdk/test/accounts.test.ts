@@ -91,14 +91,61 @@ describe("BrowserAccountsClient", () => {
     ]);
   });
 
-  test("classifies a lost mutation response as outcome unknown for exact replay", async () => {
+  test("pins exact admission headers across outcome-unknown reconciliation", async () => {
+    const requests: Request[] = [];
+    const newer = { ...projection, generation: "2", actorEpoch: "2", csrfToken: "d".repeat(43) };
+    let reads = 0;
+    let mutations = 0;
+    const client = new BrowserAccountsClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (request.method === "GET") {
+          reads += 1;
+          return Response.json(reads === 1 ? projection : newer);
+        }
+        mutations += 1;
+        if (mutations === 1) throw new TypeError("connection closed after request write");
+        return Response.json(newer);
+      },
+    });
+    await client.getSessionSet();
+    const command = {
+      operationId: "11111111-1111-4111-8111-111111111111",
+      expectedGeneration: "1",
+      slotId: "22222222-2222-4222-8222-222222222222",
+    };
+    await expect(client.selectLoginSlot(command)).rejects.toMatchObject({
+      name: "BrowserAccountsApiError",
+      status: 503,
+      code: "operation_outcome_unknown",
+    });
+    await client.getSessionSet();
+    expect(await client.selectLoginSlot(command)).toEqual(newer);
+
+    const mutationRequests = requests.filter((request) => request.method === "POST");
+    expect(mutationRequests).toHaveLength(2);
+    expect(await mutationRequests[1]?.text()).toBe(await mutationRequests[0]?.text());
+    expect(mutationRequests[0]?.headers.get("x-opengeni-session-csrf")).toBe(projection.csrfToken);
+    expect(mutationRequests[1]?.headers.get("x-opengeni-session-csrf")).toBe(projection.csrfToken);
+    expect(mutationRequests[1]?.headers.get("x-opengeni-actor-epoch")).toBe(projection.actorEpoch);
+
+    await expect(
+      client.selectLoginSlot({ ...command, slotId: "33333333-3333-4333-8333-333333333333" }),
+    ).rejects.toMatchObject({ status: 409, code: "operation_reused" });
+    expect(requests.filter((request) => request.method === "POST")).toHaveLength(2);
+  });
+
+  test("classifies a malformed successful mutation receipt as outcome unknown", async () => {
     let calls = 0;
     const client = new BrowserAccountsClient({
       baseUrl: "https://api.example.test",
       fetch: async () => {
         calls += 1;
-        if (calls === 1) return Response.json(projection);
-        throw new TypeError("connection closed after request write");
+        return calls === 1
+          ? Response.json(projection)
+          : new Response("{", { status: 200, headers: { "content-type": "application/json" } });
       },
     });
     await client.getSessionSet();
@@ -108,11 +155,7 @@ describe("BrowserAccountsClient", () => {
         expectedGeneration: "1",
         slotId: "22222222-2222-4222-8222-222222222222",
       }),
-    ).rejects.toMatchObject({
-      name: "BrowserAccountsApiError",
-      status: 503,
-      code: "operation_outcome_unknown",
-    });
+    ).rejects.toMatchObject({ status: 503, code: "operation_outcome_unknown" });
   });
 
   test("re-reads the cookie-backed authority after logout-all", async () => {

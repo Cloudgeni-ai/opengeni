@@ -495,7 +495,7 @@ describe("BrowserAccountsProvider", () => {
   test("keeps a selected-account reauthentication blocked without retaining credentials", async () => {
     let blocked = true;
     let selected = projection();
-    const completionOperationIds: string[] = [];
+    const completionRequests: Array<{ operationId: string; expectedGeneration: string }> = [];
     const client = scriptedClient({
       getSessionSet: async () => selected,
       beginLoginTransaction: async (request) => ({
@@ -505,11 +505,14 @@ describe("BrowserAccountsProvider", () => {
         returnIntentId: null,
       }),
       completeEmailPasswordTransaction: async (request) => {
-        completionOperationIds.push(request.operationId);
-        if (completionOperationIds.length === 1) {
+        completionRequests.push({
+          operationId: request.operationId,
+          expectedGeneration: request.expectedGeneration,
+        });
+        if (completionRequests.length === 1) {
+          selected = projection({ generation: "2", actorEpoch: "2" });
           throw Object.assign(new Error("unknown"), { code: "operation_outcome_unknown" });
         }
-        selected = projection({ generation: "2", actorEpoch: "2" });
         return { projection: selected, returnIntent: null };
       },
     });
@@ -549,8 +552,9 @@ describe("BrowserAccountsProvider", () => {
         }),
       ),
     ).toBe(true);
-    expect(completionOperationIds).toHaveLength(2);
-    expect(completionOperationIds[1]).toBe(completionOperationIds[0]);
+    expect(completionRequests).toHaveLength(2);
+    expect(completionRequests[1]).toEqual(completionRequests[0]);
+    expect(completionRequests[0]?.expectedGeneration).toBe("1");
     expect(accounts.current.transaction).toBeNull();
     unregister();
     await accounts.unmount();

@@ -173,8 +173,14 @@ export function BrowserAccountsProvider({
   const transactionTargetSlotIdRef = useRef<string | null>(null);
   const beginOperationRef = useRef<{ signature: string; operationId: string } | null>(null);
   const bootstrapOperationRef = useRef<{ generation: string; operationId: string } | null>(null);
-  const completionOperationIdRef = useRef<string | null>(null);
-  const cancelOperationIdRef = useRef<string | null>(null);
+  const completionOperationRef = useRef<{
+    operationId: string;
+    expectedGeneration: string;
+  } | null>(null);
+  const cancelOperationRef = useRef<{
+    operationId: string;
+    expectedGeneration: string;
+  } | null>(null);
   const pendingCommitSequenceRef = useRef<number | null>(null);
   const invalidatedDuringPendingCommitRef = useRef(false);
   const sequenceRef = useRef(0);
@@ -459,8 +465,8 @@ export function BrowserAccountsProvider({
         });
         beginOperationRef.current = null;
         transactionTargetSlotIdRef.current = slotId ?? null;
-        completionOperationIdRef.current = null;
-        cancelOperationIdRef.current = null;
+        completionOperationRef.current = null;
+        cancelOperationRef.current = null;
         setTransaction(next);
         setPhase("ready");
         return next;
@@ -497,19 +503,22 @@ export function BrowserAccountsProvider({
       const sequence = ++sequenceRef.current;
       setPhase("committing");
       setError(null);
-      const completionOperation = completionOperationIdRef.current ?? operationId();
-      completionOperationIdRef.current = completionOperation;
+      const completionOperation = completionOperationRef.current ?? {
+        operationId: operationId(),
+        expectedGeneration: current.generation,
+      };
+      completionOperationRef.current = completionOperation;
       try {
         const completed = await client.completeEmailPasswordTransaction({
-          operationId: completionOperation,
-          expectedGeneration: current.generation,
+          operationId: completionOperation.operationId,
+          expectedGeneration: completionOperation.expectedGeneration,
           transactionId: activeTransaction.id,
           email: input.email,
           password: input.password,
         });
         if (sequenceRef.current !== sequence) return false;
-        completionOperationIdRef.current = null;
-        cancelOperationIdRef.current = null;
+        completionOperationRef.current = null;
+        cancelOperationRef.current = null;
         transactionTargetSlotIdRef.current = null;
         setTransaction(null);
         const actorChanged = completed.projection.actorEpoch !== current.actorEpoch;
@@ -540,8 +549,8 @@ export function BrowserAccountsProvider({
       try {
         await reconcile(activeTransaction.kind, true);
         if (transactionRef.current?.id !== transactionId) return false;
-        completionOperationIdRef.current = null;
-        cancelOperationIdRef.current = null;
+        completionOperationRef.current = null;
+        cancelOperationRef.current = null;
         transactionTargetSlotIdRef.current = null;
         setTransaction(null);
         return true;
@@ -560,16 +569,19 @@ export function BrowserAccountsProvider({
     const activeTransaction = transactionRef.current;
     if (!current || !activeTransaction) return;
     setPhase("committing");
-    const cancelOperation = cancelOperationIdRef.current ?? operationId();
-    cancelOperationIdRef.current = cancelOperation;
+    const cancelOperation = cancelOperationRef.current ?? {
+      operationId: operationId(),
+      expectedGeneration: current.generation,
+    };
+    cancelOperationRef.current = cancelOperation;
     try {
       const next = await client.cancelLoginTransaction({
-        operationId: cancelOperation,
-        expectedGeneration: current.generation,
+        operationId: cancelOperation.operationId,
+        expectedGeneration: cancelOperation.expectedGeneration,
         transactionId: activeTransaction.id,
       });
-      completionOperationIdRef.current = null;
-      cancelOperationIdRef.current = null;
+      completionOperationRef.current = null;
+      cancelOperationRef.current = null;
       transactionTargetSlotIdRef.current = null;
       setTransaction(null);
       setProjection(next);

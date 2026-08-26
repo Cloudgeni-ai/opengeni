@@ -83,6 +83,12 @@ export class BrowserAccountsApiError extends Error {
 export class BrowserAccountsClient implements BrowserAccountsClientLike {
   readonly #baseUrl: string;
   readonly #fetch: BrowserAccountsFetch;
+  // CSRF is generation-bound. Exact idempotent replay must retain the
+  // admission envelope even after an authority reread observes a newer clock.
+  readonly #mutationAdmissions = new Map<
+    string,
+    { signature: string; csrfToken: string; actorEpoch: string }
+  >();
   #projection: ManagedAuthSessionSetProjectionType | null = null;
 
   constructor(options: BrowserAccountsClientOptions) {
@@ -210,9 +216,28 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
     const body = schema.parse(request);
     const projection = this.#projection;
     if (!projection) throw new BrowserAccountsApiError(409, "session_set_projection_required");
+    const operationId = mutationOperationId(body);
+    const signature = operationId ? JSON.stringify([method, path, body]) : null;
+    const retained = operationId ? this.#mutationAdmissions.get(operationId) : null;
+    if (retained && retained.signature !== signature) {
+      throw new BrowserAccountsApiError(409, "operation_reused");
+    }
+    const admission =
+      retained ??
+      ({
+        signature: signature ?? "",
+        csrfToken: projection.csrfToken,
+        actorEpoch: projection.actorEpoch,
+      } as const);
+    if (operationId && !retained) {
+      this.#mutationAdmissions.set(operationId, admission);
+      if (this.#mutationAdmissions.size > 64) {
+        this.#mutationAdmissions.delete(this.#mutationAdmissions.keys().next().value!);
+      }
+    }
     return await this.#request(method, path, body, {
-      "x-opengeni-session-csrf": projection.csrfToken,
-      "x-opengeni-actor-epoch": projection.actorEpoch,
+      "x-opengeni-session-csrf": admission.csrfToken,
+      "x-opengeni-actor-epoch": admission.actorEpoch,
     });
   }
 
@@ -242,10 +267,17 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
       }
       throw cause;
     }
-    const value = await response.json().catch(() => null);
+    let parsed = true;
+    const value = await response.json().catch(() => {
+      parsed = false;
+      return null;
+    });
     if (!response.ok) {
       const code = managedAuthErrorCode(value) ?? `http_${response.status}`;
       throw new BrowserAccountsApiError(response.status, code);
+    }
+    if (!parsed && method !== "GET") {
+      throw new BrowserAccountsApiError(503, "operation_outcome_unknown");
     }
     return value;
   }
@@ -258,6 +290,12 @@ export class BrowserAccountsClient implements BrowserAccountsClientLike {
     }
     return current;
   }
+}
+
+function mutationOperationId(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const operationId = (value as { operationId?: unknown }).operationId;
+  return typeof operationId === "string" ? operationId : null;
 }
 
 function compareProjectionClock(
