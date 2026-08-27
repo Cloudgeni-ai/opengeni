@@ -171,6 +171,28 @@ describe("deployment model catalog source", () => {
       parseModelCatalogDocument({
         schemaVersion: 1,
         builtInModels: ["gpt-5.6-luna"],
+        registryProviders: [
+          {
+            id: "database-provider",
+            baseUrl: "https://provider.example.test/v1",
+            apiKeyEnv: "AWS_SECRET_ACCESS_KEY",
+            models: [{ id: "database/model" }],
+          },
+        ],
+      }),
+    ).toThrow();
+    for (const productId of ["bad\nmodel", "bad|model"]) {
+      expect(() =>
+        parseModelCatalogDocument({
+          schemaVersion: 1,
+          builtInModels: [productId],
+        }),
+      ).toThrow("catalog product ids must not contain newlines or the | field separator");
+    }
+    expect(() =>
+      parseModelCatalogDocument({
+        schemaVersion: 1,
+        builtInModels: ["gpt-5.6-luna"],
         modelNotes: { "unknown/model": "Unknown models are rejected." },
       }),
     ).toThrow("model note references a product id outside the deployment catalog");

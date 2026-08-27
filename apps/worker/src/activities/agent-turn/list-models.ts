@@ -20,7 +20,7 @@ export function renderListModels(input: {
 }): string {
   const lines: string[] = [];
   if (input.currentModelId) {
-    lines.push(`Current: ${input.currentModelId}`);
+    lines.push(`Current: ${safeLineField(input.currentModelId)}`);
   }
 
   const selectable = input.selections.filter((entry) => entry.availability.selectable);
@@ -30,9 +30,9 @@ export function renderListModels(input: {
   }
 
   for (const { model } of selectable) {
-    const fields = [model.id, safeLineField(model.label), model.cost];
+    const fields = [safeLineField(model.id), safeLineField(model.label), model.cost];
     const note = input.modelNotes[model.id];
-    if (note) fields.push(note);
+    if (note) fields.push(safeLineField(note));
     lines.push(`- ${fields.join(" | ")}`);
   }
   return lines.join("\n");

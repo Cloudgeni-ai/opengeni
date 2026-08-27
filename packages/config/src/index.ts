@@ -2050,6 +2050,7 @@ export type OpenRouterCatalogModel = z.infer<typeof OpenRouterCatalogModel>;
 
 const DeploymentRegistryProviderSchema = RegistryProviderSchema.safeExtend({
   apiKey: z.never().optional(),
+  apiKeyEnv: z.never().optional(),
 }).strict();
 
 export const ModelCatalogDocument = z
@@ -2069,6 +2070,13 @@ export const ModelCatalogDocument = z
   .superRefine((document, context) => {
     const productIds = new Set<string>();
     const add = (id: string, path: Array<string | number>): void => {
+      if (/[\u000A\u000D|]/u.test(id)) {
+        context.addIssue({
+          code: "custom",
+          path,
+          message: "catalog product ids must not contain newlines or the | field separator",
+        });
+      }
       if (productIds.has(id)) {
         context.addIssue({ code: "custom", path, message: `duplicate product id ${id}` });
       }

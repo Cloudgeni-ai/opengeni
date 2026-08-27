@@ -58,6 +58,28 @@ describe("list_models", () => {
     ).toBe("Current: gpt-5.6-sol\nNo models are available in this workspace.");
   });
 
+  test("keeps every rendered field on one unambiguous line", () => {
+    const selection = resolveWorkspaceModelSelection({
+      settings: testSettings(),
+      policy: { allowedProviders: null, allowedModels: ["gpt-5.6-luna"] },
+      codexSubscriptionActive: false,
+    }).find((candidate) => candidate.model.id === "gpt-5.6-luna");
+    expect(selection).toBeDefined();
+    const unsafeId = "bad|model\nnext";
+    expect(
+      renderListModels({
+        currentModelId: "current\nmodel",
+        selections: [
+          {
+            ...selection!,
+            model: { ...selection!.model, id: unsafeId, label: "Bad|label\nnext" },
+          },
+        ],
+        modelNotes: { [unsafeId]: "Bad|note\nnext" },
+      }),
+    ).toBe("Current: current model\n- bad model next | Bad label next | credits | Bad note next");
+  });
+
   test("uses an empty strict schema and rejects extra arguments", async () => {
     const definition = createListModelsAttemptToolDefinition({
       currentModelId: null,
