@@ -1,12 +1,13 @@
-# Structured preference registry
+# Structured preference registry (Skills authority)
 
-The preference registry is an additive backend governance store for stable,
-skill-like preferences at organization, workspace, and personal scope. It is
+The preference registry is the technical authority behind user-facing
+**Skills**. It stores stable, reusable, conditional ways of working at
+organization, workspace, and personal scope. It is
 deliberately separate from:
 
 - Documents/RAG and imported source content;
 - `knowledge_memories` and its retrieval/ranking lifecycle;
-- Skills content, materialization, activation, or editing;
+- Memory facts, decisions, incidents, fixes, and outcomes;
 - workspace instruction-policy charters and their separate authority;
 - model, tool, connector, or prompt-composition policy.
 
@@ -14,8 +15,10 @@ The registry provides storage, service operations, HTTP and first-party MCP
 retrieval, SDK types, and isolation guarantees. Migration
 `0157_session_policy_role_snapshots.sql` now invokes its exact-attempt snapshot
 at runtime and composes only bounded descriptors with workspace policy. Full
-content remains on-demand. The Workspace State console now provides a bounded
-human administration surface over these same governance routes; it does not add
+content remains on-demand. The Agent Knowledge page provides a deliberately
+small human surface over these same governance routes: active Skill cards, an
+agent-assisted creation prompt, and a compact manual editor. It does not show
+inactive proposals, revision hashes, or lifecycle controls, and it does not add
 a connector, source/fact schema, browser full-content read path, or parallel
 preference authority.
 
@@ -207,20 +210,13 @@ Derived active/expired predicates execute in the joined SQL query before
 deterministic ordering and `LIMIT`, so bounded status pages cannot be emptied by
 expired rows that sort earlier.
 
-`/workspaces/:workspaceId/state` uses those same human governance routes to
-list authorized organization/workspace/personal records, create inactive human
-proposals, inspect compact descriptor metadata, revisions and immutable events,
-activate or roll back to an immutable revision, correct, change scope,
-deactivate, supersede an active record with an active unexpired same-scope
-replacement, and reject. Supersession records the typed replacement ID rather
-than degrading into an unlinked deactivation. Organization controls are disabled
-without the matching `account:admin` grant, workspace controls require
-`workspace:admin`, and personal controls remain self-only. Expired and
-superseded rows may retain their historical head revision, but the console labels
-that head as retained metadata rather than current descriptor authority. The
-browser never manufactures authority; stable-key conflicts remain distinct from
-stale lifecycle CAS conflicts, and the visible recovery refresh reloads both the
-registry inventory and selected detail.
+`/workspaces/:workspaceId/state` uses those same human governance routes for the
+user-facing Skills surface. It lists active authorized records and permits a
+direct human to create and activate an explicit Skill. The full proposal and
+lifecycle API remains available for purpose-built governance clients, but is
+not presented in the default Agent Knowledge UI. Organization controls require
+the matching `account:admin` grant, workspace controls require
+`workspace:admin`, and personal controls remain self-only.
 
 The summary and full-content routes require exact attempt authority. The same
 restriction applies to the first-party MCP tools

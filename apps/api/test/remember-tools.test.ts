@@ -71,10 +71,11 @@ function harness() {
               destination: "knowledge",
               receiptId: "00000000-0000-4000-8000-000000000114",
               claimId: request.claimId!,
+              memoryId: "00000000-0000-4000-8000-000000000117",
               approvalReviewId: "00000000-0000-4000-8000-000000000115",
               effectiveAt: null,
               authorityKind: "human_confirmed",
-              undo: "knowledge_review",
+              undo: "memory_management",
             },
           };
         }
@@ -150,24 +151,20 @@ describe("remember MCP tools", () => {
 
   test("the tool description states the prompt cost and the shape of a durable rule", () => {
     const description = harness().configs.get("remember")?.description ?? "";
+    expect(description).toContain("lane=knowledge for a fact, decision, incident, bug fix");
+    expect(description).toContain("lane=preference creates a Skill");
+    expect(description).toContain("lane=instruction_policy is only for a universal");
     expect(description).toContain(
-      "composed verbatim into the prompt of every session it applies to",
+      `at most ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
     );
-    // Accurate about reach and about the shared standing ceiling.
-    expect(description).toContain("every session bound to the role for a role rule");
-    expect(description).toContain("At most three rules compose at once");
-    expect(description).toContain(
-      `under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters`,
-    );
-    expect(description).toContain("one imperative rule in 1-3 sentences");
+    expect(description).toContain("normally 1-3 imperative sentences");
     expect(description).toContain("no numbered steps");
-    expect(description).toContain("Prefer several small entries over one long one");
-    expect(description).toContain("Document or Skill");
     expect(description).toContain(
-      `Keep a lane=preference under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
+      `Keep a Skill under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters`,
     );
-    // Honest about why a preference gets more room, not less.
-    expect(description).toContain("retrieval cost rather than standing prompt cost");
+    expect(description).toContain("one-sentence descriptor");
+    expect(description).toContain("materializes its exact approved text into Memory");
+    expect(description).toContain("`memory_search` retrieval");
   });
 
   test("an over-budget prompt-composed lane is refused before anything durable is written", async () => {
@@ -243,7 +240,7 @@ describe("remember MCP tools", () => {
     });
     expect(JSON.parse(knowledge.content[0]!.text)).toMatchObject({
       status: "activated",
-      activation: { destination: "knowledge", undo: "knowledge_review" },
+      activation: { destination: "knowledge", undo: "memory_management" },
     });
     expect(h.confirms[2]).toMatchObject({ request: { target: "knowledge_claim" } });
     const invalid = await h.handlers.get("remember_confirm")!({

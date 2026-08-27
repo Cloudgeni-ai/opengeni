@@ -1,7 +1,7 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { RetainedArtifactReference } from "@opengeni/sdk";
 
-type RetainedScreenshotClient = Pick<OpenGeniCoreClient, "downloadRetainedScreenshot">;
+type RetainedScreenshotClient = Pick<OpenGeniBrowserClient, "downloadRetainedScreenshot">;
 
 /**
  * Bind the authenticated SDK downloader to one routed workspace/session.

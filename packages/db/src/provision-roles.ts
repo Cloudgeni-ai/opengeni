@@ -533,6 +533,31 @@ async function grantAppRoleIfSchemaExists(
   ]
     .map(literal)
     .join(", ")}]`;
+  const managedAuthSessionSetRoutines = `ARRAY[${[
+    "get_canonical_human_exact_login_binding(text,text)",
+    "managed_auth_session_set_authority_state(text)",
+    "managed_auth_session_set_snapshot(text,text,boolean,boolean,boolean)",
+    "managed_auth_session_set_bootstrap(text,text,text,text,uuid,text,bigint,bigint)",
+    "managed_auth_session_set_begin_transaction(text,text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamp with time zone)",
+    "managed_auth_session_set_complete_transaction(text,text,uuid,text,bigint,bigint,uuid,text,text,text)",
+    "managed_auth_session_set_mutate(text,text,uuid,text,bigint,bigint,text,uuid,uuid,uuid,text,text)",
+    "managed_auth_actor_mutation_fence(text,bigint,uuid)",
+    "managed_auth_actor_mutation_lease_acquire(text,bigint,uuid,integer)",
+    "managed_auth_actor_mutation_lease_release(text,uuid)",
+    "managed_auth_actor_mutation_lease_validate(text,bigint,uuid)",
+    "managed_auth_adopted_session_snapshot(text)",
+    "managed_auth_isolated_session_reap(integer)",
+    "managed_auth_expired_session_set_reap(integer)",
+    "managed_auth_session_set_operation_receipt(text,uuid,text,text)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
+  const organizationRecoveryRoutines = `ARRAY[${[
+    "get_organization_recovery_overview(uuid,text,jsonb,text,text)",
+    "organization_recovery_command(jsonb)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
   await sql.unsafe(`
 DO $$
 DECLARE
@@ -900,6 +925,19 @@ BEGIN
       );
     END IF;
     IF to_regprocedure(
+      format('%I.materialize_remember_knowledge_memory(uuid,uuid,uuid)', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.materialize_remember_knowledge_memory(uuid, uuid, uuid) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.materialize_remember_knowledge_memory(uuid, uuid, uuid) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
       format('%I.undo_governed_learning_activation(uuid,uuid,uuid,uuid)', ${literal(schema)})
     ) IS NOT NULL THEN
       EXECUTE format(
@@ -1213,6 +1251,30 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    FOREACH routine_signature IN ARRAY ${managedAuthSessionSetRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
+    FOREACH routine_signature IN ARRAY ${organizationRecoveryRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0225 creates these target-schema-local session visibility
     -- capabilities before opengeni_app may exist. Re-converge their exact
     -- EXECUTE grants for migrate-then-provision installs without granting
@@ -1309,6 +1371,38 @@ BEGIN
       );
       EXECUTE format(
         'GRANT EXECUTE ON FUNCTION %I.replay_applied_session_fork(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.fork_session_content_with_runtime(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,jsonb,uuid,uuid,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.fork_session_content_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, jsonb, uuid, uuid, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.fork_session_content_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, jsonb, uuid, uuid, text) TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure(
+      format(
+        '%I.replay_applied_session_fork_with_runtime(uuid,uuid,uuid,text,uuid,text,boolean,text,text,integer,text)',
+        ${literal(schema)}
+      )
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.replay_applied_session_fork_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, text) FROM PUBLIC',
+        ${literal(schema)}
+      );
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.replay_applied_session_fork_with_runtime(uuid, uuid, uuid, text, uuid, text, boolean, text, text, integer, text) TO %I',
         ${literal(schema)},
         ${literal(role)}
       );
@@ -1933,6 +2027,15 @@ BEGIN
       );
       EXECUTE format(
         'REVOKE ALL PRIVILEGES ON TABLE opengeni_private.variable_set_authority_capabilities FROM %I',
+        ${literal(role)}
+      );
+    END IF;
+    IF to_regprocedure('opengeni_private.session_variable_set_attachments_protocol_v1_active()') IS NOT NULL THEN
+      REVOKE ALL ON FUNCTION
+        opengeni_private.session_variable_set_attachments_protocol_v1_active()
+        FROM PUBLIC;
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION opengeni_private.session_variable_set_attachments_protocol_v1_active() TO %I',
         ${literal(role)}
       );
     END IF;

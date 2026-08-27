@@ -1381,7 +1381,7 @@ describe("workflow execution graph manifest", () => {
     ).not.toEqual([]);
   });
 
-  test("removing any one of the 17 approved caps invalidates the committed graph", async () => {
+  test("removing any one of the 18 approved caps invalidates the committed graph", async () => {
     type MutableStep = { "timeout-minutes"?: unknown; run?: unknown; uses?: unknown };
     type MutableWorkflow = { jobs?: Record<string, { steps?: MutableStep[] }> };
     const sources = await loadWorkflowExecutionSources(root);
@@ -1398,7 +1398,7 @@ describe("workflow execution graph manifest", () => {
         }
       }
     }
-    expect(capped).toHaveLength(17);
+    expect(capped).toHaveLength(18);
 
     for (const [path, jobIndex, stepIndex] of capped) {
       const mutatedSources = { ...sources };

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type Session } from "@opengeni/sdk";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import { managedSelfContextIdentity } from "./managed-self-context";
 import {
@@ -15,6 +15,7 @@ const organizationId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const personalWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const variableSetId = "44444444-4444-4444-8444-444444444444";
+const workspaceVariableSetId = "99999999-9999-4999-8999-999999999999";
 const rigId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const enrollmentId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
@@ -69,12 +70,19 @@ function ownerScope(session?: Pick<Session, "id" | "tenancy">) {
   return resolvePersonalResourceOwnerScope({
     authMode: "managedSession",
     authSession: {
-      session: { id: "cookie", userId: "human", expiresAt: "2027-01-01T00:00:00.000Z" },
+      session: {
+        id: "cookie",
+        userId: "human",
+        expiresAt: "2027-01-01T00:00:00.000Z",
+      },
       user: { id: "human", name: "Human", email: "human@example.com" },
     },
     accessSubjectId: "user:human",
     managedSelfContext: {
-      identity: managedSelfContextIdentity({ credentialGeneration: 7, managedUserId: "human" }),
+      identity: managedSelfContextIdentity({
+        credentialGeneration: 7,
+        managedUserId: "human",
+      }),
       memberships: [
         {
           id: "55555555-5555-4555-8555-555555555555",
@@ -147,7 +155,7 @@ describe("personal resource attachment authority", () => {
           nextCursor: null,
         };
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(catalog.variableSets.map((resource) => resource.name)).toEqual(["Private deploy keys"]);
@@ -166,15 +174,59 @@ describe("personal resource attachment authority", () => {
         authorities: [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(
-      personalSelection(catalog, { variableSetId, rigId: null, connectedMachine: null }),
+      personalSelection(catalog, {
+        variableSetId,
+        rigId: null,
+        connectedMachine: null,
+      }),
     ).toMatchObject({
       personalResourceCount: 1,
       resourceCount: 0,
       closureUnverified: true,
+    });
+  });
+
+  test("accepts a verified mix of workspace and personal Variable Sets", () => {
+    const personal = personalVariableSet();
+    const workspaceVariableSet = {
+      ...personal,
+      id: workspaceVariableSetId,
+      workspaceId,
+      scope: "workspace" as const,
+      name: "Workspace defaults",
+    };
+    expect(
+      personalSelection(
+        {
+          variableSets: [workspaceVariableSet, personal],
+          rigs: [],
+          variableSetAuthorities: [authority("variable_set", variableSetId)],
+          rigAuthorities: [],
+          connectedMachineAuthorities: [],
+          personalVariableSets: [personal],
+          personalRigs: [],
+          variableSetAuthoritiesTruncated: false,
+          rigAuthoritiesTruncated: false,
+          connectedMachineAuthoritiesTruncated: false,
+          truncated: false,
+        },
+        {
+          variableSetIds: [workspaceVariableSetId, variableSetId],
+          variableSetScopes: ["workspace", "user"],
+          variableSetId,
+          variableSetScope: "user",
+          rigId: null,
+          connectedMachine: null,
+        },
+      ),
+    ).toMatchObject({
+      personalResourceCount: 1,
+      resourceCount: 2,
+      closureUnverified: false,
     });
   });
 
@@ -205,7 +257,7 @@ describe("personal resource attachment authority", () => {
             : [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(
@@ -237,11 +289,15 @@ describe("personal resource attachment authority", () => {
           options.resourceKind === "variable_set" ? [authority("variable_set", variableSetId)] : [],
         nextCursor: null,
       }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(
-      personalSelection(catalog, { variableSetId, rigId, connectedMachine: null }),
+      personalSelection(catalog, {
+        variableSetId,
+        rigId,
+        connectedMachine: null,
+      }),
     ).toMatchObject({
       personalResourceCount: 2,
       resourceCount: 1,
@@ -270,13 +326,17 @@ describe("personal resource attachment authority", () => {
           nextCursor: options.resourceKind === "variable_set" ? `page-${variablePages}` : null,
         };
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
 
     const catalog = await loadPersonalResourceCatalog(client, scope);
     expect(variablePages).toBe(4);
     expect(catalog.variableSetAuthoritiesTruncated).toBe(true);
     expect(
-      personalSelection(catalog, { variableSetId, rigId: null, connectedMachine: null }),
+      personalSelection(catalog, {
+        variableSetId,
+        rigId: null,
+        connectedMachine: null,
+      }),
     ).toMatchObject({
       personalResourceCount: 1,
       resourceCount: 1,
@@ -312,7 +372,9 @@ describe("personal resource attachment authority", () => {
 
   test("classifies only a definitive conflict carrying personal intent", () => {
     const conflict = new OpenGeniApiError(409, "conflict", { retryable: true });
-    const staleAuthority = new OpenGeniApiError(403, "forbidden", { retryable: false });
+    const staleAuthority = new OpenGeniApiError(403, "forbidden", {
+      retryable: false,
+    });
     const attempted = {
       personalResourceAttachment: {
         mode: "once" as const,

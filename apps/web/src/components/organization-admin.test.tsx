@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import * as SonnerPackage from "sonner";
@@ -276,7 +276,7 @@ describe("organization administration component fences", () => {
               changed: true,
             },
     );
-    const client = { requestJson } as unknown as OpenGeniCoreClient;
+    const client = { requestJson } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -323,7 +323,7 @@ describe("organization administration component fences", () => {
     const requestJson = mock(async (_method: string, path: string) =>
       path.includes(identityA.organizationId) ? pendingA.promise : settingsB,
     );
-    const client = { requestJson } as unknown as OpenGeniCoreClient;
+    const client = { requestJson } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -384,7 +384,7 @@ describe("organization administration component fences", () => {
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -453,7 +453,7 @@ describe("organization administration component fences", () => {
       })),
       updateOrganizationWorkspace,
       putOrganizationWorkspaceMember,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -538,7 +538,7 @@ describe("organization administration component fences", () => {
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -595,7 +595,7 @@ describe("organization administration component fences", () => {
         members: [member(identityA, "overview")],
       })),
       updateOrganizationName,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -666,7 +666,7 @@ describe("organization administration component fences", () => {
         nextCursor: null,
       }),
       updateOrganizationMember,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -721,7 +721,7 @@ describe("organization administration component fences", () => {
     const client = {
       getOrganizationRetentionPolicy,
       updateOrganizationRetentionPolicy,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -803,7 +803,7 @@ describe("organization administration component fences", () => {
       createOrganizationInvitation,
       revokeOrganizationInvitation,
       requestJson,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -901,7 +901,7 @@ describe("organization administration component fences", () => {
       }),
       listOrganizationInvitations,
       acceptOrganizationInvitation,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -964,7 +964,7 @@ describe("organization administration component fences", () => {
         nextCursor: null,
       }),
       updateOrganizationMember,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -1022,7 +1022,7 @@ describe("organization administration component fences", () => {
       getOrganizationRetentionPolicy: async (organizationId: string) =>
         organizationId === identityA.organizationId ? policy(identityA) : policy(identityB, 60),
       updateOrganizationRetentionPolicy,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -1089,7 +1089,7 @@ describe("organization administration component fences", () => {
         nextCursor: null,
       }),
       revokeOrganizationInvitation,
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);

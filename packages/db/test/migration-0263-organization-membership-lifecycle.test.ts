@@ -14,6 +14,7 @@ import {
   completeOrganizationRetentionDeletion,
   createConnection,
   createSession,
+  createVariableSet,
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUser,
@@ -38,6 +39,8 @@ import {
   updateOrganizationPrivateSessionSettings,
   updateOrganizationRetentionPolicy,
   runMigrations,
+  deleteVariableSet,
+  VariableSetAttachedError,
   type DbClient,
 } from "../src";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
@@ -141,6 +144,29 @@ async function expireOrganizationMember(
     set personal_retention_until = now() - interval '1 second'
     where account_id = ${input.owner.organizationId} and id = ${member.id}`;
   return member;
+}
+
+async function createSharedWorkspaceForMember(
+  fixture: Awaited<ReturnType<typeof provisionOrganizationMember>>,
+  label: string,
+) {
+  if (!shared) throw new Error("test database unavailable");
+  const workspaceId = crypto.randomUUID();
+  await shared.admin`
+    insert into workspaces (id, account_id, name, external_source, external_id)
+    values (
+      ${workspaceId}, ${fixture.owner.organizationId}, ${label},
+      'retention-variable-set-test', ${crypto.randomUUID()}
+    )`;
+  await shared.admin`
+    insert into workspace_inference_controls (account_id, workspace_id)
+    values (${fixture.owner.organizationId}, ${workspaceId})`;
+  await shared.admin`
+    insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+    values
+      (${fixture.owner.organizationId}, ${workspaceId}, ${fixture.ownerSubject}, 'owner'),
+      (${fixture.owner.organizationId}, ${workspaceId}, ${fixture.targetSubject}, 'member')`;
+  return workspaceId;
 }
 
 async function insertRetainedScreenshotReference(input: {
@@ -1816,6 +1842,377 @@ describe("migration 0263 organization membership lifecycle", () => {
       await expectSqlState(() => invokeAsCurrentOrganization(statement), "42501");
     }
   });
+
+  test("retention finalization detaches owned ordered Variable Sets with rotation and evidence", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("retention-variable-set-order");
+    const sharedWorkspaceId = await createSharedWorkspaceForMember(
+      fixture,
+      "Retention Variable Set shared workspace",
+    );
+    const survivor = await createVariableSet(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId: sharedWorkspaceId,
+      name: `survivor-${crypto.randomUUID()}`,
+    });
+    const firstOwned = await createVariableSet(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId: fixture.member.personalWorkspaceId!,
+      scope: "user",
+      subjectId: fixture.targetSubject,
+      name: `owned-first-${crypto.randomUUID()}`,
+    });
+    const secondOwned = await createVariableSet(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId: fixture.member.personalWorkspaceId!,
+      scope: "user",
+      subjectId: fixture.targetSubject,
+      name: `owned-second-${crypto.randomUUID()}`,
+    });
+    const personalSession = await createSession(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId: fixture.member.personalWorkspaceId!,
+      initialMessage: "retention personal attachment",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: fixture.targetSubject },
+      subjectId: fixture.targetSubject,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      variableSetIds: [firstOwned.id],
+      variableSetId: firstOwned.id,
+    });
+    const sharedSession = await createSession(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId: sharedWorkspaceId,
+      initialMessage: "retention ordered shared attachment",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: fixture.targetSubject },
+      subjectId: fixture.targetSubject,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      variableSetIds: [survivor.id, firstOwned.id, secondOwned.id],
+      variableSetId: secondOwned.id,
+    });
+    await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, backend, expires_at
+      ) values (
+        ${fixture.owner.organizationId}, ${sharedWorkspaceId}, ${sharedSession.sandboxGroupId},
+        'warm', 'none', now() + interval '1 hour'
+      )`;
+
+    await expect(
+      deleteVariableSet(
+        client.db,
+        {
+          accountId: fixture.owner.organizationId,
+          workspaceId: sharedWorkspaceId,
+          subjectId: fixture.targetSubject,
+        },
+        firstOwned.id,
+      ),
+    ).rejects.toBeInstanceOf(VariableSetAttachedError);
+
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+    const result = await finalizeOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      membershipId: member.id,
+      operationId,
+      objectBucket: retentionObjectBucket,
+    });
+    expect(result).toMatchObject({
+      outcome: "cleanup_pending",
+      deletedResources: { variableSets: 2, personalWorkspaces: 1 },
+    });
+
+    const [state] = await shared.admin<
+      Array<{
+        variableSetIds: string[];
+        variableSetId: string | null;
+        personalSessionCount: number;
+        ownedVariableSetCount: number;
+        projectionIds: string[];
+        rotationRequested: boolean;
+        eventRemovedIds: string[];
+        detachAuditCount: number;
+      }>
+    >`
+      select session_value.variable_set_ids as "variableSetIds",
+        session_value.variable_set_id as "variableSetId",
+        (select count(*)::int from sessions where id = ${personalSession.id})
+          as "personalSessionCount",
+        (select count(*)::int from workspace_variable_sets
+          where id in (${firstOwned.id}, ${secondOwned.id})) as "ownedVariableSetCount",
+        (select coalesce(array_agg(attachment.variable_set_id::text order by attachment.position),
+          array[]::text[]) from session_variable_set_attachments attachment
+          where attachment.workspace_id = ${sharedWorkspaceId}
+            and attachment.session_id = ${sharedSession.id}) as "projectionIds",
+        (select rotation_requested_at is not null from sandbox_leases
+          where workspace_id = ${sharedWorkspaceId}
+            and sandbox_group_id = ${sharedSession.sandboxGroupId}) as "rotationRequested",
+        (select array_agg(value order by ordinal)
+          from session_events event_value,
+            jsonb_array_elements_text(event_value.payload -> 'removedIds')
+              with ordinality removed(value, ordinal)
+          where event_value.workspace_id = ${sharedWorkspaceId}
+            and event_value.session_id = ${sharedSession.id}
+            and event_value.type = 'session.variable_sets.updated'
+            and event_value.payload ->> 'operationId' = ${operationId}) as "eventRemovedIds",
+        (select count(*)::int from audit_events audit_value
+          where audit_value.workspace_id = ${sharedWorkspaceId}
+            and audit_value.target_id = ${sharedSession.id}
+            and audit_value.action = 'session.variable_set.detached'
+            and audit_value.metadata ->> 'operationId' = ${operationId}) as "detachAuditCount"
+      from sessions session_value
+      where session_value.workspace_id = ${sharedWorkspaceId}
+        and session_value.id = ${sharedSession.id}`;
+    expect(state).toEqual({
+      variableSetIds: [survivor.id],
+      variableSetId: survivor.id,
+      personalSessionCount: 0,
+      ownedVariableSetCount: 0,
+      projectionIds: [survivor.id],
+      rotationRequested: true,
+      eventRemovedIds: [firstOwned.id, secondOwned.id],
+      detachAuditCount: 2,
+    });
+  }, 180_000);
+
+  test("retention Variable Set detach rolls back every mirror and evidence write on failure", async () => {
+    if (!shared || !client) return;
+    const fixture = await provisionOrganizationMember("retention-variable-set-rollback");
+    const sharedWorkspaceId = await createSharedWorkspaceForMember(
+      fixture,
+      "Retention Variable Set rollback workspace",
+    );
+    const owned = await createVariableSet(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId: fixture.member.personalWorkspaceId!,
+      scope: "user",
+      subjectId: fixture.targetSubject,
+      name: `rollback-owned-${crypto.randomUUID()}`,
+    });
+    const session = await createSession(client.db, {
+      accountId: fixture.owner.organizationId,
+      workspaceId: sharedWorkspaceId,
+      initialMessage: "retention rollback attachment",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: fixture.targetSubject },
+      subjectId: fixture.targetSubject,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      variableSetIds: [owned.id],
+      variableSetId: owned.id,
+    });
+    await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, backend, expires_at
+      ) values (
+        ${fixture.owner.organizationId}, ${sharedWorkspaceId}, ${session.sandboxGroupId},
+        'warm', 'none', now() + interval '1 hour'
+      )`;
+    const member = await expireOrganizationMember(fixture);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: fixture.owner.organizationId,
+      operationId,
+    });
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const functionName = `fail_retention_variable_set_detach_${suffix}`;
+    const triggerName = `fail_retention_variable_set_detach_${suffix}`;
+    await shared.admin.unsafe(`
+      create function ${functionName}() returns trigger language plpgsql as $$
+      begin
+        if new.action = 'session.variable_set.detached'
+          and new.metadata ->> 'operationId' = '${operationId}' then
+          raise exception 'injected retention Variable Set detach failure';
+        end if;
+        return new;
+      end
+      $$;
+      create trigger ${triggerName}
+      before insert on audit_events
+      for each row execute function ${functionName}();
+    `);
+    try {
+      await expectSqlState(
+        () =>
+          finalizeOrganizationRetentionDeletion(client!.db, {
+            organizationId: fixture.owner.organizationId,
+            membershipId: member.id,
+            operationId,
+            objectBucket: retentionObjectBucket,
+          }),
+        "P0001",
+      );
+      const [rolledBack] = await shared.admin<
+        Array<{
+          variableSetIds: string[];
+          projectionCount: number;
+          variableSetCount: number;
+          eventCount: number;
+          auditCount: number;
+          rotationRequested: boolean;
+          databaseFinalizedAt: string | null;
+        }>
+      >`
+        select session_value.variable_set_ids as "variableSetIds",
+          (select count(*)::int from session_variable_set_attachments
+            where workspace_id = ${sharedWorkspaceId} and session_id = ${session.id})
+            as "projectionCount",
+          (select count(*)::int from workspace_variable_sets where id = ${owned.id})
+            as "variableSetCount",
+          (select count(*)::int from session_events
+            where workspace_id = ${sharedWorkspaceId} and session_id = ${session.id}
+              and type = 'session.variable_sets.updated'
+              and payload ->> 'operationId' = ${operationId}) as "eventCount",
+          (select count(*)::int from audit_events
+            where workspace_id = ${sharedWorkspaceId} and target_id = ${session.id}
+              and action = 'session.variable_set.detached'
+              and metadata ->> 'operationId' = ${operationId}) as "auditCount",
+          (select rotation_requested_at is not null from sandbox_leases
+            where workspace_id = ${sharedWorkspaceId}
+              and sandbox_group_id = ${session.sandboxGroupId}) as "rotationRequested",
+          (select database_finalized_at::text from organization_user_retention_deletions
+            where account_id = ${fixture.owner.organizationId}
+              and membership_id = ${member.id}) as "databaseFinalizedAt"
+        from sessions session_value
+        where session_value.workspace_id = ${sharedWorkspaceId}
+          and session_value.id = ${session.id}`;
+      expect(rolledBack).toEqual({
+        variableSetIds: [owned.id],
+        projectionCount: 1,
+        variableSetCount: 1,
+        eventCount: 0,
+        auditCount: 0,
+        rotationRequested: false,
+        databaseFinalizedAt: null,
+      });
+    } finally {
+      await shared.admin.unsafe(`drop trigger if exists ${triggerName} on audit_events`);
+      await shared.admin.unsafe(`drop function if exists ${functionName}()`);
+    }
+    await expect(
+      finalizeOrganizationRetentionDeletion(client.db, {
+        organizationId: fixture.owner.organizationId,
+        membershipId: member.id,
+        operationId,
+        objectBucket: retentionObjectBucket,
+      }),
+    ).resolves.toMatchObject({ outcome: "cleanup_pending" });
+  }, 180_000);
+
+  test("retention Variable Set cleanup is isolated from another organization", async () => {
+    if (!shared || !client) return;
+    const first = await provisionOrganizationMember("retention-variable-set-tenant-first");
+    const second = await provisionOrganizationMember("retention-variable-set-tenant-second");
+    const firstWorkspaceId = await createSharedWorkspaceForMember(first, "First tenant shared");
+    const secondWorkspaceId = await createSharedWorkspaceForMember(second, "Second tenant shared");
+    const firstOwned = await createVariableSet(client.db, {
+      accountId: first.owner.organizationId,
+      workspaceId: first.member.personalWorkspaceId!,
+      scope: "user",
+      subjectId: first.targetSubject,
+      name: `first-owned-${crypto.randomUUID()}`,
+    });
+    const secondOwned = await createVariableSet(client.db, {
+      accountId: second.owner.organizationId,
+      workspaceId: second.member.personalWorkspaceId!,
+      scope: "user",
+      subjectId: second.targetSubject,
+      name: `second-owned-${crypto.randomUUID()}`,
+    });
+    const firstSession = await createSession(client.db, {
+      accountId: first.owner.organizationId,
+      workspaceId: firstWorkspaceId,
+      initialMessage: "first tenant retention",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: first.targetSubject },
+      subjectId: first.targetSubject,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      variableSetIds: [firstOwned.id],
+      variableSetId: firstOwned.id,
+    });
+    const secondSession = await createSession(client.db, {
+      accountId: second.owner.organizationId,
+      workspaceId: secondWorkspaceId,
+      initialMessage: "second tenant retained",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId: second.targetSubject },
+      subjectId: second.targetSubject,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      variableSetIds: [secondOwned.id],
+      variableSetId: secondOwned.id,
+    });
+    const firstMember = await expireOrganizationMember(first);
+    const operationId = crypto.randomUUID();
+    await claimOrganizationRetentionDeletion(client.db, {
+      organizationId: first.owner.organizationId,
+      operationId,
+    });
+    await finalizeOrganizationRetentionDeletion(client.db, {
+      organizationId: first.owner.organizationId,
+      membershipId: firstMember.id,
+      operationId,
+      objectBucket: retentionObjectBucket,
+    });
+    const [isolation] = await shared.admin<
+      Array<{
+        firstSessionIds: string[];
+        firstVariableSetCount: number;
+        secondSessionIds: string[];
+        secondVariableSetCount: number;
+        secondProjectionCount: number;
+        secondEventCount: number;
+      }>
+    >`
+      select
+        (select variable_set_ids from sessions where id = ${firstSession.id}) as "firstSessionIds",
+        (select count(*)::int from workspace_variable_sets where id = ${firstOwned.id})
+          as "firstVariableSetCount",
+        (select variable_set_ids from sessions where id = ${secondSession.id})
+          as "secondSessionIds",
+        (select count(*)::int from workspace_variable_sets where id = ${secondOwned.id})
+          as "secondVariableSetCount",
+        (select count(*)::int from session_variable_set_attachments
+          where account_id = ${second.owner.organizationId}
+            and workspace_id = ${secondWorkspaceId} and session_id = ${secondSession.id})
+          as "secondProjectionCount",
+        (select count(*)::int from session_events
+          where account_id = ${second.owner.organizationId}
+            and workspace_id = ${secondWorkspaceId} and session_id = ${secondSession.id}
+            and type = 'session.variable_sets.updated') as "secondEventCount"`;
+    expect(isolation).toEqual({
+      firstSessionIds: [],
+      firstVariableSetCount: 0,
+      secondSessionIds: [secondOwned.id],
+      secondVariableSetCount: 1,
+      secondProjectionCount: 1,
+      secondEventCount: 0,
+    });
+  }, 180_000);
 
   test("deletes an expired personal workspace only after exact object proof and preserves audit", async () => {
     if (!shared || !client) return;

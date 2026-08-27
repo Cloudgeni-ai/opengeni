@@ -221,8 +221,9 @@ export type MessageTimelineProps = {
  *
  * Scroll invariant (tip-follow camera — see `./tip-follow.ts`):
  * - Load/remount: hidden until tip is hard-snapped across a short settle; then
- *   reveal. Live tip: DOM grows immediately; the camera eases down (not
- *   tip-glued feed-forward — that is the one-line yank).
+ *   reveal. Live tip: DOM growth advances the pinned viewport by the same
+ *   amount, so rendered content is visible immediately. Only debt that already
+ *   existed before the growth goes through the camera ease.
  * - One continuous follow while hot (faster τ when behind); sleeps when cold.
  * - While pinned, tip-debt from growth/collapse must NEVER unpin — only
  *   wheel/keys/pointer-armed scroll-up, or a settled scrollend away from the
@@ -1193,7 +1194,7 @@ export function MessageTimeline({
 
   // First paint / session remount: keep the scroller hidden, snap to tip for
   // two animation frames (late sync layout), then reveal. Does not change the
-  // tip-follow ease law used once `revealed` is true.
+  // live tip-follow law used once `revealed` is true.
   useLayoutEffect(() => {
     if (revealed || !allGroups.length) {
       return;
@@ -1528,7 +1529,8 @@ export function MessageTimeline({
         rearmOlderPrefetchAfterLeavingTop(node);
         return;
       }
-      // Tip grew under a still viewport (no reader-up): ease back to the tip.
+      // Tip grew under a still viewport (no reader-up): track the new growth
+      // immediately and ease only any debt that already existed.
       // Reader/extension scroll-up in progress: do not yank — scrollend decides.
       // Near-bottom with tipDebt≈0 stays the quiet path (do not broaden follow
       // inside PIN_THRESHOLD — that fights small intentional scroll-ups).

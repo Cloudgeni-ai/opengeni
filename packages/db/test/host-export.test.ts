@@ -346,6 +346,7 @@ describe("durable host export (real PostgreSQL)", () => {
     });
     const delayedEventId = crypto.randomUUID();
     const delayedCommit = delayedSql.begin(async (tx) => {
+      await tx`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
       await tx`select set_config('opengeni.account_id', ${delayed.grant.accountId}, true)`;
       await tx`select set_config('opengeni.workspace_id', ${delayed.grant.workspaceId!}, true)`;
       await tx`select pg_advisory_xact_lock_shared(

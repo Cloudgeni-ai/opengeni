@@ -185,30 +185,29 @@ describe("pack sandbox image settings", () => {
   });
 });
 
-describe("rig image precedence over the pre-V2 Pack compatibility fallback", () => {
+describe("retired Rig image override compatibility seam", () => {
   const DEPLOYMENT = "opengeni-sandbox:local";
   const PACK = "ghcr.io/example/pack@sha256:pack";
   const RIG = "ghcr.io/example/rig@sha256:rig";
 
-  // The exact composition agent-turn uses: rig applied OUTERMOST over pack over
-  // the deployment default settings.
+  // Historical direct callers may still pass a Rig image value, but the helper
+  // is intentionally inert. Rig-bound agent-turn/API paths bypass the Pack
+  // image entirely before reaching this seam.
   function resolve(rigImage: string | null, packImage: string | null): Settings {
     const base = { dockerImage: DEPLOYMENT, modalImageRef: undefined } as unknown as Settings;
     return settingsWithRigImage(settingsWithPackSandboxImage(base, packImage), rigImage);
   }
 
-  // All 8 combinations of {rig, pack, deployment} image presence. Deployment is
-  // always present (the settings default), so the axis that varies is rig/pack.
   const matrix: Array<{
     rig: string | null;
     pack: string | null;
     expected: string;
     expectModal: string | undefined;
   }> = [
-    { rig: RIG, pack: PACK, expected: RIG, expectModal: RIG }, // rig wins over pack+deployment
-    { rig: RIG, pack: null, expected: RIG, expectModal: RIG }, // rig wins over deployment
-    { rig: null, pack: PACK, expected: PACK, expectModal: PACK }, // pack wins over deployment
-    { rig: null, pack: null, expected: DEPLOYMENT, expectModal: undefined }, // deployment default
+    { rig: RIG, pack: PACK, expected: PACK, expectModal: PACK },
+    { rig: RIG, pack: null, expected: DEPLOYMENT, expectModal: undefined },
+    { rig: null, pack: PACK, expected: PACK, expectModal: PACK },
+    { rig: null, pack: null, expected: DEPLOYMENT, expectModal: undefined },
   ];
 
   for (const { rig, pack: packImage, expected, expectModal } of matrix) {
@@ -224,15 +223,16 @@ describe("rig image precedence over the pre-V2 Pack compatibility fallback", () 
     expect(settingsWithRigImage(base, null)).toBe(base);
   });
 
-  test("a rig image clears a lower-precedence provider-native Modal image ID", () => {
+  test("a historical rig image cannot replace or clear the selected physical base", () => {
     const base = {
       dockerImage: DEPLOYMENT,
       modalImageRef: PACK,
       modalImageId: "im-1234567890123456789012",
     } as unknown as Settings;
     const resolved = settingsWithRigImage(base, RIG);
-    expect(resolved.modalImageRef).toBe(RIG);
-    expect(resolved.modalImageId).toBeUndefined();
+    expect(resolved).toBe(base);
+    expect(resolved.modalImageRef).toBe(PACK);
+    expect(resolved.modalImageId).toBe("im-1234567890123456789012");
   });
 });
 

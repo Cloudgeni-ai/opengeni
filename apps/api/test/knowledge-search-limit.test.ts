@@ -81,6 +81,7 @@ test("authenticated knowledge search rejects 51 with a typed envelope and accept
     body: JSON.stringify({
       query: "boundary",
       mode: "keyword",
+      authorityKinds: ["organization"],
       limit: 50,
       initiatingSubjectId: "user:forged",
       access: { viewerSubjectId: "user:forged" },
@@ -97,6 +98,7 @@ test("authenticated knowledge search rejects 51 with a typed envelope and accept
       limit: 50,
       mode: "keyword",
       sourceKinds: undefined,
+      authorityKinds: ["organization"],
       aclTags: undefined,
       initiatingSubjectId: SUBJECT_ID,
       surface: "human",

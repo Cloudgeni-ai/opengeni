@@ -7,9 +7,11 @@ import {
   type ForkSessionRequest,
   type SessionAuthorizationSurface,
   type UpdateSessionVisibilityRequest,
+  type VariableSet,
 } from "@opengeni/contracts";
 import {
   forkSessionContent,
+  getRig,
   getPrivateSessionCreatePolicy,
   getSessionEventForSubject,
   isRetryableDatabaseTransportFailure,
@@ -17,6 +19,7 @@ import {
   replayAppliedSessionFork,
   sessionTenancyProductActivated,
   SessionTenancyAccessError,
+  SessionTenancyInvalidRequestError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
   type Database,
@@ -26,8 +29,12 @@ import { publishDurableSessionEvents, type EventBus } from "@opengeni/events";
 import { requirePermission, type AccessGrantAuthorization } from "../access";
 import { requireSessionAuthorization } from "../session-authorization";
 import type { AppDependencies } from "../dependencies";
+import { validateVariableSetAttachment } from "../domain/environments";
 
-type SessionTenancyDependencies = Pick<AppDependencies, "db" | "bus" | "sessionAuthorization">;
+type SessionTenancyDependencies = Pick<
+  AppDependencies,
+  "db" | "bus" | "sessionAuthorization" | "settings"
+>;
 
 export class SessionTenancyManagedHumanRequiredError extends Error {
   readonly name = "SessionTenancyManagedHumanRequiredError";
@@ -286,9 +293,72 @@ export async function forkManagedHumanSession(
       request.visibility === "private" ? ("user_private" as const) : ("workspace_shared" as const),
     workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
     operationKey: request.idempotencyKey,
+    ...(request.rigId !== undefined || request.variableSetIds !== undefined
+      ? {
+          runtimeRequest: {
+            rigId: request.rigId ?? null,
+            variableSetIds: request.variableSetIds ?? [],
+          },
+        }
+      : {}),
   };
   const recoverAppliedReceipt = async () =>
     await runTenancyMutation(async () => await replayAppliedSessionFork(deps.db, forkInput));
+  const runtimeSetupRequested = request.rigId !== undefined || request.variableSetIds !== undefined;
+  let runtimeConfigurationPromise: Promise<{
+    variableSetIds: string[];
+    rigId: string | null;
+    rigVersionId: string | null;
+  }> | null = null;
+  const resolveRuntimeConfiguration = async () => {
+    if (runtimeConfigurationPromise) return await runtimeConfigurationPromise;
+    runtimeConfigurationPromise = (async () => {
+      const variableSets: VariableSet[] = [];
+      for (const variableSetId of request.variableSetIds ?? []) {
+        variableSets.push(
+          await validateVariableSetAttachment(
+            { settings: deps.settings, db: deps.db },
+            authorization.grant,
+            workspaceId,
+            variableSetId,
+          ),
+        );
+      }
+      let rigVersionId: string | null = null;
+      if (request.rigId) {
+        requirePermission(authorization.grant, "rigs:use");
+        const rig = await getRig(deps.db, authorization.grant, request.rigId);
+        if (!rig?.activeVersion) {
+          throw new SessionTenancyInvalidRequestError();
+        }
+        for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
+          await validateVariableSetAttachment(
+            { settings: deps.settings, db: deps.db },
+            authorization.grant,
+            workspaceId,
+            defaultVariableSetId,
+          );
+        }
+        rigVersionId = rig.activeVersion.id;
+      }
+      return {
+        variableSetIds: variableSets.map((variableSet) => variableSet.id),
+        rigId: request.rigId ?? null,
+        rigVersionId,
+      };
+    })();
+    return await runtimeConfigurationPromise;
+  };
+  const publishRuntimeConfiguration = async (result: ForkSessionContentResult) => {
+    if (!result.runtimeEventId || !result.runtimeEventSequence) return;
+    await publishExactCommittedEvent(deps, {
+      workspaceId,
+      sessionId: result.sessionId,
+      subjectId: authorization.grant.subjectId,
+      eventId: result.runtimeEventId,
+      eventSequence: result.runtimeEventSequence,
+    });
+  };
 
   // A committed response is owned by the exact actor/key/request tuple and no
   // longer depends on mutable source visibility. Resolve it before source/host
@@ -296,7 +366,13 @@ export async function forkManagedHumanSession(
   // owner makes a formerly shared session private.
   const applied = await recoverAppliedReceipt();
   if (applied) {
-    return await projectAndPublishSessionFork(deps, authorization.grant.subjectId, applied);
+    const response = await projectAndPublishSessionFork(
+      deps,
+      authorization.grant.subjectId,
+      applied,
+    );
+    await publishRuntimeConfiguration(applied);
+    return response;
   }
 
   try {
@@ -311,11 +387,28 @@ export async function forkManagedHumanSession(
     // exact applied receipt can convert the authorization failure into replay.
     const racedApplied = await recoverAppliedReceipt();
     if (racedApplied) {
-      return await projectAndPublishSessionFork(deps, authorization.grant.subjectId, racedApplied);
+      const response = await projectAndPublishSessionFork(
+        deps,
+        authorization.grant.subjectId,
+        racedApplied,
+      );
+      await publishRuntimeConfiguration(racedApplied);
+      return response;
     }
     throw authorizationError;
   }
 
-  const result = await runTenancyMutation(async () => await forkSessionContent(deps.db, forkInput));
-  return await projectAndPublishSessionFork(deps, authorization.grant.subjectId, result);
+  // Validate all requested runtime resources before committing the independent
+  // fork so ordinary authorization failures cannot leave an unusable copy.
+  const runtimeConfiguration = runtimeSetupRequested ? await resolveRuntimeConfiguration() : null;
+  const result = await runTenancyMutation(
+    async () =>
+      await forkSessionContent(deps.db, {
+        ...forkInput,
+        ...(runtimeConfiguration ? { runtimeConfiguration } : {}),
+      }),
+  );
+  const response = await projectAndPublishSessionFork(deps, authorization.grant.subjectId, result);
+  await publishRuntimeConfiguration(result);
+  return response;
 }

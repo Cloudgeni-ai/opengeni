@@ -1,6 +1,8 @@
-export { OpenGeniClient as OpenGeniCoreClient } from "./client";
+/** Backward-compatible non-artifact client surface. */
+export { OpenGeniDocumentAuthorityClient as OpenGeniCoreClient } from "./document-authority-client";
 export type {
   FetchLike,
+  GetSessionOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,

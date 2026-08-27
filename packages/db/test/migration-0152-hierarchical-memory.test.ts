@@ -153,6 +153,9 @@ async function contextRows<T extends Record<string, unknown>>(
   query: (sql: postgres.TransactionSql) => Promise<T[]>,
 ): Promise<T[]> {
   const rows = await app.begin(async (sql) => {
+    // This raw postgres-js handle models the current runtime rather than a
+    // pre-0348 binary, so carry the injected-handle protocol receipt explicitly.
+    await sql`select set_config('opengeni.session_variable_set_attachments_v1', '1', true)`;
     await sql`select set_config('opengeni.account_id', ${context.accountId}, true)`;
     await sql`select set_config('opengeni.workspace_id', ${context.workspaceId}, true)`;
     await sql`select set_config('opengeni.subject_id', ${context.subjectId ?? ""}, true)`;

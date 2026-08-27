@@ -22,6 +22,26 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Session display titles are durable session metadata, not a truncation of model
+history. Creation and migration use the prompt-free `New conversation` fallback.
+While a session still has that fallback (or a legacy null title), and its exact
+selected first-party tool and permission policy permits `set_session_title`, the
+worker projects only that exact operation through the attempt-local tool server
+and removes it from the broader remote first-party catalog for the attempt. The
+request-local one-shot instruction can therefore call `set_session_title` on the
+first model request without waiting for the remaining first-party `tools/list`;
+all other selected first-party schemas stay deferred and searchable. This does
+not grant or attach any new tool authority. The attempt-local operation uses the
+canonical title mutation, which updates the session row and appends
+`session.title_set`; a human title remains protected from later agent writes.
+The hint is based on durable title state rather than history length: turn claim
+persists the accepted user item before agent construction, so history count
+cannot identify a first turn.
+Historical fallback sessions therefore self-heal on their next eligible model
+turn. Read projections encountering malformed legacy nulls use an explicit
+factual session or agent identifier and never copy prompt text into title
+metadata.
+
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
 `clientEventId`, clears the visible draft immediately, and renders that snapshot
@@ -1671,9 +1691,17 @@ Provider request lifecycle diagnostics are synchronous, bounded, and best-effort
 Native diagnostic observers run before the existing awaited
 `agent.model.request` durable audit callback and cannot block or change it.
 Durable append/publish fencing and ordering therefore remain the source of audit
-truth. For generic providers, an attempt-local async context instead awaits the
-durable `started` checkpoint at the literal pre-fetch boundary; request bytes
-cannot reach the wire first. Model-preparation `started` is durable before
+truth. Every provider path first awaits a mandatory reconciliation of the SDK's
+complete prior history at the follow-up request boundary. A provider can
+therefore consume a completed tool batch only after its call/result pair is
+replay-safe; the first request has no prior model/tool history to append.
+When a Responses terminal omits its output array, completed stream items are
+reassembled by numeric `output_index`; sparse provider positions are compacted
+to the observed items rather than treated as missing output, while duplicate
+indices still fail closed.
+For generic providers, an attempt-local async context then awaits the durable
+`started` checkpoint at the literal pre-fetch boundary; request bytes cannot
+reach the wire first. Model-preparation `started` is durable before
 `runStream` is invoked, including an immediately-calling native transport. A
 semantic terminal is latched before downstream stream cleanup; if the consumer
 cancels after parsing it, the audit remains `completed` rather than producing a

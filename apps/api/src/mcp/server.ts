@@ -38,6 +38,7 @@ import {
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   SESSION_GOAL_TEXT_MAX_BYTES,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
+  MAX_SELECTED_VARIABLE_SETS,
   sessionGoalUtf8Bytes,
   TASK_NOTE_LIST_DEFAULT_LIMIT,
   TASK_NOTE_LIST_MAX_LIMIT,
@@ -3256,7 +3257,7 @@ function registerPreferenceRegistryTools(
     "preference_registry_summary",
     {
       description:
-        "List bounded deterministic descriptors for organization, workspace, and immutable initiating-human preferences frozen to this exact attempt. Full content is omitted; retrieve only a relevant returned handle.",
+        "List bounded deterministic Skill descriptors for organization, workspace, and the immutable initiating human, frozen to this exact attempt. Full Skill instructions are omitted; retrieve only a relevant returned handle.",
       inputSchema: {},
     },
     async () => json(await getOrCreatePreferenceRegistrySnapshot(deps.db, attemptClaims())),
@@ -3266,7 +3267,7 @@ function registerPreferenceRegistryTools(
     "preference_registry_get",
     {
       description:
-        "Retrieve full content for one preference in this exact attempt snapshot. Handles from another account, workspace, human, or attempt are rejected.",
+        "Retrieve the full instructions for one Skill in this exact attempt snapshot. Handles from another account, workspace, human, or attempt are rejected.",
       inputSchema: { retrievalHandle: z4.string().min(1).max(512) },
     },
     async ({ retrievalHandle }) =>
@@ -4295,6 +4296,7 @@ function registerWorkspaceOrchestrationTools(
         tools: z4.array(z4.unknown()).optional(),
         mcpServers: z4.array(z4.unknown()).optional(),
         variableSetId: z4.string().uuid().optional(),
+        variableSetIds: z4.array(z4.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
         environmentId: z4.string().uuid().optional(),
         rigId: z4.string().uuid().optional(),
         model: z4
@@ -4345,6 +4347,26 @@ function registerWorkspaceOrchestrationTools(
           .union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })])
           .optional(),
       })
+      .superRefine((value, context) => {
+        if (!value.variableSetIds) return;
+        if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+          context.addIssue({
+            code: z4.ZodIssueCode.custom,
+            path: ["variableSetIds"],
+            message: "variableSetIds must not contain duplicates",
+          });
+        }
+        const singular = value.variableSetId ?? value.environmentId;
+        if (singular === undefined) return;
+        const expected = value.variableSetIds[value.variableSetIds.length - 1];
+        if (singular !== expected) {
+          context.addIssue({
+            code: z4.ZodIssueCode.custom,
+            path: ["variableSetId"],
+            message: "variableSetId must match the last variableSetIds entry",
+          });
+        }
+      })
       .strict();
     server.registerTool(
       "session_create",
@@ -4355,6 +4377,11 @@ function registerWorkspaceOrchestrationTools(
       },
       async (args) => {
         try {
+          requireVariableSetsUseForMcpAttachments(grant, {
+            variableSetIds: args.variableSetIds,
+            variableSetId: args.variableSetId,
+            environmentId: args.environmentId,
+          });
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
@@ -5339,6 +5366,25 @@ function requireVariableSetsUseForMcpAttachment(
   }
   if (variableSetId !== null && !hasPermission(grant.permissions, "variable-sets:use")) {
     throw new Error("missing permission: variable-sets:use");
+  }
+}
+
+function requireVariableSetsUseForMcpAttachments(
+  grant: AccessGrant,
+  selection: {
+    variableSetIds?: string[] | undefined;
+    variableSetId?: string | undefined;
+    environmentId?: string | undefined;
+  },
+): void {
+  const singular = selection.variableSetId ?? selection.environmentId;
+  const variableSetIds = selection.variableSetIds ?? (singular ? [singular] : undefined);
+  if (variableSetIds === undefined) return;
+  if (!hasPermission(grant.permissions, "variable-sets:attach")) {
+    throw new HTTPException(403, { message: "missing permission: variable-sets:attach" });
+  }
+  if (variableSetIds.length > 0 && !hasPermission(grant.permissions, "variable-sets:use")) {
+    throw new HTTPException(403, { message: "missing permission: variable-sets:use" });
   }
 }
 

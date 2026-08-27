@@ -1,4 +1,13 @@
+import type { GetSessionOptions } from "@opengeni/sdk/browser";
 import type { Session } from "@/types";
+
+type SessionChannelPointReadClient = {
+  getSession: (
+    workspaceId: string,
+    sessionId: string,
+    options?: GetSessionOptions,
+  ) => Promise<Session>;
+};
 
 export type SessionChannelMoveOverride = Readonly<{
   channelId: string | null;
@@ -7,6 +16,19 @@ export type SessionChannelMoveOverride = Readonly<{
 }>;
 
 export type SessionChannelMoveOverrides = ReadonlyMap<string, SessionChannelMoveOverride>;
+
+/** Await a detail-read generation whose network request starts after this call. */
+export function readSessionChannelMovePoint(
+  client: SessionChannelPointReadClient,
+  workspaceId: string,
+  sessionId: string,
+  onRequestStart?: () => void,
+): Promise<Session> {
+  return client.getSession(workspaceId, sessionId, {
+    fresh: true,
+    ...(onRequestStart ? { onRequestStart } : {}),
+  });
+}
 
 /** Project one in-flight or committed move over a possibly stale list row. */
 export function applySessionChannelMove(
@@ -54,6 +76,15 @@ export function rollbackSessionChannelMove(
   return next;
 }
 
+/** Retire an exact pending overlay when newer server evidence rejects its response. */
+export function discardRejectedSessionChannelMove(
+  current: SessionChannelMoveOverrides,
+  sessionId: string,
+  operation: number,
+): SessionChannelMoveOverrides {
+  return rollbackSessionChannelMove(current, sessionId, operation);
+}
+
 /**
  * Drop committed overlays only after a server list projection confirms the
  * destination. Pending moves and rows omitted by pagination stay projected.
@@ -76,25 +107,20 @@ export function reconcileSessionChannelMoves(
 }
 
 /**
- * Reconcile a committed optimistic move with an exact point read started after
- * the write. Matching state proves the list row is stale and keeps the overlay;
- * a different channel supersedes it immediately, while a missing session
- * retires the otherwise-unconfirmable override.
+ * Reconcile a committed optimistic move with an accepted exact point read
+ * started after the write. Persistent read authority now owns either the
+ * matching destination or a newer cross-client destination, so the temporary
+ * priority overlay must retire in both cases. A missing session retires it too.
  */
 export function reconcileSessionChannelMovePointRead(
   current: SessionChannelMoveOverrides,
   sessionId: string,
   operation: number,
-  authoritative: Session | null,
+  _authoritative: Pick<Session, "channelId"> | null,
 ): SessionChannelMoveOverrides {
   const override = current.get(sessionId);
   if (!override || override.operation !== operation || !override.committed) return current;
-  if (!authoritative) {
-    const next = new Map(current);
-    next.delete(sessionId);
-    return next;
-  }
-  const channelId = authoritative.channelId ?? null;
-  if (channelId === override.channelId) return current;
-  return new Map(current).set(sessionId, { ...override, channelId });
+  const next = new Map(current);
+  next.delete(sessionId);
+  return next;
 }

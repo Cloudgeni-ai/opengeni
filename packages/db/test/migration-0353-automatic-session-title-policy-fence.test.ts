@@ -18,6 +18,8 @@ import {
   FORCE_RLS_TABLES,
   inspectRuntimeDatabasePosture,
   PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_TABLE_PRIVILEGES,
+  RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
   RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
 } from "../src/runtime-posture";
 import {
@@ -595,6 +597,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       ownerSql = postgres(owned.ownerUrl, { max: 1, prepare: false });
       const rows = await ownerSql.begin(async (transaction) => {
         await transaction`select
+          set_config('opengeni.session_variable_set_attachments_v1', '1', true),
           set_config('lock_timeout', '1s', true),
           set_config('statement_timeout', '10s', true)`;
         return await transaction.unsafe<Array<{ id: string }>>(await quarantineStatement());
@@ -937,10 +940,89 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
       "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
     ]);
+    // This test deliberately freezes the database immediately after 0353. Keep
+    // today's evaluator strict for every table that existed at that boundary,
+    // while explicitly removing tables introduced by later migrations.
+    const post0353RuntimeTables = new Set([
+      "organization_recovery_approvals",
+      "organization_recovery_command_receipts",
+      "organization_recovery_custodian_acceptances",
+      "organization_recovery_custodians",
+      "organization_recovery_events",
+      "organization_recovery_notification_attempts",
+      "organization_recovery_notification_outbox",
+      "organization_recovery_operations",
+      "organization_recovery_policies",
+      "organization_recovery_policy_heads",
+      "pr_review_managed_github_authority_nonces",
+      "pr_review_managed_github_routes",
+      "remember_knowledge_memory_materializations",
+    ]);
+    // The current runtime evaluator intentionally requires every capability in
+    // today's schema. A database frozen immediately after 0353 predates the
+    // 0361 Memory materialization table/function, so preserve those exact,
+    // expected boundary gaps while continuing to reject every other posture
+    // violation in this rolling-compatibility test.
+    const expectedPost0353EvaluatorGaps = [
+      "target-schema runtime capability activate_governed_learning_decision(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+      "target-schema runtime capability materialize_remember_knowledge_memory(uuid, uuid, uuid) is missing or ambiguous",
+      "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
+    ];
+    const sessionSetTables = new Set([
+      "managed_auth_actor_mutation_leases",
+      "managed_auth_browser_installations",
+      "managed_auth_login_return_intents",
+      "managed_auth_login_slots",
+      "managed_auth_login_transaction_rate_limits",
+      "managed_auth_login_transactions",
+      "managed_auth_session_set_operations",
+      "managed_auth_session_sets",
+    ]);
+    const sessionSetRoutines = new Set([
+      "get_canonical_human_exact_login_binding(text, text)",
+      "managed_auth_session_set_authority_state(text)",
+      "managed_auth_session_set_snapshot(text, text, boolean, boolean, boolean)",
+      "managed_auth_session_set_bootstrap(text, text, text, text, uuid, text, bigint, bigint)",
+      "managed_auth_session_set_begin_transaction(text, text, text, uuid, text, bigint, uuid, bigint, text, text, uuid, uuid, text, timestamp with time zone)",
+      "managed_auth_session_set_complete_transaction(text, text, uuid, text, bigint, bigint, uuid, text, text, text)",
+      "managed_auth_session_set_mutate(text, text, uuid, text, bigint, bigint, text, uuid, uuid, uuid, text, text)",
+      "managed_auth_actor_mutation_fence(text, bigint, uuid)",
+      "managed_auth_actor_mutation_lease_acquire(text, bigint, uuid, integer)",
+      "managed_auth_actor_mutation_lease_release(text, uuid)",
+      "managed_auth_actor_mutation_lease_validate(text, bigint, uuid)",
+      "managed_auth_adopted_session_snapshot(text)",
+      "managed_auth_isolated_session_reap(integer)",
+      "managed_auth_expired_session_set_reap(integer)",
+      "managed_auth_session_set_operation_receipt(text, uuid, text, text)",
+      "get_organization_recovery_overview(uuid, text, jsonb, text, text)",
+      "organization_recovery_command(jsonb)",
+    ]);
+    const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
+    const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(
+      (table) => !post0353ProtectedTables.has(table),
+    );
+    const preSessionSetNoDirectDmlTables = PROTECTED_NO_DIRECT_DML_TABLES.filter(
+      (table) => !post0353ProtectedTables.has(table),
+    );
+    const preSessionSetTablePrivileges = Object.fromEntries(
+      Object.entries(RUNTIME_TABLE_PRIVILEGES).filter(
+        ([table]) => !post0353ProtectedTables.has(table),
+      ),
+    );
+    const preSessionSetCapabilityRoutines = RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES.filter(
+      (routine) => !sessionSetRoutines.has(routine),
+    );
     const postureOptions = (expectedRole: string) => ({
       rlsStrategy: "force" as const,
       expectedRole,
       targetSchema: "public",
+      protectedTables: preSessionSetProtectedTables,
+      protectedNoDirectDmlTables: preSessionSetNoDirectDmlTables,
+      tablePrivileges: preSessionSetTablePrivileges,
+      targetSchemaCapabilityRoutines: preSessionSetCapabilityRoutines,
+      targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     });
 
     try {
@@ -1014,7 +1096,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         update: false,
         delete: false,
       });
-      expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(customPosture, postureOptions(customRole))).toEqual(
+        expectedPost0353EvaluatorGaps,
+      );
 
       // Model the complete pre-policy posture with its original target-table
       // contract and private-routine generic loop. The current evaluator covers
@@ -1030,7 +1114,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
           (routine) => !titleRoutineNames.has(routine.name),
         ),
       };
-      expect(evaluateRuntimeDatabasePosture(legacyPosture, postureOptions(customRole))).toEqual([]);
+      expect(evaluateRuntimeDatabasePosture(legacyPosture, postureOptions(customRole))).toEqual(
+        expectedPost0353EvaluatorGaps,
+      );
       expect(
         customPosture.privateRoutines
           .filter((routine) => titleRoutineNames.has(routine.name))
@@ -1058,7 +1144,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
         postureOptions(deferredRole),
       );
       expect(evaluateRuntimeDatabasePosture(deferredPosture, postureOptions(deferredRole))).toEqual(
-        [],
+        expectedPost0353EvaluatorGaps,
       );
       expect(
         deferredPosture.privateTables.find(

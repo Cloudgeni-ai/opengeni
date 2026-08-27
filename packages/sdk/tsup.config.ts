@@ -10,7 +10,10 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/accounts.ts",
     "src/core.ts",
+    "src/browser.ts",
+    "src/document-authority.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
     "src/automations.ts",

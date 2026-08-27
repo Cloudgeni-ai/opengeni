@@ -42,11 +42,13 @@ import {
   BoxIcon,
   CheckIcon,
   ChevronDownIcon,
+  ChevronUpIcon,
   FolderIcon,
   MonitorOffIcon,
   PlusIcon,
   ServerCogIcon,
   ServerIcon,
+  XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -75,6 +77,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
+import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
@@ -193,12 +196,21 @@ function SessionsIndexRouteContent({
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
   const fixedResourceCatalogEnabled = draft.compute.kind === "sandbox";
-  const variableSets = useVariableSets({ enabled: fixedResourceCatalogEnabled });
+  const variableSets = useVariableSets({
+    enabled: fixedResourceCatalogEnabled,
+  });
   const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
-  const selectedVariableSet = variableSets.variableSets.find(
-    (candidate) => candidate.id === draft.variableSetId,
-  );
   const selectedRig = rigs.rigs.find((candidate) => candidate.id === draft.rigId);
+  const personalAttachmentVariableSetIds = [
+    ...new Set([
+      ...(selectedRig?.activeVersion?.defaultVariableSetIds ?? []),
+      ...draft.variableSetIds,
+    ]),
+  ];
+  const personalAttachmentVariableSetScopes = personalAttachmentVariableSetIds.map(
+    (variableSetId) =>
+      variableSets.variableSets.find((candidate) => candidate.id === variableSetId)?.scope ?? null,
+  );
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -263,14 +275,23 @@ function SessionsIndexRouteContent({
     managedSelfContext: context.managedSelfContext,
     workspace,
     fixed: {
-      variableSetId: draft.compute.kind === "sandbox" ? draft.variableSetId || null : null,
+      variableSetIds: draft.compute.kind === "sandbox" ? personalAttachmentVariableSetIds : [],
+      variableSetScopes:
+        draft.compute.kind === "sandbox" ? personalAttachmentVariableSetScopes : [],
+      variableSetId:
+        draft.compute.kind === "sandbox" ? (personalAttachmentVariableSetIds.at(-1) ?? null) : null,
       variableSetScope:
-        draft.compute.kind === "sandbox" ? (selectedVariableSet?.scope ?? null) : null,
+        draft.compute.kind === "sandbox"
+          ? (personalAttachmentVariableSetScopes.at(-1) ?? null)
+          : null,
       rigId: draft.compute.kind === "sandbox" ? draft.rigId || null : null,
       rigScope: draft.compute.kind === "sandbox" ? (selectedRig?.scope ?? null) : null,
       connectedMachine:
         selectedMachine?.scope === "user" && selectedMachine.enrollmentId
-          ? { enrollmentId: selectedMachine.enrollmentId, name: selectedMachine.name }
+          ? {
+              enrollmentId: selectedMachine.enrollmentId,
+              name: selectedMachine.name,
+            }
           : null,
     },
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
@@ -772,6 +793,29 @@ function SessionsIndexRouteContent({
       return await createComposer.send();
     },
   };
+  useBrowserAccountBridgeBlocker(`new-session-composer:${workspaceId}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (busy || submitting || newSessionDraft.saving) {
+      return {
+        id: "ignored",
+        label: "A new-session mutation is still running",
+        detail: "Wait for the current save or session creation to finish.",
+      };
+    }
+    return createComposer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "The new-session composer has an unsent draft",
+          detail: "Continuing clears the account-bound draft.",
+        }
+      : null;
+  });
 
   return (
     // The canvas parent is overflow-hidden, so this route owns its scrolling —
@@ -1627,15 +1671,10 @@ function ManagedSandboxFields(props: {
             disabled={props.disabled}
             onChange={(event) => {
               const rigId = event.target.value;
-              const picked = [...workspaceRigs, ...personalRigs].find((rig) => rig.id === rigId);
-              const defaultVariableSetId = picked?.activeVersion?.defaultVariableSetIds[0];
               props.personalAttachment.setMode(null);
               onChange({
                 ...draft,
                 rigId,
-                // Preselect the rig's first default variable set into the single
-                // session-level control; the rest still apply server-side.
-                ...(defaultVariableSetId ? { variableSetId: defaultVariableSetId } : {}),
               });
             }}
             className="h-8 w-auto max-w-56 text-xs"
@@ -1670,35 +1709,131 @@ function ManagedSandboxFields(props: {
             showRigs && "border-t border-border/70",
           )}
         >
-          <Label className="flex shrink-0 items-center gap-1.5 text-xs">
+          <Label className="flex shrink-0 items-center gap-1.5 self-start pt-1.5 text-xs">
             <BoxIcon className="size-3 shrink-0 text-fg-subtle" />
-            Variable set
+            Variable sets
           </Label>
-          <Select
-            value={draft.variableSetId}
-            disabled={props.disabled}
-            onChange={(event) => {
-              props.personalAttachment.setMode(null);
-              onChange({ ...draft, variableSetId: event.target.value });
-            }}
-            className="h-8 w-auto max-w-56 text-xs"
-          >
-            <option value="">No variable set</option>
-            {workspaceVariableSets.map((variableSet) => (
-              <option key={variableSet.id} value={variableSet.id}>
-                {variableSet.name} ({variableSet.variables.length} vars)
-              </option>
-            ))}
-            {personalVariableSets.length > 0 ? (
-              <optgroup label="Only me">
-                {personalVariableSets.map((variableSet) => (
-                  <option key={variableSet.id} value={variableSet.id}>
-                    {variableSet.name} ({variableSet.variables.length} vars)
-                  </option>
-                ))}
-              </optgroup>
+          <div className="min-w-0 max-w-80 flex-1 space-y-2">
+            {draft.variableSetIds.length > 0 ? (
+              <div className="space-y-1">
+                {draft.variableSetIds.map((variableSetId, index) => {
+                  const variableSet = [...workspaceVariableSets, ...personalVariableSets].find(
+                    (candidate) => candidate.id === variableSetId,
+                  );
+                  return (
+                    <div
+                      key={variableSetId}
+                      className="flex min-w-0 items-center gap-1 rounded border border-border bg-bg/45 px-1.5 py-1"
+                    >
+                      <span className="w-4 shrink-0 text-center font-mono text-2xs text-fg-subtle">
+                        {index + 1}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-xs">
+                        {variableSet?.name ?? variableSetId}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Move ${variableSet?.name ?? variableSetId} earlier`}
+                        disabled={props.disabled || index === 0}
+                        onClick={() => {
+                          const next = [...draft.variableSetIds];
+                          [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
+                          props.personalAttachment.setMode(null);
+                          onChange({
+                            ...draft,
+                            variableSetIds: next,
+                            variableSetId: next.at(-1) ?? "",
+                          });
+                        }}
+                      >
+                        <ChevronUpIcon />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Move ${variableSet?.name ?? variableSetId} later`}
+                        disabled={props.disabled || index === draft.variableSetIds.length - 1}
+                        onClick={() => {
+                          const next = [...draft.variableSetIds];
+                          [next[index], next[index + 1]] = [next[index + 1]!, next[index]!];
+                          props.personalAttachment.setMode(null);
+                          onChange({
+                            ...draft,
+                            variableSetIds: next,
+                            variableSetId: next.at(-1) ?? "",
+                          });
+                        }}
+                      >
+                        <ChevronDownIcon />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Remove ${variableSet?.name ?? variableSetId}`}
+                        disabled={props.disabled}
+                        onClick={() => {
+                          const next = draft.variableSetIds.filter((id) => id !== variableSetId);
+                          props.personalAttachment.setMode(null);
+                          onChange({
+                            ...draft,
+                            variableSetIds: next,
+                            variableSetId: next.at(-1) ?? "",
+                          });
+                        }}
+                      >
+                        <XIcon />
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-right text-xs text-fg-subtle">No Variable Sets selected</p>
+            )}
+            {draft.variableSetIds.length < 25 ? (
+              <Select
+                value=""
+                disabled={props.disabled}
+                onChange={(event) => {
+                  const variableSetId = event.target.value;
+                  if (!variableSetId) return;
+                  const next = [...draft.variableSetIds, variableSetId];
+                  props.personalAttachment.setMode(null);
+                  onChange({ ...draft, variableSetIds: next, variableSetId });
+                }}
+                className="h-8 w-full text-xs"
+              >
+                <option value="">Add Variable Set…</option>
+                {workspaceVariableSets
+                  .filter((variableSet) => !draft.variableSetIds.includes(variableSet.id))
+                  .map((variableSet) => (
+                    <option key={variableSet.id} value={variableSet.id}>
+                      {variableSet.name} ({variableSet.variables.length} vars)
+                    </option>
+                  ))}
+                {personalVariableSets.some(
+                  (variableSet) => !draft.variableSetIds.includes(variableSet.id),
+                ) ? (
+                  <optgroup label="Only me">
+                    {personalVariableSets
+                      .filter((variableSet) => !draft.variableSetIds.includes(variableSet.id))
+                      .map((variableSet) => (
+                        <option key={variableSet.id} value={variableSet.id}>
+                          {variableSet.name} ({variableSet.variables.length} vars)
+                        </option>
+                      ))}
+                  </optgroup>
+                ) : null}
+              </Select>
             ) : null}
-          </Select>
+            <p className="text-right text-2xs text-fg-subtle">
+              Later sets override earlier sets when names collide.
+            </p>
+          </div>
         </div>
       ) : null}
     </div>

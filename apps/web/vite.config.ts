@@ -49,20 +49,20 @@ export default defineConfig({
               // one app-shell unit. Keeping them together avoids an extra
               // request without pulling any route implementation into startup.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/]routes\.ts|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-down|chevron-left|circle-alert)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/]routes\.ts|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 4,
             },
             {
               // The hierarchy rail is substantial and belongs to the lazy
-              // workspace shell. Its channel, browse, pin, and row-action
-              // expansion must not turn route-shared helpers into startup
-              // dependencies for signed-out and non-workspace pages.
+              // workspace shell. Keep the component itself route-only: a
+              // recursive entry-aware group can merge it into the direct
+              // session graph when an unrelated lazy route becomes smaller.
+              // Its shared helpers remain available for normal consumer-aware
+              // splitting without pulling the full rail implementation in.
               name: "session-rail",
               test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/]session-list\.tsx$/,
-              includeDependenciesRecursively: true,
-              entriesAware: true,
-              entriesAwareMergeThreshold: 192 * 1024,
+              includeDependenciesRecursively: false,
               priority: 3,
             },
             {
@@ -71,7 +71,7 @@ export default defineConfig({
               // merging cannot use an icon or label helper to pull the full
               // session workbench into startup.
               name: "session-shared-primitives",
-              test: /(?:apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:git-branch|rotate-cw|server)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -103,12 +103,15 @@ export default defineConfig({
             {
               // The settings hub owns several substantial management surfaces.
               // Keep their static graph behind that route so settings-only
-              // controls cannot densify an initial or direct-session load.
+              // controls cannot densify an initial or direct-session load. The
+              // isolated account-auth route adds another entry-aware boundary;
+              // 28 KiB is the highest merge threshold that keeps settings-only
+              // sources out of the direct-session graph on Bun 1.4 Linux/x64.
               name: "workspace-settings",
               test: /src[\\/]routes[\\/]workspace-settings\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 128 * 1024,
+              entriesAwareMergeThreshold: 28 * 1024,
               priority: 3,
             },
             {
@@ -122,6 +125,25 @@ export default defineConfig({
               entriesAware: true,
               entriesAwareMergeThreshold: 128 * 1024,
               priority: 3,
+            },
+            {
+              // Route simplification can otherwise make entry-aware merging
+              // attach the large Office command/query schemas to the live
+              // session graph. Keep these editor-only contracts behind the
+              // editable-artifact routes that consume them.
+              name: "editable-artifact-contracts",
+              test: /packages[\\/]contracts[\\/]src[\\/](?:document-artifact-(?:commands|query)|presentation-artifact-(?:commands|query)|spreadsheet-artifact-(?:commands|date|query)|editable-artifact-(?:binary|causal-frontier|codec-registry|committed-transaction|live|serialized-commit|versions)|editable-artifacts)\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
+            },
+            {
+              // Skills administration is lazy workspace governance. Pinning
+              // its schema prevents a small Agent Knowledge route from
+              // re-bucketing that schema into every direct session load.
+              name: "preference-registry-contracts",
+              test: /packages[\\/]contracts[\\/]src[\\/]preference-registry\.ts$/,
+              includeDependenciesRecursively: false,
+              priority: 5,
             },
             {
               // Keep schema parsing from being folded into a larger shared

@@ -46,6 +46,7 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
     firstPartyMcpPermissions:
       | ScheduledTaskRunAcceptedExecution["resolvedFirstPartyMcpPermissions"]
       | null;
+    variableSetIds?: readonly string[];
     variableSetId: string | null;
     rigId: string | null;
     rigVersionId: string | null;
@@ -88,6 +89,9 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
   let rig: IncidentTelemetryResponderMetadata["rig"] = null;
   const variableSetIds = new Set<string>();
   if (input.executionPolicy ?? input.session) {
+    for (const id of input.executionPolicy?.variableSetIds ?? input.session?.variableSetIds ?? []) {
+      variableSetIds.add(id);
+    }
     const variableSetId = input.executionPolicy?.variableSetId ?? input.session?.variableSetId;
     const rigId = input.executionPolicy?.rigId ?? input.session?.rigId ?? null;
     const rigVersionId = input.executionPolicy?.rigVersionId ?? input.session?.rigVersionId ?? null;
@@ -286,6 +290,9 @@ export async function validateIncidentTelemetrySystemUpdateAuthority(input: {
           firstPartyMcpTools: acceptedExecution.targetSessionExecution.firstPartyMcpTools,
           firstPartyMcpPermissions:
             acceptedExecution.targetSessionExecution.firstPartyMcpPermissions,
+          variableSetIds: acceptedExecution.targetSessionExecution.variableSets.map(
+            (variableSet) => variableSet.id,
+          ),
           variableSetId: acceptedExecution.targetSessionExecution.variableSetId,
           rigId: acceptedExecution.targetSessionExecution.rigId,
           rigVersionId: acceptedExecution.targetSessionExecution.rigVersionId,

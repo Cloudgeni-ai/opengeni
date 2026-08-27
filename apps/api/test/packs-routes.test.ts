@@ -117,18 +117,13 @@ describe("Pack routes", () => {
     const packA = `pack-route-a-${suffix}`;
     const packB = `pack-route-b-${suffix}`;
     const packConflict = `pack-route-conflict-${suffix}`;
-    const imageA =
-      "example.com/pack-route-a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const imageB =
-      "example.com/pack-route-b@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-    const manifest = (id: string, image: string, runbook = "Verify, apply, and observe.") => ({
+    const manifest = (id: string, runbook = "Verify, apply, and observe.") => ({
       id,
       name: id,
       description: `Composable Pack ${id}`,
       role: "infrastructure",
       category: "deployment",
       version: "1.0.0",
-      sandboxImage: image,
       skills: [
         {
           name: skillName,
@@ -144,7 +139,7 @@ describe("Pack routes", () => {
       ],
     });
 
-    for (const pack of [manifest(packA, imageA), manifest(packB, imageB)]) {
+    for (const pack of [manifest(packA), manifest(packB)]) {
       const registered = await request("/packs", {
         method: "POST",
         body: JSON.stringify(pack),
@@ -163,15 +158,16 @@ describe("Pack routes", () => {
     expect(legacyEnable.status).toBe(409);
     expect(await legacyEnable.text()).toContain("Pack installation flow");
 
-    const missingRigPreview = await request(`/packs/${packA}/installation-preview`, {
+    const previewWithoutRig = await request(`/packs/${packA}/installation-preview`, {
       method: "POST",
       body: JSON.stringify({}),
     });
-    expect(missingRigPreview.status).toBe(200);
-    expect(await missingRigPreview.json()).toMatchObject({
-      ready: false,
-      rig: { required: true, status: "missing" },
+    expect(previewWithoutRig.status).toBe(200);
+    expect(await previewWithoutRig.json()).toMatchObject({
+      ready: true,
+      rig: { required: false, status: "not_required" },
       legacyInlineSkillCount: 1,
+      legacySandboxImage: null,
     });
 
     const [rigA, rigB] = await Promise.all([
@@ -180,14 +176,14 @@ describe("Pack routes", () => {
         workspaceId,
         name: `Pack route A ${suffix}`,
         createdBy: subjectId,
-        initialVersion: { image: imageA },
+        initialVersion: { setupScript: "true" },
       }),
       createRig(client.db, {
         accountId,
         workspaceId,
         name: `Pack route B ${suffix}`,
         createdBy: subjectId,
-        initialVersion: { image: imageB },
+        initialVersion: { setupScript: "true" },
       }),
     ]);
 
@@ -293,9 +289,7 @@ describe("Pack routes", () => {
 
     const registeredConflict = await request("/packs", {
       method: "POST",
-      body: JSON.stringify(
-        manifest(packConflict, imageA, "Different content under the same Skill name."),
-      ),
+      body: JSON.stringify(manifest(packConflict, "Different content under the same Skill name.")),
     });
     expect(registeredConflict.status).toBe(201);
     const conflictPlan = await preview(packConflict, rigA.id);
@@ -379,4 +373,44 @@ describe("Pack routes", () => {
       ),
     ).toHaveLength(0);
   }, 60_000);
+
+  test("blocks v2 Pack sandboxImage requirements while Rig images are disabled", async () => {
+    if (!available || !client) return;
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const packId = `pack-route-image-blocked-${suffix}`;
+    const sandboxImage =
+      "example.com/retired-pack-base@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const registered = await request("/packs", {
+      method: "POST",
+      body: JSON.stringify({
+        id: packId,
+        name: packId,
+        description: "Requires a retired explicit image",
+        role: "infrastructure",
+        category: "deployment",
+        version: "1.0.0",
+        sandboxImage,
+        skills: [],
+      }),
+    });
+    expect(registered.status).toBe(201);
+
+    const rig = await createRig(client.db, {
+      accountId,
+      workspaceId,
+      name: `Platform Rig ${suffix}`,
+      createdBy: subjectId,
+      initialVersion: { setupScript: "true" },
+    });
+    const preview = await request(`/packs/${packId}/installation-preview`, {
+      method: "POST",
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(preview.status).toBe(200);
+    expect(await preview.json()).toMatchObject({
+      ready: false,
+      rig: { required: true, status: "mismatch", image: null },
+      blockers: [expect.stringContaining("deployment-managed platform sandbox")],
+    });
+  });
 });

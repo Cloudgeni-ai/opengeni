@@ -57,6 +57,35 @@ describe("session tenancy public contracts", () => {
         workspaceSharedAcknowledged: true,
       }).success,
     ).toBe(false);
+    expect(
+      ForkSessionRequest.parse({
+        idempotencyKey: "restart-session-1",
+        visibility: "private",
+        workspaceSharedAcknowledged: false,
+        rigId: null,
+        variableSetIds: [
+          "55555555-5555-4555-8555-555555555555",
+          "66666666-6666-4666-8666-666666666666",
+        ],
+      }),
+    ).toMatchObject({
+      rigId: null,
+      variableSetIds: [
+        "55555555-5555-4555-8555-555555555555",
+        "66666666-6666-4666-8666-666666666666",
+      ],
+    });
+    expect(
+      ForkSessionRequest.safeParse({
+        idempotencyKey: "restart-session-1",
+        visibility: "private",
+        workspaceSharedAcknowledged: false,
+        variableSetIds: [
+          "55555555-5555-4555-8555-555555555555",
+          "55555555-5555-4555-8555-555555555555",
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   test("requires a complete durable event receipt exactly when visibility changed", () => {

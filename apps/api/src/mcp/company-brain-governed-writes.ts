@@ -125,7 +125,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Atomically promote one still-active note from this exact root task tree into an inactive workspace instruction-policy draft. The note bytes remain exact evidence and draft content. " +
-        `Once a human activates the draft, those bytes are composed verbatim into the prompt of every session the target applies to, so a note over ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters is rejected here rather than truncated: write a fresh short imperative note instead of promoting a long working note. ` +
+        `Use this only for a universal always-on rule, never for an incident, fact, decision, outcome, or conditional procedure. Once a human activates the draft, those bytes are composed verbatim into the prompt of every session the target applies to, so a note over ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters is rejected here rather than truncated: write a fresh minimal imperative note instead of promoting a long working note. ` +
         "The frozen learning policy records a decision receipt, but mandatory policy still requires human activation even under Automatic; this never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
@@ -149,7 +149,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "task_note_promote_preference",
     {
       description:
-        "Atomically promote one still-active note from this exact root task tree into a workspace preference proposal. The note bytes remain exact evidence and full proposal content. " +
+        "Atomically promote one still-active note from this exact root task tree into a workspace Skill proposal backed by the structured preference authority. Use this for reusable conditional how-to guidance, never for an incident, fact, decision, outcome, or universal always-on rule. The note bytes remain exact evidence and full proposal content. " +
         `The title and description you supply are what gets composed into every session prompt, so write them as one short imperative statement; the note content is retrieved on demand and a note over ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters is rejected here rather than truncated. ` +
         "Under Suggest the proposal waits for human review; under Automatic an eligible decision is activated through the preference lifecycle and remains undoable. This never widens scope.",
       inputSchema: {
@@ -186,7 +186,7 @@ export function registerCompanyBrainGovernedWriteTools(
     {
       description:
         "Materialize an evidence-backed inactive workspace instruction-policy draft. " +
-        `Once a human activates it, this content is composed verbatim into the prompt of every session the target applies to (every session in this workspace for a global charter or policy, every session bound to the role for a role policy), so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
+        `Use this only for a minimal universal rule, never for an incident, fact, decision, outcome, or conditional procedure. Once a human activates it, this content is composed verbatim into the prompt of every session the target applies to (every session in this workspace for a global charter or policy, every session bound to the role for a role policy), so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
         "The frozen learning policy records a decision receipt, but this tool cannot activate mandatory behavior, including when learning mode is Automatic; a human must activate the draft.",
       inputSchema: {
         ...evidence,
@@ -219,7 +219,7 @@ export function registerCompanyBrainGovernedWriteTools(
     "preference_propose",
     {
       description:
-        "Materialize an evidence-backed workspace preference proposal. " +
+        "Materialize an evidence-backed workspace Skill proposal in the structured preference authority. Use this only for reusable conditional how-to guidance, never for an incident, fact, decision, outcome, or universal always-on rule. " +
         `Its short title and description are what get composed into every session prompt; the content is retrieved on demand, so its length is retrieval cost rather than standing prompt cost. Keep the content under ${AGENT_AUTHORED_PREFERENCE_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_DURABLE_TEXT_STYLE} ` +
         "Under Suggest it stays inactive for human review; under Automatic an eligible decision is activated through the governed preference lifecycle with an undoable receipt. It never creates mandatory authority.",
       inputSchema: {

@@ -298,10 +298,27 @@ describe("timeline scroll ownership browser regression", () => {
   test("keeps a nested row anchored when prepend merges into its activity group", async () => {
     await page.goto(`${baseUrl}/timeline-scroll-merge-test.html`);
     await page.waitForFunction(() => window.timelineMergeHarness !== undefined);
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+    });
     const target = page.getByText("reasoning-50", { exact: true });
     await target.waitFor({ timeout: 15_000 });
-    await target.evaluate((node) => node.scrollIntoView({ block: "start" }));
-    await page.waitForTimeout(100);
+    await target.evaluate(async (node) => {
+      const scroller = document.querySelector<HTMLElement>(
+        "[data-timeline-merge-test] .og-root > div",
+      );
+      if (!scroller) throw new Error("timeline merge scroller is unavailable");
+      const settled =
+        "onscrollend" in scroller
+          ? new Promise<void>((resolve) => {
+              scroller.addEventListener("scrollend", () => resolve(), { once: true });
+            })
+          : new Promise<void>((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+            );
+      node.scrollIntoView({ block: "start" });
+      await settled;
+    });
 
     const before = await nestedVisible(page, "reasoning-50");
     await page.evaluate(() => window.timelineMergeHarness!.prependActivity());
@@ -428,27 +445,41 @@ describe("timeline scroll ownership browser regression", () => {
       const node = window.timelineCollapsedHistoryHarness!.scroller();
       return node.style.visibility !== "hidden";
     });
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+    });
 
     const evidence = await page.evaluate(async () => {
       const harness = window.timelineCollapsedHistoryHarness!;
-      const before = harness.metrics();
       harness.settleOlder("success");
+      await new Promise<void>((resolve) => {
+        const prepended = () =>
+          document.querySelector('[data-conversation-message="user-1"]') !== null;
+        if (prepended()) {
+          resolve();
+          return;
+        }
+        const observer = new MutationObserver(() => {
+          if (!prepended()) return;
+          observer.disconnect();
+          resolve();
+        });
+        observer.observe(harness.scroller(), { childList: true, subtree: true });
+      });
       const samples = [];
       for (let index = 0; index < 24; index += 1) {
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
         samples.push(harness.metrics());
       }
-      return { before, samples };
+      return samples;
     });
     await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
 
-    expect(evidence.samples).toHaveLength(24);
-    const parkedGap = evidence.samples[0]!.liveTailGap;
-    expect(evidence.samples.every((sample) => Math.abs(sample.liveTailGap - parkedGap) < 1)).toBe(
-      true,
-    );
+    expect(evidence).toHaveLength(24);
+    const parkedGap = evidence[0]!.liveTailGap;
+    expect(evidence.every((sample) => Math.abs(sample.liveTailGap - parkedGap) < 1)).toBe(true);
     expect(parkedGap).toBeLessThan(48);
-    expect(evidence.samples.every((sample) => sample.maxScroll - sample.scrollTop < 2)).toBe(true);
+    expect(evidence.every((sample) => sample.maxScroll - sample.scrollTop < 2)).toBe(true);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
   }, 30_000);
 
@@ -512,6 +543,11 @@ describe("timeline scroll ownership browser regression", () => {
 
     expect(immediate.maxScroll - immediate.scrollTop).toBeLessThan(2);
     expect(immediate.liveTailGap).toBeLessThan(48);
+    expect(await scroller.getAttribute("data-og-bottom-follow")).toBe("true");
+    // Pin intent changes synchronously, while AnimatePresence retains the
+    // exiting control for its 150 ms fade. Wait for that visual lifecycle
+    // instead of treating the retained exit node as stale scroll state.
+    await page.getByRole("button", { name: "Jump to latest" }).waitFor({ state: "detached" });
     expect(await page.getByRole("button", { name: "Jump to latest" }).count()).toBe(0);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
   }, 30_000);

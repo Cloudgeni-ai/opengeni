@@ -79,7 +79,7 @@ describe("artifact runtime workflow contract", () => {
     expect(candidate).toContain("cancel-in-progress: false");
     expect(ci).toContain("github.event_name != 'workflow_dispatch'");
     expect(ci).toContain(
-      "browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}",
+      "browsers: ${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );
     for (const suite of [
       "artifact-spreadsheet-canvas.browser.e2e.ts",

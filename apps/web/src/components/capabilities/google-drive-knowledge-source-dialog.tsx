@@ -1,4 +1,4 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { FolderOpenIcon, Loader2Icon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -39,7 +39,7 @@ export type GoogleDriveFacetMutation = {
 };
 
 export type GoogleDriveKnowledgeSourceDialogProps = {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   entry: GoogleDriveFacetEntry | null;

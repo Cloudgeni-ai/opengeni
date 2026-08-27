@@ -1,7 +1,7 @@
-// The shared machine-definition editor: base image, setup script, checks, and
-// default variable sets. Used by rig create (advanced disclosure) and by the
-// setup/definition edit that proposes a `definition_edit` change — one editor so
-// the two paths never drift.
+// The shared machine-definition editor: setup script, checks, and default
+// variable sets. Every Rig layers on the deployment-owned platform image; the
+// editable image field is intentionally absent so Computer/Browser/Terminal
+// cannot be replaced by a Rig definition.
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useRef } from "react";
 
@@ -12,14 +12,13 @@ import { Textarea } from "@/components/ui/textarea";
 import type { ResourceAuthorityScope, RigCheck, VariableSet } from "@/types";
 
 export type RigDefinitionDraft = {
-  image: string;
   setupScript: string;
   checks: RigCheck[];
   defaultVariableSetIds: string[];
 };
 
 export function emptyRigDefinitionDraft(): RigDefinitionDraft {
-  return { image: "", setupScript: "", checks: [], defaultVariableSetIds: [] };
+  return { setupScript: "", checks: [], defaultVariableSetIds: [] };
 }
 
 export function RigDefinitionFields({
@@ -66,21 +65,6 @@ export function RigDefinitionFields({
 
   return (
     <div className="grid gap-4">
-      <div className="grid gap-1.5">
-        <Label htmlFor={`${idPrefix}-image`}>Base image</Label>
-        <Input
-          id={`${idPrefix}-image`}
-          value={value.image}
-          disabled={disabled}
-          onChange={(event) => onChange({ ...value, image: event.target.value })}
-          placeholder="Leave blank for the workspace default image"
-          className="h-9 font-mono text-xs"
-        />
-        <p className="text-2xs text-fg-subtle">
-          A container image reference. Blank falls back to the deployment default.
-        </p>
-      </div>
-
       <div className="grid gap-1.5">
         <Label htmlFor={`${idPrefix}-setup`}>Setup script</Label>
         <Textarea

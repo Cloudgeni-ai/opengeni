@@ -61,6 +61,7 @@ import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
+import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
@@ -104,7 +105,10 @@ import {
   sessionReadProjectionKey,
   shouldAcknowledgeActiveSession,
 } from "@/lib/session-attention";
-import { mergeSessionContextProjection } from "@/lib/session-pins";
+import {
+  mergeSessionContextProjection,
+  mergeSessionDetailReadProjection,
+} from "@/lib/session-pins";
 import { createWorkspaceRetainedArtifactLoader } from "@/lib/retained-artifact-loader";
 import { createSessionRetainedScreenshotLoader } from "@/lib/retained-screenshot-loader";
 import { createWorkspaceRetainedVideoLoader } from "@/lib/retained-video-loader";
@@ -195,12 +199,36 @@ export function SessionRoute({
     jumpToLatest,
     error: streamError,
   } = useSessionEvents(sessionId);
+  const sessionDetailReadOwner = useRef<object>({});
+  const beginSessionDetailRead = useCallback(
+    () =>
+      context.sessionChannelProjectionAuthority.beginDetailRead(sessionDetailReadOwner.current, {
+        id: sessionId,
+        workspaceId,
+      }),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
   const {
     session: fetchedSession,
     loading,
     error: loadError,
+    readRevision: sessionReadRevision,
+    readGeneration: sessionReadGeneration,
     refresh: refreshSession,
-  } = useSession(sessionId, { events });
+  } = useSession(sessionId, {
+    events,
+    beginRead: beginSessionDetailRead,
+  });
+  useEffect(
+    () => () =>
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current),
+    [context.sessionChannelProjectionAuthority, sessionId, workspaceId],
+  );
+  useEffect(() => {
+    if (loadError) {
+      context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current);
+    }
+  }, [context.sessionChannelProjectionAuthority, loadError]);
   const creationHandoff =
     context.sessionCreationHandoff?.session.id === sessionId && context.session?.id === sessionId
       ? context.sessionCreationHandoff
@@ -298,9 +326,47 @@ export function SessionRoute({
     windowFocused: document.hasFocus(),
   }));
   const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
+  const reconciledSessionRead = useRef<{ sessionId: string; revision: number } | null>(null);
   useEffect(() => {
-    setContextSession((current) => mergeSessionContextProjection(current, session));
-  }, [session, setContextSession]);
+    if (!fetchedSession || sessionReadRevision === 0) return;
+    if (
+      reconciledSessionRead.current?.sessionId === sessionId &&
+      reconciledSessionRead.current.revision === sessionReadRevision
+    ) {
+      return;
+    }
+    reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
+    const accepted = context.sessionChannelProjectionAuthority.recordRead(
+      fetchedSession,
+      sessionReadGeneration,
+    );
+    setContextSession((current) =>
+      mergeSessionDetailReadProjection(
+        current,
+        fetchedSession,
+        context.sessionChannelProjectionAuthority,
+        sessionReadGeneration,
+        accepted,
+      ),
+    );
+  }, [
+    context.sessionChannelProjectionAuthority,
+    fetchedSession,
+    sessionId,
+    sessionReadGeneration,
+    sessionReadRevision,
+    setContextSession,
+  ]);
+  useEffect(() => {
+    setContextSession((current) =>
+      mergeSessionContextProjection(
+        current,
+        session,
+        context.sessionChannelProjectionAuthority,
+        "live",
+      ),
+    );
+  }, [context.sessionChannelProjectionAuthority, session, setContextSession]);
   useEffect(() => {
     const reconcileForeground = () => {
       setForeground({
@@ -674,6 +740,7 @@ export function SessionRoute({
           events={events}
           connectionState={connectionState}
           primary={<LoadingPanel label={loading ? "Opening session" : "Preparing session"} />}
+          onReloadSession={refreshSession}
           dockCollapsed={!context.inspectorOpen}
           onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
           openFileRequest={sandboxFileRequest}
@@ -750,6 +817,7 @@ export function SessionRoute({
         events={events}
         connectionState={connectionState}
         primary={chatPane}
+        onReloadSession={refreshSession}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
         openFileRequest={sandboxFileRequest}
@@ -788,6 +856,7 @@ function SessionDock(props: {
   events: SessionEvent[];
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
   primary: React.ReactNode;
+  onReloadSession: () => Promise<void>;
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
   onOpenNavigation: () => void;
@@ -874,6 +943,7 @@ function SessionDock(props: {
             session={props.session}
             events={props.events}
             connectionState={props.connectionState}
+            onReloadSession={props.onReloadSession}
           />
         </Suspense>
       ),
@@ -1312,13 +1382,17 @@ function SessionChatPane(props: {
   const workspace =
     context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null;
   const fixedResourceCatalogEnabled = props.session.sandboxBackend !== "selfhosted";
-  const [fixedVariableSetScope, fixedRigScope] = useFixedResourceScopes(
+  const sessionVariableSetIds =
+    props.session.variableSetIds ??
+    (props.session.variableSetId ? [props.session.variableSetId] : []);
+  const [fixedVariableSetScopes, fixedRigScope] = useFixedResourceScopes(
     context.client,
     workspace?.id ?? null,
-    props.session.variableSetId,
+    sessionVariableSetIds,
     props.session.rigId,
     fixedResourceCatalogEnabled,
   );
+  const fixedVariableSetScope = fixedVariableSetScopes.at(-1) ?? null;
   const personalAttachment = usePersonalResourceAttachment({
     client: context.client,
     authMode: context.clientConfig.auth.mode,
@@ -1329,6 +1403,8 @@ function SessionChatPane(props: {
     session: props.session,
     enabled: props.session.sandboxBackend !== "selfhosted",
     fixed: {
+      variableSetIds: sessionVariableSetIds,
+      variableSetScopes: fixedVariableSetScopes,
       variableSetId: props.session.variableSetId,
       variableSetScope: fixedVariableSetScope,
       rigId: props.session.rigId,
@@ -1369,6 +1445,29 @@ function SessionChatPane(props: {
     },
     onSent: (_text, input) => personalAttachment.onAccepted(input),
     onDeliveryError: personalAttachment.onDeliveryError,
+  });
+  useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (composer.sending || composer.draftSaving || durableToolsSaving) {
+      return {
+        id: "ignored",
+        label: "A session mutation is still running",
+        detail: "Wait for the current save or send to finish.",
+      };
+    }
+    return composer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "This session has an unsent draft",
+          detail: "Continuing clears the account-bound composer state.",
+        }
+      : null;
   });
   const composerPolicy = composer.policy;
   const composerDraftLoading = composer.draftLoading;

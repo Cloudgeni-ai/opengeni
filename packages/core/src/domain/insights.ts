@@ -5,14 +5,7 @@ import {
   type WorkspaceInsightsResponse,
 } from "@opengeni/contracts";
 import {
-  aggregateModelCallFacts,
-  aggregateModelCallFactsByDay,
-  aggregateModelCallFactsByHour,
-  aggregateModelContextContributions,
-  aggregateRootSessionDrivers,
-  aggregateScheduleFacts,
   aggregateSessionDepth,
-  aggregateWarmSecondsByGroup,
   countOnlineMachines,
   countScheduledTaskFires,
   countSessionsAttachedToGroups,
@@ -20,18 +13,47 @@ import {
   enumerateUtcHours,
   listFloorSessions,
   listLiveWarmLeases,
-  listModelCallFacets,
-  listRecentModelCalls,
   listScheduledTasks,
+  readWorkspaceInsightsModelBundle,
+  readWorkspaceInsightsUsageBundle,
   requireWorkspace,
-  sumUsageQuantity,
-  sumUsageQuantityByDay,
-  sumUsageQuantityByHour,
-  sumUsageQuantityInRange,
   type Database,
 } from "@opengeni/db";
 
 const MACHINE_HEARTBEAT_FRESH_MS = 120_000;
+export const WORKSPACE_INSIGHTS_PROVIDER_FILTER_MAX_UTF8_BYTES = 256;
+export const WORKSPACE_INSIGHTS_MODEL_FILTER_MAX_UTF8_BYTES = 512;
+
+export type WorkspaceInsightsFilterField = "provider" | "model";
+
+export class WorkspaceInsightsFilterValidationError extends Error {
+  readonly field: WorkspaceInsightsFilterField;
+  readonly maxUtf8Bytes: number;
+
+  constructor(field: WorkspaceInsightsFilterField, maxUtf8Bytes: number) {
+    super(`${field} must be at most ${maxUtf8Bytes} UTF-8 bytes`);
+    this.name = "WorkspaceInsightsFilterValidationError";
+    this.field = field;
+    this.maxUtf8Bytes = maxUtf8Bytes;
+  }
+}
+
+/** Normalize the public filter sentinel and enforce the database authority envelope. */
+export function normalizeWorkspaceInsightsFilter(
+  value: string | null | undefined,
+  field: WorkspaceInsightsFilterField,
+): string | null {
+  const normalized = value?.trim() || null;
+  if (normalized === null || normalized === "all") return null;
+  const maxUtf8Bytes =
+    field === "provider"
+      ? WORKSPACE_INSIGHTS_PROVIDER_FILTER_MAX_UTF8_BYTES
+      : WORKSPACE_INSIGHTS_MODEL_FILTER_MAX_UTF8_BYTES;
+  if (new TextEncoder().encode(normalized).byteLength > maxUtf8Bytes) {
+    throw new WorkspaceInsightsFilterValidationError(field, maxUtf8Bytes);
+  }
+  return normalized;
+}
 
 export type GetWorkspaceInsightsInput = {
   workspaceId: string;
@@ -174,167 +196,81 @@ function pricingSourceOf(
   return value === "configured_list_price" || value === "gateway_reported" ? value : null;
 }
 
+export function insightsSessionLabel(input: {
+  id: string;
+  title: string | null;
+  depth?: number | null;
+}): string {
+  const title = input.title?.trim();
+  if (title) return title;
+  return `${(input.depth ?? 0) > 0 ? "Agent" : "Session"} ${input.id.slice(0, 8)}`;
+}
+
 export async function getWorkspaceInsights(
   db: Database,
   settings: Settings,
   input: GetWorkspaceInsightsInput,
 ): Promise<WorkspaceInsightsResponse> {
+  const provider = normalizeWorkspaceInsightsFilter(input.provider, "provider");
+  const model = normalizeWorkspaceInsightsFilter(input.model, "model");
   await requireWorkspace(db, input.workspaceId);
   const now = input.now ?? new Date();
   const window = resolveRangeWindow(input.range, now);
-  const provider = input.provider?.trim() || null;
-  const model = input.model?.trim() || null;
   const modelFilterActive = Boolean(provider || model);
   const filter = { provider, model };
-  const aggregateFactsForSeries =
-    input.range === "today" ? aggregateModelCallFactsByHour : aggregateModelCallFactsByDay;
-  const sumUsageForSeries =
-    input.range === "today" ? sumUsageQuantityByHour : sumUsageQuantityByDay;
 
-  const [
+  const [modelBundle, usageBundle, liveWarm, tasks, depth, floorRows, machinesOnline] =
+    await Promise.all([
+      readWorkspaceInsightsModelBundle(db, {
+        workspaceId: input.workspaceId,
+        since: window.since,
+        until: window.until,
+        priorSince: window.priorSince,
+        priorUntil: window.priorUntil,
+        granularity: input.range === "today" ? "hour" : "day",
+        ...filter,
+      }),
+      readWorkspaceInsightsUsageBundle(db, {
+        workspaceId: input.workspaceId,
+        since: window.since,
+        until: window.until,
+        priorSince: window.priorSince,
+        priorUntil: window.priorUntil,
+        monthSince: startOfUtcMonth(now),
+        granularity: input.range === "today" ? "hour" : "day",
+        warmGroupLimit: 24,
+      }),
+      listLiveWarmLeases(db, input.workspaceId),
+      listScheduledTasks(db, input.workspaceId, 100),
+      aggregateSessionDepth(db, input.workspaceId),
+      listFloorSessions(db, input.workspaceId, 24),
+      settings.sandboxSelfhostedEnabled
+        ? countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now)
+        : Promise.resolve(0),
+    ]);
+
+  const {
+    modelRows,
+    priorModelRows,
+    factBuckets: factDays,
+    rootDrivers,
+    priorRootDrivers,
+    scheduleFacts,
+    facets,
+    recentCalls,
+    promptContributions,
+  } = modelBundle;
+  const {
     workspaceCreditMicros,
     priorWorkspaceCreditMicros,
     warmSeconds,
     priorWarmSeconds,
-    modelRows,
-    priorModelRows,
-    factDays,
-    warmDays,
-    costDays,
+    buckets: usageBuckets,
     warmGroups,
-    liveWarm,
-    rootDrivers,
-    scheduleFacts,
-    tasks,
-    depth,
-    floorRows,
-    machinesOnline,
     billableTokensUsed,
     agentRunsUsed,
-    facets,
-    recentCalls,
-    promptContributions,
-  ] = await Promise.all([
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      since: window.since,
-      until: window.until,
-    }),
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      since: window.priorSince,
-      until: window.priorUntil,
-    }),
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "sandbox.warm_seconds",
-      since: window.since,
-      until: window.until,
-    }),
-    sumUsageQuantityInRange(db, {
-      workspaceId: input.workspaceId,
-      eventType: "sandbox.warm_seconds",
-      since: window.priorSince,
-      until: window.priorUntil,
-    }),
-    aggregateModelCallFacts(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-    }),
-    aggregateModelCallFacts(db, {
-      workspaceId: input.workspaceId,
-      since: window.priorSince,
-      until: window.priorUntil,
-      ...filter,
-    }),
-    aggregateFactsForSeries(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-    }),
-    sumUsageForSeries(db, {
-      workspaceId: input.workspaceId,
-      eventType: "sandbox.warm_seconds",
-      since: window.since,
-      until: window.until,
-    }),
-    sumUsageForSeries(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      since: window.since,
-      until: window.until,
-    }),
-    aggregateWarmSecondsByGroup(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      limit: 24,
-    }),
-    listLiveWarmLeases(db, input.workspaceId),
-    aggregateRootSessionDrivers(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-      limit: 8,
-    }),
-    aggregateScheduleFacts(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-    }),
-    listScheduledTasks(db, input.workspaceId, 100),
-    aggregateSessionDepth(db, input.workspaceId),
-    listFloorSessions(db, input.workspaceId, 24),
-    settings.sandboxSelfhostedEnabled
-      ? countOnlineMachines(db, input.workspaceId, MACHINE_HEARTBEAT_FRESH_MS, now)
-      : Promise.resolve(0),
-    sumUsageQuantity(db, {
-      workspaceId: input.workspaceId,
-      eventType: "model.tokens",
-      since: startOfUtcMonth(now),
-    }),
-    sumUsageQuantity(db, {
-      workspaceId: input.workspaceId,
-      eventType: "agent_run.created",
-      since: startOfUtcMonth(now),
-    }),
-    listModelCallFacets(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-    }),
-    listRecentModelCalls(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-      limit: 50,
-    }),
-    aggregateModelContextContributions(db, {
-      workspaceId: input.workspaceId,
-      since: window.since,
-      until: window.until,
-      ...filter,
-    }),
-  ]);
-
-  const [priorRootDrivers, attached, fireCounts] = await Promise.all([
-    // Exact prior costs for the current top drivers — never a separate top-N page that
-    // drops roots and invents +$full as "new" spend.
-    aggregateRootSessionDrivers(db, {
-      workspaceId: input.workspaceId,
-      since: window.priorSince,
-      until: window.priorUntil,
-      ...filter,
-      rootSessionIds: rootDrivers.map((row) => row.rootSessionId),
-    }),
+  } = usageBundle;
+  const [attached, fireCounts] = await Promise.all([
     countSessionsAttachedToGroups(
       db,
       input.workspaceId,
@@ -419,13 +355,13 @@ export async function getWorkspaceInsights(
     };
     const modelCostMicros = modelFilterActive
       ? facts.costMicros
-      : (costDays.get(bucket) ?? facts.costMicros);
+      : (usageBuckets.get(bucket)?.costMicros ?? facts.costMicros);
     return {
       label: input.range === "today" ? bucket.slice(11) : bucket.slice(5),
       modelCostUsd: microsToUsd(modelCostMicros),
       estimatedProviderUsd: microsToUsd(facts.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: facts.estimatedProviderCostKnownCalls,
-      warmSeconds: warmDays.get(bucket) ?? 0,
+      warmSeconds: usageBuckets.get(bucket)?.warmSeconds ?? 0,
       inputTokens: facts.inputTokens,
       outputTokens: facts.outputTokens,
       cachedTokens: facts.cachedTokens,
@@ -453,7 +389,7 @@ export async function getWorkspaceInsights(
     return {
       id: `root:${row.rootSessionId}`,
       groupBy: "root_session" as const,
-      label: row.title?.trim() || row.rootSessionId.slice(0, 8),
+      label: insightsSessionLabel({ id: row.rootSessionId, title: row.title, depth: 0 }),
       creditUsd,
       estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
@@ -494,7 +430,11 @@ export async function getWorkspaceInsights(
     })
     .map((row) => ({
       id: row.id,
-      title: row.title?.trim() || "Untitled session",
+      title: insightsSessionLabel({
+        id: row.id,
+        title: row.title,
+        depth: row.nestedAgentDepth,
+      }),
       state: floorState(row),
       depth: row.nestedAgentDepth,
       model: row.model,
@@ -528,7 +468,11 @@ export async function getWorkspaceInsights(
       occurredAt: row.occurredAt.toISOString(),
       recordedAt: row.recordedAt.toISOString(),
       sessionId: row.sessionId,
-      sessionTitle: row.sessionTitle?.trim() || "Untitled session",
+      sessionTitle: insightsSessionLabel({
+        id: row.sessionId,
+        title: row.sessionTitle,
+        depth: row.sessionDepth,
+      }),
       turnId: row.turnId,
       provider: row.provider,
       providerApi: row.providerApi,
@@ -588,7 +532,13 @@ export async function getWorkspaceInsights(
     sessionsTouched: depth.sessionsTouched,
     rootSessions: depth.rootSessions,
     deepestDepth: depth.deepestDepth,
-    deepestSessionTitle: depth.deepestSessionTitle || "",
+    deepestSessionTitle: depth.deepestSessionId
+      ? insightsSessionLabel({
+          id: depth.deepestSessionId,
+          title: depth.deepestSessionTitle,
+          depth: depth.deepestDepth,
+        })
+      : "",
     avgDepth: Math.round(depth.avgDepth * 10) / 10,
     warmIdleNow: liveWarm.filter((lease) => lease.turnHolders === 0).length,
     billableTokensUsed,

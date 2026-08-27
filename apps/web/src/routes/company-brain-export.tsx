@@ -60,7 +60,7 @@ export function CompanyBrainExportButton({
       </button>
       <span aria-live="polite" className="max-w-xs text-xs text-fg-muted">
         {status === "success"
-          ? "Permission-filtered Company Brain package downloaded."
+          ? "Permission-filtered Agent Knowledge package downloaded."
           : status === "error"
             ? `Export failed: ${error}`
             : "Includes authorized guidance bodies and explicit omission facts."}

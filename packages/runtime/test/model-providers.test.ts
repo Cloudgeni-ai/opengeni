@@ -837,6 +837,46 @@ describe("pinned Responses protocol conformance", () => {
     expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
   });
 
+  test("reconstructs sparse output indices without inventing missing items", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.output_item.done",
+        output_index: 7,
+        item: responseMessage("message-seven", "seven"),
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 2,
+        item: responseMessage("message-two", "two"),
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "completed",
+          status: "completed",
+          output: [],
+          usage: null,
+        },
+      },
+    ]);
+    expect(result.error).toBeUndefined();
+    const terminalModel = result.events.find(
+      (event) =>
+        event.type === "model" &&
+        (event.event as { type?: unknown } | undefined)?.type === "response.completed",
+    );
+    const output = (terminalModel?.event as { response?: { output?: Array<{ id?: string }> } })
+      ?.response?.output;
+    expect(output?.map((item) => item.id)).toEqual(["message-two", "message-seven"]);
+    const responseDone = result.events.find((event) => event.type === "response_done") as
+      | { response?: { output?: Array<{ id?: string }> } }
+      | undefined;
+    expect(responseDone?.response?.output?.map((item) => item.id)).toEqual([
+      "message-two",
+      "message-seven",
+    ]);
+  });
+
   test("fails closed on duplicate output indices", async () => {
     const result = await consumeDirectResponses([
       {
@@ -860,6 +900,27 @@ describe("pinned Responses protocol conformance", () => {
       },
     ]);
     expect(String((result.error as Error).message)).toContain("duplicate output_item.done index");
+    expect(result.events.some((event) => event.type === "response_done")).toBe(false);
+  });
+
+  test("fails closed on invalid output indices", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.output_item.done",
+        output_index: -1,
+        item: responseMessage("invalid", "invalid"),
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "completed",
+          status: "completed",
+          output: [responseMessage("terminal", "terminal")],
+          usage: null,
+        },
+      },
+    ]);
+    expect(String((result.error as Error).message)).toContain("invalid index or missing item");
     expect(result.events.some((event) => event.type === "response_done")).toBe(false);
   });
 
@@ -999,22 +1060,6 @@ describe("pinned Responses protocol conformance", () => {
 
     const malformedCases: DirectResponsesEvent[][] = [
       [{ type: "response.created", response: { id: "unterminated" } }],
-      [
-        {
-          type: "response.output_item.done",
-          output_index: 2,
-          item: responseMessage("sparse", "sparse"),
-        },
-        {
-          type: "response.completed",
-          response: {
-            id: "sparse",
-            status: "completed",
-            output: [],
-            usage: null,
-          },
-        },
-      ],
       [
         {
           type: "response.output_item.done",
@@ -1885,6 +1930,8 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       (candidate) => candidate.type === "function" && candidate.name === "generate_image",
     );
     if (!tool || tool.type !== "function") throw new Error("generate_image tool missing");
+    expect(tool.description).toContain("PNG, JPEG, or WebP");
+    expect(tool.description).toContain("convert SVG or other formats first");
     const serializedParameters = JSON.stringify(tool.parameters);
     expect(serializedParameters).not.toContain("(?!");
     expect(serializedParameters).not.toContain("(?=");

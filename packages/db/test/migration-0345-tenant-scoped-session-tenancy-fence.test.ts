@@ -15,6 +15,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   type DbClient,
 } from "../src";
+import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "../src/lossless-json";
 
 const migrationUrl = new URL(
   "../drizzle/0345_tenant_scoped_session_tenancy_fence.sql",
@@ -56,6 +57,8 @@ const directHotMutatorInventory = [
   "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   "opengeni_private.claim_terminal_retained_processes(uuid,integer,bigint)",
+  "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
+  "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
   "opengeni_private.reap_sandbox_leases(bigint,bigint,bigint,bigint)",
   "opengeni_private.reap_stale_interaction_transitions(bigint)",
   "opengeni_private.request_due_sandbox_rotations(bigint,integer)",
@@ -70,7 +73,15 @@ const internalHotMutatorCallers = new Map<string, string>([
     "materialize_scheduled_task_reusable_session_from_run_0252(uuid,uuid,uuid,uuid,uuid,bigint,text)",
     "materialize_scheduled_task_reusable_session_from_run(uuid,uuid,uuid,uuid,uuid,bigint,text)",
   ],
+  [
+    "opengeni_private.detach_retention_variable_set_session_selections(uuid,uuid,uuid)",
+    "finalize_organization_retention_deletion(uuid,uuid,uuid,text)",
+  ],
   ["organization_membership_command_0263(jsonb)", "organization_membership_command(jsonb)"],
+]);
+
+const selfFencedInternalHotMutators = new Set<string>([
+  "opengeni_private.configure_fork_session_runtime(uuid,uuid,uuid,uuid,text,jsonb,uuid,uuid,text)",
 ]);
 
 const firstFenceIndex = (source: string): number => {
@@ -460,7 +471,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         expect(routine.appExecutable, routine.signature).toBe(false);
         continue;
       }
-      expect(routine.appExecutable, routine.signature).toBe(true);
+      if (selfFencedInternalHotMutators.has(routine.signature)) {
+        expect(routine.appExecutable, routine.signature).toBe(false);
+      } else {
+        expect(routine.appExecutable, routine.signature).toBe(true);
+      }
       const fence = firstFenceIndex(routine.source);
       const protectedAction = firstRowLockOrHotMutationIndex(routine.source);
       expect(fence, routine.signature).toBeGreaterThanOrEqual(0);
@@ -564,7 +579,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
 
   test("requires an exact fenced-access token in addition to the held workspace lock", async () => {
     if (!owned) return;
-    const runtime = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+    const runtime = postgres(owned.ownerUrl, {
+      max: 1,
+      onnotice: () => undefined,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
     try {
       await runtime.begin(async (transaction) => {
         const workspaceId = crypto.randomUUID();
@@ -606,8 +625,14 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
 
   test("an exclusive fence blocks only writers in the same workspace", async () => {
     if (!owned) return;
-    const holder = postgres(owned.ownerUrl, { max: 1 });
-    const probe = postgres(owned.ownerUrl, { max: 1 });
+    const holder = postgres(owned.ownerUrl, {
+      max: 1,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
+    const probe = postgres(owned.ownerUrl, {
+      max: 1,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
     const workspaceA = crypto.randomUUID();
     const workspaceB = crypto.randomUUID();
     const connection = await holder.reserve();
@@ -759,8 +784,16 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
       availableWorkspaceIds: string[],
       setActorScope = true,
     ) => {
-      const holder = postgres(owned!.ownerUrl, { max: 1, onnotice: () => undefined });
-      const probe = postgres(owned!.ownerUrl, { max: 1, onnotice: () => undefined });
+      const holder = postgres(owned!.ownerUrl, {
+        max: 1,
+        onnotice: () => undefined,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
+      const probe = postgres(owned!.ownerUrl, {
+        max: 1,
+        onnotice: () => undefined,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
       const connection = await holder.reserve();
       try {
         await connection`begin`;
@@ -852,7 +885,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
     const runtimeUrl = new URL(owned.adminUrl);
     runtimeUrl.username = "opengeni_app";
     runtimeUrl.password = owned.appPassword;
-    const runtime = postgres(runtimeUrl.toString(), { max: 1, onnotice: () => undefined });
+    const runtime = postgres(runtimeUrl.toString(), {
+      max: 1,
+      onnotice: () => undefined,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+    });
     try {
       await runtime.begin(async (transaction) => {
         await transaction`
@@ -994,6 +1031,7 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
     const holder = postgres(owned.ownerUrl, {
       max: 1,
       onnotice: () => undefined,
+      connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
     });
     const connection = await holder.reserve();
     try {
@@ -1429,7 +1467,11 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
         throw new Error("target namespace OIDs were not inventoried");
       }
 
-      const ownerRuntime = postgres(owned.ownerUrl, { max: 1, onnotice: () => undefined });
+      const ownerRuntime = postgres(owned.ownerUrl, {
+        max: 1,
+        onnotice: () => undefined,
+        connection: { application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME },
+      });
       try {
         await ownerRuntime.begin(async (transaction) => {
           const [opened] = await transaction<Array<{ capabilityA: string }>>`

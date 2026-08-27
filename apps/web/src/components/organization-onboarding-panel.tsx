@@ -1,7 +1,7 @@
 import { Building2Icon, CheckIcon, LockKeyholeIcon, Loader2Icon, MailIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
   completeSelfServiceOrganizationSetup,
@@ -19,7 +19,7 @@ export function OrganizationOnboardingPanel({
   previewState,
 }: {
   onComplete: () => void;
-  client?: OpenGeniCoreClient;
+  client?: OpenGeniBrowserClient;
   previewState?: SelfServiceOrganizationOnboardingState;
 }) {
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(

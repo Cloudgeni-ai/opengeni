@@ -35,6 +35,12 @@ import {
   DESKTOP_STREAM_PORT,
   DEFAULT_FILE_RESOURCE_MOUNT_ROOT as CONTRACT_DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   ListWorkspaceMembersResponse as ContractListWorkspaceMembersResponse,
+  AcceptOrganizationRecoveryCustodyRequest as ContractAcceptOrganizationRecoveryCustodyRequest,
+  ConfigureOrganizationRecoveryPolicyRequest as ContractConfigureOrganizationRecoveryPolicyRequest,
+  OrganizationRecoveryMutationResponse as ContractOrganizationRecoveryMutationResponse,
+  OrganizationRecoveryOperationCommandRequest as ContractOrganizationRecoveryOperationCommandRequest,
+  OrganizationRecoveryOverview as ContractOrganizationRecoveryOverview,
+  StartOrganizationRecoveryOperationRequest as ContractStartOrganizationRecoveryOperationRequest,
   MachineState as ContractMachineState,
   OPENGENI_API_CONTRACT_HEADER as CONTRACT_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION as CONTRACT_API_CONTRACT_REVISION,
@@ -167,6 +173,12 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   ListWorkspaceMembersResponse,
+  AcceptOrganizationRecoveryCustodyRequest,
+  ConfigureOrganizationRecoveryPolicyRequest,
+  OrganizationRecoveryMutationResponse,
+  OrganizationRecoveryOperationCommandRequest,
+  OrganizationRecoveryOverview,
+  StartOrganizationRecoveryOperationRequest,
   MachineState,
   MachineView,
   MachinesResponse,
@@ -299,6 +311,37 @@ describe("SDK / contracts parity", () => {
     expect([request, pageFromSdk, pageFromContract].every((fn) => typeof fn === "function")).toBe(
       true,
     );
+  });
+
+  test("organization recovery requests and projections stay in parity", () => {
+    const configureFromSdk = (
+      value: ConfigureOrganizationRecoveryPolicyRequest,
+    ): z.input<typeof ContractConfigureOrganizationRecoveryPolicyRequest> => value;
+    const acceptFromSdk = (
+      value: AcceptOrganizationRecoveryCustodyRequest,
+    ): z.input<typeof ContractAcceptOrganizationRecoveryCustodyRequest> => value;
+    const startFromSdk = (
+      value: StartOrganizationRecoveryOperationRequest,
+    ): z.input<typeof ContractStartOrganizationRecoveryOperationRequest> => value;
+    const commandFromSdk = (
+      value: OrganizationRecoveryOperationCommandRequest,
+    ): z.input<typeof ContractOrganizationRecoveryOperationCommandRequest> => value;
+    const overviewFromContract = (
+      value: z.infer<typeof ContractOrganizationRecoveryOverview>,
+    ): OrganizationRecoveryOverview => value;
+    const mutationFromContract = (
+      value: z.infer<typeof ContractOrganizationRecoveryMutationResponse>,
+    ): OrganizationRecoveryMutationResponse => value;
+    expect(
+      [
+        configureFromSdk,
+        acceptFromSdk,
+        startFromSdk,
+        commandFromSdk,
+        overviewFromContract,
+        mutationFromContract,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
   });
 
   test("session visibility and explicit fork request/response shapes stay in parity", () => {
@@ -622,7 +665,6 @@ describe("SDK / contracts parity", () => {
     const create: CreateRigRequest = {
       name: "dev-machine",
       description: "cloudgeni-dev stress rig",
-      image: "ubuntu:24.04",
       setupScript: "apt-get install -y ripgrep",
       checks: [{ name: "rg", command: "rg --version" }],
       credentialHooks: ["azure-cli-login"],
@@ -638,12 +680,21 @@ describe("SDK / contracts parity", () => {
     };
     const edit: ProposeRigChangeRequest = {
       kind: "definition_edit",
-      payload: { image: "ubuntu:24.10", changelog: "bump base" },
+      payload: { setupScript: "apt-get install -y jq", changelog: "add jq" },
     };
     expect(ContractCreateRigRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateRigRequest.safeParse(update).success).toBe(true);
     expect(ContractProposeRigChangeRequest.safeParse(append).success).toBe(true);
     expect(ContractProposeRigChangeRequest.safeParse(edit).success).toBe(true);
+    expect(
+      ContractCreateRigRequest.safeParse({ name: "custom-base", image: "ubuntu:24.04" }).success,
+    ).toBe(false);
+    expect(
+      ContractProposeRigChangeRequest.safeParse({
+        kind: "definition_edit",
+        payload: { image: "ubuntu:24.10" },
+      }).success,
+    ).toBe(false);
     // Bad check shape and unknown change kind are rejected.
     expect(ContractCreateRigRequest.safeParse({ name: "x", checks: [{ name: "" }] }).success).toBe(
       false,

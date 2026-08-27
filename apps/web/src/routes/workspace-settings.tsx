@@ -63,6 +63,7 @@ import {
   hasWorkspacePermission,
 } from "@/lib/permissions";
 import type { ApiKey, SlackUserLinkAccessRequest } from "@/types";
+import { WorkspaceLearningAdministration } from "./workspace-learning-admin";
 
 export function WorkspaceSettingsRoute({
   workspaceId,
@@ -408,6 +409,8 @@ export function WorkspaceSettingsRoute({
                 <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
               </div>
             </section>
+
+            <WorkspaceLearningAdministration workspaceId={workspaceId} />
           </>
         ) : null}
 
@@ -843,8 +846,10 @@ function MembersSectionContent({
       </div>
 
       <Notice title="Workspace access is managed from the organization">
-        The organization member list is the single place to assign named workspace roles. Personal
-        workspaces are never administered from this page.
+        This workspace is permanently owned by its organization. Hand off access within the same
+        organization by granting or revoking named workspace roles. Cross-organization transfer and
+        Personal workspace transfer are unsupported. Personal workspaces are never administered from
+        this page.
         {canManage ? (
           <Button asChild type="button" variant="secondary" size="sm" className="mt-2">
             <Link
@@ -951,7 +956,7 @@ function MemoryPreferenceRow({
     <PreferenceToggleRow
       icon={<BrainCircuitIcon className="size-3.5 text-brand" />}
       label="Workspace memory"
-      description="Durable facts agents carry across sessions — editable on Documents."
+      description="Durable facts agents carry across sessions — manage them in Memory."
       checked={enabled}
       disabled={saving || !canManage}
       saving={saving}

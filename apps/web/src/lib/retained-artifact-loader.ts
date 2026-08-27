@@ -1,8 +1,8 @@
 import type { RetainedArtifactReference } from "@opengeni/sdk";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 type RetainedArtifactClient = Pick<
-  OpenGeniCoreClient,
+  OpenGeniBrowserClient,
   "createRetainedArtifactDownloadUrl" | "downloadRetainedArtifact"
 >;
 

@@ -1,4 +1,8 @@
-import { normalizeProtocolJsonValue, sanitizeHistoryItemsForModel } from "@opengeni/runtime";
+import {
+  normalizeProtocolJsonValue,
+  sanitizeHistoryItemsForModel,
+  toolCallIdFromSdkItem,
+} from "@opengeni/runtime";
 import { opaqueProviderArtifactFingerprint } from "@opengeni/codex";
 
 export function historyRowsToAppend(
@@ -149,7 +153,7 @@ export function pendingToolCallFromSdkEvent(event: unknown): {
   // never receives a separate function result and therefore must not enter the
   // pending function-call ledger.
   if (raw.type === "hosted_tool_call" && raw.name === "image_generation_call") return null;
-  const callId = raw.callId ?? raw.call_id ?? raw.id;
+  const callId = toolCallIdFromSdkItem(raw) ?? raw.id;
   const callType = raw.type;
   if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {
     return null;
@@ -182,7 +186,7 @@ export function completedToolCallFromSdkEvent(event: unknown): {
     item.rawItem && typeof item.rawItem === "object" && !Array.isArray(item.rawItem)
       ? (item.rawItem as Record<string, unknown>)
       : {};
-  const callId = raw.callId ?? raw.call_id ?? item.id;
+  const callId = toolCallIdFromSdkItem(raw) ?? item.id;
   if (typeof callId !== "string" || callId.length === 0) return null;
   return {
     callId,
