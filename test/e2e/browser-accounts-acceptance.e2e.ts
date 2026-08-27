@@ -188,6 +188,10 @@ const DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS = new Map<string, ReadonlySet<string
   ["responsive-evidence-bootstrap", new Set(["/v1/config/client", "/v1/auth/get-session"])],
 ]);
 
+const DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES = new Map<string, ReadonlySet<string>>([
+  ["slot-revocation-reauthentication", new Set(["cross-slot-deep-link"])],
+]);
+
 const EXPECTED_HTTP_CONSOLE_ERRORS: ReadonlyArray<{
   phases: ReadonlySet<string>;
   pattern: RegExp;
@@ -346,8 +350,11 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
     isCancellation &&
     !isConnectionReset &&
     input.method === "GET" &&
-    input.dispatchPhase === input.responsePhase &&
-    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true;
+    DOCUMENT_BOOTSTRAP_CANCELLATION_PATHS.get(input.responsePhase)?.has(pathname) === true &&
+    (input.dispatchPhase === input.responsePhase ||
+      DOCUMENT_BOOTSTRAP_CANCELLATION_DISPATCH_PHASES.get(input.responsePhase)?.has(
+        input.dispatchPhase,
+      ) === true);
   if (
     isExpectedScopedActorReadCancellation ||
     isAcceptedActorTransitionCancellation ||
@@ -2069,6 +2076,18 @@ describe("provider-neutral browser account acceptance", () => {
       responsePhase: "slot-revocation-reauthentication",
     };
     expect(requestFailureProblem(reauthenticationBootstrapRead)).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "cross-slot-deep-link",
+      }),
+    ).toBeNull();
+    expect(
+      requestFailureProblem({
+        ...reauthenticationBootstrapRead,
+        dispatchPhase: "late-old-epoch-alpha-to-beta",
+      }),
+    ).toContain("/v1/config/client");
     expect(
       requestFailureProblem({
         ...reauthenticationBootstrapRead,
