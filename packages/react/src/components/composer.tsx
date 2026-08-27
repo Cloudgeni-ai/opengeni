@@ -138,6 +138,8 @@ export type ChatComposerMessages = {
   uploadFailed: string;
   previewAttachment: (name: string) => string;
   attachmentPreviewLabel: string;
+  downloadAttachment: (name: string) => string;
+  closeAttachmentPreview: string;
   retryAttachment: (name: string) => string;
   retryUpload: string;
   removeAttachment: (name: string) => string;
@@ -203,6 +205,8 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   uploadFailed: "Upload failed",
   previewAttachment: (name) => `Preview ${name}`,
   attachmentPreviewLabel: "Attachment preview",
+  downloadAttachment: (name) => `Download ${name}`,
+  closeAttachmentPreview: "Close",
   retryAttachment: (name) => `Retry ${name}`,
   retryUpload: "Retry upload",
   removeAttachment: (name) => `Remove ${name}`,
@@ -1671,6 +1675,10 @@ function AttachmentChips({
                     event.currentTarget,
                     messages.attachmentPreviewLabel,
                     attachment.name,
+                    {
+                      download: messages.downloadAttachment(attachment.name),
+                      close: messages.closeAttachmentPreview,
+                    },
                   );
                 }}
               >

@@ -92,6 +92,7 @@ export type { ActivityDisclosureProps, DisclosureChip } from "./shared";
 
 // screenshot lightbox
 export { LightboxProvider, useLightbox, useLightboxOptional } from "./screenshot-lightbox";
+export type { LightboxControlLabels } from "./screenshot-lightbox";
 
 // disclosure defaults (opt-in initial-open seed; for screenshot/test instrumentation)
 export { DisclosureDefaultsProvider, useForcedDefaultOpen } from "./disclosure-context";

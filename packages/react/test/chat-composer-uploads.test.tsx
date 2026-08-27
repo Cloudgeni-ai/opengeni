@@ -212,7 +212,7 @@ describe("ChatComposer attachments", () => {
     expect(preview?.querySelector('img[src="blob:screenshot.png"]')).not.toBeNull();
   });
 
-  test("uses composer message overrides for the attachment preview trigger and dialog", async () => {
+  test("uses composer message overrides for all attachment preview accessible names", async () => {
     const container = await mount(
       <LightboxProvider>
         <ChatComposer
@@ -221,6 +221,8 @@ describe("ChatComposer attachments", () => {
           messages={{
             previewAttachment: (name) => `Vista previa de ${name}`,
             attachmentPreviewLabel: "Vista previa del archivo adjunto",
+            downloadAttachment: (name) => `Descargar ${name}`,
+            closeAttachmentPreview: "Cerrar",
           }}
         />
       </LightboxProvider>,
@@ -231,9 +233,10 @@ describe("ChatComposer attachments", () => {
     );
     expect(preview).not.toBeNull();
     expect(container.querySelector('[aria-label="Preview screenshot.png"]')).toBeNull();
-    // Radix portals do not materialize reliably in happy-dom. Pin the dialog
-    // handoff at the source contract while browser acceptance covers opening it.
+
     expect(composerSource).toContain("messages.attachmentPreviewLabel,");
+    expect(composerSource).toContain("download: messages.downloadAttachment(attachment.name),");
+    expect(composerSource).toContain("close: messages.closeAttachmentPreview,");
   });
 
   test("degrades an image attachment to a non-interactive thumbnail without a lightbox host", async () => {
