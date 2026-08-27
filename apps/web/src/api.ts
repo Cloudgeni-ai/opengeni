@@ -23,6 +23,17 @@ const accessKeyStorageKey = "opengeni.accessKey";
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 let activeAuthConfig: ClientConfig["auth"] | null = null;
+let managedActorEpoch: string | null = null;
+let managedActorRevision = 0;
+type ManagedActorRequest = {
+  abortActor: (reason: DOMException) => void;
+};
+const managedActorRequests = new Set<ManagedActorRequest>();
+const managedActorMutationListeners = new Set<() => void>();
+const managedActorInvalidationListeners = new Set<() => void>();
+let managedActorMutationCount = 0;
+const MANAGED_ACTOR_EPOCH_HEADER = "x-opengeni-actor-epoch";
+const MANAGED_ACTOR_STATE_HEADER = "x-opengeni-actor-state";
 
 export class ApiError extends Error {
   constructor(
@@ -59,21 +70,269 @@ export function isApiErrorStatus(error: unknown, status: number): boolean {
  * along for managed-session deployments.
  */
 export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniCoreClient {
+  const createdAtActorRevision = managedActorRevision;
   return new OpenGeniCoreClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
     headers: () => authHeaders(),
     fetch: async (input, init) => {
-      const response = await fetch(input, {
+      const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
+      if (actorBound) {
+        if (createdAtActorRevision !== managedActorRevision) {
+          throw new DOMException("The browser account changed", "AbortError");
+        }
+      }
+      const response = await managedActorFetch(input, {
         ...init,
         // API requests need managed-session cookies. The SDK explicitly marks
         // signed object-storage requests as credential-free; preserve that
         // narrower policy instead of overriding it at the console boundary.
         credentials: init?.credentials ?? "include",
+        signal: init?.signal,
       });
       handleApiContractResponse(response);
       return response;
     },
+  });
+}
+
+/**
+ * Rotate the browser's accepted actor epoch before exposing any new tenant
+ * state. Every older finite request is aborted and its eventual response is
+ * rejected even when the underlying transport cannot be cancelled.
+ */
+export function configureManagedActorEpoch(epoch: string | null): void {
+  if (managedActorEpoch === epoch) return;
+  managedActorEpoch = epoch;
+  managedActorRevision += 1;
+  const reason = new DOMException("The browser account changed", "AbortError");
+  for (const managedRequest of managedActorRequests) {
+    managedRequest.abortActor(reason);
+  }
+}
+
+export function currentManagedActorEpoch(): string | null {
+  return managedActorEpoch;
+}
+
+export function managedActorMutationBusySnapshot(): boolean {
+  return managedActorMutationCount > 0;
+}
+
+export function subscribeManagedActorMutationBusy(listener: () => void): () => void {
+  managedActorMutationListeners.add(listener);
+  return () => managedActorMutationListeners.delete(listener);
+}
+
+export function subscribeManagedActorInvalidation(listener: () => void): () => void {
+  managedActorInvalidationListeners.add(listener);
+  return () => managedActorInvalidationListeners.delete(listener);
+}
+
+function updateManagedActorMutationCount(delta: 1 | -1): void {
+  const before = managedActorMutationCount > 0;
+  managedActorMutationCount = Math.max(0, managedActorMutationCount + delta);
+  if (before !== managedActorMutationCount > 0) {
+    for (const listener of managedActorMutationListeners) listener();
+  }
+}
+
+function notifyManagedActorInvalidation(): void {
+  for (const listener of managedActorInvalidationListeners) listener();
+}
+
+function requestMethod(input: string | URL | Request, init: RequestInit): string {
+  const inherited =
+    typeof Request !== "undefined" && input instanceof Request ? input.method : null;
+  return String(init.method ?? inherited ?? "GET").toUpperCase();
+}
+
+export async function managedActorFetch(
+  input: string | URL | Request,
+  init: RequestInit = {},
+): Promise<Response> {
+  const acceptedEpoch = managedActorEpoch;
+  const acceptedRevision = managedActorRevision;
+  const controller = new AbortController();
+  const inputSignal =
+    init.signal ??
+    (typeof Request !== "undefined" && input instanceof Request ? input.signal : null);
+  let abortTarget = (reason: unknown) => controller.abort(reason);
+  const abortFromCaller = () => abortTarget(inputSignal?.reason);
+  if (inputSignal?.aborted) abortFromCaller();
+  else inputSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  const actorRequest: ManagedActorRequest = {
+    abortActor: (reason) => abortTarget(reason),
+  };
+  managedActorRequests.add(actorRequest);
+  const tracksMutation =
+    acceptedEpoch !== null && !new Set(["GET", "HEAD", "OPTIONS"]).has(requestMethod(input, init));
+  if (tracksMutation) updateManagedActorMutationCount(1);
+  let responseOwnsCleanup = false;
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    managedActorRequests.delete(actorRequest);
+    inputSignal?.removeEventListener("abort", abortFromCaller);
+    if (tracksMutation) updateManagedActorMutationCount(-1);
+  };
+  const headers = new Headers(
+    typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined,
+  );
+  new Headers(init.headers).forEach((value, key) => headers.set(key, value));
+  if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
+    headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
+  }
+  try {
+    const response = await fetch(input, {
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+    if (
+      acceptedEpoch !== null &&
+      response.headers.get(MANAGED_ACTOR_STATE_HEADER)?.toLowerCase() === "changed"
+    ) {
+      notifyManagedActorInvalidation();
+    }
+    const responseEpoch = response.headers.get(MANAGED_ACTOR_EPOCH_HEADER);
+    const responseIsStale = () =>
+      acceptedRevision !== managedActorRevision ||
+      acceptedEpoch !== managedActorEpoch ||
+      (acceptedEpoch !== null && responseEpoch !== null && responseEpoch !== acceptedEpoch);
+    if (responseIsStale()) {
+      void response.body?.cancel();
+      throw new DOMException("Ignored a response from the previous browser account", "AbortError");
+    }
+    if (!response.body) return response;
+    // Finite JSON is consumed before it crosses the actor boundary. Returning
+    // a manual bridge over a native compressed response can leave Chromium's
+    // transport lifecycle unresolved even after the source reader reaches
+    // EOF. Draining here also guarantees the native body already has a
+    // rejection consumer before any post-header actor abort.
+    let actorResponse = response;
+    if (isFiniteJsonResponse(response)) {
+      const bytes = await response.arrayBuffer();
+      if (responseIsStale()) {
+        throw new DOMException(
+          "Ignored a response from the previous browser account",
+          "AbortError",
+        );
+      }
+      actorResponse = new Response(bytes, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    }
+    // Before headers—and through a finite JSON drain—actor rotation aborts the
+    // native fetch. Once a streaming or detached body is admitted, transfer
+    // both actor and caller cancellation to the wrapper reader. WebKit otherwise
+    // reclassifies a post-header native abort as an unhandled access-control
+    // error. The downstream body remains fail-closed with the same AbortError.
+    const actorBodyController = new AbortController();
+    abortTarget = (reason) => actorBodyController.abort(reason);
+    responseOwnsCleanup = true;
+    return managedActorTrackedResponse(actorResponse, actorBodyController.signal, cleanup);
+  } finally {
+    if (!responseOwnsCleanup) cleanup();
+  }
+}
+
+function isFiniteJsonResponse(response: Response): boolean {
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  return contentType === "application/json" || contentType?.endsWith("+json") === true;
+}
+
+function managedActorTrackedResponse(
+  response: Response,
+  signal: AbortSignal,
+  cleanup: () => void,
+): Response {
+  const reader = response.body!.getReader();
+  let settled = false;
+  let readerReleased = false;
+  let actorAbortReason: unknown | null = null;
+  const releaseReader = () => {
+    if (readerReleased) return;
+    try {
+      reader.releaseLock();
+      readerReleased = true;
+    } catch {
+      // A pending read owns the lock until it settles; its completion path
+      // retries this release before returning to the downstream consumer.
+    }
+  };
+  const settle = () => {
+    if (settled) return false;
+    settled = true;
+    signal.removeEventListener("abort", abortBody);
+    cleanup();
+    return true;
+  };
+  const abortBody = () => {
+    if (settled) return;
+    const reason = signal.reason ?? new DOMException("The browser account changed", "AbortError");
+    actorAbortReason = reason;
+    settle();
+    void reader
+      .cancel(reason)
+      .catch(() => undefined)
+      .finally(releaseReader);
+  };
+  // Keep actor-abort rejection consumer-owned. WebKit can report a stream
+  // error raised directly inside the abort event as an unhandled page error
+  // before the SDK has attached its body reader. Zero buffering also prevents
+  // the wrapper from pulling an old response merely to fill an internal queue.
+  const body = new ReadableStream<Uint8Array>(
+    {
+      start() {
+        signal.addEventListener("abort", abortBody, { once: true });
+        if (signal.aborted) abortBody();
+      },
+      async pull(controller) {
+        if (actorAbortReason !== null) {
+          controller.error(actorAbortReason);
+          return;
+        }
+        if (settled) return;
+        try {
+          const next = await reader.read();
+          if (actorAbortReason !== null) {
+            controller.error(actorAbortReason);
+            return;
+          }
+          if (next.done) {
+            releaseReader();
+            if (settle()) controller.close();
+            return;
+          }
+          controller.enqueue(next.value);
+        } catch (error) {
+          releaseReader();
+          if (actorAbortReason !== null) {
+            controller.error(actorAbortReason);
+          } else if (settle()) {
+            controller.error(error);
+          }
+        }
+      },
+      async cancel(reason) {
+        try {
+          await reader.cancel(reason);
+        } finally {
+          releaseReader();
+          settle();
+        }
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
   });
 }
 
@@ -124,7 +383,7 @@ function authHeaders(): Record<string, string> {
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     ...init,
     credentials: "include",
     headers: {
@@ -143,7 +402,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}/v1/auth${path}`, {
+  const response = await managedActorFetch(`${apiBaseUrl}/v1/auth${path}`, {
     ...init,
     credentials: "include",
     headers: {
@@ -323,7 +582,7 @@ export async function redeemCodexResetCredit(
 }
 
 async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(`${apiBaseUrl}${path}`, {
+  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     method: "POST",
     credentials: "include",
     // Managed-session mutations intentionally authenticate only with the

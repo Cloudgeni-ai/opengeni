@@ -105,6 +105,37 @@ function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
   }));
 }
 
+const managedAuthSessionSetAuthorityTableNames = [
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_browser_installations",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_slots",
+  "managed_auth_login_transaction_rate_limits",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+  "managed_auth_session_sets",
+] as const;
+
+function managedAuthSessionSetAuthorityTables(): RuntimeTablePosture[] {
+  return managedAuthSessionSetAuthorityTableNames.map((name) => ({
+    name,
+    owner: "opengeni_migrator",
+    rlsEnabled: false,
+    rlsForced: false,
+    rlsActive: false,
+    policyCount: 0,
+    artifactOutboxDispatcherPolicy: false,
+    artifactMaterializerPolicy: false,
+    select: false,
+    insert: false,
+    update: false,
+    delete: false,
+    truncate: false,
+    references: false,
+    trigger: false,
+  }));
+}
+
 function companyBrainPreferenceAuthorityTables(): RuntimeTablePosture[] {
   return [
     "company_brain_preference_proposal_receipts",
@@ -310,6 +341,7 @@ function safePosture(): RuntimeDatabasePosture {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...managedAuthSessionSetAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),
@@ -474,6 +506,12 @@ describe("runtime database posture evaluator", () => {
           new Set<string>(FORCE_RLS_TABLES).has(table) &&
           new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
       ).length;
+      const managedAuthSessionSetProtectedTableCount =
+        managedAuthSessionSetAuthorityTableNames.filter(
+          (table) =>
+            new Set<string>(FORCE_RLS_TABLES).has(table) &&
+            new Set<string>(PROTECTED_NO_DIRECT_DML_TABLES).has(table),
+        ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
             [FORCE_RLS_TABLES, 300],
@@ -500,7 +538,9 @@ describe("runtime database posture evaluator", () => {
       for (const [tables, length] of contracts) {
         const expectedLength =
           tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
-            ? length + personalResourceProtectedTableCount
+            ? length +
+              personalResourceProtectedTableCount +
+              managedAuthSessionSetProtectedTableCount
             : length;
         expect(tables).toHaveLength(expectedLength);
         expect(new Set(tables).size).toBe(tables.length);
@@ -510,10 +550,10 @@ describe("runtime database posture evaluator", () => {
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount = hasCurrentMainActivityLedger ? 313 : 212;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount,
+        tableCount + personalResourceProtectedTableCount + managedAuthSessionSetProtectedTableCount,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
-        tableCount + personalResourceProtectedTableCount,
+        tableCount + personalResourceProtectedTableCount + managedAuthSessionSetProtectedTableCount,
       );
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
@@ -948,6 +988,34 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("fails closed on missing or split managed-auth session-set authority", () => {
+    const routineName = "managed_auth_session_set_authority_state(text)";
+    const missing = safePosture();
+    missing.tables = missing.tables.filter((table) => table.name !== "managed_auth_session_sets");
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(
+      `target-schema runtime capability ${routineName} managed auth session-set authority tables are missing`,
+    );
+
+    const split = safePosture();
+    split.tables.find((table) => table.name === "managed_auth_session_set_operations")!.owner =
+      "another_owner";
+    expect(
+      evaluateRuntimeDatabasePosture(split, options).some(
+        (violation) =>
+          violation.startsWith(
+            `target-schema runtime capability ${routineName} authority table owners do not match:`,
+          ) && violation.includes("managed_auth_session_set_operations=another_owner"),
+      ),
+    ).toBe(true);
+
+    const routineMismatch = safePosture();
+    routineMismatch.targetRoutines.find((routine) => routine.name === routineName)!.owner =
+      "another_owner";
+    expect(evaluateRuntimeDatabasePosture(routineMismatch, options)).toContain(
+      `target-schema runtime capability ${routineName} owner another_owner does not match authority table owner opengeni_migrator`,
+    );
+  });
+
   test("requires same-owner organization membership lifecycle authority", () => {
     const routineName = "organization_membership_command(jsonb)";
 
@@ -990,6 +1058,24 @@ describe("runtime database posture evaluator", () => {
       expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
       expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
     }
+  });
+
+  test("classifies managed-auth session-set tables as FORCE-RLS with no direct DML", () => {
+    for (const table of managedAuthSessionSetAuthorityTableNames) {
+      expect(FORCE_RLS_TABLES).toContain(table);
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain(table);
+      expect(RUNTIME_TABLE_PRIVILEGES[table]).toBeUndefined();
+    }
+    expect(RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES).toEqual(
+      expect.arrayContaining([
+        "managed_auth_session_set_authority_state(text)",
+        "managed_auth_session_set_snapshot(text, text, boolean, boolean, boolean)",
+        "managed_auth_session_set_mutate(text, text, uuid, text, bigint, bigint, text, uuid, uuid, uuid, text, text)",
+        "managed_auth_actor_mutation_lease_acquire(text, bigint, uuid, integer)",
+        "managed_auth_actor_mutation_lease_release(text, uuid)",
+        "managed_auth_actor_mutation_lease_validate(text, bigint, uuid)",
+      ]),
+    );
   });
 
   test("classifies organization private-session settings as capability-only FORCE-RLS state", () => {
@@ -1315,6 +1401,7 @@ describe("runtime database posture evaluator", () => {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...managedAuthSessionSetAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
     ];
@@ -1504,6 +1591,7 @@ describe("runtime database posture evaluator", () => {
       ...knowledgeAuthorityTables(),
       ...googleDriveAuthorityTables(),
       ...canonicalHumanIdentityAuthorityTables(),
+      ...managedAuthSessionSetAuthorityTables(),
       ...companyBrainPreferenceAuthorityTables(),
       ...companyProfileAgentAdminAuthorityTables(),
       ...organizationMembershipLifecycleAuthorityTables(),

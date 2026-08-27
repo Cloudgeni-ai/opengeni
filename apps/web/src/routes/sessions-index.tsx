@@ -77,6 +77,7 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
+import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
   composerLaunchSearchKey,
@@ -792,6 +793,29 @@ function SessionsIndexRouteContent({
       return await createComposer.send();
     },
   };
+  useBrowserAccountBridgeBlocker(`new-session-composer:${workspaceId}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (busy || submitting || newSessionDraft.saving) {
+      return {
+        id: "ignored",
+        label: "A new-session mutation is still running",
+        detail: "Wait for the current save or session creation to finish.",
+      };
+    }
+    return createComposer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "The new-session composer has an unsent draft",
+          detail: "Continuing clears the account-bound draft.",
+        }
+      : null;
+  });
 
   return (
     // The canvas parent is overflow-hidden, so this route owns its scrolling —

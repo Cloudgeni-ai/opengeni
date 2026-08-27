@@ -9,6 +9,7 @@ import {
   LogOutIcon,
   UserIcon,
 } from "lucide-react";
+import { lazy, Suspense } from "react";
 import { toast } from "sonner";
 
 import { useRail } from "@/components/rail/rail-context";
@@ -26,6 +27,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAppContext } from "@/context";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
+const BrowserAccountMenu = lazy(() =>
+  import("@/components/browser-account-menu").then((module) => ({
+    default: module.BrowserAccountMenu,
+  })),
+);
+
 function userInitial(label: string): string {
   return (label.trim()[0] ?? "U").toUpperCase();
 }
@@ -34,6 +41,7 @@ export function RailFooter() {
   const rail = useRail();
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
+  const browserAccounts = managed && context.clientConfig.managedAuthSessionSetMode !== "legacy";
   const showAnalyticsPreferences = analyticsPreferencesAvailable(context.clientConfig.analytics);
   const displayName =
     context.authSession?.user.name ??
@@ -48,74 +56,91 @@ export function RailFooter() {
       <div
         className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-center gap-1.5"}
       >
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              aria-label="Account menu"
-              className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none pointer-coarse:py-2"
-            >
-              <Avatar size="sm">
-                {image ? <AvatarImage src={image} alt="" /> : null}
-                <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
-                  {userInitial(displayName)}
-                </AvatarFallback>
-              </Avatar>
-              {!rail.collapsed ? (
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium text-fg">{displayName}</span>
-                  {secondary && secondary !== displayName ? (
-                    <span className="block truncate text-2xs text-fg-subtle">{secondary}</span>
-                  ) : null}
-                </span>
-              ) : null}
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="start"
-            side={rail.collapsed ? "right" : "top"}
-            className="min-w-56"
+        {browserAccounts ? (
+          <Suspense
+            fallback={
+              <AccountTrigger
+                collapsed={rail.collapsed}
+                displayName={displayName}
+                secondary={secondary}
+                image={image}
+              />
+            }
           >
-            <DropdownMenuLabel className="grid gap-0.5">
-              <span className="truncate text-sm">{displayName}</span>
-              {secondary && secondary !== displayName ? (
-                <span className="truncate text-xs font-normal text-fg-subtle">{secondary}</span>
-              ) : null}
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            {showAnalyticsPreferences ? (
-              <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
-                <ChartColumnIcon className="size-4" />
-                Analytics preferences
-              </DropdownMenuItem>
-            ) : null}
-            {managed ? (
-              <DropdownMenuItem
-                variant="destructive"
-                onSelect={() => {
-                  void context
-                    .handleManagedSignOut()
-                    .catch((error) =>
-                      toast.error("Sign out failed", { description: String(error) }),
-                    );
-                }}
+            <BrowserAccountMenu />
+          </Suspense>
+        ) : (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label="Account menu"
+                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none pointer-coarse:py-2"
               >
-                <LogOutIcon className="size-4" />
-                Sign out
-              </DropdownMenuItem>
-            ) : context.keyAuthRequired ? (
-              <DropdownMenuItem variant="destructive" onSelect={() => context.forgetAccessKey()}>
-                <LockIcon className="size-4" />
-                Clear access key
-              </DropdownMenuItem>
-            ) : (
-              <DropdownMenuItem disabled>
-                <UserIcon className="size-4" />
-                {context.accessContext.mode} access
-              </DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+                <Avatar size="sm">
+                  {image ? <AvatarImage src={image} alt="" /> : null}
+                  <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
+                    {userInitial(displayName)}
+                  </AvatarFallback>
+                </Avatar>
+                {!rail.collapsed ? (
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs font-medium text-fg">
+                      {displayName}
+                    </span>
+                    {secondary && secondary !== displayName ? (
+                      <span className="block truncate text-2xs text-fg-subtle">{secondary}</span>
+                    ) : null}
+                  </span>
+                ) : null}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              side={rail.collapsed ? "right" : "top"}
+              className="min-w-56"
+            >
+              <DropdownMenuLabel className="grid gap-0.5">
+                <span className="truncate text-sm">{displayName}</span>
+                {secondary && secondary !== displayName ? (
+                  <span className="truncate text-xs font-normal text-fg-subtle">{secondary}</span>
+                ) : null}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {showAnalyticsPreferences ? (
+                <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
+                  <ChartColumnIcon className="size-4" />
+                  Analytics preferences
+                </DropdownMenuItem>
+              ) : null}
+              {managed ? (
+                <DropdownMenuItem
+                  variant="destructive"
+                  onSelect={() => {
+                    void context
+                      .handleManagedSignOut()
+                      .catch((error) =>
+                        toast.error("Sign out failed", { description: String(error) }),
+                      );
+                  }}
+                >
+                  <LogOutIcon className="size-4" />
+                  Sign out
+                </DropdownMenuItem>
+              ) : context.keyAuthRequired ? (
+                <DropdownMenuItem variant="destructive" onSelect={() => context.forgetAccessKey()}>
+                  <LockIcon className="size-4" />
+                  Clear access key
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem disabled>
+                  <UserIcon className="size-4" />
+                  {context.accessContext.mode} access
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         {!rail.isMobile ? (
           <Tooltip>
@@ -142,5 +167,36 @@ export function RailFooter() {
         ) : null}
       </div>
     </div>
+  );
+}
+
+function AccountTrigger(props: {
+  collapsed: boolean;
+  displayName: string;
+  secondary: string;
+  image: string | undefined;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label="Loading account menu"
+      disabled
+      className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left"
+    >
+      <Avatar size="sm">
+        {props.image ? <AvatarImage src={props.image} alt="" /> : null}
+        <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
+          {userInitial(props.displayName)}
+        </AvatarFallback>
+      </Avatar>
+      {!props.collapsed ? (
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-medium text-fg">{props.displayName}</span>
+          {props.secondary !== props.displayName ? (
+            <span className="block truncate text-2xs text-fg-subtle">{props.secondary}</span>
+          ) : null}
+        </span>
+      ) : null}
+    </button>
   );
 }

@@ -3777,6 +3777,7 @@ describe("workflow contracts", () => {
       "browser-acceptance": [
         "Stabilize Ubuntu package downloads",
         "Install pinned lane browser runtimes",
+        "Browser account session-set acceptance",
         "Editable artifact browser acceptance",
         "Install pinned artifact native toolchain",
         "Editable artifact full-stack browser acceptance",
@@ -3789,6 +3790,7 @@ describe("workflow contracts", () => {
         "Responsive knowledge surfaces browser acceptance",
         "Organization onboarding lifecycle acceptance",
         "Workbench browser acceptance",
+        "Upload browser account acceptance evidence",
         "Upload session pin visual evidence",
         "Upload Codex quota visual evidence",
         "Upload responsive knowledge-surface evidence",
@@ -3826,6 +3828,13 @@ describe("workflow contracts", () => {
 
     const browser = ci.jobs["browser-acceptance"];
     const expectedBrowserGates = new Map([
+      [
+        "Browser account session-set acceptance",
+        {
+          lane: "accounts",
+          run: "bun test --max-concurrency=1 --timeout 180000 \\\n  ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \\\n  ./apps/api/test/managed-auth-session-sets.integration.test.ts\nbun scripts/run-browser-e2e.ts \\\n  ./test/e2e/browser-accounts-acceptance.e2e.ts\n",
+        },
+      ],
       [
         "Codex quota and entitlement browser acceptance",
         {
@@ -3924,7 +3933,8 @@ describe("workflow contracts", () => {
         uses: "./.github/actions/playwright-browsers",
         "timeout-minutes": 17,
         with: {
-          browsers: "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}",
+          browsers:
+            "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
         },
       },
     ]);
@@ -3963,6 +3973,13 @@ describe("workflow contracts", () => {
     );
     expect(browserAction).toContain("path: ~/.cache/ms-playwright");
     expect(
+      browser.steps.find((step: any) => step.name === "Browser account session-set acceptance").env,
+    ).toEqual({
+      OPENGENI_REQUIRE_REAL_DB: "1",
+      OPENGENI_ACCOUNT_BROWSER_ENGINE: "${{ matrix.engine }}",
+      OPENGENI_ACCOUNT_EVIDENCE_DIR: "/tmp/opengeni-account-acceptance",
+    });
+    expect(
       browser.steps.find(
         (step: any) => step.name === "Codex quota and entitlement browser acceptance",
       ).env,
@@ -3987,6 +4004,11 @@ describe("workflow contracts", () => {
     });
 
     const expectedEvidence = {
+      "Upload browser account acceptance evidence": {
+        if: "${{ matrix.lane == 'accounts' && steps.browser_accounts.outcome == 'success' }}",
+        name: "browser-account-acceptance-${{ matrix.engine }}",
+        path: ["/tmp/opengeni-account-acceptance"],
+      },
       "Upload session pin visual evidence": {
         if: "${{ always() && matrix.lane == 'knowledge' && (steps.session_pin_browser.outcome == 'success' || steps.session_pin_browser.outcome == 'failure') }}",
         name: "sessionpin-session-pin-visual-evidence",

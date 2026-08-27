@@ -18,6 +18,7 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "../managed-auth-type";
 import { getManagedSession } from "../managed-session";
+import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 
 const bearerPrefix = "Bearer ";
 const accessContextByRequest = new WeakMap<Request, Promise<AccessContext | null>>();
@@ -61,6 +62,7 @@ export type AccessDeps = {
   db: Database;
   settings: Settings;
   managedAuth?: ManagedAuth | null;
+  managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
 };
 
 export async function requireAccessContext(c: Context, deps: AccessDeps): Promise<AccessContext> {
@@ -377,7 +379,11 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
   }
 
   if (deps.managedAuth) {
-    const session = await getManagedSession(c, deps.managedAuth, { db: deps.db });
+    const session = await getManagedSession(c, deps.managedAuth, {
+      db: deps.db,
+      sessionSetMode: deps.settings.managedAuthSessionSetMode,
+      sessionAdapter: deps.managedAuthSessionAdapter,
+    });
     if (session?.user) {
       // THE canonical managed-cookie (Better Auth) branch, and the only place
       // that may stamp a context as such. Every `return` above this point leaves
@@ -389,6 +395,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         name: session.user.name,
         emailVerified: session.user.emailVerified,
         provisionFallbackOrganization: false,
+        bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
       return context;

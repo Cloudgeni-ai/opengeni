@@ -61,6 +61,7 @@ import { Notice } from "@/components/ui/notice";
 import type { WorkspaceTab } from "@opengeni/react";
 import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
+import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
   SessionEditableArtifactSummary,
   SessionEditableArtifactsStatus,
@@ -1444,6 +1445,29 @@ function SessionChatPane(props: {
     },
     onSent: (_text, input) => personalAttachment.onAccepted(input),
     onDeliveryError: personalAttachment.onDeliveryError,
+  });
+  useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
+    if (attachments.hasUnresolved) {
+      return {
+        id: "ignored",
+        label: "A file upload is not settled",
+        detail: "Wait for the upload or remove it before changing accounts.",
+      };
+    }
+    if (composer.sending || composer.draftSaving || durableToolsSaving) {
+      return {
+        id: "ignored",
+        label: "A session mutation is still running",
+        detail: "Wait for the current save or send to finish.",
+      };
+    }
+    return composer.hasDraftContent()
+      ? {
+          id: "ignored",
+          label: "This session has an unsent draft",
+          detail: "Continuing clears the account-bound composer state.",
+        }
+      : null;
   });
   const composerPolicy = composer.policy;
   const composerDraftLoading = composer.draftLoading;

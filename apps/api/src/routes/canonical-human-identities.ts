@@ -5,7 +5,11 @@ import {
   CanonicalHumanIdentityProjection,
   LinkCanonicalHumanLoginBindingRequest,
 } from "@opengeni/contracts/canonical-human-identities";
-import { requireCanonicalHumanRequestIdentity } from "@opengeni/core/canonical-human-identities";
+import {
+  getManagedAuthRequestActorLeaseStamp,
+  markManagedAuthRequestActorTransitionApplied,
+  requireCanonicalHumanRequestIdentity,
+} from "@opengeni/core/canonical-human-identities";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   applyCanonicalHumanIdentityOperation,
@@ -13,6 +17,7 @@ import {
   CanonicalHumanIdentityConflictError,
   CanonicalHumanIdentityNotFoundError,
   CanonicalHumanIdentityOperationReuseError,
+  CanonicalHumanIdentityMutationInFlightError,
   getCanonicalHumanIdentityProjection,
 } from "@opengeni/db/canonical-human-identities";
 import type { Context, Hono } from "hono";
@@ -25,6 +30,8 @@ async function requestIdentity(context: Context, deps: ApiRouteDeps) {
   return await requireCanonicalHumanRequestIdentity(context, {
     db: deps.db,
     ...(deps.managedAuth === undefined ? {} : { managedAuth: deps.managedAuth }),
+    managedAuthSessionAdapter: deps.managedAuthSessionAdapter,
+    managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
     allowRecovery: true,
   });
 }
@@ -49,6 +56,9 @@ function identityError(context: Context, error: unknown): Response {
   }
   if (error instanceof CanonicalHumanIdentityOperationReuseError) {
     return context.json({ code: error.code, message: error.message }, 409);
+  }
+  if (error instanceof CanonicalHumanIdentityMutationInFlightError) {
+    return context.json({ code: error.code, message: error.message, retryable: true }, 409);
   }
   if (error instanceof CanonicalHumanIdentityNotFoundError) {
     return context.json(
@@ -79,21 +89,26 @@ async function mutate(
   },
 ): Promise<Response> {
   const identity = await requestIdentity(context, deps);
+  const actorFence = getManagedAuthRequestActorLeaseStamp(context.req.raw);
+  if (deps.settings.managedAuthSessionSetMode !== "legacy" && !actorFence) {
+    throw new HTTPException(409, { message: "Managed actor mutation fence is unavailable" });
+  }
   try {
-    return context.json(
-      CanonicalHumanIdentityMutationResponse.parse(
-        await applyCanonicalHumanIdentityOperation(deps.db, {
-          operationId: input.operationId,
-          authUserId: identity.authUserId,
-          expectedIdentityRevision: input.expectedIdentityRevision,
-          operationType: input.operationType,
-          ...(input.bindingId ? { bindingId: input.bindingId } : {}),
-          ...(input.providerId ? { providerId: input.providerId } : {}),
-          ...(input.providerAccountId ? { providerAccountId: input.providerAccountId } : {}),
-          reason: input.reason,
-        }),
-      ),
+    const response = CanonicalHumanIdentityMutationResponse.parse(
+      await applyCanonicalHumanIdentityOperation(deps.db, {
+        operationId: input.operationId,
+        authUserId: identity.authUserId,
+        expectedIdentityRevision: input.expectedIdentityRevision,
+        operationType: input.operationType,
+        ...(input.bindingId ? { bindingId: input.bindingId } : {}),
+        ...(input.providerId ? { providerId: input.providerId } : {}),
+        ...(input.providerAccountId ? { providerAccountId: input.providerAccountId } : {}),
+        reason: input.reason,
+        ...(actorFence ? { actorFence } : {}),
+      }),
     );
+    if (actorFence) markManagedAuthRequestActorTransitionApplied(context.req.raw);
+    return context.json(response);
   } catch (error) {
     return identityError(context, error);
   }

@@ -51,6 +51,10 @@
       "types": "./src/canonical-human-identities.ts",
       "default": "./src/canonical-human-identities.ts"
     },
+    "./managed-auth-session-sets": {
+      "types": "./src/managed-auth-session-sets.ts",
+      "default": "./src/managed-auth-session-sets.ts"
+    },
     "./session-tenancy": {
       "types": "./src/session-tenancy.ts",
       "default": "./src/session-tenancy.ts"

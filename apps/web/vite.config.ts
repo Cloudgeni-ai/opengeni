@@ -103,12 +103,15 @@ export default defineConfig({
             {
               // The settings hub owns several substantial management surfaces.
               // Keep their static graph behind that route so settings-only
-              // controls cannot densify an initial or direct-session load.
+              // controls cannot densify an initial or direct-session load. The
+              // isolated account-auth route adds another entry-aware boundary;
+              // 28 KiB is the highest merge threshold that keeps settings-only
+              // sources out of the direct-session graph on Bun 1.4 Linux/x64.
               name: "workspace-settings",
               test: /src[\\/]routes[\\/]workspace-settings\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 128 * 1024,
+              entriesAwareMergeThreshold: 28 * 1024,
               priority: 3,
             },
             {

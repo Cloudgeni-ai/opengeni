@@ -12,6 +12,8 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Product API key | `ogk_…` bearer | Workspace member via `POST /v1/workspaces/:id/api-keys` | Hash lookup (stored hashed, shown once) | Until revoked | A product/backend calling the REST API for one workspace |
 | Delegated access token | `ogd_…` bearer; domain-bound `ogd2_…` when it asserts service provenance | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
+| Browser session-set authority | Opaque 43-character `HttpOnly`, `SameSite=Lax` cookie; hash-only at rest | Session-set API | Hash lookup plus CSRF, generation, actor-epoch, and exact-origin admission | 30-day idle / 180-day absolute | One managed browser installation; never browser JavaScript |
+| Isolated login transaction | Path-scoped `HttpOnly`, `SameSite=Strict` cookie; hash-only at rest | Session-set API after explicit add/re-auth | One-use transaction plus exact expected slot/identity/binding revisions | 10 minutes | The same-origin credential popup only |
 | Stream token | `ogs_…` (query/header) | API, on viewer/stream mint | HMAC, scope+TTL embedded | Minutes | Browsers attaching to desktop/terminal streams |
 | Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | HMAC + active enrollment row + exact credential generation | 30 days; generation-rotated on every re-enrollment | A self-hosted/connected machine agent |
 | Headless enrollment token | `oget_…` | Operator via enrollment API | One-time exchange for `oge_…` | Single use | Provisioning scripts for headless machines |
@@ -27,6 +29,13 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
 Rules that hold across the table:
+
+- **Managed browser slots do not expose provider credentials.** In `dual` and
+  `broker`, a safe browser projection names bounded slot display metadata and one
+  selected actor. Unselected Better Auth sessions remain server-side; add/re-auth
+  strips ambient cookies before provider authentication; the opener receives only
+  a transaction UUID and rereads authority. See
+  [`browser-login-session-sets.md`](browser-login-session-sets.md).
 
 - **Configured-secret authority is explicit.** Secret values are authenticated-
   encrypted at rest and never appear in unrelated list/detail/event/log/span

@@ -1508,6 +1508,7 @@ export async function ensureManagedAccessForUser(
     name: string;
     emailVerified?: boolean;
     provisionFallbackOrganization?: boolean;
+    bindPendingInvitations?: boolean;
   },
 ): Promise<AccessContext> {
   return (await ensureManagedAccessForUserWithOrganizationMemberships(db, input)).accessContext;
@@ -1653,6 +1654,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
     name: string;
     emailVerified?: boolean;
     provisionFallbackOrganization?: boolean;
+    bindPendingInvitations?: boolean;
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
@@ -1660,7 +1662,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, subjectId);
-    if (input.emailVerified === true) {
+    if (input.emailVerified === true && input.bindPendingInvitations !== false) {
       await rawRows(
         txDb,
         sql`select bind_pending_organization_invitations_for_verified_email(
@@ -29002,6 +29004,43 @@ async function lockSessionPersonalStateExclusive(
   );
 }
 
+async function requireSessionPersonalStateWriteAuthority(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  },
+): Promise<void> {
+  const [membership] = await db
+    .select({ id: schema.workspaceMemberships.id })
+    .from(schema.workspaceMemberships)
+    .where(
+      and(
+        eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+        eq(schema.workspaceMemberships.subjectId, input.subjectId),
+      ),
+    )
+    .limit(1);
+  // Managed personal-workspace owners intentionally have no membership row.
+  // The caller may assert this exception only from canonical managed-cookie
+  // authentication; the live organization-membership pointer remains the
+  // database authority and keeps suspended/foreign subjects denied.
+  if (
+    !membership &&
+    !(
+      input.personalWorkspaceOwnerException === true &&
+      (await subjectHasLiveWorkspaceAuthorityInScope(db, {
+        accountId: await accountIdInRlsScope(db),
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+      }))
+    )
+  ) {
+    throw new SessionPinAccessError();
+  }
+}
+
 type SessionPinRow = Pick<
   typeof schema.sessionPins.$inferSelect,
   | "pinned"
@@ -30213,36 +30252,7 @@ export async function setSessionPin(
         // serializes with member removal before changing personal state. A stale
         // API grant cannot recreate a pin after removal commits.
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-        const [membership] = await tx
-          .select({ id: schema.workspaceMemberships.id })
-          .from(schema.workspaceMemberships)
-          .where(
-            and(
-              eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
-              eq(schema.workspaceMemberships.subjectId, input.subjectId),
-            ),
-          )
-          .limit(1);
-        // The owner of a managed personal workspace never has a membership row
-        // there (migration 0219 raises on one), so a bare probe would deny every
-        // pin inside their own workspace. Defer to the canonical resolver, on
-        // this same transaction handle so the exclusive personal-state fence
-        // above still serializes it with member removal. Gated on the caller's
-        // canonical managed-cookie assertion; see
-        // PersonalWorkspaceOwnerException.
-        if (
-          !membership &&
-          !(
-            input.personalWorkspaceOwnerException === true &&
-            (await subjectHasLiveWorkspaceAuthorityInScope(tx, {
-              accountId: await accountIdInRlsScope(tx),
-              workspaceId: input.workspaceId,
-              subjectId: input.subjectId,
-            }))
-          )
-        ) {
-          throw new SessionPinAccessError();
-        }
+        await requireSessionPersonalStateWriteAuthority(tx, input);
         const [session] = await tx
           .select()
           .from(schema.sessions)
@@ -30371,6 +30381,8 @@ export async function setSessionAttention(
     acknowledgedThroughSequence?: number | undefined;
     activelyWorking?: boolean | undefined;
     expectedVersion?: number | undefined;
+    /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
   },
 ): Promise<Session | null> {
   return await withWorkspaceSubjectRls(
@@ -30380,17 +30392,7 @@ export async function setSessionAttention(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-        const [membership] = await tx
-          .select({ id: schema.workspaceMemberships.id })
-          .from(schema.workspaceMemberships)
-          .where(
-            and(
-              eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
-              eq(schema.workspaceMemberships.subjectId, input.subjectId),
-            ),
-          )
-          .limit(1);
-        if (!membership) throw new SessionPinAccessError();
+        await requireSessionPersonalStateWriteAuthority(tx, input);
 
         const [session] = await tx
           .select()
@@ -30542,6 +30544,8 @@ export async function setSessionArchive(
     sessionId: string;
     archived: boolean;
     expectedVersion?: number | undefined;
+    /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
   },
 ): Promise<Session | null> {
   return await withWorkspaceSubjectRls(
@@ -30551,17 +30555,7 @@ export async function setSessionArchive(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-        const [membership] = await tx
-          .select({ id: schema.workspaceMemberships.id })
-          .from(schema.workspaceMemberships)
-          .where(
-            and(
-              eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
-              eq(schema.workspaceMemberships.subjectId, input.subjectId),
-            ),
-          )
-          .limit(1);
-        if (!membership) throw new SessionPinAccessError();
+        await requireSessionPersonalStateWriteAuthority(tx, input);
 
         const [session] = await tx
           .select()
@@ -67885,6 +67879,7 @@ export * from "./attached-browser-devices";
 export * from "./interaction-revisions";
 export * from "./interaction-placement-loss";
 export * from "./canonical-human-identities";
+export * from "./managed-auth-session-sets";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";

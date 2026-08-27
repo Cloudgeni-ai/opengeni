@@ -682,6 +682,61 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("physically aborts an old draft GET when the actor target changes", async () => {
+    let oldSignal: AbortSignal | undefined;
+    const dynamic = client({
+      getNewSessionDraft: async (workspaceId, options) => {
+        if (workspaceId === WORKSPACE_B) return remote(8, { text: "workspace b" });
+        oldSignal = options?.signal;
+        return await new Promise<NewSessionDraft>((_resolve, reject) => {
+          oldSignal?.addEventListener(
+            "abort",
+            () => reject(oldSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const hook = await renderDraftHook(dynamic);
+    await flush();
+    expect(oldSignal?.aborted).toBe(false);
+
+    await hook.rerender({ client: dynamic, workspaceId: WORKSPACE_B });
+    await flush();
+
+    expect(oldSignal?.aborted).toBe(true);
+    expect(hook.result.current.value.text).toBe("workspace b");
+    expect(hook.result.current.draft.revision).toBe(8);
+    expect(hook.result.current.draft.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("physically aborts pending file hydration when the hook unmounts", async () => {
+    const fileId = "00000000-0000-4000-8000-000000000011";
+    let fileSignal: AbortSignal | undefined;
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => remote(4, { resources: [{ kind: "file", fileId }] }),
+        getFile: async (_workspaceId, _fileId, options) => {
+          fileSignal = options?.signal;
+          return await new Promise<FileAsset>((_resolve, reject) => {
+            fileSignal?.addEventListener(
+              "abort",
+              () => reject(fileSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          });
+        },
+      }),
+    );
+    await flush();
+    expect(fileSignal?.aborted).toBe(false);
+
+    await hook.unmount();
+
+    expect(fileSignal?.aborted).toBe(true);
+  });
+
   test("reload before catalogs are ready does not fetch", async () => {
     let reads = 0;
     const draftClient = client({

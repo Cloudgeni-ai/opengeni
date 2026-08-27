@@ -533,6 +533,25 @@ async function grantAppRoleIfSchemaExists(
   ]
     .map(literal)
     .join(", ")}]`;
+  const managedAuthSessionSetRoutines = `ARRAY[${[
+    "get_canonical_human_exact_login_binding(text,text)",
+    "managed_auth_session_set_authority_state(text)",
+    "managed_auth_session_set_snapshot(text,text,boolean,boolean,boolean)",
+    "managed_auth_session_set_bootstrap(text,text,text,text,uuid,text,bigint,bigint)",
+    "managed_auth_session_set_begin_transaction(text,text,text,uuid,text,bigint,uuid,bigint,text,text,uuid,uuid,text,timestamp with time zone)",
+    "managed_auth_session_set_complete_transaction(text,text,uuid,text,bigint,bigint,uuid,text,text,text)",
+    "managed_auth_session_set_mutate(text,text,uuid,text,bigint,bigint,text,uuid,uuid,uuid,text,text)",
+    "managed_auth_actor_mutation_fence(text,bigint,uuid)",
+    "managed_auth_actor_mutation_lease_acquire(text,bigint,uuid,integer)",
+    "managed_auth_actor_mutation_lease_release(text,uuid)",
+    "managed_auth_actor_mutation_lease_validate(text,bigint,uuid)",
+    "managed_auth_adopted_session_snapshot(text)",
+    "managed_auth_isolated_session_reap(integer)",
+    "managed_auth_expired_session_set_reap(integer)",
+    "managed_auth_session_set_operation_receipt(text,uuid,text,text)",
+  ]
+    .map(literal)
+    .join(", ")}]`;
   await sql.unsafe(`
 DO $$
 DECLARE
@@ -1226,6 +1245,18 @@ BEGIN
         ${literal(role)}
       );
     END IF;
+    FOREACH routine_signature IN ARRAY ${managedAuthSessionSetRoutines} LOOP
+      IF to_regprocedure(format('%I.%s', ${literal(schema)}, routine_signature)) IS NOT NULL THEN
+        EXECUTE format(
+          'REVOKE ALL ON FUNCTION %I.%s FROM PUBLIC',
+          ${literal(schema)}, routine_signature
+        );
+        EXECUTE format(
+          'GRANT EXECUTE ON FUNCTION %I.%s TO %I',
+          ${literal(schema)}, routine_signature, ${literal(role)}
+        );
+      END IF;
+    END LOOP;
     -- Migration 0225 creates these target-schema-local session visibility
     -- capabilities before opengeni_app may exist. Re-converge their exact
     -- EXECUTE grants for migrate-then-provision installs without granting
