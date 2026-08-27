@@ -551,7 +551,11 @@ A Codex terminal SSE failure carried
 on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
 cannot masquerade as an empty successful summary. After a fenced durable
 replacement, the same activity, turn, attempt, and sandbox rebuild model input
-and continue; compaction never creates queue or recovery work.
+and continue; compaction itself never creates queue or recovery work. If that
+fresh continuation ends without any terminal model response, it is not accepted
+as an empty completion: cancellation still wins, otherwise the compacted
+checkpoint enters the ordinary bounded same-turn recovery path while newer
+queued prompts remain behind it.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
