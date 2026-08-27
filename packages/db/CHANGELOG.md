@@ -1,5 +1,12 @@
 # @opengeni/db
 
+## 3.5.1
+
+### Patch Changes
+
+- da0c2d2: Prevent accepted-attempt workspace learning-policy snapshots from deadlocking with ordinary session lifecycle writers. The snapshot function now locks the workspace, session, turn, and attempt explicitly in the canonical order, then revalidates the complete live-attempt and interruption tuple in a fresh statement before deriving the immutable policy snapshot.
+- 92f227f: Make session and workspace Pause/Resume desired-state mutations report authoritative changed, unchanged, and replayed outcomes. Represented no-ops no longer allocate control revisions, events, interruptions, or wakes, while newer descendant overrides and missing lifecycle repairs still produce real mutations. First-party MCP session control now returns the same versioned mutation receipt for agent-bound and sessionless callers.
+
 ## 3.5.0
 
 ### Minor Changes
