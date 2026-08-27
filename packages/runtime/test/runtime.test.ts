@@ -1336,7 +1336,8 @@ describe("runtime event normalization", () => {
         type: "tool_search_call_item",
         rawItem: {
           type: "tool_search_call",
-          callId,
+          call_id: callId,
+          callId: "conflicting-sdk-alias",
           arguments: { query: "matching tools" },
         },
       },

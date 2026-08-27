@@ -346,7 +346,9 @@ export function normalizeSdkEvent(
     pushProtocolEvent({
       type: "agent.toolCall.created",
       payload: {
-        id: toolCallIdFromSdkItem(raw) ?? raw.id ?? item.id ?? null,
+        // Preserve the native tool-search wire identity when both SDK aliases
+        // are present; provider metadata remains the additive fallback.
+        id: raw.call_id ?? toolCallIdFromSdkItem(raw) ?? raw.id ?? item.id ?? null,
         name: "tool_search",
         arguments: raw.arguments ?? null,
         raw,
@@ -362,7 +364,7 @@ export function normalizeSdkEvent(
     pushProtocolEvent({
       type: "agent.toolCall.output",
       payload: {
-        id: toolCallIdFromSdkItem(raw) ?? item.id ?? null,
+        id: raw.call_id ?? toolCallIdFromSdkItem(raw) ?? item.id ?? null,
         output: {
           type: "text",
           text:
