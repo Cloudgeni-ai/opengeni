@@ -30,6 +30,7 @@ describe("observability", () => {
     expect(typeof obs.incrementCounter).toBe("function");
     expect(typeof obs.observeHistogram).toBe("function");
     expect(typeof obs.debug).toBe("function");
+    expect(typeof obs.flush).toBe("function");
   });
 
   test("renders prometheus metrics with resource and request labels", async () => {
@@ -376,6 +377,36 @@ describe("observability", () => {
     }
   });
 
+  test("flush waits for every accepted OTLP export", async () => {
+    let releaseExport: (() => void) | undefined;
+    let markExportStarted: (() => void) | undefined;
+    const exportStarted = new Promise<void>((resolve) => {
+      markExportStarted = resolve;
+    });
+    const obs = createObservability(settings, {
+      component: "api",
+      exporter: async () => {
+        markExportStarted?.();
+        await new Promise<void>((resolve) => {
+          releaseExport = resolve;
+        });
+      },
+    });
+
+    obs.startSpan("api.pending_export").end();
+    await exportStarted;
+    let flushed = false;
+    const flush = obs.flush().then(() => {
+      flushed = true;
+    });
+    await Bun.sleep(0);
+
+    expect(flushed).toBe(false);
+    releaseExport?.();
+    await flush;
+    expect(flushed).toBe(true);
+  });
+
   test("projects span errors and drops unknown attributes before OTLP export", async () => {
     const exported: Array<{ body: any }> = [];
     const obs = createObservability(settings, {
@@ -633,6 +664,50 @@ describe("observability", () => {
       status: 502,
     });
     expect(JSON.parse(observed[0]!)).not.toHaveProperty("workspaceId");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
+  });
+
+  test("public fatal diagnostics retain only closed structural fields", () => {
+    const sentinel = "PUBLIC_FATAL_DIAGNOSTIC_SENTINEL_1c3f91";
+    const observed: string[] = [];
+    const originalError = console.error;
+    console.error = (message?: unknown) => observed.push(String(message));
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.error("fixed fatal diagnostic", {
+        errorClass: "ApiFatalOperationError",
+        errorCode: "api_unhandled_rejection",
+        origin: "api",
+        phase: "running",
+        reasonKind: "object",
+        correlationId: "api-fatal.test-public",
+        rejection: sentinel,
+      });
+      obs.error("invalid fatal diagnostic", {
+        errorClass: "ApiFatalOperationError",
+        errorCode: "api_uncaught_exception",
+        origin: "api",
+        phase: sentinel,
+        reasonKind: sentinel,
+        correlationId: `invalid correlation ${sentinel}`,
+      });
+    } finally {
+      console.error = originalError;
+    }
+
+    expect(observed).toHaveLength(2);
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      message: "fixed fatal diagnostic",
+      errorClass: "ApiFatalOperationError",
+      errorCode: "api_unhandled_rejection",
+      origin: "api",
+      phase: "running",
+      reasonKind: "object",
+      correlationId: "api-fatal.test-public",
+    });
+    expect(observed.join("\n")).not.toContain(sentinel);
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("phase");
+    expect(JSON.parse(observed[1]!)).not.toHaveProperty("reasonKind");
     expect(JSON.parse(observed[1]!)).not.toHaveProperty("correlationId");
   });
 

@@ -21,7 +21,11 @@ import {
   type Database,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
-import { createObservability, logStartupDependencyRetry } from "@opengeni/observability";
+import {
+  createObservability,
+  logStartupDependencyRetry,
+  type Observability,
+} from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import { SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID } from "@opengeni/core";
@@ -51,6 +55,7 @@ import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
+import { installApiFatalProcessBoundary } from "./fatal-process-boundary";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -299,9 +304,15 @@ export async function createTemporalWorkflowClient(
   };
 }
 
-export async function startApi() {
-  const settings = getSettings();
-  const observability = createObservability(settings, { component: "api" });
+export async function startApi(
+  options: {
+    settings?: ReturnType<typeof getSettings>;
+    observability?: Observability;
+  } = {},
+) {
+  const settings = options.settings ?? getSettings();
+  const observability =
+    options.observability ?? createObservability(settings, { component: "api" });
   // Step I: standalone → dbSchema unset → searchPath undefined → today's plain
   // handle (public). Embedded → scoped to the dedicated schema + the host's RLS
   // strategy.
@@ -531,7 +542,16 @@ export async function startApi() {
 }
 
 if (import.meta.main) {
-  await startApi();
+  const fatalBoundary = installApiFatalProcessBoundary();
+  try {
+    const settings = getSettings();
+    const observability = createObservability(settings, { component: "api" });
+    fatalBoundary.attachObservability(observability);
+    await startApi({ settings, observability });
+    fatalBoundary.markRunning();
+  } catch (error) {
+    await fatalBoundary.reportStartupFailure(error);
+  }
 }
 
 export function temporalOverlapPolicy(policy: ScheduledTaskOverlapPolicy): ScheduleOverlapPolicy {
