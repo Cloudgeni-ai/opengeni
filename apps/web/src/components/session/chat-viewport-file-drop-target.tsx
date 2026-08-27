@@ -12,11 +12,13 @@ export function ChatViewportFileDropTarget({
   enabled,
   onFiles,
   className,
+  "data-workspace-scroll-owner": scrollOwner,
 }: {
   children: ReactNode;
   enabled: boolean;
   onFiles: (files: FileList) => void;
   className?: string;
+  "data-workspace-scroll-owner": "self-managed";
 }) {
   const [dragging, setDragging] = useState(false);
   const dragDepth = useRef(0);
@@ -87,7 +89,7 @@ export function ChatViewportFileDropTarget({
 
   return (
     <section
-      data-workspace-scroll-owner="self-managed"
+      data-workspace-scroll-owner={scrollOwner}
       data-testid="chat-viewport-drop-target"
       className={cn("relative flex h-full min-h-0 min-w-0 flex-col overflow-hidden", className)}
       onDragEnter={onDragEnter}

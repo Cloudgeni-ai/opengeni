@@ -9,10 +9,10 @@ import {
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
-  test("retains at least one KiB above the exact attachment-preview graph", () => {
-    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_199_485);
-    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2149 * KIB);
-    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_091);
+  test("retains at least one KiB above the exact embedded attachment-preview graph", () => {
+    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_200_819);
+    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2151 * KIB);
+    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_805);
     expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBeGreaterThanOrEqual(
       MINIMUM_RAW_HEADROOM_BYTES,
     );

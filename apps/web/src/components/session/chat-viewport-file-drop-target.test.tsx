@@ -23,7 +23,11 @@ async function mount(onFiles: (files: FileList) => void): Promise<HTMLElement> {
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      <ChatViewportFileDropTarget enabled onFiles={onFiles}>
+      <ChatViewportFileDropTarget
+        data-workspace-scroll-owner="self-managed"
+        enabled
+        onFiles={onFiles}
+      >
         <div data-testid="timeline">
           <span data-testid="nested">Conversation</span>
         </div>
@@ -57,6 +61,15 @@ function fireDrag(
 }
 
 describe("ChatViewportFileDropTarget", () => {
+  test("forwards the route-declared scroll ownership marker to its root", async () => {
+    const container = await mount(() => {});
+    const viewport = container.querySelector<HTMLElement>(
+      '[data-testid="chat-viewport-drop-target"]',
+    );
+
+    expect(viewport?.getAttribute("data-workspace-scroll-owner")).toBe("self-managed");
+  });
+
   test("shows one full-viewport overlay without flicker across nested enter/leave events", async () => {
     const container = await mount(() => {});
     const viewport = container.querySelector<HTMLElement>(

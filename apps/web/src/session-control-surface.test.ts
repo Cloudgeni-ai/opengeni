@@ -22,10 +22,30 @@ describe("session control surface architecture", () => {
   test("makes the full chat viewport a file drop target", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("<ChatViewportFileDropTarget");
+    expect(route).toContain('data-workspace-scroll-owner="self-managed"');
     expect(route).toContain(
       "enabled={!terminal && context.clientConfig.fileUploads.enabled === true}",
     );
     expect(route).toContain("onFiles={attachments.addFiles}");
+  });
+
+  test("shares one route-level attachment lightbox across the timeline and composer", async () => {
+    const [sessionRoute, newSessionRoute, chatComposer] = await Promise.all([
+      source("routes/session.tsx"),
+      source("routes/sessions-index.tsx"),
+      source("../../../packages/react/src/components/chat-composer.tsx"),
+    ]);
+    const provider = sessionRoute.indexOf("createElement(\n    LightboxProvider,");
+    const timeline = sessionRoute.indexOf("<MessageTimeline", provider);
+    const composer = sessionRoute.indexOf("<ConsoleComposer", timeline);
+    const providerEnd = sessionRoute.indexOf("</ChatViewportFileDropTarget>,", composer);
+
+    expect(provider).toBeGreaterThan(-1);
+    expect(timeline).toBeGreaterThan(provider);
+    expect(composer).toBeGreaterThan(timeline);
+    expect(providerEnd).toBeGreaterThan(composer);
+    expect(newSessionRoute).toContain("createElement(\n    LightboxProvider,");
+    expect(chatComposer).not.toContain("<LightboxProvider>");
   });
 
   test("wires the authenticated retained screenshot loader into the production timeline", async () => {

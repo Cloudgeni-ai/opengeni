@@ -11,6 +11,7 @@ import { ChatComposer } from "../src/components/chat-composer";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { FileAttachment, UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
 import { COMPOSER_PAYMENT_REQUIRED_MESSAGE } from "../src/lib/format";
+import { LightboxProvider } from "../src/timeline/screenshot-lightbox";
 import { registerDom } from "./render-hook";
 
 registerDom();
@@ -194,10 +195,12 @@ describe("ChatComposer attachments", () => {
 
   test("renders an image attachment as a shared-lightbox preview trigger", async () => {
     const container = await mount(
-      <ChatComposer
-        composer={makeComposer()}
-        attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
-      />,
+      <LightboxProvider>
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
+        />
+      </LightboxProvider>,
     );
 
     const preview = container.querySelector<HTMLButtonElement>(
@@ -205,6 +208,18 @@ describe("ChatComposer attachments", () => {
     );
     expect(preview).not.toBeNull();
     expect(preview?.querySelector('img[src="blob:screenshot.png"]')).not.toBeNull();
+  });
+
+  test("degrades an image attachment to a non-interactive thumbnail without a lightbox host", async () => {
+    const container = await mount(
+      <ChatComposer
+        composer={makeComposer()}
+        attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
+      />,
+    );
+
+    expect(container.querySelector('[aria-label="Preview screenshot.png"]')).toBeNull();
+    expect(container.querySelector('img[src="blob:screenshot.png"]')).not.toBeNull();
   });
 
   test("a managed-credit rejection is actionable and keeps the ready attachment visible", async () => {
