@@ -260,9 +260,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
             if (matrixCase.label === "desktop") {
               if (surface === "documents") {
                 // Documents remains in the session rail, whose single
-                // Workspace entry opens the persistent management shell.
-                const workspaceNav = page.getByRole("navigation", { name: "Workspace" });
-                await workspaceNav.getByRole("link", { name: "Workspace", exact: true }).waitFor();
+                // Settings entry opens the persistent management shell.
+                const settingsNav = page.getByRole("navigation", { name: "Settings" });
+                await settingsNav.getByRole("link", { name: "Settings", exact: true }).waitFor();
               } else {
                 // Managed workspace pages share a persistent destination rail.
                 await page
