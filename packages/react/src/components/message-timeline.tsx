@@ -238,6 +238,13 @@ export type MessageTimelineProps = {
  */
 const PIN_THRESHOLD_PX = 48;
 /**
+ * A pinned timeline can still have meaningful pre-existing debt while the
+ * tip-follow camera catches up. Surface the existing explicit jump once that
+ * debt is large enough to be useful, without flashing the control for ordinary
+ * line-sized streaming movement.
+ */
+const JUMP_TO_LATEST_CATCHUP_DEBT_PX = 240;
+/**
  * Prefetch older history when the top sentinel is this far from the viewport.
  * After a page loads we stay cool until the reader leaves this band (scrolls
  * down into content) — never re-fire from continued scroll toward y=0.
@@ -432,6 +439,8 @@ export function MessageTimeline({
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const previousBulkFirstKeyRef = useRef<string | null | undefined>(undefined);
   const [pinned, setPinned] = useState(true);
+  const [canSkipTipCatchup, setCanSkipTipCatchup] = useState(false);
+  const canSkipTipCatchupRef = useRef(false);
   const [bulkActive, setBulkActive] = useState(true);
   // Older history prefetch is user-driven: a window shorter than the viewport
   // + rootMargin would otherwise keep the top sentinel intersecting and fetch
@@ -545,15 +554,28 @@ export function MessageTimeline({
     previousBulkFirstKeyRef.current !== firstGroupKey;
   const bulkRender = allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
+  const applyCanSkipTipCatchup = useCallback((value: boolean) => {
+    if (canSkipTipCatchupRef.current !== value) {
+      canSkipTipCatchupRef.current = value;
+      setCanSkipTipCatchup(value);
+    }
+  }, []);
+
   // The ONLY writer of the pinned flag. Ref and state move together, so
   // behavior (refs read by rAF callbacks) and rendering (the anchor class,
   // the Jump-to-latest button) can never desync.
-  const applyPinned = useCallback((value: boolean) => {
-    if (pinnedRef.current !== value) {
-      pinnedRef.current = value;
-      setPinned(value);
-    }
-  }, []);
+  const applyPinned = useCallback(
+    (value: boolean) => {
+      if (pinnedRef.current !== value) {
+        pinnedRef.current = value;
+        setPinned(value);
+      }
+      if (!value) {
+        applyCanSkipTipCatchup(false);
+      }
+    },
+    [applyCanSkipTipCatchup],
+  );
 
   const rearmOlderPrefetchAfterLeavingTop = useCallback((node: HTMLElement) => {
     if (node.scrollTop > OLDER_PREFETCH_MARGIN_PX) {
@@ -757,8 +779,9 @@ export function MessageTimeline({
         lastClientHeight: node.clientHeight,
         cameraTop: null,
       };
+      applyCanSkipTipCatchup(false);
     },
-    [cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
+    [applyCanSkipTipCatchup, cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
   );
 
   const beginUserMessageDisclosureChange = useCallback(
@@ -965,6 +988,10 @@ export function MessageTimeline({
       followRef.current = result.state;
       writeScrollTop(node, result.scrollTop);
       syncScrollBaseline(node);
+      applyCanSkipTipCatchup(
+        result.state.running &&
+          maxScrollOf(node) - node.scrollTop >= JUMP_TO_LATEST_CATCHUP_DEBT_PX,
+      );
       if (result.state.running) {
         cancelLeaveFallback();
         if (followFrameRef.current == null) {
@@ -981,7 +1008,7 @@ export function MessageTimeline({
         followFrameRef.current = null;
       }
     },
-    [cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
+    [applyCanSkipTipCatchup, cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
   );
   driveFollowRef.current = driveFollow;
 
@@ -1825,9 +1852,10 @@ export function MessageTimeline({
                     ) : null}
                   </AnimatePresence>
                   <AnimatePresence>
-                    {((!pinned && autoFollow) || hasNewer) && autoFollow ? (
+                    {((!pinned && autoFollow) || hasNewer || canSkipTipCatchup) && autoFollow ? (
                       <motion.button
                         type="button"
+                        data-og-jump-to-latest=""
                         initial={{ opacity: 0, y: 8 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: 8 }}
