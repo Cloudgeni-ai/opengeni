@@ -854,6 +854,34 @@ async function expectAndConsumeConsoleErrors(
   problems.consoleErrors.splice(0);
 }
 
+async function expectAndConsumePageErrors(
+  page: Page,
+  problems: BrowserProblems,
+  allowed: string[],
+  required: string[] = allowed,
+): Promise<void> {
+  await page.waitForTimeout(100);
+  const counts = Object.fromEntries(
+    [...new Set(problems.pageErrors)].map((message) => [
+      message,
+      problems.pageErrors.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  const allowedCounts = Object.fromEntries(
+    [...new Set(allowed)].map((message) => [
+      message,
+      allowed.filter((candidate) => candidate === message).length,
+    ]),
+  );
+  expect({
+    excess: Object.fromEntries(
+      Object.entries(counts).filter(([message, count]) => count > (allowedCounts[message] ?? 0)),
+    ),
+    missing: required.filter((message) => !problems.pageErrors.includes(message)),
+  }).toEqual({ excess: {}, missing: [] });
+  problems.pageErrors.splice(0);
+}
+
 function optionalWebKitReauthenticationReloadError(
   problems: BrowserProblems,
   engine: EngineName,
@@ -869,6 +897,23 @@ function optionalWebKitReauthenticationReloadError(
       ),
     )
     .slice(0, 1);
+}
+
+function isWebKitReauthenticationAccessControlPageError(message: string): boolean {
+  return /^\[slot-revocation-reauthentication\] \/127\.0\.0\.1:\d+\/v1\/workspaces\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/sessions\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/turns\?latestStarted=1 due to access control checks\.$/u.test(
+    message,
+  );
+}
+
+function optionalWebKitReauthenticationAccessControlPageError(
+  problems: BrowserProblems,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can surface one read from the deliberately replaced document as a
+  // page error instead of a request cancellation. Keep the phase, origin,
+  // endpoint shape, query, browser, and maximum count exact.
+  return problems.pageErrors.filter(isWebKitReauthenticationAccessControlPageError).slice(0, 1);
 }
 
 async function expectAndConsumeActorTransitionResponse(
@@ -2095,6 +2140,16 @@ describe("provider-neutral browser account acceptance", () => {
       }),
     ).toContain("/v1/config/other");
     expect(
+      isWebKitReauthenticationAccessControlPageError(
+        "[slot-revocation-reauthentication] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      ),
+    ).toBe(true);
+    expect(
+      isWebKitReauthenticationAccessControlPageError(
+        "[cross-slot-deep-link] /127.0.0.1:20035/v1/workspaces/f7acfc16-b1dc-4683-bd9b-317782ed74e2/sessions/45779fe5-3636-4d7e-b4af-0ba46f90ffc0/turns?latestStarted=1 due to access control checks.",
+      ),
+    ).toBe(false);
+    expect(
       requestFailureProblem({
         ...crossTabBootstrapRead,
         dispatchPhase: "cross-slot-deep-link",
@@ -2529,6 +2584,12 @@ describe("provider-neutral browser account acceptance", () => {
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
           ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
         ],
+        [],
+      );
+      await expectAndConsumePageErrors(
+        page,
+        pageProblems,
+        optionalWebKitReauthenticationAccessControlPageError(pageProblems, engine),
         [],
       );
 

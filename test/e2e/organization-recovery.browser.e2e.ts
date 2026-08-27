@@ -131,6 +131,37 @@ function accountMenuTrigger(page: Page, displayName: string) {
   });
 }
 
+async function waitForSelectedAccount(
+  page: Page,
+  account: Pick<ActorAccount, "name">,
+  timeout = 30_000,
+): Promise<Locator> {
+  const trigger = accountMenuTrigger(page, account.name);
+  const continueAs = page.getByRole("button", {
+    name: `Continue as ${account.name}`,
+  });
+  const deadline = Date.now() + timeout;
+  let visibleSince: number | null = null;
+  while (Date.now() < deadline) {
+    if ((await continueAs.isVisible()) && (await continueAs.isEnabled())) {
+      await continueAs.click();
+      visibleSince = null;
+      await page.waitForTimeout(100);
+      continue;
+    }
+    if (await trigger.isVisible()) {
+      visibleSince ??= Date.now();
+      if (Date.now() - visibleSince >= 250) return trigger;
+    } else {
+      visibleSince = null;
+    }
+    await page.waitForTimeout(50);
+  }
+  throw new Error(
+    `account selection did not settle for ${account.name}: url=${page.url()} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
+  );
+}
+
 async function completeEmailPopup(popup: Page, account: Pick<ActorAccount, "email" | "name">) {
   await popup.getByRole("heading", { name: "Authenticate this account" }).waitFor();
   await popup.getByLabel("Email").fill(account.email);
@@ -169,7 +200,6 @@ function waitForSessionSetReconciliation(page: Page): Promise<void> {
 
 async function reauthenticateAccount(
   page: Page,
-  accountTrigger: Locator,
   account: Pick<ActorAccount, "email" | "name">,
 ): Promise<void> {
   let lastBootstrapError: unknown;
@@ -178,7 +208,7 @@ async function reauthenticateAccount(
       await page.keyboard.press("Escape").catch(() => undefined);
       await page.waitForTimeout(100);
     }
-    await accountTrigger.waitFor({ timeout: 30_000 });
+    const accountTrigger = await waitForSelectedAccount(page, account);
     await accountTrigger.click();
     const accountMenu = page
       .locator('[data-slot="dropdown-menu-content"][data-state="open"]')
@@ -248,29 +278,14 @@ async function signInAndReauthenticate(account: ActorAccount): Promise<ActorBrow
     page.getByRole("button", { name: "Continue with email" }).click(),
   ]);
   await completeEmailPopup(initialPopup, account);
-  const continueAs = page.getByRole("button", {
-    name: `Continue as ${account.name}`,
-  });
-  const accountTrigger = accountMenuTrigger(page, account.name);
-  if (!(await accountTrigger.isVisible())) {
-    try {
-      await continueAs.waitFor({ timeout: 30_000 });
-      await continueAs.click();
-    } catch (error) {
-      throw new Error(
-        `account selection did not settle for ${account.name}: url=${page.url()} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
-        { cause: error },
-      );
-    }
-  }
-  await accountTrigger.waitFor({ timeout: 30_000 });
+  await waitForSelectedAccount(page, account);
 
   // The selected actor transition commits before the account trigger mounts,
   // but its final finite access reads can still replace the menu tree once.
   // Let that settled render win before opening the re-authentication submenu.
   await page.waitForTimeout(1_000);
-  await reauthenticateAccount(page, accountTrigger, account);
-  await accountTrigger.waitFor({ timeout: 30_000 });
+  await reauthenticateAccount(page, account);
+  await waitForSelectedAccount(page, account);
   await page.waitForTimeout(100);
 
   observeRecoveryPage(page, account.key);
