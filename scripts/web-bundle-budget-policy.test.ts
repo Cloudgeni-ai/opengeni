@@ -9,10 +9,10 @@ import {
 } from "./web-bundle-budget-policy";
 
 describe("web bundle budget policy", () => {
-  test("retains at least one KiB above the exact personal GitHub graph", () => {
-    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_210_048);
-    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2160 * KIB);
-    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_792);
+  test("retains at least one KiB above the combined personal GitHub and attachment graph", () => {
+    expect(DIRECT_SESSION_RAW_MEASUREMENT).toBe(2_215_484);
+    expect(DIRECT_SESSION_RAW_BUDGET).toBe(2165 * KIB);
+    expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBe(1_476);
     expect(DIRECT_SESSION_RAW_BUDGET - DIRECT_SESSION_RAW_MEASUREMENT).toBeGreaterThanOrEqual(
       MINIMUM_RAW_HEADROOM_BYTES,
     );

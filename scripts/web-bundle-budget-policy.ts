@@ -14,6 +14,6 @@ export function wholeKibEnvelope(
   return Math.ceil((measuredBytes + minimumHeadroomBytes) / KIB) * KIB;
 }
 
-/** Exact personal-GitHub-authority Linux/x64 Bun 1.4 direct-session measurement. */
-export const DIRECT_SESSION_RAW_MEASUREMENT = 2_210_048;
+/** Exact personal-GitHub plus attachment-preview Linux/x64 Bun 1.4 measurement. */
+export const DIRECT_SESSION_RAW_MEASUREMENT = 2_215_484;
 export const DIRECT_SESSION_RAW_BUDGET = wholeKibEnvelope(DIRECT_SESSION_RAW_MEASUREMENT);

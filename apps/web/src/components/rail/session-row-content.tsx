@@ -34,6 +34,7 @@ function RailAggregateDot({ summary }: { summary: RailAggregateStatus }) {
       <Loader2Icon
         aria-hidden="true"
         className="size-3 shrink-0 animate-spin text-fg-subtle motion-reduce:animate-none"
+        style={{ animationDuration: "1.333333s" }}
       />
     );
   }

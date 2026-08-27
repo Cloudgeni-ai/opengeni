@@ -1,6 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
+import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
@@ -31,7 +32,16 @@ import {
   PanelsTopLeftIcon,
   XIcon,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  createElement,
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
@@ -53,12 +63,12 @@ import {
 } from "@/components/session/banners";
 import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
+import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
-import type { WorkspaceTab } from "@opengeni/react";
 import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
@@ -1715,10 +1725,13 @@ function SessionChatPane(props: {
     [props.onOpenSandboxFile, props.session.workspaceId],
   );
 
-  return (
-    <section
+  return createElement(
+    LightboxProvider,
+    null,
+    <ChatViewportFileDropTarget
       data-workspace-scroll-owner="self-managed"
-      className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden"
+      enabled={!terminal && context.clientConfig.fileUploads.enabled === true}
+      onFiles={attachments.addFiles}
     >
       {terminal ? (
         <div className="mx-auto w-full max-w-3xl px-4 pt-6 sm:px-6">
@@ -2012,6 +2025,6 @@ function SessionChatPane(props: {
           />
         </div>
       </div>
-    </section>
+    </ChatViewportFileDropTarget>,
   );
 }

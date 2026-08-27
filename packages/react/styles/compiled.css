@@ -3876,6 +3876,13 @@
       }
     }
   }
+:where(.og-root).hover\:opacity-80,:where(.og-root) .hover\:opacity-80 {
+    &:hover {
+      @media (hover: hover) {
+        opacity: 80%;
+      }
+    }
+  }
 :where(.og-root).hover\:opacity-90,:where(.og-root) .hover\:opacity-90 {
     &:hover {
       @media (hover: hover) {

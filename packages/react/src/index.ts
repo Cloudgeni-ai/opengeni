@@ -408,6 +408,7 @@ export type {
   TurnSummaryFacetResult,
   TurnSummaryOptions,
   TurnSummaryProps,
+  LightboxControlLabels,
 } from "./timeline";
 
 // Pure provider-shape parsers (exec banner, V4A diff, tool arguments, …)
