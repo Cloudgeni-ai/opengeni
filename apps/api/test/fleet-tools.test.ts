@@ -180,7 +180,7 @@ async function seedFleet(
   opts: {
     online?: boolean;
     hostname?: string;
-    sandboxBackend?: "modal" | "none";
+    sandboxBackend?: "modal" | "none" | "selfhosted";
   } = {},
 ) {
   const { accountId, workspaceId } = await freshWorkspace();
@@ -544,6 +544,48 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect((await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId))?.activeSandboxId).toBe(
       sandbox.id,
     );
+  }, 60_000);
+
+  test("a machine-home session exposes and switches to the deployment-managed group", async () => {
+    if (!available) return;
+    const { ctx, services, session, sandbox } = await seedFleet({
+      sandboxBackend: "selfhosted",
+    });
+    const attached = await swapActiveSandbox(services, ctx, sandbox.id);
+    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandbox.id });
+
+    const listed = await listFleet(services, ctx);
+    const group = listed.sandboxes.find((entry) => entry.isSessionGroup);
+    expect(group).toMatchObject({
+      id: session.sandboxGroupId,
+      kind: "modal",
+      active: false,
+      operationAvailability: "wakeable",
+    });
+
+    let readinessChecks = 0;
+    let releases = 0;
+    const switched = await swapActiveSandbox(
+      {
+        ...services,
+        ensureSessionGroupReady: async () => {
+          readinessChecks += 1;
+          return {
+            release: async () => {
+              releases += 1;
+            },
+          };
+        },
+      },
+      ctx,
+      "session",
+    );
+    expect(switched).toMatchObject({ swapped: true, activeSandboxId: null });
+    expect(readinessChecks).toBe(1);
+    expect(releases).toBe(1);
+    expect(await readActiveSandbox(db, ctx.workspaceId, ctx.sessionId)).toMatchObject({
+      activeSandboxId: null,
+    });
   }, 60_000);
 
   test("sandboxes_list: the session Modal box + the enrolled machine, each with liveness + active marker", async () => {

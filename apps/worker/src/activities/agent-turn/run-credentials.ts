@@ -105,6 +105,18 @@ export type PrepareRunCredentialsDeps = {
   runWorkspaceMutationForSandbox: SandboxTurnRuntime["runWorkspaceMutationForSandbox"];
 };
 
+export function sandboxEnvironmentSettingsForRoute(input: {
+  runSettings: Settings;
+  machinePrimary: boolean;
+  groupBoxBackend: Settings["sandboxBackend"];
+}): Settings {
+  return input.runSettings.sandboxBackend === "selfhosted" &&
+    !input.machinePrimary &&
+    input.groupBoxBackend !== "selfhosted"
+    ? { ...input.runSettings, sandboxBackend: input.groupBoxBackend }
+    : input.runSettings;
+}
+
 export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
   const {
     input,
@@ -134,6 +146,16 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     connectionScope,
     runWorkspaceMutationForSandbox,
   } = deps;
+  // A machine-home row carries selfhosted path defaults, but clearing its
+  // pointer explicitly selects the deployment-managed group. Build the stable
+  // manifest environment with that effective provider just as Channel-A and
+  // viewer readiness do; otherwise the verified managed box and the agent can
+  // disagree on backend-aware HOME/token-file paths.
+  const sandboxEnvironmentSettings = sandboxEnvironmentSettingsForRoute({
+    runSettings,
+    machinePrimary,
+    groupBoxBackend,
+  });
 
   const runCredentialResolver =
     effectiveRunCredentialBackend === "none"
@@ -321,7 +343,7 @@ export async function prepareRunCredentials(deps: PrepareRunCredentialsDeps) {
     codemodeTokenExpiresAt: sandboxCodemodeTokenExpiresAt,
   } = await waitForTurnOperation(
     sandboxEnvironmentForRun(
-      runSettings,
+      sandboxEnvironmentSettings,
       turnResources,
       // Rig default sets merged BELOW the session set (session wins); rig-less
       // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).

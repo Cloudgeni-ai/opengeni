@@ -271,6 +271,15 @@ outcome; text-only reasoning can still begin without contacting it. OpenGeni
 never interprets an offline machine as permission to cold-create a rival box,
 snapshot it, or provider-terminate the user's computer.
 
+A machine-home session does not pre-provision a hidden managed box. When the
+deployment has a managed sandbox backend, its fleet nevertheless exposes the
+session's synthetic managed group as a separate explicit target. Selecting
+`session`/`default` clears the active machine pointer, verifies that managed
+group through the ordinary viewer/lease lifecycle, and lets the next operation
+or turn use it. This is an intentional user route change, not an
+offline-machine fallback; deployments configured with only `none` or
+`selfhosted` expose no managed group.
+
 Canonical: `packages/runtime/src/sandbox/selfhosted/`,
 `apps/worker/src/activities/agent-turn/sandbox-establish.ts`,
 `agent/proto/opengeni_agent.proto`, [`connected-machines.md`](connected-machines.md),
@@ -294,6 +303,12 @@ operation to be replayed.
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
 or selected pointer alone is not proof that a command can run.
+
+The effective backend behind a synthetic managed group is resolved once from
+the session policy and deployment backend. Fleet projection, swap readiness,
+viewer attachment, API-direct operations, and worker turns must use that same
+answer so a route cannot be advertised under one backend and established under
+another.
 
 The canonical backend enum currently contains `docker`, `modal`, `local`,
 `none`, `daytona`, `runloop`, `e2b`, `blaxel`, `cloudflare`, `vercel`,

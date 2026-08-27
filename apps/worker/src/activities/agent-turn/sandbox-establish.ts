@@ -22,6 +22,7 @@ import {
   resolveConnectedMachineWorkspaceRoot,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
+import { managedSessionGroupBackend, managedSessionGroupOs } from "@opengeni/core";
 import { mergeResourceRefs } from "../common";
 import {
   mintSandboxCodemodeToken,
@@ -249,10 +250,10 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
   // common path this is runSettings.sandboxBackend. A selfhosted home turn
   // that is NOT machine-primary falls back to the deployment cloud backend
   // so swap-away / flag-off degrade to a real group box.
-  const groupBoxBackend: Settings["sandboxBackend"] =
-    runSettings.sandboxBackend === "selfhosted" && !machinePrimary
-      ? settings.sandboxBackend
-      : runSettings.sandboxBackend;
+  const groupBoxBackend: Settings["sandboxBackend"] = !machinePrimary
+    ? (managedSessionGroupBackend(settings.sandboxBackend, runSettings.sandboxBackend) ??
+      runSettings.sandboxBackend)
+    : runSettings.sandboxBackend;
   sandboxState.startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
   media.sandboxFileDownloadBackend = sandboxState.startupMilestoneBackend;
   // Durable lease identity is always the logical OCI/base image. A provider
@@ -315,6 +316,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     rigVersion,
     turnResources,
   } = deps;
+  const groupBoxOs = managedSessionGroupOs(runSettings.sandboxBackend, session.sandboxOs);
   const {
     releaseLateSandbox,
     onHomeSandboxRebound,
@@ -577,7 +579,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 sandboxGroupId: lazyGroupId,
                 sessionId: input.sessionId,
                 backend: groupBoxBackend,
-                os: session.sandboxOs,
+                os: groupBoxOs,
                 environment: sandboxEnvironment,
                 ...(groupBoxImage
                   ? {
@@ -656,7 +658,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 // deployment default), never a "selfhosted" box (which would throw
                 // for lack of a bound agentId).
                 backend: groupBoxBackend,
-                os: session.sandboxOs,
+                os: groupBoxOs,
                 environment: sandboxEnvironment,
                 // IMAGE IS SHARED STATE (B3): the container image
                 // this run resolves. The lease stamps it + conflicts on a live shared box
