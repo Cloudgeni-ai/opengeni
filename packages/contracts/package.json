@@ -62,6 +62,10 @@
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
     },
+    "./organization-recovery": {
+      "types": "./src/organization-recovery.ts",
+      "default": "./src/organization-recovery.ts"
+    },
     "./codex-provider-account-authority": {
       "types": "./src/codex-provider-account-authority.ts",
       "default": "./src/codex-provider-account-authority.ts"

@@ -262,6 +262,11 @@ const budgets = {
   // envelope retains 1,271 bytes of headroom; 603 KiB gzip retains 1,996 bytes,
   // above the established 1.5-KiB platform-skew allowance. Initial aggregate,
   // lazy-chunk, CSS, and unrelated per-file caps remain fixed.
+  // Organization recovery adds the typed SDK command surface to the shared
+  // client while its settings UI remains lazy. The exact Linux/x64 Bun 1.4
+  // graph measures 2,198,819 raw bytes. The policy-derived 2,149-KiB envelope
+  // retains 1,757 bytes of headroom; compressed, file-count, initial, lazy,
+  // CSS, and unrelated per-file caps remain fixed.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 603 * kib,
   directSessionFiles: 31,

@@ -3403,8 +3403,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION =
-  "2026-08-personal-only-organization-setup-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -3857,6 +3856,108 @@ export type OrganizationRetentionPolicy = {
   retentionDays: number | null;
   version: number;
   updatedAt: string;
+};
+export type OrganizationRecoveryPolicyState =
+  | "pending_acceptance"
+  | "active"
+  | "degraded"
+  | "superseded"
+  | "disabled";
+export type OrganizationRecoveryOperationState =
+  | "collecting"
+  | "cooling"
+  | "executed"
+  | "cancelled"
+  | "expired"
+  | "superseded";
+export type OrganizationRecoveryUnavailableReason =
+  | "no_policy"
+  | "pending_acceptance"
+  | "degraded"
+  | "disabled"
+  | "identity_unavailable";
+export type OrganizationRecoveryMemberSummary = {
+  membershipId: string;
+  name: string | null;
+  email: string | null;
+};
+export type OrganizationRecoveryCustodian = OrganizationRecoveryMemberSummary & {
+  ordinal: number;
+  enrollmentState: "pending_acceptance" | "accepted" | "ineligible";
+  acceptedAt: string | null;
+};
+export type OrganizationRecoveryPolicy = {
+  id: string;
+  organizationId: string;
+  revision: number;
+  state: OrganizationRecoveryPolicyState;
+  custodians: OrganizationRecoveryCustodian[];
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationRecoveryApproval = OrganizationRecoveryMemberSummary & {
+  approvedAt: string;
+};
+export type OrganizationRecoveryOperation = {
+  id: string;
+  organizationId: string;
+  policyId: string;
+  policyRevision: number;
+  revision: number;
+  state: OrganizationRecoveryOperationState;
+  target: OrganizationRecoveryMemberSummary;
+  approvals: OrganizationRecoveryApproval[];
+  approvalCount: number;
+  quorumAt: string | null;
+  executableAt: string | null;
+  expiresAt: string;
+  executedAt: string | null;
+  cancelledAt: string | null;
+  notificationJournaled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+export type OrganizationRecoveryCapabilities = {
+  configure: boolean;
+  accept: boolean;
+  disable: boolean;
+  start: boolean;
+  approve: boolean;
+  cancel: boolean;
+  execute: boolean;
+};
+export type OrganizationRecoveryOverview = {
+  organizationId: string;
+  availability: "available" | "recovery_unavailable";
+  unavailableReason: OrganizationRecoveryUnavailableReason | null;
+  recentReauthenticationAt: string | null;
+  eligibleMembers: OrganizationRecoveryMemberSummary[];
+  policy: OrganizationRecoveryPolicy | null;
+  operation: OrganizationRecoveryOperation | null;
+  capabilities: OrganizationRecoveryCapabilities;
+};
+export type ConfigureOrganizationRecoveryPolicyRequest = {
+  custodianMembershipIds: [string, string, string];
+  expectedPolicyRevision: number;
+  operationId: string;
+};
+export type AcceptOrganizationRecoveryCustodyRequest = {
+  expectedPolicyRevision: number;
+  operationId: string;
+};
+export type DisableOrganizationRecoveryPolicyRequest = AcceptOrganizationRecoveryCustodyRequest;
+export type StartOrganizationRecoveryOperationRequest = {
+  targetMembershipId: string;
+  expectedPolicyRevision: number;
+  operationId: string;
+};
+export type OrganizationRecoveryOperationCommandRequest = {
+  expectedOperationRevision: number;
+  operationId: string;
+};
+export type OrganizationRecoveryMutationResponse = {
+  replay: boolean;
+  overview: OrganizationRecoveryOverview;
 };
 export type CreateOrganizationInvitationRequest = {
   email: string;

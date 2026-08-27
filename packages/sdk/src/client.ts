@@ -261,6 +261,8 @@ import type {
   ListOrganizationAdministrationMembersResponse,
   AcceptOrganizationInvitationRequest,
   AcceptOrganizationInvitationResponse,
+  AcceptOrganizationRecoveryCustodyRequest,
+  ConfigureOrganizationRecoveryPolicyRequest,
   CreateOrganizationInvitationRequest,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
@@ -268,6 +270,9 @@ import type {
   OrganizationInvitation,
   OrganizationAdministrationOverview,
   OrganizationMember,
+  OrganizationRecoveryMutationResponse,
+  OrganizationRecoveryOperationCommandRequest,
+  OrganizationRecoveryOverview,
   OrganizationWorkspaceAccess,
   OrganizationWorkspaceAccessMember,
   OrganizationRetentionPolicy,
@@ -278,6 +283,8 @@ import type {
   PutOrganizationWorkspaceMemberRequest,
   UpdateOrganizationMemberRequest,
   UpdateOrganizationNameRequest,
+  DisableOrganizationRecoveryPolicyRequest,
+  StartOrganizationRecoveryOperationRequest,
   UpdateOrganizationWorkspaceRequest,
   UpdateOrganizationRetentionPolicyRequest,
   ListPacksResponse,
@@ -4142,6 +4149,93 @@ export class OpenGeniClient {
     return await this.requestJson<OrganizationRetentionPolicy>(
       "PATCH",
       `/v1/organizations/${organizationId}/retention-policy`,
+      request,
+    );
+  }
+
+  async getOrganizationRecovery(organizationId: string): Promise<OrganizationRecoveryOverview> {
+    return await this.requestJson<OrganizationRecoveryOverview>(
+      "GET",
+      `/v1/organizations/${organizationId}/recovery`,
+    );
+  }
+
+  async configureOrganizationRecoveryPolicy(
+    organizationId: string,
+    request: ConfigureOrganizationRecoveryPolicyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "PUT",
+      `/v1/organizations/${organizationId}/recovery/policy`,
+      request,
+    );
+  }
+
+  async acceptOrganizationRecoveryCustody(
+    organizationId: string,
+    request: AcceptOrganizationRecoveryCustodyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/policy/accept`,
+      request,
+    );
+  }
+
+  async disableOrganizationRecoveryPolicy(
+    organizationId: string,
+    request: DisableOrganizationRecoveryPolicyRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/policy/disable`,
+      request,
+    );
+  }
+
+  async startOrganizationRecoveryOperation(
+    organizationId: string,
+    request: StartOrganizationRecoveryOperationRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations`,
+      request,
+    );
+  }
+
+  async approveOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/approve`,
+      request,
+    );
+  }
+
+  async cancelOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/cancel`,
+      request,
+    );
+  }
+
+  async executeOrganizationRecoveryOperation(
+    organizationId: string,
+    recoveryOperationId: string,
+    request: OrganizationRecoveryOperationCommandRequest,
+  ): Promise<OrganizationRecoveryMutationResponse> {
+    return await this.requestJson<OrganizationRecoveryMutationResponse>(
+      "POST",
+      `/v1/organizations/${organizationId}/recovery/operations/${recoveryOperationId}/execute`,
       request,
     );
   }

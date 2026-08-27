@@ -351,6 +351,22 @@ const MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES = [
   "managed_auth_login_transactions",
   "managed_auth_session_set_operations",
 ] as const;
+const ORGANIZATION_RECOVERY_ROUTINES = [
+  "get_organization_recovery_overview(uuid, text, jsonb, text, text)",
+  "organization_recovery_command(jsonb)",
+] as const;
+const ORGANIZATION_RECOVERY_AUTHORITY_TABLES = [
+  "organization_recovery_approvals",
+  "organization_recovery_command_receipts",
+  "organization_recovery_custodian_acceptances",
+  "organization_recovery_custodians",
+  "organization_recovery_events",
+  "organization_recovery_notification_attempts",
+  "organization_recovery_notification_outbox",
+  "organization_recovery_operations",
+  "organization_recovery_policies",
+  "organization_recovery_policy_heads",
+] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
 const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
@@ -539,6 +555,7 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
   ...MANAGED_AUTH_SESSION_SET_ROUTINES,
+  ...ORGANIZATION_RECOVERY_ROUTINES,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -752,6 +769,16 @@ export const FORCE_RLS_TABLES = [
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
+  "organization_recovery_approvals",
+  "organization_recovery_command_receipts",
+  "organization_recovery_custodian_acceptances",
+  "organization_recovery_custodians",
+  "organization_recovery_events",
+  "organization_recovery_notification_attempts",
+  "organization_recovery_notification_outbox",
+  "organization_recovery_operations",
+  "organization_recovery_policies",
+  "organization_recovery_policy_heads",
   "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -1254,6 +1281,16 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
+  "organization_recovery_approvals",
+  "organization_recovery_command_receipts",
+  "organization_recovery_custodian_acceptances",
+  "organization_recovery_custodians",
+  "organization_recovery_events",
+  "organization_recovery_notification_attempts",
+  "organization_recovery_notification_outbox",
+  "organization_recovery_operations",
+  "organization_recovery_policies",
+  "organization_recovery_policy_heads",
   "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -2304,6 +2341,24 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if ((ORGANIZATION_RECOVERY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ORGANIZATION_RECOVERY_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== ORGANIZATION_RECOVERY_AUTHORITY_TABLES.length) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} organization recovery authority tables are missing`,
+        );
+      } else if (authorityOwners.size !== 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (routine.owner !== authorityTables[0]!.owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+        );
       }
     } else if ((MANAGED_AUTH_SESSION_SET_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.filter((tableName) =>

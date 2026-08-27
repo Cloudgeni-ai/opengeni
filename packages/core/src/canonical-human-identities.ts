@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import type { ManagedAuth } from "./managed-auth-type";
 import { getManagedSession } from "./managed-session";
 export {
+  getManagedAuthRequestActorAdmissionStamp,
   getManagedAuthRequestActorLeaseStamp,
   markManagedAuthRequestActorTransitionApplied,
 } from "./managed-session";
@@ -26,7 +27,9 @@ export async function requireCanonicalHumanRequestIdentity(
   },
 ): Promise<CanonicalHumanRequestIdentity> {
   if (!input.managedAuth) {
-    throw new HTTPException(404, { message: "Canonical human identity is unavailable" });
+    throw new HTTPException(404, {
+      message: "Canonical human identity is unavailable",
+    });
   }
   const session = await getManagedSession(context, input.managedAuth, {
     db: input.db,
@@ -35,7 +38,9 @@ export async function requireCanonicalHumanRequestIdentity(
     ...(input.allowRecovery === undefined ? {} : { allowIdentityRecovery: input.allowRecovery }),
   });
   if (!session?.user || typeof session.session?.id !== "string") {
-    throw new HTTPException(401, { message: "Managed human authentication required" });
+    throw new HTTPException(401, {
+      message: "Managed human authentication required",
+    });
   }
   return { authUserId: session.user.id, authSessionId: session.session.id };
 }

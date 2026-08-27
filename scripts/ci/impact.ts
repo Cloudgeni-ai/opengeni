@@ -258,6 +258,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/organization-recovery.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/browser-accounts-acceptance.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",

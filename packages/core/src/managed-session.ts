@@ -59,6 +59,7 @@ type ActorMutationLease = {
 };
 const actorMutationLeaseByRequest = new WeakMap<Request, ActorMutationLease>();
 const managedActorEpochByRequest = new WeakMap<Request, string>();
+const managedActorAdmissionByRequest = new WeakMap<Request, ManagedAuthActorAdmissionStamp>();
 
 /**
  * Read a Better Auth session without bypassing its sliding-cookie renewal.
@@ -111,6 +112,10 @@ export async function getManagedSession(
             c.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER, selected.projection.actorEpoch);
             managedActorEpochByRequest.set(c.req.raw, selected.projection.actorEpoch);
           }
+          managedActorAdmissionByRequest.set(c.req.raw, {
+            authorityHash: managedAuthSha256(authority),
+            actorEpoch: selected.projection.actorEpoch,
+          });
         }
         if (selected && !selected.session) return null;
         if (selected?.session) {
@@ -179,6 +184,10 @@ export async function getManagedSession(
             c.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER, adopted.actorEpoch);
             managedActorEpochByRequest.set(c.req.raw, adopted.actorEpoch);
           }
+          managedActorAdmissionByRequest.set(c.req.raw, {
+            authorityHash: adopted.authorityHash,
+            actorEpoch: adopted.actorEpoch,
+          });
           if (requestNeedsActorMutationLease(c.req.method)) {
             await ensureActorMutationLeaseForHash(
               c.req.raw,
@@ -287,7 +296,10 @@ export function installManagedAuthActorLeaseRuntimeForTest(
   overrides: Partial<ActorMutationLeaseRuntime>,
 ): () => void {
   const previous = actorMutationLeaseRuntime;
-  actorMutationLeaseRuntime = { ...productionActorMutationLeaseRuntime, ...overrides };
+  actorMutationLeaseRuntime = {
+    ...productionActorMutationLeaseRuntime,
+    ...overrides,
+  };
   return () => {
     actorMutationLeaseRuntime = previous;
   };
@@ -302,7 +314,9 @@ export async function validateManagedAuthRequestActorLease(request: Request): Pr
   if (!lease) return;
   if (lease.actorTransitionApplied) return;
   if (lease.poisoned !== null) {
-    throw new ManagedAuthActorLeaseOutcomeUnknownError({ cause: lease.poisoned });
+    throw new ManagedAuthActorLeaseOutcomeUnknownError({
+      cause: lease.poisoned,
+    });
   }
   const valid = await validateManagedAuthActorMutationLease(lease.db, {
     authorityHash: lease.authorityHash,
@@ -331,6 +345,18 @@ export type ManagedAuthActorMutationLeaseStamp = {
   actorEpoch: string;
   requestId: string;
 };
+
+export type ManagedAuthActorAdmissionStamp = {
+  authorityHash: string;
+  actorEpoch: string;
+};
+
+/** Verified server-owned actor evidence available to both reads and mutations. */
+export function getManagedAuthRequestActorAdmissionStamp(
+  request: Request,
+): ManagedAuthActorAdmissionStamp | null {
+  return managedActorAdmissionByRequest.get(request) ?? null;
+}
 
 /** Exact request-owned fence passed into a same-transaction actor transition. */
 export function getManagedAuthRequestActorLeaseStamp(

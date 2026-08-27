@@ -2965,13 +2965,15 @@ export const CreateWorkspaceRequest = z.object({
 });
 export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
 
-export const UpdateWorkspaceRequest = z.object({
-  name: z.string().min(1).optional(),
-  slug: z.string().min(1).nullable().optional(),
-  // White-label persona override. Pass null to clear it back to the deployment
-  // default; omit to leave it unchanged.
-  agentInstructions: z.string().min(1).nullable().optional(),
-});
+export const UpdateWorkspaceRequest = z
+  .object({
+    name: z.string().min(1).optional(),
+    slug: z.string().min(1).nullable().optional(),
+    // White-label persona override. Pass null to clear it back to the deployment
+    // default; omit to leave it unchanged.
+    agentInstructions: z.string().min(1).nullable().optional(),
+  })
+  .strict();
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
 
 export const ApiKey = z.object({
@@ -15704,8 +15706,7 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION =
-  "2026-08-personal-only-organization-setup-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -15894,6 +15895,7 @@ export * from "./governed-learning-activation";
 export * from "./knowledge";
 export * from "./task-notes";
 export * from "./canonical-human-identities";
+export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";

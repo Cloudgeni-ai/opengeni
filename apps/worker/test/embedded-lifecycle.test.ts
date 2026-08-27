@@ -371,6 +371,18 @@ describe("embedded worker lifecycle contract", () => {
       "managed_auth_session_set_operations",
       "managed_auth_session_sets",
     ];
+    const organizationRecoveryTables = [
+      "organization_recovery_approvals",
+      "organization_recovery_command_receipts",
+      "organization_recovery_custodian_acceptances",
+      "organization_recovery_custodians",
+      "organization_recovery_events",
+      "organization_recovery_notification_attempts",
+      "organization_recovery_notification_outbox",
+      "organization_recovery_operations",
+      "organization_recovery_policies",
+      "organization_recovery_policy_heads",
+    ];
     const catalogResults: unknown[] = [
       [
         {
@@ -466,6 +478,7 @@ describe("embedded worker lifecycle contract", () => {
           "canonical_human_login_bindings",
           "canonical_human_identity_operations",
           ...managedAuthSessionSetTables,
+          ...organizationRecoveryTables,
           "organization_user_setup_deliveries",
           "organization_user_setup_delivery_attempts",
         ].map((name) => ({
@@ -618,6 +631,7 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
         ...managedAuthSessionSetTables,
+        ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
       ],
@@ -628,6 +642,7 @@ describe("embedded worker lifecycle contract", () => {
         "canonical_human_login_bindings",
         "canonical_human_identity_operations",
         ...managedAuthSessionSetTables,
+        ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
       ],
