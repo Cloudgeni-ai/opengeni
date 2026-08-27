@@ -32620,12 +32620,59 @@ export async function listSessionHumanInputRequests(
 ): Promise<SessionHumanInputRequest[]> {
   const limit = Math.min(100, Math.max(1, Math.floor(options.limit ?? 50)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const actionablePendingIds =
+      options.status === "pending"
+        ? await scopedDb.execute<{ id: string }>(sql`
+            select request_row.id
+            from session_human_input_requests request_row
+            join sessions session_row
+              on session_row.workspace_id = request_row.workspace_id
+             and session_row.id = request_row.session_id
+            join session_turns turn_row
+              on turn_row.workspace_id = request_row.workspace_id
+             and turn_row.session_id = request_row.session_id
+             and turn_row.id = request_row.turn_id
+            join session_events trigger_row
+              on trigger_row.workspace_id = turn_row.workspace_id
+             and trigger_row.session_id = turn_row.session_id
+             and trigger_row.id = turn_row.trigger_event_id
+            where request_row.workspace_id = ${workspaceId}
+              and request_row.session_id = ${sessionId}
+              and request_row.status = 'pending'
+              and (request_row.expires_at is null or request_row.expires_at > now())
+              and session_row.status = 'requires_action'
+              and session_row.active_turn_id = request_row.turn_id
+              and turn_row.status = 'requires_action'
+              and turn_row.execution_generation = request_row.turn_generation
+              and not exists (
+                select 1
+                from session_events accepted_row
+                where accepted_row.workspace_id = request_row.workspace_id
+                  and accepted_row.session_id = request_row.session_id
+                  and accepted_row.turn_id = request_row.turn_id
+                  and accepted_row.turn_generation = request_row.turn_generation
+                  and accepted_row.type in ('user.approvalDecision', 'user.humanInputResponse')
+                  and accepted_row.sequence > trigger_row.sequence
+              )
+            order by request_row.created_at desc, request_row.id desc
+            limit ${limit}
+          `)
+        : null;
+    if (actionablePendingIds !== null && actionablePendingIds.length === 0) return [];
     const predicates = [
       eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
       eq(schema.sessionHumanInputRequests.sessionId, sessionId),
     ];
     if (options.status) {
       predicates.push(eq(schema.sessionHumanInputRequests.status, options.status));
+    }
+    if (actionablePendingIds !== null) {
+      predicates.push(
+        inArray(
+          schema.sessionHumanInputRequests.id,
+          actionablePendingIds.map((row: { id: string }) => row.id),
+        ),
+      );
     }
     const rows = await scopedDb
       .select()
@@ -32753,6 +32800,13 @@ export type AcceptSessionHumanInputResponseResult =
       workflowWakeRevision: number;
     }
   | {
+      action: "completed";
+      request: SessionHumanInputRequest;
+      event: SessionEvent;
+      events: SessionEvent[];
+      workflowWakeRevision: number | null;
+    }
+  | {
       action: "conflict";
       request: SessionHumanInputRequest;
       events: SessionEvent[];
@@ -32805,10 +32859,37 @@ async function hasAcceptedRequiresActionAdvance(
   return accepted !== undefined;
 }
 
+async function humanInputResponseEventForRequest(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    requestId: string;
+  },
+): Promise<SessionEvent | null> {
+  const [event] = await tx
+    .select()
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.humanInputResponse"),
+        sql`${schema.sessionEvents.payload} ->> 'requestId' = ${input.requestId}`,
+      ),
+    )
+    .orderBy(desc(schema.sessionEvents.sequence))
+    .limit(1);
+  return event ? mapEvent(event) : null;
+}
+
 /**
- * First-writer-wins settlement for one pending structured input boundary.
- * Session + logical turn + current freeze generation are locked with the row;
- * the creation attempt is provenance and is intentionally not the resume owner.
+ * First-writer-wins settlement for one structured input boundary. Session +
+ * logical turn + current freeze generation are locked with the row; the
+ * creation attempt is provenance and is intentionally not the resume owner.
+ * A committed response replays its original event without another event or
+ * workflow wake. Historical cancelled rows missing that canonical event are
+ * repaired exactly once under the same locks, but never wake terminal work.
  */
 export async function acceptSessionHumanInputResponse(
   db: Database,
@@ -32876,24 +32957,104 @@ export async function acceptSessionHumanInputResponse(
             ) {
               throw new Error("clientEventId belongs to a different session operation");
             }
-            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
-              tx as unknown as Database,
-              {
-                accountId: session.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: session.id,
-                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
-                reason: "approval_decision",
-              },
-            );
             return {
-              action: "accepted",
+              action: "completed",
               request: mapSessionHumanInputRequest(request),
               event: mapEvent(existing),
               events: [],
-              workflowWakeRevision,
+              workflowWakeRevision: null,
             } as const;
           }
+        }
+        if (request.status !== "pending") {
+          let event = await humanInputResponseEventForRequest(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            requestId: request.id,
+          });
+          let repairedEvents: SessionEvent[] = [];
+          if (
+            !event &&
+            request.status === "cancelled" &&
+            (request.response as { outcome?: unknown } | null)?.outcome === "cancelled"
+          ) {
+            const turnLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              controlLock: "already_locked",
+              workspaceLock: "already_locked",
+              turnIds: [request.turnId],
+            });
+            const turn = turnLocks.turns[0];
+            if (!turn || turn.sessionId !== session.id) {
+              throw new SessionControlInvariantError(
+                `Cancelled human-input request ${request.id} has no owning turn`,
+              );
+            }
+            const occurredAt = request.respondedAt ?? request.updatedAt;
+            const [inserted] = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: session.id,
+                    turnId: request.turnId,
+                    turnGeneration: request.turnGeneration,
+                    turnAssociation: "current",
+                    sequence: session.lastSequence + 1,
+                    type: "user.humanInputResponse",
+                    payload: { requestId: request.id, response: { outcome: "cancelled" } },
+                    clientEventId: null,
+                    occurredAt,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            if (!inserted) {
+              throw new SessionControlInvariantError(
+                `Cancelled human-input request ${request.id} could not repair its response event`,
+              );
+            }
+            await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              sourceKind: "human_input_response",
+              sourceId: inserted.id,
+              turnId: request.turnId,
+              channel: null,
+              text: renderRealtimeHumanInputResponseContext({
+                requestId: request.id,
+                questions: request.questions,
+                response: { outcome: "cancelled" },
+              }),
+              payload: {
+                requestId: request.id,
+                outcome: "cancelled",
+                sourceEventId: inserted.id,
+              },
+              now: occurredAt,
+            });
+            await tx
+              .update(schema.sessions)
+              .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+              .where(eq(schema.sessions.id, session.id));
+            event = mapEvent(inserted);
+            repairedEvents = [event];
+          }
+          if (!event) {
+            throw new Error(`Terminal human-input request has no response event: ${request.id}`);
+          }
+          return {
+            action: "completed",
+            request: mapSessionHumanInputRequest(request),
+            event,
+            events: repairedEvents,
+            workflowWakeRevision: null,
+          } as const;
         }
         const [turnPreview] = session.activeTurnId
           ? await tx
@@ -32923,7 +33084,7 @@ export async function acceptSessionHumanInputResponse(
           turn?.status === "requires_action" &&
           turn.id === request.turnId &&
           turn.executionGeneration === request.turnGeneration;
-        if (request.status !== "pending" || !boundaryOwnsRequest) {
+        if (!boundaryOwnsRequest) {
           return {
             action: "conflict",
             request: mapSessionHumanInputRequest(request),
@@ -33064,9 +33225,7 @@ export async function acceptSessionHumanInputResponse(
           events: [mappedEvent],
           workflowWakeRevision,
         };
-        return expired
-          ? ({ action: "conflict", ...result } as const)
-          : ({ action: "accepted", event: mappedEvent, ...result } as const);
+        return { action: "accepted", event: mappedEvent, ...result } as const;
       }),
   );
 }
@@ -59878,7 +60037,12 @@ export async function failSessionWorkBeforeAttemptClaim(
     workspaceId,
     {
       stage: "session_lifecycle_outbox.fail_before_attempt_claim",
-      eventTypes: ["child_terminal_result", "session.status.changed", "turn.failed"],
+      eventTypes: [
+        "child_terminal_result",
+        "session.status.changed",
+        "turn.failed",
+        "user.humanInputResponse",
+      ],
       maxAttempts: 3,
     },
     async (scopedDb) =>
@@ -60072,6 +60236,11 @@ export async function failSessionWorkBeforeAttemptClaim(
         const now = new Date();
         let sequence = session.lastSequence;
         let closedToolEvents: SessionEvent[] = [];
+        let cancelledHumanInputs: Array<{
+          id: string;
+          questions: HumanInputQuestion[];
+          turnGeneration: number;
+        }> = [];
         if (turn) {
           await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
             accountId: session.accountId,
@@ -60093,7 +60262,7 @@ export async function failSessionWorkBeforeAttemptClaim(
           );
           sequence = closedTools.sequence;
           closedToolEvents = closedTools.events;
-          const cancelledHumanInputs = await tx
+          cancelledHumanInputs = await tx
             .update(schema.sessionHumanInputRequests)
             .set({
               status: "cancelled",
@@ -60112,6 +60281,7 @@ export async function failSessionWorkBeforeAttemptClaim(
             )
             .returning({
               id: schema.sessionHumanInputRequests.id,
+              questions: schema.sessionHumanInputRequests.questions,
               turnGeneration: schema.sessionHumanInputRequests.turnGeneration,
             });
           // The child's blocked boundary died with the turn: resolve each
@@ -60152,6 +60322,21 @@ export async function failSessionWorkBeforeAttemptClaim(
         }
         const values = [
           ...(turn
+            ? cancelledHumanInputs.map((request) => ({
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: ++sequence,
+                type: "user.humanInputResponse" as const,
+                payload: { requestId: request.id, response: { outcome: "cancelled" as const } },
+                turnId: turn.id,
+                turnGeneration: request.turnGeneration,
+                turnAttemptId: null,
+                turnAssociation: "current" as const,
+                occurredAt: now,
+              }))
+            : []),
+          ...(turn
             ? [
                 {
                   accountId: session.accountId,
@@ -60190,6 +60375,36 @@ export async function failSessionWorkBeforeAttemptClaim(
           .insert(schema.sessionEvents)
           .values(withLosslessContentWriteVersion(values, "payload", "payloadCodecVersion"))
           .returning();
+        const cancelledHumanInputById = new Map(
+          cancelledHumanInputs.map((request) => [request.id, request]),
+        );
+        for (const event of inserted) {
+          if (event.type !== "user.humanInputResponse") continue;
+          const payload = sessionEventPayloadRecord(event.payload, event.payloadCodecVersion);
+          const requestId = typeof payload.requestId === "string" ? payload.requestId : null;
+          const request = requestId ? cancelledHumanInputById.get(requestId) : null;
+          if (!request || !turn) continue;
+          await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            sourceKind: "human_input_response",
+            sourceId: event.id,
+            turnId: turn.id,
+            channel: null,
+            text: renderRealtimeHumanInputResponseContext({
+              requestId: request.id,
+              questions: request.questions,
+              response: { outcome: "cancelled" },
+            }),
+            payload: {
+              requestId: request.id,
+              outcome: "cancelled",
+              sourceEventId: event.id,
+            },
+            now,
+          });
+        }
         if (turn) {
           const failedEvent = inserted.find((event) => event.type === "turn.failed");
           if (!failedEvent) {

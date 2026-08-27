@@ -8,6 +8,7 @@ import {
   useEmbeddedHumanInputSession,
   type EmbeddedHumanInputClientOverride,
 } from "../session-context";
+import { isActionableHumanInputRequest } from "../human-input";
 import {
   useDebouncedCallback,
   useMutationRunner,
@@ -70,8 +71,11 @@ export function useHumanInputRequests(
     enabled,
     pollIntervalMs: options.pollIntervalMs,
   });
+  const loadedRequests = state.data;
+  const refreshRequests = state.refresh;
   const mutation = useMutationRunner(`${workspaceId}\u0000${sessionId ?? ""}`);
   const [respondingRequestId, setRespondingRequestId] = useState<string | null>(null);
+  const [deadlineVersion, setDeadlineVersion] = useState(0);
   const respondingRequestRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -88,6 +92,25 @@ export function useHumanInputRequests(
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
   });
+
+  useEffect(() => {
+    const now = Date.now();
+    const nextDeadline = (loadedRequests ?? []).reduce<number | null>((next, request) => {
+      if (request.status !== "pending" || !request.expiresAt) return next;
+      const deadline = Date.parse(request.expiresAt);
+      if (!Number.isFinite(deadline) || deadline <= now) return next;
+      return next === null ? deadline : Math.min(next, deadline);
+    }, null);
+    if (nextDeadline === null) return;
+    const timer = globalThis.setTimeout(
+      () => {
+        setDeadlineVersion((current) => current + 1);
+        void refreshRequests();
+      },
+      Math.min(2_147_483_647, Math.max(0, nextDeadline - now + 1)),
+    );
+    return () => globalThis.clearTimeout(timer);
+  }, [loadedRequests, refreshRequests]);
 
   const respond = useCallback(
     async (
@@ -115,11 +138,15 @@ export function useHumanInputRequests(
     [client, mutation, sessionId, state, workspaceId],
   );
 
+  const now = Date.now();
+  void deadlineVersion;
   return {
-    requests: [...(state.data ?? [])].sort(
-      (left, right) =>
-        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
-    ),
+    requests: [...(state.data ?? [])]
+      .filter((request) => isActionableHumanInputRequest(request, now))
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+      ),
     loading: state.loading,
     error: state.error,
     refresh: state.refresh,

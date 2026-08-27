@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import type { HumanInputQuestion } from "@opengeni/contracts";
 import {
   HumanInputResponseValidationError,
   ApprovalRunStateLimitExceededError,
@@ -15,6 +16,7 @@ import {
   expireSessionHumanInputRequest,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
+  listSessionHumanInputRequests,
   listTurnOpenSuffixToolCalls,
   peekSessionWork,
   registerPendingSessionToolCall,
@@ -90,7 +92,14 @@ async function send(
   );
 }
 
-async function freezeRequest(options: { expiresAt?: Date | null; parallel?: boolean } = {}) {
+async function freezeRequest(
+  options: {
+    expiresAt?: Date | null;
+    parallel?: boolean;
+    allowSkip?: boolean;
+    optionalText?: boolean;
+  } = {},
+) {
   const { grant, session } = await createFixture();
   await send(grant, session.id, "continue with my decision");
   const attemptId = crypto.randomUUID();
@@ -106,26 +115,38 @@ async function freezeRequest(options: { expiresAt?: Date | null; parallel?: bool
   const turn = claim.turn;
   const requestId = crypto.randomUUID();
   const parallelRequestId = options.parallel ? crypto.randomUUID() : null;
-  const questions = [
-    {
-      id: "environment",
-      kind: "single_select" as const,
-      prompt: "Which environment?",
-      options: [
-        { id: "staging", label: "Staging" },
-        { id: "production", label: "Production" },
-      ],
-      required: true,
-      allowOther: false,
-    },
-  ];
+  const questions: HumanInputQuestion[] = options.optionalText
+    ? [
+        {
+          id: "note",
+          kind: "text" as const,
+          prompt: "Anything else?",
+          options: [],
+          required: false,
+          allowOther: false,
+        },
+      ]
+    : [
+        {
+          id: "environment",
+          kind: "single_select" as const,
+          prompt: "Which environment?",
+          options: [
+            { id: "staging", label: "Staging" },
+            { id: "production", label: "Production" },
+          ],
+          required: true,
+          allowOther: false,
+        },
+      ];
   const expiresAt = options.expiresAt ?? null;
+  const allowSkip = options.allowSkip ?? false;
   const humanInputRequests = [
     {
       id: requestId,
       toolCallId: "human-call-1",
       questions,
-      allowSkip: false,
+      allowSkip,
       expiresAt,
     },
     ...(parallelRequestId
@@ -134,7 +155,7 @@ async function freezeRequest(options: { expiresAt?: Date | null; parallel?: bool
             id: parallelRequestId,
             toolCallId: "human-call-2",
             questions,
-            allowSkip: false,
+            allowSkip,
             expiresAt,
           },
         ]
@@ -279,6 +300,59 @@ describe("durable structured human input", () => {
     });
   });
 
+  test("accepts an empty optional answer and a permitted Skip without weakening required validation", async () => {
+    const optional = await freezeRequest({ optionalText: true });
+    const empty = await acceptSessionHumanInputResponse(client.db, {
+      accountId: optional.grant.accountId,
+      workspaceId: optional.grant.workspaceId!,
+      sessionId: optional.session.id,
+      requestId: optional.requestId,
+      response: { outcome: "answered", answers: [] },
+      respondedBy: optional.grant.subjectId,
+    });
+    expect(empty).toMatchObject({
+      action: "accepted",
+      request: { status: "answered", response: { outcome: "answered", answers: [] } },
+    });
+
+    const skippable = await freezeRequest({ allowSkip: true });
+    expect(
+      await acceptSessionHumanInputResponse(client.db, {
+        accountId: skippable.grant.accountId,
+        workspaceId: skippable.grant.workspaceId!,
+        sessionId: skippable.session.id,
+        requestId: skippable.requestId,
+        response: { outcome: "skipped" },
+        respondedBy: skippable.grant.subjectId,
+      }),
+    ).toMatchObject({
+      action: "accepted",
+      request: { status: "skipped", response: { outcome: "skipped" } },
+    });
+
+    const required = await freezeRequest();
+    await expect(
+      acceptSessionHumanInputResponse(client.db, {
+        accountId: required.grant.accountId,
+        workspaceId: required.grant.workspaceId!,
+        sessionId: required.session.id,
+        requestId: required.requestId,
+        response: { outcome: "answered", answers: [] },
+        respondedBy: required.grant.subjectId,
+      }),
+    ).rejects.toBeInstanceOf(HumanInputResponseValidationError);
+    await expect(
+      acceptSessionHumanInputResponse(client.db, {
+        accountId: required.grant.accountId,
+        workspaceId: required.grant.workspaceId!,
+        sessionId: required.session.id,
+        requestId: required.requestId,
+        response: { outcome: "skipped" },
+        respondedBy: required.grant.subjectId,
+      }),
+    ).rejects.toMatchObject({ code: "SKIP_NOT_ALLOWED" });
+  });
+
   test("answer and early-expiry racers have one winner, while a passed deadline expires", async () => {
     const future = await freezeRequest({ expiresAt: new Date(Date.now() + 60_000) });
     const [answer, earlyExpiry] = await Promise.all([
@@ -301,7 +375,7 @@ describe("durable structured human input", () => {
       }),
     ]);
     expect(answer.action).toBe("accepted");
-    expect(earlyExpiry.action).toBe("conflict");
+    expect(["completed", "conflict"]).toContain(earlyExpiry.action);
     expect(
       await getSessionHumanInputRequest(
         client.db,
@@ -323,12 +397,86 @@ describe("durable structured human input", () => {
       },
       respondedBy: past.grant.subjectId,
     });
-    expect(expired.action).toBe("conflict");
+    expect(expired.action).toBe("accepted");
     if (expired.action === "not_found") throw new Error("expired request disappeared");
     expect(expired).toMatchObject({
       request: { status: "expired", response: { outcome: "expired" } },
     });
     expect(expired.events).toHaveLength(1);
+
+    const repeated = await acceptSessionHumanInputResponse(client.db, {
+      accountId: past.grant.accountId,
+      workspaceId: past.grant.workspaceId!,
+      sessionId: past.session.id,
+      requestId: past.requestId,
+      response: { outcome: "skipped" },
+      respondedBy: past.grant.subjectId,
+    });
+    expect(repeated).toMatchObject({
+      action: "completed",
+      request: { status: "expired", response: { outcome: "expired" } },
+      events: [],
+      workflowWakeRevision: null,
+    });
+    if (expired.action !== "accepted" || repeated.action !== "completed") {
+      throw new Error("expiry did not produce accepted and completed results");
+    }
+    expect(repeated.event.id).toBe(expired.event.id);
+  });
+
+  test("repairs an eventless cancelled terminal row once without waking terminal work", async () => {
+    const frozen = await freezeRequest();
+    const cancelledAt = new Date();
+    await shared.admin`
+      update session_human_input_requests
+      set status = 'cancelled', response = '{"outcome":"cancelled"}'::jsonb,
+        responded_by = 'system:legacy_cancel', responded_at = ${cancelledAt},
+        updated_at = ${cancelledAt}
+      where workspace_id = ${frozen.grant.workspaceId!}
+        and session_id = ${frozen.session.id}
+        and id = ${frozen.requestId}`;
+
+    const repaired = await acceptSessionHumanInputResponse(client.db, {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      requestId: frozen.requestId,
+      response: { outcome: "skipped" },
+      respondedBy: frozen.grant.subjectId,
+    });
+    expect(repaired).toMatchObject({
+      action: "completed",
+      request: { status: "cancelled", response: { outcome: "cancelled" } },
+      events: [{ type: "user.humanInputResponse" }],
+      workflowWakeRevision: null,
+    });
+    if (repaired.action !== "completed") throw new Error("cancelled request was not repaired");
+
+    const replayed = await acceptSessionHumanInputResponse(client.db, {
+      accountId: frozen.grant.accountId,
+      workspaceId: frozen.grant.workspaceId!,
+      sessionId: frozen.session.id,
+      requestId: frozen.requestId,
+      response: { outcome: "answered", answers: [] },
+      respondedBy: frozen.grant.subjectId,
+    });
+    expect(replayed).toMatchObject({
+      action: "completed",
+      request: { status: "cancelled", response: { outcome: "cancelled" } },
+      events: [],
+      workflowWakeRevision: null,
+    });
+    if (replayed.action !== "completed") throw new Error("cancelled request did not replay");
+    expect(replayed.event.id).toBe(repaired.event.id);
+
+    const [evidence] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_events
+      where workspace_id = ${frozen.grant.workspaceId!}
+        and session_id = ${frozen.session.id}
+        and type = 'user.humanInputResponse'
+        and payload ->> 'requestId' = ${frozen.requestId}`;
+    expect(evidence?.count).toBe(1);
   });
 
   test("admits only one response across parallel human and ordinary approval interruptions", async () => {
@@ -347,6 +495,12 @@ describe("durable structured human input", () => {
       respondedBy: frozen.grant.subjectId,
     });
     expect(first.action).toBe("accepted");
+
+    expect(
+      await listSessionHumanInputRequests(client.db, frozen.grant.workspaceId!, frozen.session.id, {
+        status: "pending",
+      }),
+    ).toEqual([]);
 
     const second = await acceptSessionHumanInputResponse(client.db, {
       accountId: frozen.grant.accountId,
@@ -415,6 +569,11 @@ describe("durable structured human input", () => {
     ).rejects.toThrow(/changed contract/i);
     const reFrozen = await reFreeze(frozen.questions);
     expect(reFrozen.action).toBe("settled");
+    expect(
+      await listSessionHumanInputRequests(client.db, frozen.grant.workspaceId!, frozen.session.id, {
+        status: "pending",
+      }),
+    ).toMatchObject([{ id: parallelRequestId, status: "pending" }]);
     expect(
       await acceptSessionHumanInputResponse(client.db, {
         accountId: frozen.grant.accountId,

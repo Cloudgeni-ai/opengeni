@@ -2980,10 +2980,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       if (accepted.action === "conflict") {
         throw new HTTPException(409, {
-          message: `human-input request is ${accepted.request.status}`,
+          message: "human-input request is not currently actionable",
         });
       }
-      return c.json(accepted.event, 202);
+      return c.json(accepted.event, accepted.action === "completed" ? 200 : 202);
     }
   });
 
