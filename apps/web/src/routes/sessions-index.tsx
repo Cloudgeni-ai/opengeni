@@ -44,13 +44,11 @@ import {
   BoxIcon,
   CheckIcon,
   ChevronDownIcon,
-  ChevronUpIcon,
   FolderIcon,
   MonitorOffIcon,
   PlusIcon,
   ServerCogIcon,
   ServerIcon,
-  XIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -62,6 +60,7 @@ import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { SessionVisibilityPicker } from "@/components/session-visibility-picker";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import { RepositoryContextMenuBody, RepositoryContextPicker } from "@/components/repository-picker";
+import { SelectedVariableSetList } from "@/components/session/selected-variable-set-list";
 import { Button } from "@/components/ui/button";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import {
@@ -1927,7 +1926,17 @@ function ManagedSandboxFields(props: {
   const workspaceRigs = props.rigs.filter((resource) => resource.scope !== "user");
   const workspaceVariableSets = props.variableSets.filter((resource) => resource.scope !== "user");
   const showRigs = workspaceRigs.length > 0 || personalRigs.length > 0;
-  const showVariableSets = workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
+  const hasEnumerableVariableSets =
+    workspaceVariableSets.length > 0 || personalVariableSets.length > 0;
+  const availableWorkspaceVariableSets = workspaceVariableSets.filter(
+    (variableSet) => !draft.variableSetIds.includes(variableSet.id),
+  );
+  const availablePersonalVariableSets = personalVariableSets.filter(
+    (variableSet) => !draft.variableSetIds.includes(variableSet.id),
+  );
+  const hasVariableSetChoices =
+    availableWorkspaceVariableSets.length > 0 || availablePersonalVariableSets.length > 0;
+  const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets;
   if (!showRigs && !showVariableSets && !props.catalogRecovery.error) {
     return null;
   }
@@ -2004,8 +2013,8 @@ function ManagedSandboxFields(props: {
         </div>
       ) : null}
 
-      {/* Offer variableSets only when some exist — configuration UI for
-          resources you don't have is clutter (same rule as machines). */}
+      {/* Keep restored selections visible even when the caller may attach/use
+          exact IDs but cannot enumerate the Variable Set catalog. */}
       {showVariableSets ? (
         <div
           className={cn(
@@ -2019,83 +2028,22 @@ function ManagedSandboxFields(props: {
           </Label>
           <div className="min-w-0 max-w-80 flex-1 space-y-2">
             {draft.variableSetIds.length > 0 ? (
-              <div className="space-y-1">
-                {draft.variableSetIds.map((variableSetId, index) => {
-                  const variableSet = [...workspaceVariableSets, ...personalVariableSets].find(
-                    (candidate) => candidate.id === variableSetId,
-                  );
-                  return (
-                    <div
-                      key={variableSetId}
-                      className="flex min-w-0 items-center gap-1 rounded border border-border bg-bg/45 px-1.5 py-1"
-                    >
-                      <span className="w-4 shrink-0 text-center font-mono text-2xs text-fg-subtle">
-                        {index + 1}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-xs">
-                        {variableSet?.name ?? variableSetId}
-                      </span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Move ${variableSet?.name ?? variableSetId} earlier`}
-                        disabled={props.disabled || index === 0}
-                        onClick={() => {
-                          const next = [...draft.variableSetIds];
-                          [next[index - 1], next[index]] = [next[index]!, next[index - 1]!];
-                          onChange({
-                            ...draft,
-                            variableSetIds: next,
-                            variableSetId: next.at(-1) ?? "",
-                          });
-                        }}
-                      >
-                        <ChevronUpIcon />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Move ${variableSet?.name ?? variableSetId} later`}
-                        disabled={props.disabled || index === draft.variableSetIds.length - 1}
-                        onClick={() => {
-                          const next = [...draft.variableSetIds];
-                          [next[index], next[index + 1]] = [next[index + 1]!, next[index]!];
-                          onChange({
-                            ...draft,
-                            variableSetIds: next,
-                            variableSetId: next.at(-1) ?? "",
-                          });
-                        }}
-                      >
-                        <ChevronDownIcon />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-xs"
-                        aria-label={`Remove ${variableSet?.name ?? variableSetId}`}
-                        disabled={props.disabled}
-                        onClick={() => {
-                          const next = draft.variableSetIds.filter((id) => id !== variableSetId);
-                          onChange({
-                            ...draft,
-                            variableSetIds: next,
-                            variableSetId: next.at(-1) ?? "",
-                          });
-                        }}
-                      >
-                        <XIcon />
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
+              <SelectedVariableSetList
+                selectedIds={draft.variableSetIds}
+                variableSets={[...workspaceVariableSets, ...personalVariableSets]}
+                disabled={props.disabled}
+                onChange={(variableSetIds) => {
+                  onChange({
+                    ...draft,
+                    variableSetIds,
+                    variableSetId: variableSetIds.at(-1) ?? "",
+                  });
+                }}
+              />
             ) : (
               <p className="text-right text-xs text-fg-subtle">No Variable Sets selected</p>
             )}
-            {draft.variableSetIds.length < 25 ? (
+            {hasVariableSetChoices && draft.variableSetIds.length < 25 ? (
               <Select
                 value=""
                 disabled={props.disabled}
@@ -2108,24 +2056,18 @@ function ManagedSandboxFields(props: {
                 className="h-8 w-full text-xs"
               >
                 <option value="">Add Variable Set…</option>
-                {workspaceVariableSets
-                  .filter((variableSet) => !draft.variableSetIds.includes(variableSet.id))
-                  .map((variableSet) => (
-                    <option key={variableSet.id} value={variableSet.id}>
-                      {variableSet.name} ({variableSet.variables.length} vars)
-                    </option>
-                  ))}
-                {personalVariableSets.some(
-                  (variableSet) => !draft.variableSetIds.includes(variableSet.id),
-                ) ? (
+                {availableWorkspaceVariableSets.map((variableSet) => (
+                  <option key={variableSet.id} value={variableSet.id}>
+                    {variableSet.name} ({variableSet.variables.length} vars)
+                  </option>
+                ))}
+                {availablePersonalVariableSets.length > 0 ? (
                   <optgroup label="Only me">
-                    {personalVariableSets
-                      .filter((variableSet) => !draft.variableSetIds.includes(variableSet.id))
-                      .map((variableSet) => (
-                        <option key={variableSet.id} value={variableSet.id}>
-                          {variableSet.name} ({variableSet.variables.length} vars)
-                        </option>
-                      ))}
+                    {availablePersonalVariableSets.map((variableSet) => (
+                      <option key={variableSet.id} value={variableSet.id}>
+                        {variableSet.name} ({variableSet.variables.length} vars)
+                      </option>
+                    ))}
                   </optgroup>
                 ) : null}
               </Select>

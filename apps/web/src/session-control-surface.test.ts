@@ -71,7 +71,11 @@ describe("session control surface architecture", () => {
       source("components/personal-resource-attachment-control.tsx"),
     ]);
     expect(route).toContain("Add Variable Set…");
-    expect(route).toContain("draft.variableSetIds.map");
+    expect(route).toContain("<SelectedVariableSetList");
+    expect(route).toContain(
+      "const showVariableSets = draft.variableSetIds.length > 0 || hasEnumerableVariableSets",
+    );
+    expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
     expect(route).not.toContain("Your resource access");
