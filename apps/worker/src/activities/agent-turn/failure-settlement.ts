@@ -1388,6 +1388,25 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         control.activityError = error;
         throw escaped;
       }
+      const postClaimRecovery =
+        recoveryResult.status === "recovering"
+          ? postClaimDatabaseRecoveryFailure({
+              error: recoveryError,
+              turnId: attempt.turnId,
+              triggerEventId: attempt.triggerEventId!,
+              executionGeneration: attempt.executionGeneration,
+              providerRecovery: {
+                failureCode: failure.code ?? "provider_unavailable",
+                providerRecoveryCount: nextProviderRecoveryCount,
+              },
+            })
+          : null;
+      if (postClaimRecovery) {
+        control.activityStatus = "recovering";
+        control.turnMetricOutcome = "recovering";
+        control.activityError = error;
+        throw postClaimRecovery;
+      }
       throw recoveryError;
     }
   }
