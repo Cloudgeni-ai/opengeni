@@ -36,7 +36,22 @@ const ARTIFACT_AUTHORIZATION_CAPABILITY_ROUTINES = [
   "authorize_editable_artifact_actor(uuid, uuid, text, text, text, text, text, text, integer, text, text, name)",
 ] as const;
 
-const DEDICATED_ARTIFACT_CAPABILITY_ROUTINES = new Set<string>([
+const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
+  "claim_automatic_session_title_fanout_v1(integer)",
+  "mark_automatic_session_title_fanout_delivered_v1(uuid, uuid)",
+  "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
+] as const;
+
+const AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE =
+  "enqueue_automatic_session_title_fanout_v1(uuid, uuid, uuid, uuid)";
+
+const AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE =
+  "enforce_automatic_session_title_policy_v1()";
+const AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE = "automatic_session_title_fanout_outbox_v1";
+const AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE =
+  "acquire_automatic_session_title_quarantine_fences_v1(integer)";
+
+const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   ...ARTIFACT_OUTBOX_CAPABILITY_ROUTINES,
   ...ARTIFACT_MATERIALIZER_CAPABILITY_ROUTINES,
   ...ARTIFACT_LIVE_TICKET_INTERNAL_ROUTINES,
@@ -309,6 +324,49 @@ const CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES = [
   "canonical_human_login_bindings",
   "canonical_human_identity_operations",
 ] as const;
+const MANAGED_AUTH_SESSION_SET_ROUTINES = [
+  "get_canonical_human_exact_login_binding(text, text)",
+  "managed_auth_session_set_authority_state(text)",
+  "managed_auth_session_set_snapshot(text, text, boolean, boolean, boolean)",
+  "managed_auth_session_set_bootstrap(text, text, text, text, uuid, text, bigint, bigint)",
+  "managed_auth_session_set_begin_transaction(text, text, text, uuid, text, bigint, uuid, bigint, text, text, uuid, uuid, text, timestamp with time zone)",
+  "managed_auth_session_set_complete_transaction(text, text, uuid, text, bigint, bigint, uuid, text, text, text)",
+  "managed_auth_session_set_mutate(text, text, uuid, text, bigint, bigint, text, uuid, uuid, uuid, text, text)",
+  "managed_auth_actor_mutation_fence(text, bigint, uuid)",
+  "managed_auth_actor_mutation_lease_acquire(text, bigint, uuid, integer)",
+  "managed_auth_actor_mutation_lease_release(text, uuid)",
+  "managed_auth_actor_mutation_lease_validate(text, bigint, uuid)",
+  "managed_auth_adopted_session_snapshot(text)",
+  "managed_auth_isolated_session_reap(integer)",
+  "managed_auth_expired_session_set_reap(integer)",
+  "managed_auth_session_set_operation_receipt(text, uuid, text, text)",
+] as const;
+const MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES = [
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_browser_installations",
+  "managed_auth_session_sets",
+  "managed_auth_login_slots",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_transaction_rate_limits",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+] as const;
+const ORGANIZATION_RECOVERY_ROUTINES = [
+  "get_organization_recovery_overview(uuid, text, jsonb, text, text)",
+  "organization_recovery_command(jsonb)",
+] as const;
+const ORGANIZATION_RECOVERY_AUTHORITY_TABLES = [
+  "organization_recovery_approvals",
+  "organization_recovery_command_receipts",
+  "organization_recovery_custodian_acceptances",
+  "organization_recovery_custodians",
+  "organization_recovery_events",
+  "organization_recovery_notification_attempts",
+  "organization_recovery_notification_outbox",
+  "organization_recovery_operations",
+  "organization_recovery_policies",
+  "organization_recovery_policy_heads",
+] as const;
 const SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE =
   "session_private_actor_visible(uuid, uuid, uuid, text)";
 const SESSION_REFERENCE_VISIBLE_ROUTINE = "session_reference_visible(uuid, uuid, uuid)";
@@ -329,6 +387,7 @@ const GOVERNED_LEARNING_ACTIVATION_ROUTINES = [
   "activate_governed_learning_decision(uuid, uuid, uuid, uuid)",
   "activate_human_confirmed_learning_decision(uuid, uuid, uuid, uuid, uuid)",
   "confirm_remember_knowledge_claim(uuid, uuid, uuid, uuid, integer, uuid, uuid, uuid)",
+  "materialize_remember_knowledge_memory(uuid, uuid, uuid)",
   "undo_governed_learning_activation(uuid, uuid, uuid, uuid)",
 ] as const;
 const GOVERNED_LEARNING_INSPECTION_ROUTINES = [
@@ -391,6 +450,7 @@ const GOVERNED_LEARNING_ACTIVATION_AUTHORITY_TABLES = [
   "preference_registry_preferences",
   "preference_registry_revisions",
   "remember_knowledge_confirmation_receipts",
+  "remember_knowledge_memory_materializations",
   "session_human_input_requests",
   "workspace_instruction_policy_activation_events",
   "workspace_instruction_policy_deactivation_events",
@@ -494,6 +554,8 @@ export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
   ...SCOPED_COMPUTE_AUTHORITY_ROUTINES,
   ...SCHEDULED_PERSONAL_RESOURCE_ROUTINES,
   ...CANONICAL_HUMAN_IDENTITY_ROUTINES,
+  ...MANAGED_AUTH_SESSION_SET_ROUTINES,
+  ...ORGANIZATION_RECOVERY_ROUTINES,
   ...TASK_NOTE_CAPABILITY_ROUTINES,
   SESSION_PRIVATE_ACTOR_VISIBLE_ROUTINE,
   SESSION_REFERENCE_VISIBLE_ROUTINE,
@@ -520,6 +582,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE,
   SESSION_TENANCY_QUIESCENCE_ROUTINE,
@@ -684,6 +747,14 @@ export const FORCE_RLS_TABLES = [
   "machine_metrics_latest",
   "machine_metrics_series",
   "machine_removal_operations",
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_browser_installations",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_slots",
+  "managed_auth_login_transaction_rate_limits",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+  "managed_auth_session_sets",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
@@ -698,6 +769,16 @@ export const FORCE_RLS_TABLES = [
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
+  "organization_recovery_approvals",
+  "organization_recovery_command_receipts",
+  "organization_recovery_custodian_acceptances",
+  "organization_recovery_custodians",
+  "organization_recovery_events",
+  "organization_recovery_notification_attempts",
+  "organization_recovery_notification_outbox",
+  "organization_recovery_operations",
+  "organization_recovery_policies",
+  "organization_recovery_policy_heads",
   "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -719,6 +800,7 @@ export const FORCE_RLS_TABLES = [
   "personal_github_repository_selections",
   "personal_resource_once_consumption_receipts",
   "pr_review_app_registrations",
+  "pr_review_managed_github_authority_nonces",
   "pr_review_repository_bindings",
   "preference_registry_events",
   "preference_registry_preferences",
@@ -726,6 +808,7 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_snapshots",
   "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
+  "remember_knowledge_memory_materializations",
   "retained_screenshot_artifacts",
   "rig_changes",
   "rig_versions",
@@ -783,6 +866,7 @@ export const FORCE_RLS_TABLES = [
   "session_turn_attempts",
   "session_turn_startup_milestones",
   "session_turns",
+  "session_variable_set_attachments",
   "session_visibility_write_capabilities",
   "session_workflow_wake_outbox",
   "sessions",
@@ -875,6 +959,7 @@ export const NON_RLS_RUNTIME_TABLES = [
   "integration_oauth_clients",
   "managed_accounts",
   "nested_agent_depth_configuration",
+  "pr_review_managed_github_routes",
   "stripe_webhook_events",
   "workspace_memberships",
   "workspaces",
@@ -959,6 +1044,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "pack_installation_components",
   "pack_installations",
   "pr_review_app_registrations",
+  "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
   "retained_screenshot_artifacts",
   "rig_changes",
@@ -1097,6 +1183,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
+  "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
   "session_attempt_tool_catalogs",
@@ -1178,6 +1265,14 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "host_export_cursor_state",
   "host_export_dead_letters",
   "host_export_outbox",
+  "managed_auth_actor_mutation_leases",
+  "managed_auth_browser_installations",
+  "managed_auth_login_return_intents",
+  "managed_auth_login_slots",
+  "managed_auth_login_transaction_rate_limits",
+  "managed_auth_login_transactions",
+  "managed_auth_session_set_operations",
+  "managed_auth_session_sets",
   "organization_invitation_binding_events",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
@@ -1186,6 +1281,16 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
+  "organization_recovery_approvals",
+  "organization_recovery_command_receipts",
+  "organization_recovery_custodian_acceptances",
+  "organization_recovery_custodians",
+  "organization_recovery_events",
+  "organization_recovery_notification_attempts",
+  "organization_recovery_notification_outbox",
+  "organization_recovery_operations",
+  "organization_recovery_policies",
+  "organization_recovery_policy_heads",
   "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -1206,6 +1311,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "personal_resource_once_consumption_receipts",
   "private_session_create_capabilities",
   "remember_knowledge_confirmation_receipts",
+  "remember_knowledge_memory_materializations",
   "scheduled_task_connection_authority_snapshots",
   "scheduled_task_personal_resource_authorities",
   "scheduled_task_personal_resource_snapshots",
@@ -1222,6 +1328,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
   "session_tenancy_greenfield_activation_evidence",
+  "session_variable_set_attachments",
   "session_visibility_write_capabilities",
   "task_note_events",
   "task_note_knowledge_promotion_capabilities",
@@ -1275,6 +1382,8 @@ export type RuntimeDatabasePostureOptions = {
   protectedTables?: readonly string[];
   tablePrivileges?: RuntimeTablePrivilegeContract;
   protectedNoDirectDmlTables?: readonly string[];
+  targetSchemaCapabilityRoutines?: readonly string[];
+  targetSchemaForbiddenRoutines?: readonly string[];
   organizationTenancyCanonicalActivationEnabled?: boolean;
 };
 
@@ -1334,6 +1443,10 @@ export type RuntimeTargetRoutinePosture = RuntimeRoutinePosture & {
 export type RuntimePrivateTablePosture = {
   name: string;
   owner: string;
+  rlsEnabled?: boolean;
+  rlsForced?: boolean;
+  rlsActive?: boolean;
+  policyCount?: number;
   select: boolean;
   insert: boolean;
   update: boolean;
@@ -1352,6 +1465,7 @@ export type RuntimeDatabasePosture = {
   targetRoutines: RuntimeTargetRoutinePosture[];
   privateRoutines: RuntimeRoutinePosture[];
   sessionTenancyProductActivationPresent: boolean;
+  sessionVariableSetAttachmentsCutoverPresent: boolean;
 };
 
 export class RuntimeDatabasePostureError extends Error {
@@ -1405,6 +1519,10 @@ export async function inspectRuntimeDatabasePosture(
   options: RuntimeDatabasePostureOptions,
 ): Promise<RuntimeDatabasePosture> {
   const targetSchema = options.targetSchema?.trim() || "public";
+  const targetSchemaCapabilityRoutines =
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
+  const targetSchemaForbiddenRoutines =
+    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
   return await db.transaction(
     async (tx) => {
@@ -1458,6 +1576,15 @@ export async function inspectRuntimeDatabasePosture(
         await tx.execute(sql`select session_tenancy_any_product_activation() as activated`),
       );
       const sessionTenancyProductActivationPresent = activationRows[0]?.activated === true;
+      const variableSetCutoverRows = resultRows<{ present: boolean }>(
+        await tx.execute(sql`
+          select to_regprocedure(
+            'opengeni_private.session_variable_set_attachments_protocol_v1_active()'
+          ) is not null as present
+        `),
+      );
+      const sessionVariableSetAttachmentsCutoverPresent =
+        variableSetCutoverRows[0]?.present === true;
 
       // Scoped/embedded topology deliberately leaves ownership and isolation to
       // the host. Prove the connection identity is coherent, but do not impose
@@ -1474,6 +1601,7 @@ export async function inspectRuntimeDatabasePosture(
           targetRoutines: [],
           privateRoutines: [],
           sessionTenancyProductActivationPresent,
+          sessionVariableSetAttachmentsCutoverPresent,
         };
       }
 
@@ -1595,6 +1723,10 @@ export async function inspectRuntimeDatabasePosture(
       const privateTables = resultRows<{
         name: string;
         owner: string;
+        rls_enabled: boolean;
+        rls_forced: boolean;
+        rls_active: boolean;
+        policy_count: number;
         can_select: boolean;
         can_insert: boolean;
         can_update: boolean;
@@ -1604,6 +1736,10 @@ export async function inspectRuntimeDatabasePosture(
           select
             c.relname::text as name,
             pg_get_userbyid(c.relowner)::text as owner,
+            c.relrowsecurity as rls_enabled,
+            c.relforcerowsecurity as rls_forced,
+            row_security_active(c.oid) as rls_active,
+            (select count(*)::int from pg_policy policy where policy.polrelid = c.oid) as policy_count,
             has_table_privilege(current_user, c.oid, 'SELECT') as can_select,
             has_table_privilege(current_user, c.oid, 'INSERT') as can_insert,
             has_table_privilege(current_user, c.oid, 'UPDATE') as can_update,
@@ -1619,12 +1755,17 @@ export async function inspectRuntimeDatabasePosture(
               ${PERSONAL_DOCUMENT_CAPABILITY_TABLE},
               ${DOCUMENT_MIGRATION_CAPABILITY_TABLE},
               ${SCOPED_COMPUTE_CAPABILITY_TABLE},
-              ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE}
+              ${CONNECTION_TENANCY_BACKFILL_CAPABILITY_TABLE},
+              ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE}
             )
         `),
       ).map((row) => ({
         name: row.name,
         owner: row.owner,
+        rlsEnabled: row.rls_enabled,
+        rlsForced: row.rls_forced,
+        rlsActive: row.rls_active,
+        policyCount: row.policy_count,
         select: row.can_select,
         insert: row.can_insert,
         update: row.can_update,
@@ -1656,10 +1797,9 @@ export async function inspectRuntimeDatabasePosture(
             and (p.proname || '(' || pg_catalog.oidvectortypes(p.proargtypes) || ')') = any(
               array[
                 ${sql.join(
-                  [
-                    ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
-                    ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
-                  ].map((name) => sql`${name}`),
+                  [...targetSchemaCapabilityRoutines, ...targetSchemaForbiddenRoutines].map(
+                    (name) => sql`${name}`,
+                  ),
                   sql`, `,
                 )}
               ]::text[]
@@ -1719,6 +1859,7 @@ export async function inspectRuntimeDatabasePosture(
         targetRoutines,
         privateRoutines,
         sessionTenancyProductActivationPresent,
+        sessionVariableSetAttachmentsCutoverPresent,
       };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
@@ -1732,6 +1873,10 @@ export function evaluateRuntimeDatabasePosture(
 ): string[] {
   const violations: string[] = [];
   const identity = posture.identity;
+
+  if (!posture.sessionVariableSetAttachmentsCutoverPresent) {
+    violations.push("database is missing the 0352 session Variable Set attachment runtime receipt");
+  }
 
   if (
     posture.sessionTenancyProductActivationPresent &&
@@ -1767,6 +1912,10 @@ export function evaluateRuntimeDatabasePosture(
     options.protectedNoDirectDmlTables ??
       (options.protectedTables ? [] : PROTECTED_NO_DIRECT_DML_TABLES),
   );
+  const targetSchemaCapabilityRoutines =
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES;
+  const targetSchemaForbiddenRoutines =
+    options.targetSchemaForbiddenRoutines ?? RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES;
 
   if (identity.currentUser !== expectedRole || identity.sessionUser !== expectedRole) {
     violations.push(
@@ -1897,7 +2046,7 @@ export function evaluateRuntimeDatabasePosture(
   }
 
   const targetSchemaOwner = posture.schemas.find((schema) => schema.name === targetSchema)?.owner;
-  for (const forbiddenRoutine of RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES) {
+  for (const forbiddenRoutine of targetSchemaForbiddenRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === forbiddenRoutine);
     if (matches.length !== 1) {
       violations.push(
@@ -1924,7 +2073,7 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`PUBLIC has forbidden owner-internal helper ${routine.name}`);
     }
   }
-  for (const expectedRoutine of RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES) {
+  for (const expectedRoutine of targetSchemaCapabilityRoutines) {
     const matches = posture.targetRoutines.filter((routine) => routine.name === expectedRoutine);
     if (matches.length !== 1) {
       violations.push(
@@ -2193,6 +2342,42 @@ export function evaluateRuntimeDatabasePosture(
           );
         }
       }
+    } else if ((ORGANIZATION_RECOVERY_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = ORGANIZATION_RECOVERY_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== ORGANIZATION_RECOVERY_AUTHORITY_TABLES.length) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} organization recovery authority tables are missing`,
+        );
+      } else if (authorityOwners.size !== 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (routine.owner !== authorityTables[0]!.owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+        );
+      }
+    } else if ((MANAGED_AUTH_SESSION_SET_ROUTINES as readonly string[]).includes(routine.name)) {
+      const authorityTables = MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.filter((tableName) =>
+        tableByName.has(tableName),
+      ).map((tableName) => tableByName.get(tableName)!);
+      const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+      if (authorityTables.length !== MANAGED_AUTH_SESSION_SET_AUTHORITY_TABLES.length) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} managed auth session-set authority tables are missing`,
+        );
+      } else if (authorityOwners.size !== 1) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+        );
+      } else if (routine.owner !== authorityTables[0]!.owner) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+        );
+      }
     } else if ((CANONICAL_HUMAN_IDENTITY_ROUTINES as readonly string[]).includes(routine.name)) {
       const authorityTables = CANONICAL_HUMAN_IDENTITY_AUTHORITY_TABLES.filter((tableName) =>
         tableByName.has(tableName),
@@ -2359,6 +2544,152 @@ export function evaluateRuntimeDatabasePosture(
       if (routine.execute) {
         violations.push(
           `generic runtime role has forbidden global artifact outbox capability ${routine.name}`,
+        );
+      }
+    }
+  }
+
+  const automaticTitleFanoutOutboxes = posture.privateTables.filter(
+    (table) => table.name === AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE,
+  );
+  const automaticTitleFanoutRoutineNames = new Set<string>([
+    ...AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES,
+    AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
+    AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
+  ]);
+  const automaticTitleFanoutCatalogPresent = posture.privateRoutines.some((routine) =>
+    automaticTitleFanoutRoutineNames.has(routine.name),
+  );
+  if (automaticTitleFanoutCatalogPresent && automaticTitleFanoutOutboxes.length !== 1) {
+    violations.push(
+      `automatic session title fanout private outbox ${AUTOMATIC_SESSION_TITLE_FANOUT_OUTBOX_TABLE} is missing or ambiguous`,
+    );
+  }
+  const automaticTitleFanoutOutbox = automaticTitleFanoutOutboxes[0];
+  if (automaticTitleFanoutOutbox) {
+    if (automaticTitleFanoutOutbox.owner === expectedRole) {
+      violations.push(
+        `runtime role owns private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name}`,
+      );
+    }
+    if (!automaticTitleFanoutOutbox.rlsEnabled) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} does not ENABLE RLS`,
+      );
+    }
+    if (!automaticTitleFanoutOutbox.rlsForced) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} does not FORCE RLS`,
+      );
+    }
+    if (!automaticTitleFanoutOutbox.rlsActive) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} has inactive RLS for runtime role`,
+      );
+    }
+    if ((automaticTitleFanoutOutbox.policyCount ?? 0) < 1) {
+      violations.push(
+        `private automatic session title fanout outbox ${automaticTitleFanoutOutbox.name} has no RLS policy`,
+      );
+    }
+    const directPrivileges = [
+      ["SELECT", automaticTitleFanoutOutbox.select],
+      ["INSERT", automaticTitleFanoutOutbox.insert],
+      ["UPDATE", automaticTitleFanoutOutbox.update],
+      ["DELETE", automaticTitleFanoutOutbox.delete],
+    ].filter(([, granted]) => granted);
+    if (directPrivileges.length > 0) {
+      violations.push(
+        `runtime role has forbidden direct privileges on private table ${automaticTitleFanoutOutbox.name}: ${directPrivileges.map(([privilege]) => privilege).join(", ")}`,
+      );
+    }
+    for (const expectedRoutine of AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES) {
+      const matches = posture.privateRoutines.filter((routine) => routine.name === expectedRoutine);
+      if (matches.length !== 1) {
+        violations.push(
+          `automatic session title fanout capability ${expectedRoutine} is missing or ambiguous`,
+        );
+        continue;
+      }
+      const routine = matches[0]!;
+      if (!routine.securityDefiner) {
+        violations.push(
+          `automatic session title fanout capability ${routine.name} is not SECURITY DEFINER`,
+        );
+      }
+      if (routine.owner !== automaticTitleFanoutOutbox.owner) {
+        violations.push(
+          `automatic session title fanout capability ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(
+          `runtime role lacks automatic session title fanout capability ${routine.name}`,
+        );
+      }
+      if (routine.publicExecute) {
+        violations.push(
+          `PUBLIC has forbidden automatic session title fanout capability ${routine.name}`,
+        );
+      }
+    }
+    const enqueueMatches = posture.privateRoutines.filter(
+      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE,
+    );
+    if (enqueueMatches.length !== 1) {
+      violations.push(
+        `automatic session title fanout migration helper ${AUTOMATIC_SESSION_TITLE_FANOUT_MIGRATION_ROUTINE} is missing or ambiguous`,
+      );
+    } else {
+      const routine = enqueueMatches[0]!;
+      if (routine.securityDefiner) {
+        violations.push(
+          `automatic session title fanout migration helper ${routine.name} must be SECURITY INVOKER`,
+        );
+      }
+      if (routine.owner !== automaticTitleFanoutOutbox.owner) {
+        violations.push(
+          `automatic session title fanout migration helper ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(
+          `runtime role lacks rolling-compatible automatic session title fanout migration helper ${routine.name}`,
+        );
+      }
+      if (routine.publicExecute) {
+        violations.push(
+          `PUBLIC has forbidden automatic session title fanout migration helper ${routine.name}`,
+        );
+      }
+    }
+    const policyTriggerMatches = posture.privateRoutines.filter(
+      (routine) => routine.name === AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE,
+    );
+    if (policyTriggerMatches.length !== 1) {
+      violations.push(
+        `automatic session title policy trigger ${AUTOMATIC_SESSION_TITLE_POLICY_TRIGGER_ROUTINE} is missing or ambiguous`,
+      );
+    } else {
+      const routine = policyTriggerMatches[0]!;
+      if (routine.securityDefiner) {
+        violations.push(
+          `automatic session title policy trigger ${routine.name} must be SECURITY INVOKER`,
+        );
+      }
+      if (routine.owner !== automaticTitleFanoutOutbox.owner) {
+        violations.push(
+          `automatic session title policy trigger ${routine.name} owner ${routine.owner} does not match table owner ${automaticTitleFanoutOutbox.owner}`,
+        );
+      }
+      if (!routine.execute) {
+        violations.push(
+          `runtime role lacks rolling-compatible automatic session title policy trigger ${routine.name}`,
+        );
+      }
+      if (routine.publicExecute) {
+        violations.push(
+          `PUBLIC has forbidden automatic session title policy trigger ${routine.name}`,
         );
       }
     }
@@ -2876,8 +3207,8 @@ export function evaluateRuntimeDatabasePosture(
     if (routine.owner === expectedRole) {
       violations.push(`runtime role owns private routine ${routine.name}`);
     }
-    const dedicatedArtifactCapability = DEDICATED_ARTIFACT_CAPABILITY_ROUTINES.has(routine.name);
-    if (!routine.execute && !dedicatedArtifactCapability) {
+    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
+    if (!routine.execute && !ownerInternalRoutine) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }

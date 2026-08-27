@@ -239,7 +239,7 @@ mock.module("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
 }));
 
-const { AgentBrainPrompt } = await import("./agent-brain-prompt");
+const { AgentKnowledgePrompt } = await import("./agent-brain-prompt");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -286,13 +286,13 @@ async function setValue(element: HTMLTextAreaElement, value: string): Promise<vo
   });
 }
 
-describe("AgentBrainPrompt", () => {
+describe("AgentKnowledgePrompt", () => {
   test("waits for the workspace catalog and starts with a workspace-selectable model", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     await act(async () => {
-      root.render(<AgentBrainPrompt kind="workspace_instructions" workspaceId={workspaceId} />);
+      root.render(<AgentKnowledgePrompt kind="workspace_instructions" workspaceId={workspaceId} />);
     });
     await settle();
 
@@ -336,6 +336,36 @@ describe("AgentBrainPrompt", () => {
     container.remove();
   });
 
+  test("keeps the personal Skill draft honest about the manual save boundary", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <AgentKnowledgePrompt kind="skill" workspaceId={workspaceId} personalWorkspace />,
+      );
+    });
+    await settle();
+
+    expect(container.textContent).toContain("Describe a personal skill");
+    expect(container.textContent).toContain("use the personal manual editor below to save it");
+    const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+    await setValue(textarea, "Lead with the outcome.");
+    await act(async () => {
+      (container.querySelector("form") as HTMLFormElement).dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle();
+
+    const options = startSession.mock.calls[0]?.[2] as { instructions: string };
+    expect(options.instructions).toContain("cannot safely activate a user-scoped Skill");
+    expect(options.instructions).toContain("do not call remember or claim that you saved it");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("shows the no-model message and keeps the button disabled when nothing is selectable", async () => {
     getWorkspaceModelCatalog.mockImplementationOnce(async () => ({
       models: [catalogModel("gpt-5.6-sol", { selectable: false })],
@@ -344,7 +374,7 @@ describe("AgentBrainPrompt", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     await act(async () => {
-      root.render(<AgentBrainPrompt kind="company_profile" workspaceId={workspaceId} />);
+      root.render(<AgentKnowledgePrompt kind="company_profile" workspaceId={workspaceId} />);
     });
     await settle();
 
@@ -369,7 +399,7 @@ describe("AgentBrainPrompt", () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     await act(async () => {
-      root.render(<AgentBrainPrompt kind="preference" workspaceId={workspaceId} />);
+      root.render(<AgentKnowledgePrompt kind="skill" workspaceId={workspaceId} />);
     });
     await settle();
 

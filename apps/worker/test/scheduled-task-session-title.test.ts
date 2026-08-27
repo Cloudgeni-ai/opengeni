@@ -3,9 +3,8 @@ import { scheduledTaskSessionTitle } from "../src/activities/scheduled-tasks";
 
 describe("scheduled session title", () => {
   test("names the task", () => {
-    // The product-facing shape: a scheduled session's initialMessage is the task
-    // prompt, identical for every run, so an untitled scheduled session reads as
-    // that prompt in the rail. The task name is the label that identifies it.
+    // A scheduled session starts with the neutral automatic fallback; the task
+    // name is the stable human label that should replace it.
     expect(scheduledTaskSessionTitle("Daily production alert sweep")).toBe(
       "Daily production alert sweep",
     );
@@ -43,16 +42,14 @@ describe("scheduled session title", () => {
     );
   });
 
-  test("an unbounded task name is trimmed to the shared ceiling", () => {
-    // ScheduledTask.name has no length bound of its own, so the title is held to
-    // the same 200 char ceiling the rename field and set_session_title enforce.
+  test("an unbounded task name uses the short automatic-title ceiling without artifacts", () => {
     const title = scheduledTaskSessionTitle("x".repeat(400));
-    expect(title.length).toBe(200);
-    expect(title.endsWith("…")).toBe(true);
+    expect(title.length).toBe(80);
+    expect(title.endsWith("…")).toBe(false);
   });
 
-  test("a name already at the ceiling is left intact", () => {
-    const exact = "y".repeat(200);
+  test("a name already at the automatic ceiling is left intact", () => {
+    const exact = "y".repeat(80);
     expect(scheduledTaskSessionTitle(exact)).toBe(exact);
   });
 

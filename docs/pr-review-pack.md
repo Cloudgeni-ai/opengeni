@@ -13,11 +13,16 @@ Azure DevOps pull requests through one normalized event contract.
 
 1. Install the `pr-review` Pack from **Capabilities** through the normal Pack
    preview/install flow.
-2. Register a dedicated provider app or bot credential and a webhook secret in
-   the Pack setup card.
-3. Configure the provider webhook with the OpenGeni API origin plus the returned
-   opaque path, `/v1/webhooks/automations/:endpointId`.
-4. Bind only the repositories the bot may review. Provider repository,
+2. For GitHub, choose **Install on GitHub** and authorize the deployment-owned
+   **OpenGeni Lens** App as the personal-account owner or an active organization
+   owner. GitHub's installation screen is the repository picker; the callback
+   creates or repairs the exact registration and repository triggers
+   atomically. GitLab, Azure DevOps, and self-hosted bring-your-own GitHub Apps
+   remain available under the advanced credential form.
+3. For an advanced provider registration, configure the provider webhook with
+   the OpenGeni API origin plus the returned opaque path,
+   `/v1/webhooks/automations/:endpointId`.
+4. Enable only the repositories the bot may review. Provider repository,
    installation, and project identifiers are authority, not display metadata.
 
 Registration and secret rotation require workspace administration and
@@ -27,8 +32,12 @@ presence and expiry metadata, never secret values.
 
 ### GitHub
 
-Create a dedicated GitHub App named **OpenGeni Review Bot**. Do not reuse the
-platform GitHub App or a human's personal GitHub connection.
+The ordinary product flow installs a deployment-owned GitHub App named
+**OpenGeni Lens**. It is a separate identity from the platform GitHub App and
+from every human connection. A deployment operator registers it once; workspace
+administrators then install or reconnect it without handling an App ID, private
+key, or webhook secret. Self-hosted deployments may instead use the advanced
+bring-your-own App form.
 
 Repository permissions:
 
@@ -36,11 +45,29 @@ Repository permissions:
 - Contents: read-only
 - Pull requests: read and write
 
-Subscribe to **Pull request** events and configure a strong webhook secret.
-Install the App only on reviewable repositories. Register its App ID and private
-key, then bind an exact installation ID and repository ID. OpenGeni verifies the
-repository against that App, persists GitHub's canonical clone URL, and mints a
-fresh installation token restricted to the exact repository for each live run.
+Organization permission:
+
+- Members: read-only, used only by the OAuth owner-proof callback
+
+Subscribe to **Pull request** events and configure the webhook URL as
+`/v1/webhooks/pr-review/github`. The App setup URL is
+`/v1/pr-review/github/setup`; its OAuth callback is
+`/v1/pr-review/github/oauth/callback`. Configure
+`OPENGENI_PR_REVIEW_GITHUB_APP_ID`, `..._CLIENT_ID`, `..._CLIENT_SECRET`,
+`..._APP_SLUG`, `..._WEBHOOK_SECRET`, and `..._APP_PRIVATE_KEY` on API and
+worker processes. The flow also requires the existing
+`OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET` and
+`OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`. OpenGeni proves exact personal or
+organization ownership, reads the installation's selected repositories,
+persists canonical clone URLs, and mints each live token for the exact
+repository with only `contents:read` and `pull_requests:write`.
+
+The shared App has one webhook URL. OpenGeni verifies its HMAC over the bounded
+raw body before parsing provider ids, then resolves the globally unique
+installation/repository route to one workspace source. A repository may have
+only one active OpenGeni Lens route in a deployment, preventing duplicate review
+sessions across workspaces. Disabling a registration removes those routes but
+does not uninstall the App from GitHub.
 
 The initial adapter supports `github.com`, not GitHub Enterprise Server.
 
@@ -185,10 +212,25 @@ PATCH  /v1/workspaces/:workspaceId/pr-review/repositories/:bindingId
 DELETE /v1/workspaces/:workspaceId/pr-review/repositories/:bindingId
 ```
 
-Provider webhooks use only the generic public route:
+Manually registered provider identities use the generic public route:
 
 ```text
 POST /v1/webhooks/automations/:endpointId
+```
+
+The deployment-owned GitHub App uses its single shared ingress route:
+
+```text
+POST /v1/webhooks/pr-review/github
+```
+
+GitHub installation setup adds:
+
+```text
+GET /v1/workspaces/:workspaceId/pr-review/github
+GET /v1/workspaces/:workspaceId/pr-review/github/connect
+GET /v1/pr-review/github/setup
+GET /v1/pr-review/github/oauth/callback
 ```
 
 `DELETE` is an audit-preserving disable. The opt-in SDK surface is
@@ -205,6 +247,7 @@ the generic automation routes cannot claim or alter those Pack-owned rows.
   `packages/db/src/pr-review.ts`, migration `0320_pr_review_pack.sql`
 - setup HTTP adapter and provider repository verification:
   `apps/api/src/routes/pr-review.ts`,
+  `apps/api/src/routes/pr-review-github.ts`,
   `apps/api/src/integrations/pr-review-provider.ts`
 - standalone credential broker: `apps/worker/src/pr-review-credentials.ts`
 - exact-head repository materialization: `packages/runtime/src/index.ts`

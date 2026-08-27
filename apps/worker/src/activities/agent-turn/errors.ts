@@ -35,10 +35,16 @@ import {
   isXaiSubscriptionTransportError,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
-import type { EscapedMcpTimeoutRecoveryDetail, PreClaimFailureDetail } from "../types";
+import type {
+  EscapedMcpTimeoutRecoveryDetail,
+  PostClaimDatabaseRecoveryDetail,
+  PreClaimFailureDetail,
+} from "../types";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
 } from "../types";
@@ -246,36 +252,75 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
  */
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
-  const sqlState = persistenceFailure?.details.sqlState ?? null;
-  const rawTransportFailure = sqlState === null && isRetryableDatabaseTransportFailure(error);
+  const retryableCode = retryableDatabaseFailureCode(error);
   // The database transaction itself retries only the two contention failures
   // proven safe for immediate replay. Once the activity has failed, the
   // workflow may also retry operational outages after a durable re-read and
   // bounded delay. Unknown driver/database failures stay recoverable because
   // they commonly represent a lost connection; known constraint, auth, and
   // application SQLSTATEs are permanent and must not create an infinite loop.
-  const retryable = Boolean(
-    rawTransportFailure ||
-    (persistenceFailure &&
-      (sqlState === null ||
-        sqlState.startsWith("08") ||
-        sqlState.startsWith("40") ||
-        sqlState.startsWith("53") ||
-        sqlState === "55P03" ||
-        sqlState === "57014" ||
-        sqlState === "57P01" ||
-        sqlState === "57P02" ||
-        sqlState === "57P03" ||
-        sqlState.startsWith("58"))),
-  );
   const detail: PreClaimFailureDetail = {
-    disposition: retryable ? "retryable" : "permanent",
-    code:
-      persistenceFailure?.details.code ?? (rawTransportFailure ? "db_failure" : "claim_invariant"),
+    disposition: retryableCode ? "retryable" : "permanent",
+    code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
   };
   return ApplicationFailure.create({
     message: PRE_CLAIM_FAILURE_MESSAGE,
     type: PRE_CLAIM_FAILURE_TYPE,
+    nonRetryable: true,
+    details: [detail],
+  });
+}
+
+function retryableDatabaseFailureCode(
+  error: unknown,
+): PostClaimDatabaseRecoveryDetail["code"] | null {
+  const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
+  const sqlState = persistenceFailure?.details.sqlState ?? null;
+  if (sqlState === null && isRetryableDatabaseTransportFailure(error)) {
+    return "db_failure";
+  }
+  if (
+    !persistenceFailure ||
+    !(
+      sqlState === null ||
+      sqlState.startsWith("08") ||
+      sqlState.startsWith("40") ||
+      sqlState.startsWith("53") ||
+      sqlState === "55P03" ||
+      sqlState === "57014" ||
+      sqlState === "57P01" ||
+      sqlState === "57P02" ||
+      sqlState === "57P03" ||
+      sqlState.startsWith("58")
+    )
+  ) {
+    return null;
+  }
+  return persistenceFailure.details.code;
+}
+
+/**
+ * Carry one exact claimed-but-not-started attempt into the workflow's DB-only
+ * recovery lane. Permanent database/state failures remain terminal; only the
+ * same operational outage classes that are safe before claim are admitted.
+ */
+export function postClaimDatabaseRecoveryFailure(input: {
+  error: unknown;
+  turnId: string;
+  triggerEventId: string;
+  executionGeneration: number;
+}): ApplicationFailure | null {
+  const code = retryableDatabaseFailureCode(input.error);
+  if (!code || input.executionGeneration < 1) return null;
+  const detail: PostClaimDatabaseRecoveryDetail = {
+    turnId: input.turnId,
+    triggerEventId: input.triggerEventId,
+    executionGeneration: input.executionGeneration,
+    code,
+  };
+  return ApplicationFailure.create({
+    message: POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+    type: POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
     nonRetryable: true,
     details: [detail],
   });

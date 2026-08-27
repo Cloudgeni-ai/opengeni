@@ -309,6 +309,8 @@ export type DrainableProviderProbeFn = (
 export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
 export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
+export const RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS = 5;
+export const RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS = 24 * 60 * 60_000;
 export const CONNECTED_COMMAND_RECONCILIATION_LIMIT = 20;
 export const CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
 
@@ -1475,13 +1477,9 @@ async function deferRetainedProcessClaim(
   process: SandboxRetainedProcess,
   expected: ReturnType<typeof retainedProcessSettlementIdentity>,
   claimId: string,
-  outcome: RetainedProcessReconciliationOutcome,
+  outcome: RetainedProcessDeferralOutcome,
 ): Promise<void> {
-  const exponent = Math.min(4, Math.max(0, process.reconcileAttempts - 1));
-  const retryAfterMs = Math.min(
-    5 * 60_000,
-    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
-  );
+  const deferral = retainedProcessReconciliationDeferral(settings, process, outcome);
   try {
     await deferRetainedProcessReconciliation(db, {
       accountId: process.accountId,
@@ -1490,10 +1488,10 @@ async function deferRetainedProcessClaim(
       processId: process.id,
       expected,
       claimId,
-      outcome,
-      retryAfterMs,
+      outcome: deferral.durableOutcome,
+      retryAfterMs: deferral.retryAfterMs,
     });
-    recordRetainedProcessReconciliation(observability, outcome);
+    recordRetainedProcessReconciliation(observability, deferral.metricOutcome);
   } catch (error) {
     recordRetainedProcessReconciliation(observability, "defer_failed");
     observability.warn("sandbox reaper: retained-process defer failed", {
@@ -1501,6 +1499,47 @@ async function deferRetainedProcessClaim(
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+type RetainedProcessDeferralOutcome =
+  | Extract<RetainedProcessProbeResult, { status: "deferred" }>["reason"]
+  | "settlement_failed";
+
+export function retainedProcessReconciliationDeferral(
+  settings: Pick<ActivityServices["settings"], "sandboxLeaseReaperPeriodMs">,
+  process: Pick<SandboxRetainedProcess, "reconcileAttempts">,
+  outcome: RetainedProcessDeferralOutcome,
+): {
+  durableOutcome: string;
+  metricOutcome: RetainedProcessReconciliationOutcome;
+  retryAfterMs: number;
+  quarantined: boolean;
+} {
+  const bindingQuarantine =
+    process.reconcileAttempts >= RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS &&
+    (outcome === "provider_binding_missing" || outcome === "provider_binding_mismatch");
+  if (bindingQuarantine) {
+    return {
+      durableOutcome: `quarantined_${outcome}`,
+      metricOutcome:
+        outcome === "provider_binding_missing"
+          ? "quarantined_binding_missing"
+          : "quarantined_binding_mismatch",
+      retryAfterMs: RETAINED_PROCESS_BINDING_QUARANTINE_RETRY_MS,
+      quarantined: true,
+    };
+  }
+  const exponent = Math.min(4, Math.max(0, process.reconcileAttempts - 1));
+  const retryAfterMs = Math.min(
+    5 * 60_000,
+    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
+  );
+  return {
+    durableOutcome: outcome,
+    metricOutcome: outcome,
+    retryAfterMs,
+    quarantined: false,
+  };
 }
 
 type RetainedProcessProbeClient = {

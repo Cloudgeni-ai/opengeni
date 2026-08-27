@@ -1,6 +1,6 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
-import type { EventBus } from "@opengeni/events";
+import { SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION, type EventBus } from "@opengeni/events";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -12,6 +12,19 @@ const durableControlReads: Array<{ after: number; limit: number }> = [];
 let interactionRevisionState = { revision: 0, updatedAt: null as Date | null };
 let interactionRevisionReads = 0;
 
+function sessionEventBus(
+  methods: Record<string, unknown>,
+  subscribeRecovery: (listener: (generation: number) => void) => () => void = () => () => {},
+): EventBus {
+  return {
+    sessionEventDurableFanout: {
+      version: SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
+      subscribeRecovery,
+    },
+    ...methods,
+  } as unknown as EventBus;
+}
+
 function event(sequence: number): SessionEvent {
   return {
     id: `33333333-3333-4333-8333-${String(sequence).padStart(12, "0")}`,
@@ -21,6 +34,20 @@ function event(sequence: number): SessionEvent {
     type: "agent.message.delta",
     payload: { text: String(sequence) },
     occurredAt: "2026-07-19T00:00:00.000Z",
+    turnId: null,
+    clientEventId: null,
+  };
+}
+
+function titleEvent(sequence: number, title: string): SessionEvent {
+  return {
+    id: `44444444-4444-4444-8444-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type: "session.title_set",
+    payload: { title, source: "agent" },
+    occurredAt: "2026-08-25T00:00:00.000Z",
     turnId: null,
     clientEventId: null,
   };
@@ -142,7 +169,7 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   let nextSubscriptionId = 0;
   const subscribers = new Map<number, (events: SessionEvent[]) => void | Promise<void>>();
   const released: number[] = [];
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async (
       _workspaceId: string,
       _sessionId: string,
@@ -155,7 +182,7 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
         released.push(id);
       };
     },
-  } as EventBus;
+  });
   const stalledObservations: Array<{
     reason: string;
     desiredSize: number | null;
@@ -281,7 +308,7 @@ test("session SSE coalesces long durable delta runs before they reach the browse
   durableReads.length = 0;
   const response = await sseSessionStream(
     fakeDb as never,
-    { subscribe: async () => () => {} } as unknown as EventBus,
+    sessionEventBus({ subscribe: async () => () => {} }),
     WORKSPACE_ID,
     SESSION_ID,
     0,
@@ -303,16 +330,161 @@ test("session SSE coalesces long durable delta runs before they reach the browse
   await reader.cancel();
 });
 
+test("an open session stream reconciles a quarantine title event from durable fanout", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  let subscriber: ((events: SessionEvent[]) => void | Promise<void>) | null = null;
+  const response = await sseSessionStream(
+    fakeDb as never,
+    sessionEventBus({
+      subscribe: async (
+        _workspaceId: string,
+        _sessionId: string,
+        onEvents: (events: SessionEvent[]) => void | Promise<void>,
+      ) => {
+        subscriber = onEvents;
+        return () => {};
+      },
+    }),
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+
+  durableEvents = [titleEvent(1, "New conversation")];
+  await subscriber?.(durableEvents);
+  const [quarantineEvent] = await readSessionEvents(reader, 1);
+  expect(quarantineEvent).toMatchObject({
+    sequence: 1,
+    type: "session.title_set",
+    payload: { title: "New conversation", source: "agent" },
+  });
+  expect(durableReads).toEqual([
+    { after: 0, limit: 100 },
+    { after: 0, limit: 1 },
+  ]);
+  await reader.cancel();
+});
+
+test("an open session stream catches up after an accepted embedding publish while its subscriber is offline", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  let reconnect: ((generation: number) => void) | null = null;
+  let reconnectReleased = 0;
+  let subscriberConnected = true;
+  let subscriber: ((events: SessionEvent[]) => void | Promise<void>) | null = null;
+  const publish = mock(async (_workspaceId: string, _sessionId: string, events: SessionEvent[]) => {
+    if (subscriberConnected) await subscriber?.(events);
+  });
+  const bus = sessionEventBus(
+    {
+      publish,
+      subscribe: async (
+        _workspaceId: string,
+        _sessionId: string,
+        listener: (events: SessionEvent[]) => void | Promise<void>,
+      ) => {
+        subscriber = listener;
+        return () => {
+          subscriber = null;
+        };
+      },
+    },
+    (listener) => {
+      reconnect = listener;
+      return () => {
+        reconnectReleased += 1;
+      };
+    },
+  );
+  const response = await sseSessionStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+
+  // Core NATS drops publications while this subscriber is disconnected. The
+  // durable row exists, but no session-event notification reaches the stream.
+  durableEvents = [titleEvent(1, "New conversation")];
+  subscriberConnected = false;
+  await bus.publish(WORKSPACE_ID, SESSION_ID, durableEvents);
+  expect(publish).toHaveBeenCalledTimes(1);
+  subscriberConnected = true;
+  reconnect?.(1);
+  const [quarantineEvent] = await readSessionEvents(reader, 1);
+  expect(quarantineEvent).toMatchObject({
+    sequence: 1,
+    type: "session.title_set",
+    payload: { title: "New conversation", source: "agent" },
+  });
+  expect(durableReads).toEqual([
+    { after: 0, limit: 100 },
+    { after: 0, limit: 100 },
+  ]);
+
+  // A duplicate notification for the same transport generation and the normal
+  // heartbeat both remain read-free.
+  reconnect?.(1);
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": heartbeat\n\n");
+  expect(durableReads).toHaveLength(2);
+
+  await reader.cancel();
+  expect(reconnectReleased).toBe(1);
+});
+
+test("idle session stream count does not multiply durable reads on heartbeat", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  const streamCount = 24;
+  const responses = await Promise.all(
+    Array.from({ length: streamCount }, () =>
+      sseSessionStream(
+        fakeDb as never,
+        sessionEventBus({ subscribe: async () => () => {} }),
+        WORKSPACE_ID,
+        SESSION_ID,
+        0,
+        new AbortController().signal,
+        { heartbeatIntervalMs: 1_000, stallTimeoutMs: 100 },
+      ),
+    ),
+  );
+  const readers = responses.map((response) => response.body!.getReader());
+  const connected = await Promise.all(readers.map(async (reader) => await reader.read()));
+  expect(connected.map((frame) => new TextDecoder().decode(frame.value))).toEqual(
+    Array.from({ length: streamCount }, () => ": connected\n\n"),
+  );
+  expect(durableReads).toHaveLength(streamCount);
+
+  const heartbeats = await Promise.all(readers.map(async (reader) => await reader.read()));
+  expect(heartbeats.map((frame) => new TextDecoder().decode(frame.value))).toEqual(
+    Array.from({ length: streamCount }, () => ": heartbeat\n\n"),
+  );
+  expect(durableReads).toHaveLength(streamCount);
+
+  await Promise.all(readers.map(async (reader) => await reader.cancel()));
+});
+
 test("a session stream fails closed before its first frame when host authorization is revoked", async () => {
   durableEvents = [];
   durableReads.length = 0;
   let released = 0;
   let reauthorizations = 0;
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async () => () => {
       released += 1;
     },
-  } as unknown as EventBus;
+  });
   const response = await sseSessionStream(
     fakeDb as never,
     bus,
@@ -339,7 +511,7 @@ test("rechecks current authority and suppresses a live event after revocation", 
   durableReads.length = 0;
   let allowed = true;
   let publish: ((events: SessionEvent[]) => void) | null = null;
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async (
       _workspaceId: string,
       _sessionId: string,
@@ -348,7 +520,7 @@ test("rechecks current authority and suppresses a live event after revocation", 
       publish = listener;
       return () => {};
     },
-  } as unknown as EventBus;
+  });
   const response = await sseSessionStream(
     fakeDb as never,
     bus,
@@ -369,14 +541,51 @@ test("rechecks current authority and suppresses a live event after revocation", 
   await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
 });
 
+test("emits the selected actor epoch and closes before a cross-tab actor event", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  let currentEpoch = "7";
+  let publish: ((events: SessionEvent[]) => void) | null = null;
+  const bus = sessionEventBus({
+    subscribe: async (
+      _workspaceId: string,
+      _sessionId: string,
+      listener: (events: SessionEvent[]) => void,
+    ) => {
+      publish = listener;
+      return () => {};
+    },
+  });
+  const response = await sseSessionStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    {
+      actorEpoch: "7",
+      reauthorize: async () => {
+        if (currentEpoch !== "7") throw new Error("selected actor changed in another tab");
+      },
+    },
+  );
+  expect(response.headers.get("x-opengeni-actor-epoch")).toBe("7");
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+  currentEpoch = "8";
+  publish?.([event(1)]);
+  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+});
+
 test("every long-lived SSE surface closes when its current workspace authority is revoked", async () => {
   durableEvents = [];
   durableControlEvents = [];
   interactionRevisionState = { revision: 0, updatedAt: null };
-  const bus = {
+  const bus = sessionEventBus({
     subscribe: async () => () => {},
     subscribeWorkspaceControl: async () => () => {},
-  } as unknown as EventBus;
+  });
   const revoked = () => ({
     reauthorizeAfterMs: 1_000,
     reauthorize: async () => {

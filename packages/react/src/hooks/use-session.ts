@@ -1,5 +1,5 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSessionRead, type EmbeddedSessionReadClientOverride } from "../session-context";
 import {
   useMutationRunner,
@@ -12,12 +12,18 @@ export type UseSessionOptions = EmbeddedSessionReadClientOverride &
   SessionEventFeedOptions & {
     /** Re-fetch on an interval (ms). Off by default — pair with `useSessionEvents` for live status. */
     pollIntervalMs?: number | undefined;
+    /** Optional shared causal clock invoked when each network read starts. */
+    beginRead?: (() => number) | undefined;
   };
 
 export type UseSessionResult = {
   session: Session | null;
   loading: boolean;
   error: Error | null;
+  /** Monotonic revision of accepted authoritative detail reads. */
+  readRevision: number;
+  /** Causal generation captured when the accepted network read started. */
+  readGeneration: number;
   refresh: () => Promise<void>;
   /** Manually rename the session (PATCH, source='user'). Returns the updated session, or null on failure. */
   updateTitle: (title: string) => Promise<Session | null>;
@@ -41,16 +47,29 @@ export function useSession(
     useEmbeddedSessionRead(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [override, setOverride] = useState<Session | null>(null);
+  const nextReadRevision = useRef(0);
+  const nextReadGeneration = useRef(0);
+  const beginRead = options.beginRead;
   const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const load = useCallback(async () => {
     if (!sessionId) {
       return null;
     }
-    const fetched = await client.getSession(workspaceId, sessionId);
+    let readGeneration = 0;
+    const fetched = await client.getSession(workspaceId, sessionId, {
+      fresh: true,
+      onRequestStart: () => {
+        readGeneration = beginRead?.() ?? ++nextReadGeneration.current;
+      },
+    });
     // A fresh server read supersedes any optimistic/event-driven override.
     setOverride(null);
-    return fetched;
-  }, [client, workspaceId, sessionId]);
+    return {
+      session: fetched,
+      revision: ++nextReadRevision.current,
+      readGeneration,
+    };
+  }, [beginRead, client, workspaceId, sessionId]);
   const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled,
@@ -63,7 +82,9 @@ export function useSession(
     return registerSessionReconciler(sessionId, "session", refresh);
   }, [enabled, refresh, registerSessionReconciler, sessionId]);
 
-  const base = data ?? null;
+  const base = data?.session ?? null;
+  const readRevision = data?.revision ?? 0;
+  const readGeneration = data?.readGeneration ?? 0;
   // The override only ever carries title/titleSource patches; it is reset on
   // every fresh load so it can never go stale against the server snapshot.
   const session = useMemo(
@@ -78,6 +99,13 @@ export function useSession(
   // the UI reflects the new title without polling or a full re-fetch.
   const onTitleEvent = useCallback(
     (event: SessionEvent) => {
+      // The fetched session row is the authoritative title projection through
+      // lastSequence. Shared feeds may replay that historical tail after the
+      // fetch; applying it would undo a row-only migration quarantine. Only an
+      // event committed after this snapshot may live-patch the title.
+      if (!base || event.sequence <= base.lastSequence) {
+        return;
+      }
       const payload = (event.payload ?? {}) as { title?: unknown; source?: unknown };
       const title = payload.title;
       if (typeof title !== "string") {
@@ -87,9 +115,6 @@ export function useSession(
         payload.source === "user" || payload.source === "agent" ? payload.source : null;
       setOverride((current): Session | null => {
         const next = current ?? base;
-        if (!next) {
-          return current;
-        }
         return { ...next, title, titleSource: source };
       });
     },
@@ -118,6 +143,8 @@ export function useSession(
     session,
     loading,
     error,
+    readRevision,
+    readGeneration,
     refresh,
     updateTitle,
     updating: mutating,

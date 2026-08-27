@@ -1,7 +1,7 @@
 // Rigs: organization-, workspace-, or user-scoped sandbox machine definitions. A rig is the
-// team's machine — a base image + setup script + health checks + default
-// variable sets, versioned and self-healing. This page lists them and creates
-// new ones; the per-rig detail owns versions, changes, and promotion.
+// team's machine — a setup/check layer over the platform sandbox image plus
+// default variable sets, versioned and self-healing. This page lists them and
+// creates new ones; the per-rig detail owns versions, changes, and promotion.
 import { useRigs, useVariableSets } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -92,7 +92,7 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
       <PageHeader
         icon={<ServerCogIcon className="size-4" />}
         title="Rigs"
-        description="The team's machine, versioned and self-healing: a base image, a setup script, and health checks that every sandbox on the rig materializes from."
+        description="The team's machine, versioned and self-healing: setup and health checks layered on the deployment-managed platform sandbox."
         actions={
           <>
             <Button
@@ -324,7 +324,6 @@ function CreateRigForm({
       scope,
       name: trimmed,
       ...(description.trim() ? { description: description.trim() } : {}),
-      ...(definition.image.trim() ? { image: definition.image.trim() } : {}),
       ...(definition.setupScript.trim() ? { setupScript: definition.setupScript } : {}),
       checks: cleanRigChecks(definition.checks),
       credentialHooks: [],
@@ -389,7 +388,7 @@ function CreateRigForm({
       >
         <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-fg-muted transition-colors hover:text-fg">
           <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-open:rotate-180" />
-          Image, setup script &amp; checks
+          Setup script &amp; checks
           <span className="text-fg-subtle">
             — optional; you can add these later as verified changes
           </span>

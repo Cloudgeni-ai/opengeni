@@ -11,12 +11,16 @@ export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
   /** Refresh interval (ms). Off by default. */
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
+  /** Optional shared causal clock invoked when each network read starts. */
+  beginRead?: (() => number) | undefined;
 };
 
 export type UseSessionLineageResult = {
   lineage: SessionLineageResponse | null;
   loading: boolean;
   error: Error | null;
+  /** Causal generation captured when the accepted lineage read started. */
+  readGeneration: number;
   refresh: () => Promise<void>;
 };
 
@@ -63,13 +67,26 @@ export function useSessionLineage(
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionLineage(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const load = useCallback(
-    async () =>
-      sessionId
-        ? await client.getSessionLineage(workspaceId, sessionId)
-        : { ancestors: [], children: [], truncated: false },
-    [client, workspaceId, sessionId],
-  );
+  const nextReadGeneration = useRef(0);
+  const beginRead = options.beginRead;
+  const load = useCallback(async () => {
+    if (!sessionId) {
+      return {
+        lineage: { ancestors: [], children: [], truncated: false },
+        readGeneration: 0,
+      };
+    }
+    let readGeneration = 0;
+    const lineage = await client.getSessionLineage(workspaceId, sessionId, {
+      onRequestStart: (sharedReadGeneration) => {
+        readGeneration = sharedReadGeneration ?? beginRead?.() ?? ++nextReadGeneration.current;
+      },
+    });
+    return {
+      lineage,
+      readGeneration,
+    };
+  }, [beginRead, client, workspaceId, sessionId]);
   const state = usePolledValue(load, { pollIntervalMs: options.pollIntervalMs, enabled });
   const refresh = state.refresh;
   useEffect(() => {
@@ -123,9 +140,10 @@ export function useSessionLineage(
     { events: options.events, enabled: enabled && options.events !== undefined },
   );
   return {
-    lineage: state.data,
+    lineage: state.data?.lineage ?? null,
     loading: state.loading,
     error: state.error,
+    readGeneration: state.data?.readGeneration ?? 0,
     refresh,
   };
 }

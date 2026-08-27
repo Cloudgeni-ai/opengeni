@@ -83,13 +83,11 @@ export function settingsWithPackSandboxImage(
 }
 
 export function settingsWithRigImage(settings: Settings, rigImage: string | null): Settings {
-  if (!rigImage) return settings;
-  return {
-    ...settings,
-    dockerImage: rigImage,
-    modalImageRef: rigImage,
-    modalImageId: undefined,
-  };
+  // Explicit Rig image overrides are intentionally inert. Preserve this helper
+  // as a compatibility seam for callers and historical rows while ensuring the
+  // deployment-owned platform image remains authoritative.
+  void rigImage;
+  return settings;
 }
 
 export function rigProviderImageSourceImage(
@@ -250,10 +248,12 @@ export async function resolveSessionSandboxRuntime(
     throw new Error(`Frozen rig version ${session.rigVersionId} is unavailable`);
   }
   const legacy = legacySandboxRuntimeFromPacks(packs);
-  const logicalSettings = settingsWithRigImage(
-    settingsWithPackSandboxImage(settings, legacy.sandboxImage, legacy.sandboxProviderImages),
-    rigVersion?.image ?? null,
-  );
+  // A Rig is always a setup/check layer over the deployment-owned platform
+  // sandbox. Legacy pre-v2 Pack image compatibility remains available only to
+  // rig-less sessions; it cannot replace the base beneath a Rig.
+  const logicalSettings = rigVersion
+    ? settings
+    : settingsWithPackSandboxImage(settings, legacy.sandboxImage, legacy.sandboxProviderImages);
   return {
     settings: {
       ...logicalSettings,

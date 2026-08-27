@@ -4,7 +4,6 @@ import {
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   getXaiSessionAccountPin,
   setXaiSessionAccountPin,
-  countSessionHistoryItems,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
   beginConnectorActionExecution,
@@ -46,7 +45,10 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
 import { executeCodexImageGeneration } from "../codex-image-generation";
-import { resolveImageGenerationReferences } from "../image-generation-references";
+import {
+  ImageGenerationReferenceError,
+  resolveImageGenerationReferencesForTool,
+} from "../image-generation-references";
 import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { VideoGenerationRejectedResult } from "@opengeni/contracts";
@@ -74,6 +76,7 @@ import type {
   RecordingState,
   SandboxRuntimeState,
 } from "./turn-context";
+import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 
 export type BuildTurnAgentDeps = {
   input: RunAgentTurnInput;
@@ -137,6 +140,7 @@ export type BuildTurnAgentDeps = {
     executionGeneration: number;
     initiator: Pick<ClaimTurnOk["turn"]["initiator"], "kind" | "subjectId">;
   };
+  preparationIndependentToolNames: readonly string[];
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -154,7 +158,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     cancellationSignal,
     runtimeCancellationSignal,
     eventing,
-    attempt,
     sandboxState,
     recordingState,
     maybeStartOnTurnRecording,
@@ -197,6 +200,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     fileResourceDownloads,
     attemptConnectorActionBindings,
     connectorActionIdentity,
+    preparationIndependentToolNames,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -205,9 +209,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   } = deps;
   const preparedTools = eventing.preparedTools!;
 
-  const isGenesisTurn =
-    attempt.triggerType === "user.message" &&
-    (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
+  const missingSessionTitleHint = preparationIndependentToolNames.includes(
+    SESSION_TITLE_MODEL_TOOL_NAME,
+  );
   // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
   // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
   // may have been swapped to a connected machine (active_sandbox_id → a
@@ -239,9 +243,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       : {};
   const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
   const resolveImageReferences = async (
-    references: Parameters<typeof resolveImageGenerationReferences>[0]["references"],
+    references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>
-    await resolveImageGenerationReferences({
+    await resolveImageGenerationReferencesForTool({
       db,
       objectStorage: objectStorage!,
       accountId: input.accountId,
@@ -267,7 +271,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           encoding: "base64",
           maxBytes,
         });
-        if (read.truncated) throw new Error("Sandbox image reference exceeds the byte limit");
+        if (read.truncated) {
+          throw new ImageGenerationReferenceError(
+            "reference_too_large",
+            "The sandbox image reference exceeds the per-image byte limit.",
+          );
+        }
         return Uint8Array.from(Buffer.from(read.content, "base64"));
       },
     });
@@ -296,7 +305,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         imageGeneration: {
           kind: "provider_adapter",
           execute: async ({ prompt, references }, { toolCallId }) => {
-            const resolvedReferences = await resolveImageReferences(references);
+            const referenceResolution = await resolveImageReferences(references);
+            if (referenceResolution.status === "rejected") return referenceResolution.result;
             const receipt = await executeCodexImageGeneration({
               db,
               objectStorage,
@@ -307,7 +317,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               attemptId: input.attemptId,
               toolCallId,
               prompt,
-              references: resolvedReferences,
+              references: referenceResolution.references,
               credentialId: imageAuthority.credentialId,
               codexContext: imageAuthority.credentialContext,
               ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
@@ -330,7 +340,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         imageGeneration: {
           kind: "provider_adapter",
           execute: async ({ prompt, references }, { toolCallId }) => {
-            const resolvedReferences = await resolveImageReferences(references);
+            const referenceResolution = await resolveImageReferences(references);
+            if (referenceResolution.status === "rejected") return referenceResolution.result;
             const receipt = await executeXaiSubscriptionImageGeneration({
               db,
               objectStorage,
@@ -341,7 +352,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               attemptId: input.attemptId,
               toolCallId,
               prompt,
-              references: resolvedReferences,
+              references: referenceResolution.references,
               credentialId: imageAuthority.credentialId,
               xaiContext: imageAuthority.credentialContext,
               ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
@@ -365,7 +376,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       imageGeneration: {
         kind: "provider_adapter",
         execute: async ({ prompt, references }, { toolCallId }) => {
-          const resolvedReferences = await resolveImageReferences(references);
+          const referenceResolution = await resolveImageReferences(references);
+          if (referenceResolution.status === "rejected") return referenceResolution.result;
           const receipt = await executeGatewayImageGeneration({
             db,
             objectStorage,
@@ -377,7 +389,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             apiKey: gatewayApiKey,
             modelId: capabilitySettings.imageGenerationModel,
             prompt,
-            references: resolvedReferences,
+            references: referenceResolution.references,
             toolCallId,
             ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
           });
@@ -612,7 +624,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(serviceTier ? { serviceTier } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         humanInputEnabled: agentHumanInputEnabled,
-        genesisTitleHint: isGenesisTurn,
+        missingSessionTitleHint,
         sandboxEnvironment,
         ...(preparedTools.attemptToolCatalog
           ? { attemptToolCatalog: preparedTools.attemptToolCatalog }
@@ -681,6 +693,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(eventing.toolPreparationReady
           ? { toolPreparationReady: eventing.toolPreparationReady }
           : {}),
+        preparationIndependentToolNames,
         supportsImageInput,
         inputFileMediaTypes: modelInputPolicy.inputFileMediaTypes,
         ...(resolvedModel

@@ -476,7 +476,6 @@ function admissionFixture(
   const requests: RequestRecord[] = [];
   const checks: Array<Record<string, any>> = [];
   let nextCheckId = 850;
-  let mainReads = 0;
   let retainedHeadSha = options.releaseHeadRefSha;
   let retainedRelease = options.release ?? null;
   const pullBaseSha = options.pullBaseSha ?? baseSha;
@@ -526,10 +525,8 @@ function admissionFixture(
     }
     if (method !== "GET") return response({ message: "read-only fixture" }, 405);
     if (url.pathname === prefix) return response(repository());
-    if (url.pathname === `${prefix}/git/ref/heads/main`) {
-      mainReads += 1;
-      return response(mainRef(mainReads > 2 ? (options.terminalMainSha ?? baseSha) : baseSha));
-    }
+    if (url.pathname === `${prefix}/git/ref/heads/main`)
+      return response(mainRef(options.terminalMainSha ?? baseSha));
     if (url.pathname === `${prefix}/pulls/${pullNumber}`)
       return response(versionPull({ base: pullBaseSha }));
     if (url.pathname === `${prefix}/actions/runs/${runId}`)
@@ -623,6 +620,19 @@ function admissionFixture(
         ahead_by: 1,
         total_commits: 1,
       });
+    if (
+      options.terminalMainSha !== undefined &&
+      url.pathname === `${prefix}/compare/${baseSha}...${options.terminalMainSha}`
+    )
+      return response({
+        status: "ahead",
+        base_commit: { sha: baseSha },
+        merge_base_commit: { sha: baseSha },
+        commits: [{ sha: options.terminalMainSha }],
+        behind_by: 0,
+        ahead_by: 1,
+        total_commits: 1,
+      });
     if (url.pathname === `${prefix}/pulls/${pullNumber}/files`)
       return response([{ filename: "package.json", status: "modified" }]);
     if (url.pathname === `${prefix}/git/trees/${pullMergeBaseTreeSha}`)
@@ -696,6 +706,18 @@ describe("automation CI admission", () => {
       logger: { log() {} },
     });
     expect(result).toMatchObject({ prNumber: pullNumber, baseSha, headSha });
+  });
+
+  test("keeps an admitted Version PR valid while main advances", async () => {
+    const advancedMainSha = "9".repeat(40);
+    const fixture = admissionFixture({ terminalMainSha: advancedMainSha });
+    const result = await validateVersionPrCiAdmission({
+      env: automationCiEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+    expect(result).toMatchObject({ prNumber: pullNumber, baseSha, headSha });
+    expect(result.admission.currentMainSha).toBe(advancedMainSha);
   });
 
   test("rejects a failed source Release run", async () => {
@@ -2103,6 +2125,9 @@ test("exact-head check completion succeeds while the Version PR remains unchange
   expect(
     fixture.checks.find((check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.automationCi),
   ).toMatchObject({ status: "completed", conclusion: "success" });
+  expect(fixture.requests.some((request) => request.path.endsWith("/git/ref/heads/main"))).toBe(
+    false,
+  );
 });
 
 test("exact-head check completion accepts an exact-tree merge after branch deletion", async () => {
@@ -3673,6 +3698,14 @@ describe("workflow contracts", () => {
     ]) {
       expect(source.steps.some((step: any) => step.name === stepName)).toBe(true);
     }
+    const releasePlan = source.steps.find(
+      (step: any) => step.name === "Validate changeset release plan",
+    ).run;
+    expect(releasePlan).toContain('version_base_ref="$AUTOMATION_BASE_SHA"');
+    expect(releasePlan).toContain('git worktree add --detach "$expected" "$version_base_ref"');
+    expect(releasePlan).not.toContain(
+      '[ "$(git rev-parse refs/remotes/origin/main)" = "$AUTOMATION_BASE_SHA" ]',
+    );
     expect(
       source.steps.find((step: any) => step.name === "Profile impacted TypeScript 7 projects").run,
     ).toContain("scripts/ci/run-typecheck-plan.ts");
@@ -3744,17 +3777,20 @@ describe("workflow contracts", () => {
       "browser-acceptance": [
         "Stabilize Ubuntu package downloads",
         "Install pinned lane browser runtimes",
+        "Browser account session-set acceptance",
         "Editable artifact browser acceptance",
         "Install pinned artifact native toolchain",
         "Editable artifact full-stack browser acceptance",
         "Codex quota and entitlement browser acceptance",
         "Queue surface browser acceptance",
         "Long user-message disclosure browser acceptance",
+        "Timeline pagination browser regressions",
         "Public realtime SDK demo browser acceptance",
         "Session pin browser acceptance",
         "Responsive knowledge surfaces browser acceptance",
         "Organization onboarding lifecycle acceptance",
         "Workbench browser acceptance",
+        "Upload browser account acceptance evidence",
         "Upload session pin visual evidence",
         "Upload Codex quota visual evidence",
         "Upload responsive knowledge-surface evidence",
@@ -3793,6 +3829,13 @@ describe("workflow contracts", () => {
     const browser = ci.jobs["browser-acceptance"];
     const expectedBrowserGates = new Map([
       [
+        "Browser account session-set acceptance",
+        {
+          lane: "accounts",
+          run: "bun test --max-concurrency=1 --timeout 180000 \\\n  ./packages/db/test/migration-0362-managed-auth-session-sets.test.ts \\\n  ./apps/api/test/managed-auth-session-sets.integration.test.ts\nbun scripts/run-browser-e2e.ts \\\n  ./test/e2e/browser-accounts-acceptance.e2e.ts\n",
+        },
+      ],
+      [
         "Codex quota and entitlement browser acceptance",
         {
           lane: "interaction",
@@ -3811,6 +3854,13 @@ describe("workflow contracts", () => {
         {
           lane: "interaction",
           run: "bun scripts/run-browser-e2e.ts ./test/e2e/user-message-disclosure.browser.e2e.ts",
+        },
+      ],
+      [
+        "Timeline pagination browser regressions",
+        {
+          lane: "interaction",
+          run: "bun scripts/run-browser-e2e.ts ./test/e2e/timeline-scroll.browser.e2e.ts",
         },
       ],
       [
@@ -3883,7 +3933,8 @@ describe("workflow contracts", () => {
         uses: "./.github/actions/playwright-browsers",
         "timeout-minutes": 17,
         with: {
-          browsers: "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || 'chromium' }}",
+          browsers:
+            "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
         },
       },
     ]);
@@ -3922,6 +3973,13 @@ describe("workflow contracts", () => {
     );
     expect(browserAction).toContain("path: ~/.cache/ms-playwright");
     expect(
+      browser.steps.find((step: any) => step.name === "Browser account session-set acceptance").env,
+    ).toEqual({
+      OPENGENI_REQUIRE_REAL_DB: "1",
+      OPENGENI_ACCOUNT_BROWSER_ENGINE: "${{ matrix.engine }}",
+      OPENGENI_ACCOUNT_EVIDENCE_DIR: "/tmp/opengeni-account-acceptance",
+    });
+    expect(
       browser.steps.find(
         (step: any) => step.name === "Codex quota and entitlement browser acceptance",
       ).env,
@@ -3946,6 +4004,11 @@ describe("workflow contracts", () => {
     });
 
     const expectedEvidence = {
+      "Upload browser account acceptance evidence": {
+        if: "${{ matrix.lane == 'accounts' && steps.browser_accounts.outcome == 'success' }}",
+        name: "browser-account-acceptance-${{ matrix.engine }}",
+        path: ["/tmp/opengeni-account-acceptance"],
+      },
       "Upload session pin visual evidence": {
         if: "${{ always() && matrix.lane == 'knowledge' && (steps.session_pin_browser.outcome == 'success' || steps.session_pin_browser.outcome == 'failure') }}",
         name: "sessionpin-session-pin-visual-evidence",
@@ -3980,14 +4043,10 @@ describe("workflow contracts", () => {
           "/tmp/knowledge-surfaces-768-dark-documents.png",
           "/tmp/knowledge-surfaces-desktop-light-memory.png",
           "/tmp/knowledge-surfaces-desktop-dark-memory.png",
-          "/tmp/company-brain-320-light-overview.png",
-          "/tmp/company-brain-320-light-attention.png",
-          "/tmp/company-brain-375-dark-overview.png",
-          "/tmp/company-brain-375-dark-attention.png",
-          "/tmp/company-brain-768-light-overview.png",
-          "/tmp/company-brain-768-light-attention.png",
-          "/tmp/company-brain-desktop-dark-overview.png",
-          "/tmp/company-brain-desktop-dark-attention.png",
+          "/tmp/agent-knowledge-320-light-overview.png",
+          "/tmp/agent-knowledge-375-dark-overview.png",
+          "/tmp/agent-knowledge-768-light-overview.png",
+          "/tmp/agent-knowledge-desktop-dark-overview.png",
         ],
       },
       "Upload workbench visual evidence": {

@@ -13,11 +13,13 @@ import {
   coalesceSessionEventDeltas,
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
+  requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
   sessionEventResumeSequence,
   type EventBus,
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
 const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
@@ -269,12 +271,14 @@ export async function sseSessionStream(
   signal: AbortSignal,
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  const durableFanout = requireSessionEventDurableFanoutCapability(bus);
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: SessionEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<SessionEvent> | null = null;
+  let stopReconnectObservation = () => {};
   let stopReauthorization = () => {};
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   let detachAbortListener = () => {};
@@ -282,6 +286,8 @@ export async function sseSessionStream(
   const stopUpstream = () => {
     closeMetrics();
     detachAbortListener();
+    stopReconnectObservation();
+    stopReconnectObservation = () => {};
     stopReauthorization();
     if (heartbeatTimer) {
       clearTimeout(heartbeatTimer);
@@ -315,17 +321,6 @@ export async function sseSessionStream(
     });
     writeTail = write.catch(() => {});
     return write;
-  };
-  const scheduleHeartbeat = () => {
-    if (channel.stopped()) return;
-    heartbeatTimer = setTimeout(() => {
-      heartbeatTimer = null;
-      void writeFrame(": heartbeat\n\n")
-        .then(scheduleHeartbeat)
-        .catch((error) => {
-          if (!(error instanceof SseStreamStoppedError)) fail(error);
-        });
-    }, heartbeatIntervalMs);
   };
   const deliverDurableThrough = async (targetSequence?: number) => {
     while (true) {
@@ -364,12 +359,66 @@ export async function sseSessionStream(
       if (targetSequence === undefined && page.length < limit) return;
     }
   };
+  let durableDeliveryTail = Promise.resolve();
+  const reconcileDurableThrough = (targetSequence?: number): Promise<void> => {
+    const deliveryRun = durableDeliveryTail.then(() => deliverDurableThrough(targetSequence));
+    durableDeliveryTail = deliveryRun.catch(() => {});
+    return deliveryRun;
+  };
+  let newestReconnectGeneration = 0;
+  let reconnectReconcilePending = false;
+  let reconnectReconcileRunning = false;
+  const drainReconnectReconciliation = () => {
+    if (
+      bootstrapping ||
+      reconnectReconcileRunning ||
+      !reconnectReconcilePending ||
+      channel.stopped()
+    ) {
+      return;
+    }
+    reconnectReconcileRunning = true;
+    void (async () => {
+      while (reconnectReconcilePending && !channel.stopped()) {
+        // Multiple reconnects during one durable read collapse into one newest
+        // catch-up. Postgres is authoritative, so that later read covers every
+        // disconnect window without one query per heartbeat or buffered event.
+        reconnectReconcilePending = false;
+        await reconcileDurableThrough();
+      }
+    })()
+      .catch((error) => {
+        if (!(error instanceof SseStreamStoppedError)) fail(error);
+      })
+      .finally(() => {
+        reconnectReconcileRunning = false;
+        drainReconnectReconciliation();
+      });
+  };
+  const scheduleReconnectReconciliation = (generation: number) => {
+    if (generation <= newestReconnectGeneration || channel.stopped()) return;
+    newestReconnectGeneration = generation;
+    reconnectReconcilePending = true;
+    drainReconnectReconciliation();
+  };
   const send = async (event: SessionEvent) => {
     const targetSequence = sessionEventResumeSequence(event);
     if (targetSequence <= lastSent) return;
-    await deliverDurableThrough(targetSequence);
+    await reconcileDurableThrough(targetSequence);
+  };
+  const scheduleHeartbeat = () => {
+    if (channel.stopped()) return;
+    heartbeatTimer = setTimeout(() => {
+      heartbeatTimer = null;
+      void writeFrame(": heartbeat\n\n")
+        .then(scheduleHeartbeat)
+        .catch((error) => {
+          if (!(error instanceof SseStreamStoppedError)) fail(error);
+        });
+    }, heartbeatIntervalMs);
   };
   delivery = createLatestWinsDelivery(send, fail);
+  stopReconnectObservation = durableFanout.subscribeRecovery(scheduleReconnectReconciliation);
 
   void (async () => {
     const release = await bus.subscribe(workspaceId, sessionId, (events) => {
@@ -389,10 +438,11 @@ export async function sseSessionStream(
     }
     unsubscribe = release;
 
-    await deliverDurableThrough();
+    await reconcileDurableThrough();
     await writeFrame(": connected\n\n");
     scheduleHeartbeat();
     bootstrapping = false;
+    drainReconnectReconciliation();
     const buffered = newestBuffered;
     newestBuffered = null;
     if (buffered) delivery.publish([buffered]);
@@ -414,6 +464,7 @@ export async function sseSessionStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -587,6 +638,7 @@ export async function sseWorkspaceControlStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -714,6 +766,7 @@ export async function sseWorkspaceLiveStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -802,6 +855,7 @@ export async function sseWorkspaceInteractionRevisionStream(
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      ...(options.actorEpoch ? { [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: options.actorEpoch } : {}),
     },
   });
 }
@@ -873,6 +927,8 @@ export type SseDeliveryOptions = {
   /** Current ACL re-check, run even while the event stream is idle. */
   reauthorize?: (() => Promise<void>) | undefined;
   reauthorizeAfterMs?: number | undefined;
+  /** Exact selected actor emitted on the stream response for cross-tab fencing. */
+  actorEpoch?: string | undefined;
 };
 
 export type SessionSseDeliveryOptions = SseDeliveryOptions;

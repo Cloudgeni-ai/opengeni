@@ -101,6 +101,7 @@ import {
   toolCallProducesRetainableSessionImage,
   completedToolCallFromSdkEvent,
 } from "./history";
+import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
 import {
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
@@ -481,6 +482,7 @@ export async function runTurnStreamAttempt(
       resolvedModel?.provider.kind === "xai-subscription";
     let fallbackProviderRequestStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+      await checkpointHistoryBeforeProviderDispatch(historySink);
       if (
         providerPublishesNativeRequestEvents ||
         eventing.firstModelRequestPreparationRecorded ||

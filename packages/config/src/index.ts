@@ -1241,10 +1241,19 @@ const SettingsSchema = z.object({
   githubAppSlug: z.string().optional(),
   githubWebhookSecret: z.string().optional(),
   githubAppPrivateKey: z.string().optional(),
+  prReviewGithubAppId: z.string().optional(),
+  prReviewGithubClientId: z.string().optional(),
+  prReviewGithubClientSecret: z.string().optional(),
+  prReviewGithubAppSlug: z.string().optional(),
+  prReviewGithubWebhookSecret: z.string().optional(),
+  prReviewGithubAppPrivateKey: z.string().optional(),
   betterAuthSecret: z.string().optional(),
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
   betterAuthTrustedOrigins: z.string().default(""),
+  // Rolling browser login-slot compatibility. Repository/deployment default is
+  // deliberately legacy; changing to broker is an operator-authorized rollout.
+  managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("OpenGeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
@@ -2622,10 +2631,17 @@ export function getSettings(): Settings {
     githubAppSlug: optional("OPENGENI_GITHUB_APP_SLUG"),
     githubWebhookSecret: optional("OPENGENI_GITHUB_WEBHOOK_SECRET"),
     githubAppPrivateKey: optional("OPENGENI_GITHUB_APP_PRIVATE_KEY"),
+    prReviewGithubAppId: optional("OPENGENI_PR_REVIEW_GITHUB_APP_ID"),
+    prReviewGithubClientId: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID"),
+    prReviewGithubClientSecret: optional("OPENGENI_PR_REVIEW_GITHUB_CLIENT_SECRET"),
+    prReviewGithubAppSlug: optional("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG"),
+    prReviewGithubWebhookSecret: optional("OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET"),
+    prReviewGithubAppPrivateKey: optional("OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY"),
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
     betterAuthTrustedOrigins: optional("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS"),
+    managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
@@ -5276,6 +5292,15 @@ function validateSettings(settings: Settings): void {
     if (!settings.delegationSecret) {
       throw new Error(
         "OPENGENI_DELEGATION_SECRET is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",
+      );
+    }
+    if (
+      settings.managedAuthSessionSetMode !== "legacy" &&
+      !["local", "test"].includes(settings.environment) &&
+      !settings.publicBaseUrl.startsWith("https://")
+    ) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when browser session sets are enabled outside local/test",
       );
     }
     if (!["local", "test"].includes(settings.environment) && !settings.resendApiKey) {

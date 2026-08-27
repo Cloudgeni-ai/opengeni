@@ -417,6 +417,7 @@ async function installAccessApi(page: Page, state: AccessUiState): Promise<void>
         fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
         productAccessMode: "managed",
         auth: { mode: "managedSession", session: "cookie" },
+        managedAuthSessionSetMode: "legacy",
         structuredServices: { fileSystem: false, git: false, terminalEvents: false },
       });
     }

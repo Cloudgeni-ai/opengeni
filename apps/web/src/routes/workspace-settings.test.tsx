@@ -109,7 +109,7 @@ describe("workspace access settings convergence", () => {
         "Workspace access is managed from the organization",
       );
       expect(rendered.container.textContent).toContain(
-        "single place to assign named workspace roles",
+        "granting or revoking named workspace roles",
       );
       expect(rendered.container.textContent).toContain("Manage organization workspaces");
       expect(listWorkspaceMembers).not.toHaveBeenCalled();

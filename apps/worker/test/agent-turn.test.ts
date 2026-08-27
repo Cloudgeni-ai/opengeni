@@ -89,6 +89,7 @@ import {
   managedSandboxOwnershipForTurn,
   pendingToolCallFromSdkEvent,
   pointerReconcileReason,
+  postClaimDatabaseRecoveryFailure,
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
   persistOrSignalSessionAttemptQuiescence,
@@ -624,6 +625,24 @@ describe("turn exact-content boundaries", () => {
     expect(Object.hasOwn(completed!.resultItem.output as object, "optional")).toBe(false);
     expect(Object.hasOwn(rawItem, "providerData")).toBe(true);
     expect(Object.hasOwn(rawItem.output, "optional")).toBe(true);
+  });
+
+  test("correlates native tool-search results whose id only survives in provider data", () => {
+    const rawItem = {
+      type: "tool_search_output",
+      tools: [{ name: "matching_tool" }],
+      providerData: { call_id: "tool-search-provider-id" },
+    };
+
+    expect(
+      completedToolCallFromSdkEvent({
+        type: "run_item_stream_event",
+        item: { type: "tool_search_output_item", rawItem },
+      }),
+    ).toEqual({
+      callId: "tool-search-provider-id",
+      resultItem: rawItem,
+    });
   });
 
   test("keeps non-object undefined values fail-closed at the pending receipt boundary", () => {
@@ -4721,6 +4740,51 @@ describe("transient provider error classifier", () => {
     expect(
       JSON.stringify(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))),
     ).not.toContain("SECRET");
+  });
+
+  test("exports exact post-claim recovery truth only for operational database failures", () => {
+    const identity = {
+      turnId: "turn-claimed",
+      triggerEventId: "trigger-claimed",
+      executionGeneration: 3,
+    };
+    const deadlock = new SessionEventPersistenceError({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_turns.start",
+      eventTypes: ["turn.started"],
+      correlationId: "corr-postclaim",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: { table: "session_turns" },
+    });
+    expect(postClaimDatabaseRecoveryFailure({ error: deadlock, ...identity })).toMatchObject({
+      type: "OpenGeniPostClaimDatabaseRecovery",
+      nonRetryable: true,
+      details: [{ ...identity, code: "db_deadlock" }],
+    });
+    expect(
+      postClaimDatabaseRecoveryFailure({
+        error: Object.assign(new Error("SECRET connection detail"), { code: "ECONNRESET" }),
+        ...identity,
+      }),
+    ).toMatchObject({
+      details: [{ ...identity, code: "db_failure" }],
+    });
+    const constraint = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "23505",
+      stage: "session_turns.start",
+      eventTypes: ["turn.started"],
+      correlationId: "corr-postclaim-constraint",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { constraint: "session_turns_pkey" },
+    });
+    expect(postClaimDatabaseRecoveryFailure({ error: constraint, ...identity })).toBeNull();
+    expect(
+      postClaimDatabaseRecoveryFailure({ error: new Error("SECRET invariant"), ...identity }),
+    ).toBeNull();
   });
 
   test("retains an exact database cause internally but sanitizes the session payload", async () => {

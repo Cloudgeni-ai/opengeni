@@ -21,6 +21,8 @@ import {
   createNatsEventBus,
   createResponderConnection,
   publishDurableSessionEvents,
+  requireSessionEventDurableFanoutCapability,
+  SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION,
 } from "../src/index";
 
 const SENTINEL_URL = "nats://test-sentinel:4222";
@@ -41,6 +43,46 @@ function fakeNatsConnection(): unknown {
     },
     isClosed: () => false,
     isDraining: () => false,
+  };
+}
+
+function controllableStatusFeed(): {
+  iterable: AsyncIterable<{ type: string; data: string }>;
+  push: (type: string) => void;
+  close: () => void;
+} {
+  const queued: Array<{ type: string; data: string }> = [];
+  const waiters: Array<
+    (result: IteratorResult<{ type: string; data: string }, undefined>) => void
+  > = [];
+  let closed = false;
+  return {
+    iterable: {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => {
+            const queuedStatus = queued.shift();
+            if (queuedStatus) return { done: false, value: queuedStatus } as const;
+            if (closed) return { done: true, value: undefined } as const;
+            return await new Promise<IteratorResult<{ type: string; data: string }, undefined>>(
+              (resolve) => waiters.push(resolve),
+            );
+          },
+        };
+      },
+    },
+    push: (type) => {
+      const status = { type, data: type };
+      const waiter = waiters.shift();
+      if (waiter) waiter({ done: false, value: status });
+      else queued.push(status);
+    },
+    close: () => {
+      closed = true;
+      for (const waiter of waiters.splice(0)) {
+        waiter({ done: true, value: undefined });
+      }
+    },
   };
 }
 
@@ -115,7 +157,54 @@ describe("long-lived NATS connections survive an indefinite broker outage", () =
     expect(opts.name).toBe("opengeni-auth-callout");
     expectInfiniteReconnect(opts);
   });
+
+  test("event-bus subscribers observe each successful transport reconnect once", async () => {
+    const statuses = controllableStatusFeed();
+    const bus = await createNatsEventBus("nats://reconnect-observer.test:4222", undefined, {
+      connect: async () =>
+        ({
+          ...fakeNatsConnection(),
+          status: () => statuses.iterable,
+          async drain() {
+            statuses.close();
+          },
+        }) as never,
+    });
+    const observed: number[] = [];
+    const capability = requireSessionEventDurableFanoutCapability(bus);
+    expect(capability.version).toBe(SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION);
+    const unsubscribe = capability.subscribeRecovery((generation) => observed.push(generation));
+
+    statuses.push("disconnect");
+    await Bun.sleep(0);
+    expect(observed).toEqual([]);
+
+    statuses.push("reconnect");
+    statuses.push("reconnect");
+    await waitFor(() => observed.length === 2);
+    expect(observed).toEqual([1, 2]);
+
+    unsubscribe();
+    statuses.push("reconnect");
+    await Bun.sleep(0);
+    expect(observed).toEqual([1, 2]);
+    await bus.close();
+  });
+
+  test("legacy publish-only embedding buses fail the explicit recovery contract", () => {
+    expect(() =>
+      requireSessionEventDurableFanoutCapability({ publish: async () => undefined }),
+    ).toThrow("sessionEventDurableFanout v1");
+  });
 });
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for NATS status observation");
+    await Bun.sleep(1);
+  }
+}
 
 describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
   test("does not throw the turn to death when bus.publish rejects", async () => {
@@ -184,6 +273,49 @@ describe("appendAndPublishEvents is best-effort on the live fan-out", () => {
       [],
     );
     expect(publishCalls).toBe(0);
+  });
+});
+
+describe("confirmed durable fan-out", () => {
+  test("rejects a broker flush failure while ordinary live publish remains best-effort", async () => {
+    const emptyAsyncIterable = () => (async function* () {})();
+    const bus = await createNatsEventBus("nats://confirmed-publish.test:4222", undefined, {
+      connect: async () =>
+        ({
+          status: emptyAsyncIterable,
+          subscribe: () => Object.assign(emptyAsyncIterable(), { unsubscribe() {} }),
+          publish() {},
+          async flush() {
+            throw new Error("CONNECTION_CLOSED");
+          },
+          async drain() {},
+          async request() {
+            return { data: new Uint8Array() };
+          },
+          isClosed: () => false,
+          isDraining: () => false,
+        }) as never,
+    });
+    const events = [
+      {
+        id: "00000000-0000-4000-8000-000000000011",
+        workspaceId: SENTINEL_WS,
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        sequence: 11,
+        type: "session.title_set",
+        payload: { title: "New conversation", source: "agent" },
+        occurredAt: "2026-08-25T00:00:00.000Z",
+        clientEventId: null,
+        turnId: null,
+      },
+    ];
+
+    await expect(
+      bus.publish(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", events as never),
+    ).resolves.toBeUndefined();
+    await expect(
+      bus.publishConfirmed!(SENTINEL_WS, "00000000-0000-4000-8000-000000000001", events as never),
+    ).rejects.toThrow("CONNECTION_CLOSED");
   });
 });
 

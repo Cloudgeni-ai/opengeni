@@ -28,6 +28,8 @@ import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
+import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { hasAccountPermission } from "@/lib/permissions";
 import { usePageLiveActivity } from "@opengeni/react";
 import { listViewState } from "@/lib/load-state";
 import type {
@@ -38,6 +40,10 @@ import type {
 } from "@/types";
 
 export const DEFAULT_DOCUMENT_AUTHORITY_KIND: DocumentAuthorityKind = "workspace";
+
+export function defaultDocumentAuthorityKind(personalWorkspace: boolean): DocumentAuthorityKind {
+  return personalWorkspace ? "personal" : DEFAULT_DOCUMENT_AUTHORITY_KIND;
+}
 
 export const DOCUMENT_AUTHORITY_OPTIONS = [
   { value: "organization", label: "Company" },
@@ -148,12 +154,26 @@ export function localPopulatedDocumentsPreview(
 export function DocumentsRoute({
   workspaceId,
   returnToBrain = false,
+  authorityKind,
 }: {
   workspaceId: string;
   returnToBrain?: boolean;
+  authorityKind?: DocumentAuthorityKind;
 }) {
   const context = useAppContext();
   const client = context.client;
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const canWriteOrganizationKnowledge = Boolean(
+    workspace?.accountId &&
+    hasAccountPermission(context.accessContext, workspace.accountId, "account:admin"),
+  );
+  const canAddKnowledge = authorityKind !== "organization" || canWriteOrganizationKnowledge;
+  const dropAuthorityOptions = authorityKind
+    ? DOCUMENT_AUTHORITY_OPTIONS.filter((option) => option.value === authorityKind)
+    : DOCUMENT_AUTHORITY_OPTIONS.filter(
+        (option) => option.value !== "organization" || canWriteOrganizationKnowledge,
+      );
   const pageLive = usePageLiveActivity();
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
@@ -166,7 +186,7 @@ export function DocumentsRoute({
   const [query, setQuery] = useState("");
   const [dropText, setDropText] = useState("");
   const [dropAuthorityKind, setDropAuthorityKind] = useState<DocumentAuthorityKind>(
-    DEFAULT_DOCUMENT_AUTHORITY_KIND,
+    () => authorityKind ?? defaultDocumentAuthorityKind(personalWorkspace),
   );
   const [dropping, setDropping] = useState(false);
   const dropFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -180,9 +200,12 @@ export function DocumentsRoute({
   // Set when background indexing-status polling fails, so stale "indexing…"
   // rows carry a visible notice instead of silently freezing.
   const [pollFailed, setPollFailed] = useState(false);
-  const failedDocuments = documents.filter((document) => document.status === "failed");
   const populatedPreview = localPopulatedDocumentsPreview(window.location.search, workspaceId);
-  const visibleDocuments = populatedPreview?.documents ?? documents;
+  const allVisibleDocuments = populatedPreview?.documents ?? documents;
+  const visibleDocuments = authorityKind
+    ? allVisibleDocuments.filter((document) => document.authorityKind === authorityKind)
+    : allVisibleDocuments;
+  const failedDocuments = visibleDocuments.filter((document) => document.status === "failed");
   // Honest list states: an initial fetch renders as loading and a failed load
   // as an error with retry instead of exposing the internal storage model.
   const basesView = listViewState({
@@ -190,13 +213,20 @@ export function DocumentsRoute({
     error: basesError,
     count: bases.length,
   });
-  const documentsView = listViewState({
-    loading: documentsLoading,
-    error: documentsError,
-    count: documents.length,
-  });
   const visibleBasesView = populatedPreview ? "ready" : basesView;
-  const visibleDocumentsView = populatedPreview ? "ready" : documentsView;
+  const visibleDocumentsView = populatedPreview
+    ? visibleDocuments.length === 0
+      ? "empty"
+      : "ready"
+    : listViewState({
+        loading: documentsLoading,
+        error: documentsError,
+        count: visibleDocuments.length,
+      });
+
+  useEffect(() => {
+    setDropAuthorityKind(authorityKind ?? defaultDocumentAuthorityKind(personalWorkspace));
+  }, [authorityKind, personalWorkspace, workspaceId]);
 
   const refreshBases = useCallback(async () => {
     setBasesLoading(true);
@@ -288,12 +318,14 @@ export function DocumentsRoute({
 
   async function handleDropText() {
     const text = dropText.trim();
-    if (!text) return;
+    if (!text || !canAddKnowledge) return;
+    const selectedAuthorityKind = authorityKind ?? dropAuthorityKind;
+    if (selectedAuthorityKind === "organization" && !canWriteOrganizationKnowledge) return;
     setDropping(true);
     try {
       const document = await client.createKnowledgeDrop(workspaceId, {
         text,
-        authorityKind: dropAuthorityKind,
+        authorityKind: selectedAuthorityKind,
         agentAccess: true,
       });
       setDropText("");
@@ -311,7 +343,9 @@ export function DocumentsRoute({
   }
 
   async function handleDropFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
+    if (!files || files.length === 0 || !canAddKnowledge) return;
+    const selectedAuthorityKind = authorityKind ?? dropAuthorityKind;
+    if (selectedAuthorityKind === "organization" && !canWriteOrganizationKnowledge) return;
     setDropping(true);
     try {
       let last: IndexedDocument | null = null;
@@ -323,7 +357,7 @@ export function DocumentsRoute({
         });
         last = await client.createKnowledgeDrop(workspaceId, {
           fileId: asset.id,
-          authorityKind: dropAuthorityKind,
+          authorityKind: selectedAuthorityKind,
           agentAccess: true,
         });
       }
@@ -350,10 +384,11 @@ export function DocumentsRoute({
     try {
       const response = await client.searchKnowledge(workspaceId, {
         query: query.trim(),
+        ...(authorityKind ? { authorityKinds: [authorityKind] } : {}),
         limit: 8,
         mode: "hybrid",
       });
-      setResults(response.results);
+      setResults(response.results.slice(0, 8));
       setSearched(query.trim());
     } catch (error) {
       // Clear stale matches so a failed search never leaves prior results
@@ -436,8 +471,16 @@ export function DocumentsRoute({
       <section className="flex min-h-0 flex-1 flex-col text-left">
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
-          title="Documents"
-          description="Add information agents can find when it is relevant."
+          title={personalWorkspace ? "Your Documents" : "Documents"}
+          description={
+            authorityKind === "organization"
+              ? canWriteOrganizationKnowledge
+                ? "Explore and add knowledge shared across this organization."
+                : "Explore knowledge shared across this organization."
+              : personalWorkspace
+                ? "Manage your private documents and the company knowledge available to you."
+                : "Add information agents can find when it is relevant."
+          }
         />
         {returnToBrain ? (
           <Link
@@ -447,96 +490,114 @@ export function DocumentsRoute({
             className="mt-6 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
           >
             <ArrowLeftIcon className="size-3" />
-            Back to Company Brain
+            Back to Agent Knowledge
           </Link>
         ) : null}
 
-        <div
-          role="region"
-          aria-label="Knowledge drop zone"
-          className="mt-5 rounded-lg border border-dashed border-border bg-surface/25 p-3"
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            void handleDropFiles(event.dataTransfer?.files ?? null);
-          }}
-        >
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <SparklesIcon className="size-4 text-brand" />
-            Add knowledge
-          </div>
-          <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <textarea
-              aria-label="Knowledge drop text"
-              value={dropText}
-              onChange={(event) => setDropText(event.target.value)}
-              placeholder="Paste text here, drag in files, or choose files below."
-              rows={2}
-              disabled={!fileUploadsEnabled || dropping}
-              className="min-h-16 w-full resize-y rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 py-2 text-xs leading-5 text-[color:var(--color-fg)]"
-            />
-            <div className="flex flex-col gap-2">
-              <label className="grid gap-1 text-2xs font-medium text-fg-subtle">
-                Save for
-                <Select
-                  value={dropAuthorityKind}
-                  onChange={(event) =>
-                    setDropAuthorityKind(event.target.value as DocumentAuthorityKind)
-                  }
-                  disabled={dropping}
-                  aria-label="Drop authority"
-                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs font-normal text-[color:var(--color-fg)] pointer-coarse:min-h-10"
-                >
-                  {DOCUMENT_AUTHORITY_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </Select>
-              </label>
-              <div className="flex gap-2">
-                <input
-                  ref={dropFileInputRef}
-                  type="file"
-                  multiple
-                  aria-label="Add files as a knowledge drop"
-                  className="hidden"
-                  onChange={(event) => void handleDropFiles(event.target.files)}
-                />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  disabled={!fileUploadsEnabled || dropping}
-                  onClick={() => dropFileInputRef.current?.click()}
-                  className="h-8 pointer-coarse:min-h-10"
-                >
-                  <FilesIcon className="size-3.5" />
-                  Choose files
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={!fileUploadsEnabled || dropping || !dropText.trim()}
-                  onClick={() => void handleDropText()}
-                  className="h-8 pointer-coarse:min-h-10"
-                >
-                  {dropping ? (
-                    <Loader2Icon className="size-3.5 animate-spin" />
-                  ) : (
-                    <PlusIcon className="size-3.5" />
-                  )}
-                  Add
-                </Button>
+        {personalWorkspace ? (
+          <Notice tone="info" className="mt-5" title="Your personal document library">
+            New knowledge defaults to Only me. Personal documents belong to you and can follow you
+            into other workspaces in this organization; company documents you can access are shown
+            with their own scope label.
+          </Notice>
+        ) : null}
+
+        {authorityKind === "organization" ? (
+          <Notice tone="info" className="mt-5" title="Company knowledge">
+            {canWriteOrganizationKnowledge
+              ? "This view shows only organization-scoped Documents. New knowledge is locked to Company and is available across authorized workspaces in this organization."
+              : "This view shows only organization-scoped Documents. It is read-only for you; only an organization owner can add Company knowledge."}
+          </Notice>
+        ) : null}
+
+        {canAddKnowledge ? (
+          <div
+            role="region"
+            aria-label="Knowledge drop zone"
+            className="mt-5 rounded-lg border border-dashed border-border bg-surface/25 p-3"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              void handleDropFiles(event.dataTransfer?.files ?? null);
+            }}
+          >
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <SparklesIcon className="size-4 text-brand" />
+              Add knowledge
+            </div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <textarea
+                aria-label="Knowledge drop text"
+                value={dropText}
+                onChange={(event) => setDropText(event.target.value)}
+                placeholder="Paste text here, drag in files, or choose files below."
+                rows={2}
+                disabled={!fileUploadsEnabled || dropping}
+                className="min-h-16 w-full resize-y rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 py-2 text-xs leading-5 text-[color:var(--color-fg)]"
+              />
+              <div className="flex flex-col gap-2">
+                <label className="grid gap-1 text-2xs font-medium text-fg-subtle">
+                  Save for
+                  <Select
+                    value={dropAuthorityKind}
+                    onChange={(event) =>
+                      setDropAuthorityKind(event.target.value as DocumentAuthorityKind)
+                    }
+                    disabled={dropping || authorityKind !== undefined}
+                    aria-label="Drop authority"
+                    className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs font-normal text-[color:var(--color-fg)] pointer-coarse:min-h-10"
+                  >
+                    {dropAuthorityOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    ref={dropFileInputRef}
+                    type="file"
+                    multiple
+                    aria-label="Add files as a knowledge drop"
+                    className="hidden"
+                    onChange={(event) => void handleDropFiles(event.target.files)}
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={!fileUploadsEnabled || dropping}
+                    onClick={() => dropFileInputRef.current?.click()}
+                    className="h-8 pointer-coarse:min-h-10"
+                  >
+                    <FilesIcon className="size-3.5" />
+                    Choose files
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!fileUploadsEnabled || dropping || !dropText.trim()}
+                    onClick={() => void handleDropText()}
+                    className="h-8 pointer-coarse:min-h-10"
+                  >
+                    {dropping ? (
+                      <Loader2Icon className="size-3.5 animate-spin" />
+                    ) : (
+                      <PlusIcon className="size-3.5" />
+                    )}
+                    Add
+                  </Button>
+                </div>
               </div>
             </div>
+            {!fileUploadsEnabled ? (
+              <div className="mt-2 text-2xs text-fg-subtle">
+                Knowledge drops need object storage, which is off for this deployment.
+              </div>
+            ) : null}
           </div>
-          {!fileUploadsEnabled ? (
-            <div className="mt-2 text-2xs text-fg-subtle">
-              Knowledge drops need object storage, which is off for this deployment.
-            </div>
-          ) : null}
-        </div>
+        ) : null}
 
         <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
           <div className="min-w-0">
@@ -544,7 +605,13 @@ export function DocumentsRoute({
               <>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
-                    <div className="truncate text-base font-medium">Your documents</div>
+                    <div className="truncate text-base font-medium">
+                      {authorityKind === "organization"
+                        ? "Organization knowledge"
+                        : personalWorkspace
+                          ? "Knowledge available to you"
+                          : "Available documents"}
+                    </div>
                   </div>
                   {failedDocuments.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
@@ -601,11 +668,17 @@ export function DocumentsRoute({
                   ) : visibleDocumentsView === "empty" ? (
                     <EmptyState
                       icon={<FilesIcon className="size-4" />}
-                      title="No documents yet"
+                      title={
+                        authorityKind === "organization"
+                          ? "No organization documents yet"
+                          : "No documents yet"
+                      }
                       description={
-                        fileUploadsEnabled
-                          ? "Add files or text above to make them available to agents."
-                          : "File uploads are turned off for this deployment."
+                        authorityKind === "organization" && !canWriteOrganizationKnowledge
+                          ? "An organization owner can add Company knowledge."
+                          : fileUploadsEnabled
+                            ? "Add files or text above to make them available to agents."
+                            : "File uploads are turned off for this deployment."
                       }
                     />
                   ) : (

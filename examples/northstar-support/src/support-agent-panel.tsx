@@ -393,7 +393,7 @@ function LiveAgentSession({
         toolRegistry={supportToolRegistry}
         hasOlder={hasOlder}
         loadingOlder={loadingOlder}
-        onLoadOlder={() => void loadOlder()}
+        onLoadOlder={loadOlder}
         renderMessageText={renderNorthstarMessage}
         loadVideoArtifactPlayback={loadVideoArtifactPlayback}
         className="northstar-agent-timeline min-h-0 flex-1"

@@ -3001,6 +3001,9 @@
     --tw-blur: blur(8px);
     filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
   }
+:where(.og-root).filter,:where(.og-root) .filter {
+    filter: var(--tw-blur,) var(--tw-brightness,) var(--tw-contrast,) var(--tw-grayscale,) var(--tw-hue-rotate,) var(--tw-invert,) var(--tw-saturate,) var(--tw-sepia,) var(--tw-drop-shadow,);
+  }
 :where(.og-root).backdrop-blur,:where(.og-root) .backdrop-blur {
     --tw-backdrop-blur: blur(8px);
     -webkit-backdrop-filter: var(--tw-backdrop-blur,) var(--tw-backdrop-brightness,) var(--tw-backdrop-contrast,) var(--tw-backdrop-grayscale,) var(--tw-backdrop-hue-rotate,) var(--tw-backdrop-invert,) var(--tw-backdrop-opacity,) var(--tw-backdrop-saturate,) var(--tw-backdrop-sepia,);
@@ -4937,7 +4940,7 @@
   --og-color-status-waiting: oklch(0.54 0.15 305);
   --og-color-status-failed: oklch(0.5 0.19 22);
   --og-color-status-cancelled: oklch(0.55 0.025 260);
-  --og-color-danger: oklch(0.55 0.2 22);
+  --og-color-danger: oklch(0.54 0.2 22);
   --og-color-diff-add-bg: var(--og-color-status-idle);
   --og-color-diff-del-bg: var(--og-color-status-failed);
   --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);

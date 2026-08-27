@@ -1,6 +1,8 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 
+import { DIRECT_SESSION_RAW_BUDGET, KIB as kib } from "./web-bundle-budget-policy";
+
 type ManifestEntry = {
   file: string;
   imports?: string[];
@@ -8,7 +10,6 @@ type ManifestEntry = {
   isEntry?: boolean;
 };
 
-const kib = 1024;
 const budgets = {
   // Shared consent, connector, and response-deduplication code remains in the
   // application shell while provider SDKs stay lazy. The Workspace hub densifies
@@ -110,10 +111,11 @@ const budgets = {
   // initial-raw and 564 KiB direct-session-gzip envelopes, plus every unrelated
   // graph and per-file cap, stay fixed.
   initialGzip: 405 * kib,
-  // 77 KiB: the largest shared chunk sits 22 bytes over 76 KiB under CI's
-  // bun chunking with the channels/For-you rail code; the graph totals above
-  // still bound the aggregate.
-  initialFileGzip: 77 * kib,
+  // The current-main browser-account Linux/x64 Bun 1.4 graph measures the largest
+  // initial shared chunk at 78,985 gzip bytes. Its 79-KiB envelope preserves
+  // 1,911 bytes of platform-skew headroom; the graph totals still bind the
+  // aggregate.
+  initialFileGzip: 79 * kib,
   initialFiles: 17,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
@@ -204,23 +206,82 @@ const budgets = {
   // above mandates, so this advances to 2122 KiB. Every other cap stays fixed.
   // It remains a stopgap; the real fix is to make the client
   // tree-shakeable, tracked separately.
+  // Source-aware channel reconciliation adds the browser-only projection
+  // authority and fresh-read revision fence to the always-loaded rail/route
+  // graph. Its exact Linux/x64 Bun 1.4 production build measured 2,173,204 raw
+  // / 607,228 gzip bytes.
   // Held-turn commentary projection adds the bounded waiting-state copy to
   // the shared session graph. The exact Linux/x64 production builds measure
   // 2,173,426-2,173,468 raw bytes and 607,161-607,169 gzip bytes. Preserve the
-  // guard's one-KiB raw headroom and 1.5-KiB gzip platform-skew allowance by
-  // advancing each to its next compliant whole-KiB envelope. Every file-count,
-  // initial, per-file, lazy-chunk, and CSS cap stays fixed.
+  // larger merged envelope for the stacked growth below: one-KiB raw headroom
+  // and the 1.5-KiB gzip platform-skew allowance. Every file-count, initial,
+  // per-file, lazy-chunk, and CSS cap stays fixed.
+  // The organization-admin document migration audit adds three typed SDK
+  // methods to the same non-tree-shakeable client. Exact Linux/x64 PR CI
+  // measures the direct-session graph at 2,175,302 raw / 607,439 gzip bytes.
+  // Causal channel authority for independently polled root, pins-only, detail,
+  // and post-move reads measures 2,175,936 raw / 607,961 gzip bytes in the exact
+  // Linux/x64 production build. The current-main compatibility merge stacks
+  // both surfaces at 2,179,430 raw / 608,650 gzip bytes. Advance only these two
+  // aggregates to 2,130 KiB raw and 596 KiB gzip so the guard retains one KiB
+  // of raw headroom and the 1.5-KiB gzip platform-skew allowance; every other
+  // cap remains fixed. The separately tracked structural fix is to remove this
+  // browser tax, not keep growing the shared client class.
+  // Durable move settlement, start-ordered mutation evidence, compaction-safe
+  // accepted-read fences, reactive rail projection, and queued-successor read
+  // sharing measure 2,181,466 raw bytes against the reviewed head's 2,180,493.
+  // Advance only this aggregate to the next whole-KiB envelope above one KiB
+  // of headroom; every compressed, file-count, initial, lazy, and CSS cap stays
+  // fixed.
   // The final one-time setup path keeps multiple pending invitations explicit,
   // removes implicit shared-workspace creation, and scrubs setup authority from
-  // browser URLs. The exact Bun 1.4 Linux/x64 production graph on the complete
-  // 0344-0348 stack measures 2,180,307 raw / 608,688 gzip bytes. Advance only
-  // the direct-session aggregates to preserve the guard's one-KiB raw headroom
-  // and 1.5-KiB gzip platform-skew allowance. The measured 31,498-byte CSS
-  // asset and every initial, per-file, file-count, lazy-chunk, and CSS cap stay
-  // within their existing envelopes.
-  directSessionRaw: 2131 * kib,
-  directSessionGzip: 596 * kib,
-  directSessionFiles: 24,
+  // browser URLs. Main measured that graph at 2,180,307 raw / 608,688 gzip
+  // bytes on Bun 1.4 Linux/x64. Causal post-settlement move verification and
+  // rejected-detail projection bring the exact merged graph to 2,186,879 raw /
+  // 610,576 gzip bytes. Advance only these aggregates to 2,137 KiB raw and 598
+  // KiB gzip, preserving one KiB of raw headroom and the 1.5-KiB Linux/x64
+  // platform-skew allowance. The measured 31,498-byte CSS asset and every
+  // initial, per-file, file-count, lazy-chunk, and CSS cap stay fixed.
+  // Ordered session Variable Set surfaces on protected main retain more methods
+  // on the same shared client graph. Before the request-start remediation is
+  // applied, that exact Bun 1.4 Linux/x64 production graph measures 2,184,325
+  // raw / 608,446 gzip bytes and is covered by 2,138 KiB raw / 598 KiB gzip.
+  // Shared lineage request-start identity relay, stable re-entry promises,
+  // request-causal cleanup authority, and current main's causal older-history
+  // receipt measure 2,190,732 raw / 612,758 gzip bytes in the exact Linux/x64
+  // Bun 1.4 production merge before ordered session Variable Sets land. The
+  // final combined graph measures 2,192,748 raw / 611,534 gzip bytes. Calibrate
+  // only the raw aggregate to the policy-derived 2,143-KiB envelope (1,684
+  // bytes of headroom); the existing 600-KiB gzip envelope retains 2,866 bytes
+  // of headroom, above the 1.5-KiB platform-skew allowance. Every file-count,
+  // initial, per-file, lazy-chunk, and CSS cap remains fixed.
+  // Multi-account browser isolation adds actor-fenced transport state while
+  // account controls and the credential popup remain lazy. On exact current
+  // main, the Linux/x64 Bun 1.4 direct-session graph measures 2,197,257 raw /
+  // 615,476 gzip bytes across 31 files. The policy-derived 2,147-KiB raw
+  // envelope retains 1,271 bytes of headroom; 603 KiB gzip retains 1,996 bytes,
+  // above the established 1.5-KiB platform-skew allowance. Initial aggregate,
+  // lazy-chunk, CSS, and unrelated per-file caps remain fixed.
+  // Organization recovery adds the typed SDK command surface to the shared
+  // client while its settings UI remains lazy. The exact Linux/x64 Bun 1.4
+  // graph measures 2,198,819 raw bytes. The policy-derived 2,149-KiB envelope
+  // retains 1,757 bytes of headroom; compressed, file-count, initial, lazy,
+  // CSS, and unrelated per-file caps remain fixed.
+  // The optional-operator-surface split moves six Document authority and tenancy-backfill
+  // methods behind the optional SDK surface while preserving them on the root
+  // and legacy core clients. The exact Linux/x64 Bun 1.4 direct-session graph falls to 2,197,216
+  // raw bytes, and a planted unused-method A/B bundle test proves future methods
+  // on that surface add zero bytes to the browser core. Tighten the raw envelope
+  // to the policy-derived 2,147 KiB; every compressed, file-count, initial,
+  // lazy, CSS, and unrelated per-file cap remains fixed.
+  // The generic embedded-session client constructor adds receiver-safe host
+  // overrides and native composer-submit projection to the public session
+  // entry. The exact merged Bun 1.4 Linux/x64 graph measures 2,198,390 raw
+  // bytes. Advance only the policy-derived raw envelope to 2,148 KiB, retaining
+  // 1,162 bytes of headroom; every other cap remains fixed.
+  directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
+  directSessionGzip: 603 * kib,
+  directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 31 * kib,

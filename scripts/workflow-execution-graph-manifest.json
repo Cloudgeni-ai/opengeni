@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ab93e41563072a09adba74d96cd824cdb3680c5cffa6878a2a465b79561b4e54"
+      "sha256": "b684d41c9110f3a4c9d7dd2d046516564f6d9bf8cf895f0ab0155055fd5be48b"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -551,6 +551,12 @@
     },
     {
       "workflow": ".github/workflows/ci.yml",
+      "job": "browser-acceptance",
+      "step": "Timeline pagination browser regressions",
+      "sha256": "1e63777b6c45012b47e62e4c067000f60fd4e0e746cf949204b299f8b4bbe09c"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
       "job": "deployment",
       "step": "Install dependencies",
       "sha256": "c002a6d527c30937cac224d77e729583974d8a4fba6e2e515a2b56231aa499a4"
@@ -685,7 +691,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "plan",
       "step": "Build fail-closed impact plan",
-      "sha256": "65417e12aa310fdda747063ba8c0dc71546ca0deab02384a710f9a6c4c4eb96f"
+      "sha256": "40a40a3d2887f9dbb80f0e32ef0d045e3c4e2299c00f6e58cc5d454c6b795b1f"
     },
     {
       "workflow": ".github/workflows/ci.yml",
@@ -709,7 +715,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "source-contracts",
       "step": "Validate changeset release plan",
-      "sha256": "c5654a8fbce26ca93c0f42308c8ec77bec4f02dc63db52db5c40f53041f2b25d"
+      "sha256": "20a914e98aea4f6c8ff25ad17e14a0a5523db1faeeafcb8cf14aa8dc63ca10a8"
     },
     {
       "workflow": ".github/workflows/ci.yml",

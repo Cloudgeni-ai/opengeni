@@ -1,46 +1,36 @@
-# Company Brain overview (Workspace State projection)
+# Agent Knowledge overview (Workspace State projection)
 
-The Company Brain page is a plain-language overview of existing workspace
-authorities, backed by the Workspace State projection. Its default view groups
-them by the questions people ask most often:
+The user-facing **Agent Knowledge** page is a small map of what agents can follow
+or find in the current workspace. The Workspace State projection supplies its
+status counts, but the page does not expose the projection's diagnostic model.
+It contains exactly two groups:
 
-- **Always followed**: company profile and mandatory workspace instructions;
-- **Available when needed**: guides, preferences, Documents/RAG evidence, and
-  Memory records;
-- **Needs attention**: explicit, permission-filtered gaps and partial coverage;
-- **Recent changes**: bounded update facts from authorities visible to the
-  requesting subject.
+- **How agents work**: concise Workspace instructions and conditional Skills;
+- **What agents can find**: Documents/RAG evidence and Memory records.
 
-The overview links to focused workspace-instruction and preference views rather
-than opening the diagnostic inventory. Both focused views are prompt-first: the
-user describes the desired behavior in plain language and continues in a real
-OpenGeni session that asks essential follow-ups and proposes the structured
-result before saving. This flow depends on the canonical durable learning write
-tools; it must never substitute ordinary Memory for preference or instruction
-authority.
+Workspace instructions and Skills are prompt-first. The user describes the
+desired behavior, then continues in a real OpenGeni session that asks only
+essential questions and proposes the destination-specific result before saving.
+The workspace-instruction prompt targets the shortest useful universal rule—
+normally 1–5 sentences and at most 120 words. A conditional procedure is routed
+to a Skill, while a fact, decision, incident, fix, or outcome is routed to
+remembered Knowledge. The same material is never copied across destinations.
 
-Direct workspace-instruction and preference editors remain available under a
-collapsed **Write manually** disclosure. Manual workspace saves create and
-activate an immutable global policy revision through the existing
-instruction-policy API. Manual preference saves derive the stable key and
-default conflict metadata, then activate the explicit human-authored revision.
-Full governance controls remain available in Advanced.
+The compact manual editors remain available in the focused subviews. Manual
+workspace saves create and activate an immutable global policy revision through
+the existing instruction-policy API. Manual Skill saves derive the stable key
+and default conflict metadata, then activate the explicit human-authored
+preference-registry revision. Only active Skills render as simple summary cards;
+proposal hashes, revision history, lifecycle controls, accepted-attempt lookup,
+raw inventories, structural gaps, proposal queues, portable export, and the
+historical Knowledge inspector are not presented on the default product page.
 
-The overview helps ordinary users understand effective status, scope, and the
-correct authority-specific entry point without combining those authorities or
-creating another store.
-Hashes, accepted-attempt lookup, raw inventories, structural gaps, and
-onboarding internals live under **Advanced & diagnostics**. The underlying
-projection and export remain read-only. Advanced & diagnostics preserves two
-bounded administration seams over existing canonical authorities: an
-instruction-policy onboarding composer that creates only inactive drafts, and
-structured preference governance for explicit organization/workspace/personal
-proposal and lifecycle operations. Neither seam creates another storage
-authority, background synthesizer, or runtime prompt source.
-
-The current slice is additive and dependency-safe. Role-specific policy
-authoring, proposal review workflows, learning-policy history, and source
-administration remain later phases.
+The small always-on organization identity and mission are administered from
+**Organization settings → Knowledge**. Products, customers, goals, constraints,
+and other company facts live in company-scoped Documents on that same surface
+and are retrieved when relevant. Learning mode is administered from **Workspace
+settings → General → Learning & autonomy**. Neither is a workspace instruction
+or Skill.
 
 ## Authority boundaries
 
@@ -73,9 +63,9 @@ changes remain proposals only: if represented as instruction policy, they must
 be inactive, provenance-linked drafts until an authorized policy operation
 explicitly activates them.
 
-The same Company Brain console also presents the account-scoped organization
-company profile and its immutable history through the canonical company-profile
-API. Workspace State does not own or duplicate that profile; see
+The account-scoped company profile remains a separate organization authority.
+Its agent-assisted product entry point is Organization settings → Knowledge;
+Workspace State does not own or duplicate it. See
 [`company-profile.md`](company-profile.md).
 
 ## HTTP and authorization
@@ -292,63 +282,21 @@ changes. Gaps are not persisted and cannot activate policy.
 
 ## Console surface
 
-`/workspaces/:workspaceId/state` is labeled **Company Brain** in the console and
-renders loading, empty, permission-unavailable, error/retry, partial-coverage,
-freshness, and accepted-attempt governance states. The default page is a compact
-mental model rather than a diagnostic inventory:
+`/workspaces/:workspaceId/state` is labeled **Agent Knowledge** in the console.
+The default route renders only the four destinations above. Documents summarize
+indexing health, Memory summarizes the newest authorized sample, and both link
+to their dedicated pages. Workspace instructions and Skills link to focused
+creation views; no `company`, `learning`, or generic preference-administration
+view is accepted by route search validation.
 
-1. **Always followed** lists the company profile and workspace instructions that
-   apply directly. Company profile status comes from the dedicated organization
-   authority; **Manage** opens an agent-assisted prompt, with the versioned manual
-   editor and history kept under a disclosure.
-2. **Available when needed** lists preference/guide descriptors, Documents and
-   Memory. Full guidance content remains on demand; Documents summarize indexing
-   health and Memory summarizes the newest authorized sample.
-3. **Needs attention** reports a clean state only after the visible company,
-   policy, preference, proposal and Knowledge review authorities loaded without
-   pending proposals, stale baselines, deterministic gaps, errors or partial
-   coverage. Declared conflict relationships on currently active preference
-   revisions are review signals; retained historical heads on inactive or
-   superseded preferences are not current conflicts. Loading dominates cached
-   proposal inventories during refresh, and
-   review summaries are keyed to the current workspace so a workspace switch
-   cannot reuse another workspace's clean state. Loading or unavailable review
-   authority remains explicit.
-4. **Recent changes** presents the newest bounded timestamps from visible
-   authorities.
-
-Hashes, provenance, authority table names, truncation mechanics, accepted-
-attempt drift, onboarding drafts, and lifecycle controls do not appear in the
-default overview.
-
-**Advanced & diagnostics** preserves the detailed policy and structured-
-preference inventories, the canonical Preference Registry administration panel,
-knowledge map, deterministic gaps, onboarding proposal evidence, and accepted-
-attempt inspector. The inspector accepts an attempt UUID and displays only
-drift status, counts, hashes, role metadata, and timestamps.
-Loader generation fences include both workspace and attempt IDs, so a late
-response cannot populate a newer selection. A second generation-fenced loader
-lists recent onboarding proposal evidence. Workspace admins may submit one
-explicit draft-only proposal with the exact displayed active-head baseline;
-readers see the immutable source/version/confidence, linked draft, baseline, and
-timestamp.
-
-A separate generation-fenced registry loader lists at most 100 authorized
-structured preferences and loads one selected detail. The administration panel
-shows the scope, status, scope/activation versions, compact descriptor,
-precedence/conflicts, provenance/trust, immutable revision hashes/correction
-links, and lifecycle actor/reason/time evidence. Direct humans may create an
-inactive proposal, activate or roll back to an older immutable revision,
-correct through a complete replacement body, move scope when authorized for
-both old and new scopes, deactivate, supersede with an active unexpired
-same-scope replacement, or reject. Supersession preserves the typed replacement
-lineage. Expired and superseded rows retain historical head metadata without an
-`Active` authority label. Explicit audit reasons and a new-attempt confirmation
-accompany every authority-changing lifecycle action, including correction.
-Stable-key collisions remain distinct from stale lifecycle CAS conflicts; the
-visible refresh reloads both inventory and selected detail. Server authorization
-and validation errors remain visible rather than being reinterpreted by the
-browser.
+The Workspace State API and generation-fenced loaders still provide the bounded
+projection used by tests, administrative integrations, and future purpose-built
+governance clients. The detailed policy inventory, structured-preference
+lifecycle panel, Knowledge inspector, proposal queues, accepted-attempt drift,
+and OKF export remain separate technical capabilities, not elements of the
+default Agent Knowledge experience. Simplifying the product page does not
+weaken their tenancy, compare-and-swap, immutable-history, or permission
+boundaries.
 
 The browser does not receive registry full content or attempt retrieval handles
 on list/detail. It explains that descriptors are automatically composed while
@@ -362,16 +310,10 @@ is the sole automatic-activation seam; it consumes only a final eligible
 decision receipt and revalidates the current destination head before calling
 the destination-native lifecycle.
 
-There is no instruction-policy activation/rollback UI, Memory promotion,
-Documents promotion, or general policy editor. The default overview links only
-to Documents and Memory; technical administration remains under the collapsed
-Advanced section.
-
-The committed browser acceptance opens this route through the real configured-
-principal API and non-owner PostgreSQL boundary. It verifies the attention and
-OKF export surfaces at 320, 375, 768, and desktop widths, rejects horizontal
-overflow and accessibility violations, and retains bounded screenshot evidence
-for every responsive breakpoint.
+There is no instruction-policy rollback UI, Memory promotion, Documents
+promotion, or general policy editor. The product surface intentionally omits
+the prior attention feed, recent-change list, inspector, export control, and
+collapsed technical administration panel.
 
 ## Explicit non-goals
 

@@ -1,4 +1,4 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { Session, SessionEvent, SessionVisibility } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -90,7 +90,7 @@ export default function SessionRouteAuxiliary(
  * and an unknown answer fails closed rather than offering Private optimistically.
  */
 function usePrivateForkCapability(options: {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   workspaceId: string;
   personalWorkspace: boolean;
   managedSession: boolean;
@@ -188,7 +188,7 @@ export function SessionTenancyControl({
 }: {
   session: Session;
   events?: SessionEvent[] | undefined;
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   managedSession: boolean;
   /** False also covers "not yet known": a private fork is never offered on a
    *  guess, because the database refuses it under the 0323 product decision. */

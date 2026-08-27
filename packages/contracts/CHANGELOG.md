@@ -1,5 +1,12 @@
 # @opengeni/contracts
 
+## 2.5.0
+
+### Minor Changes
+
+- 76d6396: Generate concise topic-oriented session titles with a prompt-free fallback, automatic-title safety normalization, custom-role and old-image rolling-compatible least-privilege database posture, and UI projections that never use raw initial prompts as display names. Durable title fanout now requires a versioned subscriber-recovery capability: managed NATS and supported embedded brokers coalesce one Postgres catch-up after reconnect, while legacy buses without that contract fail readiness/worker startup before durable rows can be acknowledged.
+- b5071cf: Require every Rig to layer setup and checks on the deployment-managed platform sandbox, reject new explicit Rig image overrides, keep provider-native image ids out of durable lease identity, and verify Browser, Terminal, and Computer services before publishing a Rig provider image.
+
 ## 2.4.0
 
 ### Minor Changes

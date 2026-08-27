@@ -992,6 +992,8 @@ export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "provider_binding_missing",
   "provider_binding_mismatch",
   "provider_binding_adopted",
+  "quarantined_binding_missing",
+  "quarantined_binding_mismatch",
   "defer_failed",
 ] as const;
 
@@ -1606,12 +1608,12 @@ export function recordCompanyBrainContributions(
     };
     observability.incrementCounter({
       name: "opengeni_model_context_contributions_total",
-      help: "Company Brain contributions exposed to a model, by bounded reason and authority.",
+      help: "Agent Knowledge contributions exposed to a model, by bounded reason and authority.",
       labels,
     });
     observability.observeHistogram({
       name: "opengeni_model_context_contribution_estimated_tokens",
-      help: "Estimated tokens per model-visible Company Brain contribution.",
+      help: "Estimated tokens per model-visible Agent Knowledge contribution.",
       buckets: MODEL_CONTEXT_CONTRIBUTION_TOKEN_BUCKETS,
       labels,
       value: contribution.estimatedTokens,

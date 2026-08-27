@@ -18,6 +18,37 @@ export type CanonicalHumanSessionAuthority = {
   identityStatus: "active" | "recovery_required" | "disputed" | "disabled";
 };
 
+export type CanonicalHumanExactLoginBinding = {
+  id: string;
+  identityId: string;
+  revision: number;
+  status: "active" | "recovery_pending" | "stale" | "disputed" | "revoked";
+};
+
+export async function getCanonicalHumanExactLoginBindingForAuthUser(
+  db: Database,
+  input: { authUserId: string; providerId: string },
+): Promise<CanonicalHumanExactLoginBinding> {
+  const [row] = await rawRows<{
+    result:
+      | (Omit<CanonicalHumanExactLoginBinding, "revision"> & { revision: number | string })
+      | null;
+  }>(
+    db,
+    sql`
+      select get_canonical_human_exact_login_binding(
+        ${input.authUserId}, ${input.providerId}
+      ) as result
+    `,
+  );
+  if (!row?.result) {
+    throw new CanonicalHumanIdentityAuthorityError(
+      "Authentication did not prove exactly one canonical login binding",
+    );
+  }
+  return { ...row.result, revision: Number(row.result.revision) };
+}
+
 export class CanonicalHumanIdentityConflictError extends Error {
   readonly name = "CanonicalHumanIdentityConflictError";
   readonly code = "CANONICAL_HUMAN_IDENTITY_CONFLICT";
@@ -33,6 +64,15 @@ export class CanonicalHumanIdentityOperationReuseError extends Error {
 
   constructor() {
     super("The canonical human identity operation id was already used for another request");
+  }
+}
+
+export class CanonicalHumanIdentityMutationInFlightError extends Error {
+  readonly name = "CanonicalHumanIdentityMutationInFlightError";
+  readonly code = "CANONICAL_HUMAN_IDENTITY_MUTATION_IN_FLIGHT";
+
+  constructor() {
+    super("Another request is still using this browser actor");
   }
 }
 
@@ -65,6 +105,7 @@ function mapSqlError(error: unknown): never {
   const state = nestedPostgresSqlState(error);
   if (state === "40001") throw new CanonicalHumanIdentityConflictError();
   if (state === "23505") throw new CanonicalHumanIdentityOperationReuseError();
+  if (state === "55P03") throw new CanonicalHumanIdentityMutationInFlightError();
   if (state === "P0002") throw new CanonicalHumanIdentityNotFoundError();
   if (state === "42501") {
     throw new CanonicalHumanIdentityAuthorityError(
@@ -111,6 +152,17 @@ export async function ensureCanonicalHumanIdentityForAuthUser(
   db: Database,
   authUserId: string,
 ): Promise<CanonicalHumanSessionAuthority> {
+  try {
+    const existing = await getCanonicalHumanIdentityProjection(db, authUserId);
+    return {
+      identityId: existing.activeIdentity.id,
+      identityRevision: existing.activeIdentity.identityRevision,
+      authRevision: existing.activeIdentity.authRevision,
+      identityStatus: existing.activeIdentity.status,
+    };
+  } catch (error) {
+    if (!(error instanceof CanonicalHumanIdentityNotFoundError)) throw error;
+  }
   const [user] = await rawRows<{ displayName: string }>(
     db,
     sql`
@@ -264,6 +316,11 @@ export type ApplyCanonicalHumanIdentityOperationInput = {
   providerId?: string | null;
   providerAccountId?: string | null;
   reason: string;
+  actorFence?: {
+    authorityHash: string;
+    actorEpoch: string;
+    requestId: string;
+  };
 };
 
 export async function applyCanonicalHumanIdentityOperation(
@@ -271,14 +328,46 @@ export async function applyCanonicalHumanIdentityOperation(
   input: ApplyCanonicalHumanIdentityOperationInput,
 ): Promise<CanonicalHumanIdentityMutationResponseType> {
   try {
-    const [row] = await rawRows<{
-      outcome: CanonicalHumanIdentityMutationOutcome;
-      identityId: string;
-      identityRevision: number | string;
-      authRevision: number | string;
-    }>(
-      db,
-      sql`
+    if (input.actorFence) {
+      return await db.transaction(async (tx) => {
+        const txDb = tx as unknown as Database;
+        await rawRows(
+          txDb,
+          sql`select managed_auth_actor_mutation_fence(
+            ${input.actorFence!.authorityHash}, ${input.actorFence!.actorEpoch}::bigint,
+            ${input.actorFence!.requestId}::uuid
+          )`,
+        );
+        return await applyCanonicalHumanIdentityOperationInner(txDb, input);
+      });
+    }
+    return await applyCanonicalHumanIdentityOperationInner(db, input);
+  } catch (error) {
+    if (
+      error instanceof CanonicalHumanIdentityConflictError ||
+      error instanceof CanonicalHumanIdentityOperationReuseError ||
+      error instanceof CanonicalHumanIdentityMutationInFlightError ||
+      error instanceof CanonicalHumanIdentityNotFoundError ||
+      error instanceof CanonicalHumanIdentityAuthorityError
+    ) {
+      throw error;
+    }
+    mapSqlError(error);
+  }
+}
+
+async function applyCanonicalHumanIdentityOperationInner(
+  db: Database,
+  input: ApplyCanonicalHumanIdentityOperationInput,
+): Promise<CanonicalHumanIdentityMutationResponseType> {
+  const [row] = await rawRows<{
+    outcome: CanonicalHumanIdentityMutationOutcome;
+    identityId: string;
+    identityRevision: number | string;
+    authRevision: number | string;
+  }>(
+    db,
+    sql`
         select
           outcome,
           identity_id as "identityId",
@@ -295,23 +384,12 @@ export async function applyCanonicalHumanIdentityOperation(
           ${input.reason}
         )
       `,
-    );
-    if (!row) throw new CanonicalHumanIdentityNotFoundError();
-    const identity = await getCanonicalHumanIdentityProjection(db, input.authUserId);
-    return CanonicalHumanIdentityMutationResponse.parse({
-      outcome: row.outcome,
-      operationId: input.operationId,
-      identity,
-    });
-  } catch (error) {
-    if (
-      error instanceof CanonicalHumanIdentityConflictError ||
-      error instanceof CanonicalHumanIdentityOperationReuseError ||
-      error instanceof CanonicalHumanIdentityNotFoundError ||
-      error instanceof CanonicalHumanIdentityAuthorityError
-    ) {
-      throw error;
-    }
-    mapSqlError(error);
-  }
+  );
+  if (!row) throw new CanonicalHumanIdentityNotFoundError();
+  const identity = await getCanonicalHumanIdentityProjection(db, input.authUserId);
+  return CanonicalHumanIdentityMutationResponse.parse({
+    outcome: row.outcome,
+    operationId: input.operationId,
+    identity,
+  });
 }

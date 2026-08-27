@@ -50,11 +50,11 @@ import type {
 // Human labels — no raw enum slugs ever reach the UI. Chips read as singular
 // nouns; the injected working-set block uses the plural section names.
 const KIND_LABEL: Record<KnowledgeMemoryKind, string> = {
-  preference: "Preference",
+  preference: "Legacy preference",
   semantic: "Fact",
-  procedural: "Procedure",
+  procedural: "Legacy procedure",
   decision: "Decision",
-  episodic: "History",
+  episodic: "Incident or outcome",
 };
 const STATUS_LABEL: Record<KnowledgeMemoryStatus, string> = {
   active: "Active",
@@ -72,6 +72,12 @@ const kindFilterOptions: KnowledgeMemoryKind[] = [
   "decision",
   "episodic",
 ];
+const memoryCreationKindOptions: KnowledgeMemoryKind[] = ["semantic", "decision", "episodic"];
+const MEMORY_CREATION_KIND_LABEL: Partial<Record<KnowledgeMemoryKind, string>> = {
+  semantic: "Fact",
+  decision: "Decision",
+  episodic: "Incident or outcome",
+};
 // The statuses worth browsing; "active" is the default working set an agent sees.
 const statusFilterOptions: KnowledgeMemoryStatus[] = [
   "active",
@@ -92,10 +98,12 @@ function sortMemories(memories: KnowledgeMemory[]): KnowledgeMemory[] {
 export function MemoryPane({
   workspaceId,
   memoryEnabled,
+  personalWorkspace = false,
   focusMemoryId,
 }: {
   workspaceId: string;
   memoryEnabled: boolean;
+  personalWorkspace?: boolean;
   /** A memory record to reveal + highlight, deep-linked from a timeline memory step (`?memory=<id>`). */
   focusMemoryId?: string | undefined;
 }) {
@@ -257,7 +265,10 @@ export function MemoryPane({
     try {
       // No explicit status ⇒ the server's active default, routed through the one
       // validation/deduplication write gate without rewriting accepted content.
-      const created = await client.createKnowledgeMemory(workspaceId, { text, kind: draftKind });
+      const created = await client.createKnowledgeMemory(workspaceId, {
+        text,
+        kind: draftKind,
+      });
       setDraftText("");
       setAdding(false);
       toast.success("Memory saved");
@@ -390,7 +401,11 @@ export function MemoryPane({
             Working set
           </span>
         }
-        description="Durable facts agents carry across sessions in this workspace."
+        description={
+          personalWorkspace
+            ? "Private memories agents carry across sessions in your personal workspace."
+            : "Durable facts agents carry across sessions in this workspace."
+        }
         actions={
           <>
             <Button
@@ -451,7 +466,11 @@ export function MemoryPane({
             aria-label="Memory text"
             value={draftText}
             onChange={(event) => setDraftText(event.target.value)}
-            placeholder="A durable fact, preference, decision, or procedure for this workspace"
+            placeholder={
+              personalWorkspace
+                ? "A private fact, incident, decision, or outcome for your personal workspace"
+                : "A durable fact, incident, decision, or outcome for this workspace"
+            }
             className="min-h-20 text-xs"
           />
           <div className="grid gap-2 sm:grid-cols-[minmax(10rem,1fr)_auto_auto]">
@@ -461,9 +480,9 @@ export function MemoryPane({
               onChange={(event) => setDraftKind(event.target.value as KnowledgeMemoryKind)}
               className="h-9 text-xs pointer-coarse:min-h-10"
             >
-              {kindFilterOptions.map((kind) => (
+              {memoryCreationKindOptions.map((kind) => (
                 <option key={kind} value={kind}>
-                  {KIND_LABEL[kind]}
+                  {MEMORY_CREATION_KIND_LABEL[kind]}
                 </option>
               ))}
             </Select>
@@ -795,7 +814,10 @@ function MemoryCard(props: {
         {memory.createdBySessionId ? (
           <Link
             to="/workspaces/$workspaceId/sessions/$sessionId"
-            params={{ workspaceId: props.workspaceId, sessionId: memory.createdBySessionId }}
+            params={{
+              workspaceId: props.workspaceId,
+              sessionId: memory.createdBySessionId,
+            }}
             className="hover:text-[color:var(--color-fg)]"
             title="Open the session that created this memory"
           >

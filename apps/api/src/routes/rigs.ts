@@ -12,6 +12,7 @@ import {
 import type { Hono } from "hono";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import type { ZodType } from "zod";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -32,6 +33,38 @@ import {
   updateRigForApi,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
+import { ApiHttpError } from "../http/api-error";
+
+async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string): Promise<T> {
+  const body: unknown = await c.req.json().catch(() => null);
+  const bodyRecord = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  const payloadRecord =
+    bodyRecord?.payload && typeof bodyRecord.payload === "object"
+      ? (bodyRecord.payload as Record<string, unknown>)
+      : null;
+  const imageOverrideUnsupported = Boolean(
+    (bodyRecord && Object.hasOwn(bodyRecord, "image")) ||
+    (payloadRecord && Object.hasOwn(payloadRecord, "image")),
+  );
+  const parsed = schema.safeParse(body);
+  if (parsed.success && !imageOverrideUnsupported) return parsed.data;
+  throw new ApiHttpError(422, {
+    code: "validation_failed",
+    message: imageOverrideUnsupported
+      ? "Rig base-image overrides are not supported; Rigs use the deployment-managed platform sandbox."
+      : `Invalid ${label}.`,
+    retryable: false,
+    details: {
+      ...(imageOverrideUnsupported ? { code: "RIG_IMAGE_OVERRIDE_UNSUPPORTED" } : {}),
+      fields: parsed.success
+        ? []
+        : parsed.error.issues.slice(0, 16).map((issue) => ({
+            path: issue.path,
+            code: issue.code,
+          })),
+    },
+  });
+}
 
 export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, workflowClient } = deps;
@@ -150,7 +183,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
     const grant = authorization.grant;
     requirePermission(grant, "rigs:manage");
-    const payload = CreateRigRequest.parse(await c.req.json());
+    const payload = await parseRigRequest(c, CreateRigRequest, "Rig create request");
     const allowOrganization =
       payload.scope === "organization" &&
       authorization.accountGrant?.permissions.includes("account:admin") === true;
@@ -189,7 +222,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "missing permission: account:admin",
       });
     }
-    const payload = UpdateRigRequest.parse(await c.req.json());
+    const payload = await parseRigRequest(c, UpdateRigRequest, "Rig update request");
     return c.json(await updateRigForApi({ db }, grant, rig, payload, { allowOrganization }));
   });
 
@@ -221,7 +254,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
-    const payload = RigDefinitionEditPayload.parse(await c.req.json());
+    const payload = await parseRigRequest(c, RigDefinitionEditPayload, "Rig version request");
     const version = await createRigVersionForApi({ db }, grant, rig, payload);
     const started = await tryStartInitialVersionVerification(rig.workspaceId, version.id);
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
@@ -256,7 +289,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/changes", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:use");
-    const request = ProposeRigChangeRequest.parse(await c.req.json());
+    const request = await parseRigRequest(c, ProposeRigChangeRequest, "Rig change request");
     const change = await proposeRigChangeForApi({ db }, grant, rig, request);
     const verification = await startChangeVerification(rig.workspaceId, change.id);
     if (!verification.started) c.header("OpenGeni-Rig-Verification", "deferred");

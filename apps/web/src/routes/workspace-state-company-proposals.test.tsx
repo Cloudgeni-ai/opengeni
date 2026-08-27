@@ -187,9 +187,11 @@ describe("Company profile pending proposals", () => {
     expect(text).toContain("Pending proposals");
     expect(text).toContain("r3");
     expect(text).toContain("Durable learning");
+    expect(text).toContain("Identity: CloudGeni builds OpenGeni.");
     expect(text).toContain("Mission: Proposed mission from the agent.");
-    expect(text).toContain("opengeni: Autonomous work platform.");
-    expect(text).toContain("simple-brain: Make the agent brain simple and useful.");
+    expect(text).not.toContain("opengeni: Autonomous work platform.");
+    expect(text).not.toContain("simple-brain: Make the agent brain simple and useful.");
+    expect(text).toContain("This historical revision contains retired structured details.");
     expect(text).not.toContain("Already activated proposal.");
     expect(text).not.toContain("Only an organization owner or admin can activate this proposal.");
 
@@ -237,7 +239,7 @@ describe("Company profile pending proposals", () => {
     // Both surfaces render from the same response: the pending card and the
     // history list each show the proposal once, and the editor shows the head.
     expect(text).toContain("Pending proposals");
-    expect(text).toContain("Organization company profile");
+    expect(text).toContain("Organization identity");
     expect(text).toContain("Mission: Current mission.");
     expect(text).toContain("Only organization owners and admins can edit or activate");
 

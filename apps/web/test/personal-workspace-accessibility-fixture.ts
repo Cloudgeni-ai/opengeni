@@ -11,7 +11,7 @@ import {
   type ManagedSelfContext,
 } from "../src/lib/managed-self-context";
 import { SessionTenancyOperationController } from "../src/lib/session-tenancy-operation-controller";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { Session, Workspace } from "../src/types";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -85,7 +85,7 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
               fork: null,
             },
           } as Session,
-          client: {} as OpenGeniCoreClient,
+          client: {} as OpenGeniBrowserClient,
           managedSession: true,
           scopeLabel: "Roadmap Personal workspace",
           captureWorkspaceInvocation: () => null,

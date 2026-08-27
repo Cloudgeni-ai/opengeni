@@ -47,4 +47,36 @@ describe("session tenancy domain", () => {
       }),
     );
   });
+
+  test("binds ordered restart runtime intent without changing legacy fork hashes", () => {
+    const input = {
+      sourceSessionId: "2dbf723a-cb9b-45e1-9c37-d51fcb73b32c",
+      destinationWorkspaceId: "be0d743d-2434-4fe5-8a82-73108a644a36",
+      destinationVisibility: "user_private" as const,
+      workspaceSharedAcknowledged: false,
+    };
+    const legacyHash = canonicalSessionForkHash(input);
+    const first = "7ba94a9c-1cd0-4b0e-97c5-0d50dc95eb8e";
+    const second = "c3452f0d-2fce-4c19-b901-a3de386f9ea5";
+    const rigId = "d3bcb4e9-c88b-4d57-9e38-a337eeb17638";
+
+    expect(canonicalSessionForkHash(input)).toBe(legacyHash);
+    expect(
+      canonicalSessionForkHash({
+        ...input,
+        runtimeRequest: { variableSetIds: [first, second], rigId },
+      }),
+    ).not.toBe(legacyHash);
+    expect(
+      canonicalSessionForkHash({
+        ...input,
+        runtimeRequest: { variableSetIds: [first, second], rigId },
+      }),
+    ).not.toBe(
+      canonicalSessionForkHash({
+        ...input,
+        runtimeRequest: { variableSetIds: [second, first], rigId },
+      }),
+    );
+  });
 });

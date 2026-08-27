@@ -37,6 +37,7 @@ import {
   MODEL_ATTACHMENT_REFS_FIELD,
   MODEL_TIMELINE_ANNOTATIONS_FIELD,
 } from "@opengeni/contracts";
+import { toolCallIdFromSdkItem } from "./tool-call-identity";
 
 /** A history item is any JSON object; we only inspect a few discriminator fields. */
 export type HistoryItem = Record<string, unknown>;
@@ -88,35 +89,7 @@ function itemType(item: unknown): string | undefined {
  * `call_id`. Persisted rows are the SDK shape, but we accept either so a row
  * written by any code path (or hand-repaired) still correlates.
  */
-function callIdOf(item: unknown): string | undefined {
-  if (!item || typeof item !== "object") {
-    return undefined;
-  }
-  const record = item as { callId?: unknown; call_id?: unknown; providerData?: unknown };
-  if (typeof record.callId === "string" && record.callId.length > 0) {
-    return record.callId;
-  }
-  if (typeof record.call_id === "string" && record.call_id.length > 0) {
-    return record.call_id;
-  }
-  // tool_search items may carry their correlation id ONLY in providerData
-  // (mirrors the SDK's getToolSearchProviderCallId: providerData.call_id ??
-  // providerData.callId ?? call_id ?? callId). Harmless for other item kinds —
-  // their ids never live there.
-  const provider = record.providerData as
-    | { call_id?: unknown; callId?: unknown }
-    | null
-    | undefined;
-  if (provider && typeof provider === "object") {
-    if (typeof provider.call_id === "string" && provider.call_id.length > 0) {
-      return provider.call_id;
-    }
-    if (typeof provider.callId === "string" && provider.callId.length > 0) {
-      return provider.callId;
-    }
-  }
-  return undefined;
-}
+const callIdOf = toolCallIdFromSdkItem;
 
 /**
  * Sanitize a replayed history item list into a sequence the Responses API

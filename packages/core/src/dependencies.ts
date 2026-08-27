@@ -15,6 +15,7 @@ import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
+import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
@@ -162,6 +163,8 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
+  /** Optional provider seam for the separately registered OpenGeni Lens App. */
+  prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
    * the MCP leg for Codemode/Code Mode; worker consumers bind the same port
@@ -175,6 +178,8 @@ export type AppDependencies = {
    */
   sessionAuthorization?: SessionAuthorizationPort | null;
   managedAuth?: ManagedAuth | null;
+  /** Provider-neutral browser login-slot adapter; required by dual/broker managed auth. */
+  managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
   /** Injectable managed-email transport; standalone API defaults to Resend or local capture. */
   managedEmailTransport?: ManagedEmailTransport;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */

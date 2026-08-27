@@ -77,6 +77,7 @@ export type SandboxRouteDeps = {
   media: ReturnType<typeof createTurnMediaArtifacts>;
   fileAuthoritySubjectId: ClaimTurnOk["fileAuthoritySubjectId"];
   runSettings: GovernanceModelOk["runSettings"];
+  logicalSandboxSettings: GovernanceModelOk["logicalSandboxSettings"];
 };
 
 export type SandboxRouteOk = {
@@ -163,6 +164,7 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     sandboxState,
     fileAuthoritySubjectId,
     runSettings,
+    logicalSandboxSettings,
   } = deps;
 
   // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
@@ -253,7 +255,10 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
       : runSettings.sandboxBackend;
   sandboxState.startupMilestoneBackend = activeSandboxBackend ?? groupBoxBackend;
   media.sandboxFileDownloadBackend = sandboxState.startupMilestoneBackend;
-  const groupBoxImage = rigProviderImageSourceImage(runSettings, groupBoxBackend);
+  // Durable lease identity is always the logical OCI/base image. A provider
+  // image id in runSettings is only a physical cold-create optimization and
+  // must never become cross-surface shared-state fencing.
+  const groupBoxImage = rigProviderImageSourceImage(logicalSandboxSettings, groupBoxBackend);
   const sandboxCreationBackend: Settings["sandboxBackend"] =
     settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
       ? groupBoxBackend
