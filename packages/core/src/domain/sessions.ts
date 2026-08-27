@@ -1204,6 +1204,8 @@ export async function postUserMessageTurn(input: {
   annotations?: TimelineAnnotation[];
   modelContext?: string | null;
   resources: ResourceRef[];
+  /** Actor-owned resources used only for the exact durable-draft fence. */
+  composerDraftResources?: ResourceRef[];
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   latencyMode?: "standard" | "priority" | "fast" | null;
@@ -1281,6 +1283,9 @@ export async function postUserMessageTurn(input: {
               annotations: input.annotations ?? [],
               modelContext: input.modelContext ?? null,
               resources: input.resources,
+              ...(input.composerDraftResources
+                ? { composerDraftResources: input.composerDraftResources }
+                : {}),
               model: requestedModel,
               reasoningEffort: requestedReasoningEffort,
               latencyMode: input.latencyMode ?? null,
@@ -2429,6 +2434,8 @@ export async function acceptSessionUserMessageWithOutcome(
     annotations?: SubmittedTimelineAnnotation[];
     modelContext?: string | null;
     resources?: ResourceRef[];
+    /** Actor-owned resources used only for the exact durable-draft fence. */
+    composerDraftResources?: ResourceRef[];
     model?: string | null;
     reasoningEffort?: ReasoningEffort | null;
     latencyMode?: "standard" | "priority" | "fast" | null;
@@ -2497,6 +2504,20 @@ export async function acceptSessionUserMessageWithOutcome(
     latencyModeSource: input.latencyMode == null ? "session" : "explicit",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
+  const composerDraftResources = input.composerDraftResources
+    ? normalizeResources(input.composerDraftResources)
+    : undefined;
+  if (composerDraftResources) {
+    const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
+    const unacceptedDraftResource = composerDraftResources.find(
+      (resource) => !acceptedResources.has(stableJson(resource)),
+    );
+    if (unacceptedDraftResource) {
+      throw new HTTPException(422, {
+        message: "composer draft resources must be included in the accepted resource set",
+      });
+    }
+  }
   const annotations = await validateSubmittedTimelineAnnotations(
     db,
     workspaceId,
@@ -2585,6 +2606,7 @@ export async function acceptSessionUserMessageWithOutcome(
       annotations,
       modelContext: input.modelContext ?? null,
       resources: requestedResources,
+      ...(composerDraftResources ? { composerDraftResources } : {}),
       model: input.model ?? null,
       reasoningEffort: input.reasoningEffort ?? null,
       latencyMode: input.latencyMode ?? null,

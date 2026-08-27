@@ -274,6 +274,11 @@ const budgets = {
   // on that surface add zero bytes to the browser core. Tighten the raw envelope
   // to the policy-derived 2,147 KiB; every compressed, file-count, initial,
   // lazy, CSS, and unrelated per-file cap remains fixed.
+  // The generic embedded-session client constructor adds receiver-safe host
+  // overrides and native composer-submit projection to the public session
+  // entry. The exact merged Bun 1.4 Linux/x64 graph measures 2,198,390 raw
+  // bytes. Advance only the policy-derived raw envelope to 2,148 KiB, retaining
+  // 1,162 bytes of headroom; every other cap remains fixed.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 603 * kib,
   directSessionFiles: 31,

@@ -31,6 +31,7 @@ import {
 } from "../lib/use-portal-token-style";
 import { useUnicodeFallbackFonts } from "../lib/use-unicode-fonts";
 import type { FileTreeNode, UseSandboxFilesResult } from "../hooks/use-sandbox-files";
+import { visibleFileTree, type FileNodeVisibilityPredicate } from "../file-node-visibility";
 
 export type FileBrowserProps = {
   /** From `useSandboxFiles(...)`. */
@@ -43,6 +44,8 @@ export type FileBrowserProps = {
   /** Selection callback for the preview pane. */
   onSelectFile?: ((path: string) => void) | undefined;
   selectedPath?: string | undefined;
+  /** Presentation-only node filter. Hidden parents never expose their children. */
+  isNodeVisible?: FileNodeVisibilityPredicate | undefined;
   /** Deliberately reveal this selected path by lazily opening every loaded
    * ancestor and scrolling its row into view. The path is opaque and is never
    * normalized or re-rooted here. */
@@ -183,6 +186,7 @@ export function FileBrowser({
   fallback,
   onSelectFile,
   selectedPath,
+  isNodeVisible,
   revealPath,
   revealPathRequestId,
   renderNode,
@@ -220,6 +224,10 @@ export function FileBrowser({
     () => (typeof document === "undefined" ? null : document.getElementById(treeId)),
     [treeId],
   );
+  const visibleTree = useMemo(
+    () => visibleFileTree(result.tree, isNodeVisible),
+    [isNodeVisible, result.tree],
+  );
 
   useBrowserLayoutEffect(() => {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
@@ -255,11 +263,16 @@ export function FileBrowser({
 
   // The keyboard cursor: an explicitly-navigated node falls back to the
   // externally-selected file so arrow keys pick up where the preview pane is.
-  const cursor = active ?? selectedPath ?? null;
+  const visibleActive = active && findNode(visibleTree, active) ? active : null;
+  const cursor =
+    visibleActive ?? (selectedPath && findNode(visibleTree, selectedPath) ? selectedPath : null);
+  useEffect(() => {
+    if (active !== null && visibleActive === null) setActive(null);
+  }, [active, visibleActive]);
 
   const expand = useCallback(
     async (path: string) => {
-      const node = findNode(result.tree, path);
+      const node = findNode(visibleTree, path);
       if (node && node.kind === "dir" && node.children === undefined) {
         setLoadingPaths((prev) => new Set(prev).add(path));
         try {
@@ -273,7 +286,7 @@ export function FileBrowser({
         }
       }
     },
-    [result],
+    [result, visibleTree],
   );
 
   const open = useCallback(
@@ -286,7 +299,7 @@ export function FileBrowser({
 
   useEffect(() => {
     if (!revealRequest) return;
-    const trace = traceRevealPath(result.tree, revealRequest.path);
+    const trace = traceRevealPath(visibleTree, revealRequest.path);
     if (trace.directories.length > 0) {
       setExpanded((previous) => {
         const next = new Set(previous);
@@ -310,7 +323,7 @@ export function FileBrowser({
     }
     attemptedRevealPathsRef.current.add(frontier);
     void expand(frontier);
-  }, [expand, loadingPaths, result.expandingPaths, result.tree, revealRequest]);
+  }, [expand, loadingPaths, result.expandingPaths, revealRequest, visibleTree]);
 
   const toggle = useCallback(
     async (node: FileTreeNode) => {
@@ -362,9 +375,9 @@ export function FileBrowser({
         }
       }
     };
-    walk(result.tree, 0);
+    walk(visibleTree, 0);
     return items;
-  }, [result.tree, expanded, draftCreate, loadingPaths, result.expandingPaths, cold]);
+  }, [visibleTree, expanded, draftCreate, loadingPaths, result.expandingPaths, cold]);
   const unicodeFontPaths = useMemo(
     () => renderItems.flatMap((item) => (item.type === "node" ? [item.node.path] : [])),
     [renderItems],
@@ -391,9 +404,9 @@ export function FileBrowser({
         if (node.children) visit(node.children);
       });
     };
-    visit(result.tree);
+    visit(visibleTree);
     return positions;
-  }, [result.tree]);
+  }, [visibleTree]);
   const cursorIndex = cursor ? (rowIndexByPath.get(cursor) ?? -1) : -1;
   const activeDescendantId = cursorIndex >= 0 ? `${treeId}-item-${cursorIndex}` : undefined;
 
@@ -485,7 +498,7 @@ export function FileBrowser({
       const draft = draftRename;
       setDraftRename(null);
       if (!draft || !supportsMutation) return;
-      const node = findNode(result.tree, draft.path);
+      const node = findNode(visibleTree, draft.path);
       const trimmed = name.trim().replace(/\/+$/, "");
       if (!node || !trimmed || trimmed === node.name) return;
       const newPath = joinPath(parentOf(draft.path), trimmed);
@@ -502,21 +515,21 @@ export function FileBrowser({
         setBusy(false);
       }
     },
-    [draftRename, supportsMutation, result, selectedPath, active, onSelectFile],
+    [draftRename, supportsMutation, result, selectedPath, active, onSelectFile, visibleTree],
   );
 
   // Begin a new file/folder under the active node's directory (or root).
   const startCreate = useCallback(
     (kind: "file" | "dir") => {
       if (!supportsMutation) return;
-      const anchor = cursor ? findNode(result.tree, cursor) : undefined;
+      const anchor = cursor ? findNode(visibleTree, cursor) : undefined;
       const parent = anchor ? (anchor.kind === "dir" ? anchor.path : parentOf(anchor.path)) : "";
       if (parent) open(parent);
       setDraftRename(null);
       setMenu(null);
       setDraftCreate({ parent, kind });
     },
-    [supportsMutation, cursor, result.tree, open],
+    [supportsMutation, cursor, open, visibleTree],
   );
 
   const startRename = useCallback(
@@ -534,7 +547,7 @@ export function FileBrowser({
     async (targetDir: string, sourcePath: string) => {
       setDragOver(null);
       if (!supportsMutation || !sourcePath) return;
-      const src = findNode(result.tree, sourcePath);
+      const src = findNode(visibleTree, sourcePath);
       if (!src) return;
       // No-op drops: onto its own current parent, onto itself, or into its own subtree.
       if (parentOf(sourcePath) === targetDir) return;
@@ -554,7 +567,7 @@ export function FileBrowser({
         setBusy(false);
       }
     },
-    [supportsMutation, result, selectedPath, active, onSelectFile],
+    [supportsMutation, result, selectedPath, active, onSelectFile, visibleTree],
   );
 
   const onKeyDown = useCallback(
@@ -691,9 +704,9 @@ export function FileBrowser({
     };
   }, [menu]);
 
-  const showErrorEmpty = result.error && result.tree.length === 0 && !draftCreate;
-  const showDegradedTree = result.error && result.tree.length > 0;
-  const showEmpty = !result.loading && result.tree.length === 0 && !draftCreate;
+  const showErrorEmpty = result.error && visibleTree.length === 0 && !draftCreate;
+  const showDegradedTree = result.error && visibleTree.length > 0;
+  const showEmpty = !result.loading && visibleTree.length === 0 && !draftCreate;
   // Retry lives next to the state it explains (the degraded/empty notice), so do
   // not render a second toolbar retry for the same failure.
   const showToolbar = supportsMutation || result.loading;
@@ -934,7 +947,7 @@ export function FileBrowser({
               <ToolbarButton
                 label="Rename"
                 onClick={() => {
-                  const node = cursor ? findNode(result.tree, cursor) : undefined;
+                  const node = cursor ? findNode(visibleTree, cursor) : undefined;
                   if (node) startRename(node);
                 }}
                 disabled={busy || !cursor}
@@ -944,7 +957,7 @@ export function FileBrowser({
               <ToolbarButton
                 label="Delete"
                 onClick={(event) => {
-                  const node = cursor ? findNode(result.tree, cursor) : undefined;
+                  const node = cursor ? findNode(visibleTree, cursor) : undefined;
                   if (node) void runDelete(node, event.currentTarget);
                 }}
                 disabled={busy || !cursor}

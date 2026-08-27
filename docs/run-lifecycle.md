@@ -348,6 +348,15 @@ not necessarily the provider request id: `codex/gpt-5.6-sol`, for example,
 routes upstream as `gpt-5.6-sol`. Billing and Codex allocator eligibility are
 derived from the explicit accepted attribution, never from a model prefix or a
 mutable active-credential snapshot; malformed present metadata fails closed.
+If operational database access fails after the atomic attempt claim but before
+turn-start completion, the activity exports only the exact turn, trigger,
+generation, and safe database failure class. The workflow's unbounded-retry
+DB-only control lane revalidates that identity, closes the same attempt as
+recovering, and backs off before a replacement claim; it never converts the
+claimed inference into a terminal failure or a new prompt.
+The same database-owned transition covers a lost claim commit response: if the
+activity reports retryable pre-claim failure but the control lane finds its
+exact active attempt, that durable attempt wins and is recovered.
 
 SuperGrok/xAI connected-subscription work separately freezes an identifier-free
 `workspace | user` provider-account authority snapshot. Workspace is the
@@ -1691,9 +1700,17 @@ Provider request lifecycle diagnostics are synchronous, bounded, and best-effort
 Native diagnostic observers run before the existing awaited
 `agent.model.request` durable audit callback and cannot block or change it.
 Durable append/publish fencing and ordering therefore remain the source of audit
-truth. For generic providers, an attempt-local async context instead awaits the
-durable `started` checkpoint at the literal pre-fetch boundary; request bytes
-cannot reach the wire first. Model-preparation `started` is durable before
+truth. Every provider path first awaits a mandatory reconciliation of the SDK's
+complete prior history at the follow-up request boundary. A provider can
+therefore consume a completed tool batch only after its call/result pair is
+replay-safe; the first request has no prior model/tool history to append.
+When a Responses terminal omits its output array, completed stream items are
+reassembled by numeric `output_index`; sparse provider positions are compacted
+to the observed items rather than treated as missing output, while duplicate
+indices still fail closed.
+For generic providers, an attempt-local async context then awaits the durable
+`started` checkpoint at the literal pre-fetch boundary; request bytes cannot
+reach the wire first. Model-preparation `started` is durable before
 `runStream` is invoked, including an immediately-calling native transport. A
 semantic terminal is latched before downstream stream cleanup; if the consumer
 cancels after parsing it, the audit remains `completed` rather than producing a

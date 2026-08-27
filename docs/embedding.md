@@ -44,6 +44,17 @@ their own standalone `.og-root`.
 ```ts
 createSessionForRequest(deps, grant, workspaceId, rawPayload);
 acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
+submitComposerDraftForRequest(
+  deps,
+  grant,
+  workspaceId,
+  sessionId,
+  submitComposerDraftRequest,
+  {
+    authorization,
+    additionalResources: hostAuthorizedResources,
+  },
+);
 controlHumanSessionWorkstream(deps, context, {
   action: "cancel",
   clientEventId: crypto.randomUUID(),
@@ -51,7 +62,66 @@ controlHumanSessionWorkstream(deps, context, {
 });
 ```
 
-The create/message helpers live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`; terminal control lives in `packages/core/src/application/session-commands.ts` and uses an explicit authenticated command context. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
+The create/message helpers live in `packages/core/src/domain/sessions.ts` and
+expect the documented dependency slice plus an `AccessGrant`.
+`submitComposerDraftForRequest` lives in
+`packages/core/src/application/composer-submit.ts`; it is the composer-shaped
+application boundary used by both the stock HTTP route and an in-process host.
+It validates/accepts the exact durable draft revision, appends the event,
+creates or steers the turn, rotates the draft, and returns the native
+`SubmitComposerDraftResponse`. An in-process host may provide
+`additionalResources`; they join the accepted command, idempotency hash, turn,
+and durable session resource set atomically while the saved actor draft remains
+the exact fence. This avoids a trusted draft PUT solely to add host-authorized
+repositories or files. Terminal control lives in
+`packages/core/src/application/session-commands.ts` and uses an explicit
+authenticated command context. Scheduled-task validation/sync helpers live in
+`packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing,
+but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
+
+### Host prepare → native accept → host project
+
+An embedding host may need its own business record before OpenGeni accepts
+work. Keep that integration as three explicit phases rather than rebuilding the
+composer protocol:
+
+1. **Prepare:** authenticate the host actor, authorize the product operation,
+   create or replay the host record with the browser's original
+   `clientEventId`, and freeze host-owned policy/context.
+2. **Native accept:** call `submitComposerDraftForRequest` once with the same
+   `clientEventId` and return its exact response. Do not PUT a trusted draft,
+   guess revisions, construct raw event JSON, or encode a host record id into
+   the OpenGeni operation key.
+3. **Project:** correlate the accepted event/turn/receipt back to the prepared
+   host record. A projection failure after native commit must not mark native
+   work failed; reconcile it from the idempotent receipt/export stream.
+
+Host preparation and OpenGeni acceptance are not a distributed transaction.
+A definite pre-acceptance failure may fail the host record. An ambiguous
+network/process outcome must remain retryable and use the same request bytes and
+`clientEventId`; OpenGeni then returns the committed replay or a hard
+idempotency conflict.
+
+For a host-rendered React session, construct the narrow client once instead of
+copying/binding methods manually:
+
+```ts
+import { createEmbeddedSessionClient } from "@opengeni/react/session";
+
+const sessionClient = createEmbeddedSessionClient(openGeniClient, {
+  overrides: {
+    // Calls the host's authenticated prepare/native-accept/project endpoint.
+    submitComposerDraft: hostSubmitComposerDraft,
+  },
+  // Optional presentation/policy projection for read/save/submit responses.
+  mapComposerDraft: (draft) => sanitizeHostDraft(draft),
+});
+```
+
+Delegated SDK methods retain their original receiver, overrides retain the
+override object as theirs, and construction fails immediately when a required
+session method is missing. The native submit response is not replaced with a
+fabricated success value.
 
 **Runtime dependency isolation.** `@opengeni/runtime` bundles its OpenAI Agents
 implementation together with the Zod 4 instance that defines those runtime
@@ -874,6 +944,20 @@ Files, and Terminal while omitting Desktop, or render a completely custom
 timeline/composer from the session-only hooks and pure projection. Product
 metadata should remain in host slots/components rather than being added to
 OpenGeni contracts solely for one embedding.
+
+`FileBrowser.isNodeVisible`, `SandboxFiles.isNodeVisible`, and
+`SandboxWorkspace.isFileNodeVisible` provide a presentation-only file filter.
+The default shows every node. A hidden directory hides its complete subtree;
+selection and reveal requests for hidden paths are ignored. The predicate does
+not grant or revoke filesystem authority. For example, a host can hide only
+root dotfiles while preserving nested project dotfiles:
+
+```tsx
+<SandboxWorkspace
+  {...props}
+  isFileNodeVisible={(node, { depth }) => !(depth === 0 && node.name.startsWith("."))}
+/>
+```
 
 ## Trust model
 

@@ -78,6 +78,141 @@ describe("failSessionAttempt child-terminal identity", () => {
     );
   });
 
+  test("recovers an exact claimed turn after operational database failure", async () => {
+    const published: unknown[] = [];
+    const recoveryCalls: unknown[] = [];
+    const terminalSettlement = mock(async () => ({ action: "settled" as const, events: [] }));
+    const parentWake = mock(async () => undefined);
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: {},
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        requireSession: mock(async () => ({ status: "running" }) as any),
+        getSessionTurnForAttempt: mock(
+          async () =>
+            ({
+              id: "turn-1",
+              triggerEventId: "trigger-1",
+              executionGeneration: 4,
+            }) as any,
+        ),
+        requestSessionTurnRecovery: mock(async (...args: unknown[]) => {
+          recoveryCalls.push(args[2]);
+          return {
+            action: "recovering" as const,
+            events: [{ id: "recovery-1", type: "turn.recovery.requested" }],
+          } as any;
+        }),
+        applySessionTurnSettlement: terminalSettlement as any,
+        publishDurableSessionEvents: mock(
+          async (_bus, _workspaceId, _sessionId, events: unknown[]) => {
+            published.push(...events);
+          },
+        ),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+        deliverFailedChildTurnToParent: parentWake as any,
+      },
+    );
+
+    expect(
+      await activities.failSessionAttempt({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "session-session-1",
+        postClaimDatabaseRecovery: {
+          turnId: "turn-1",
+          triggerEventId: "trigger-1",
+          executionGeneration: 4,
+          code: "db_failure",
+        },
+      }),
+    ).toEqual({ action: "recovering" });
+    expect(recoveryCalls).toEqual([
+      {
+        sessionId: "session-1",
+        turnId: "turn-1",
+        triggerEventId: "trigger-1",
+        attemptId: "attempt-1",
+        reason: "claimed_attempt_database_failure",
+        detail: {
+          code: "db_failure",
+          retryable: true,
+          recoverySource: "workflow_activity_failure",
+        },
+        fromStatuses: ["running"],
+      },
+    ]);
+    expect(published).toEqual([{ id: "recovery-1", type: "turn.recovery.requested" }]);
+    expect(terminalSettlement).not.toHaveBeenCalled();
+    expect(parentWake).not.toHaveBeenCalled();
+  });
+
+  test("recovers an ambiguously committed claim from retryable pre-claim truth", async () => {
+    const recoveryCalls: unknown[] = [];
+    const terminalSettlement = mock(async () => ({ action: "settled" as const, events: [] }));
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: {},
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        requireSession: mock(async () => ({ status: "running" }) as any),
+        getSessionTurnForAttempt: mock(
+          async () =>
+            ({
+              id: "turn-claim-commit",
+              triggerEventId: "trigger-claim-commit",
+              executionGeneration: 1,
+            }) as any,
+        ),
+        requestSessionTurnRecovery: mock(async (...args: unknown[]) => {
+          recoveryCalls.push(args[2]);
+          return { action: "recovering" as const, events: [] } as any;
+        }),
+        applySessionTurnSettlement: terminalSettlement as any,
+        publishDurableSessionEvents: mock(async () => undefined),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+      },
+    );
+
+    expect(
+      await activities.failSessionAttempt({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-claim-commit",
+        workflowId: "session-session-1",
+        preClaimFailureDisposition: "retryable",
+        preClaimFailure: { disposition: "retryable", code: "db_deadlock" },
+      }),
+    ).toEqual({ action: "recovering" });
+    expect(recoveryCalls).toEqual([
+      expect.objectContaining({
+        sessionId: "session-1",
+        turnId: "turn-claim-commit",
+        triggerEventId: "trigger-claim-commit",
+        attemptId: "attempt-claim-commit",
+        reason: "claimed_attempt_database_failure",
+        detail: expect.objectContaining({ code: "db_deadlock", retryable: true }),
+      }),
+    ]);
+    expect(terminalSettlement).not.toHaveBeenCalled();
+  });
+
   test("durably re-wakes a recovering turn when the activity failed before claim", async () => {
     const wakeCalls: unknown[][] = [];
     const settle = mock(async () => ({ action: "settled" as const, events: [] }));

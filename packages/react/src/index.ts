@@ -27,7 +27,18 @@ export type { OpenGeniProviderProps } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
+export { createEmbeddedSessionClient } from "./embedded-session-client";
+export type {
+  ComposerDraftMapContext,
+  CreateEmbeddedSessionClientOptions,
+} from "./embedded-session-client";
 export { usePageLiveActivity } from "./hooks/internal";
+export { filePathVisibility, visibleFileTree } from "./file-node-visibility";
+export type {
+  FileNodeVisibilityContext,
+  FileNodeVisibilityPredicate,
+  FilePathVisibility,
+} from "./file-node-visibility";
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
