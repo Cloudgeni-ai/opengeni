@@ -9332,7 +9332,9 @@ const RIG_SETUP_SKIPPED_SENTINEL = "__OPENGENI_RIG_SETUP_SKIPPED__";
 
 const RIG_SETUP_RUNTIME_MARKER_ROOT = "/tmp/opengeni/rig-setup";
 const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
-const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 32 * 1024;
+// Modal's command transport caps aggregate argv at 64 KiB. Cancellation and
+// run-as wrappers duplicate/expand this command, so stage moderate scripts too.
+const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
 // The cancellation fence embeds a lifecycle command twice, then the current
 // runAs wrapper repeats it across several execution branches. Keep each base64
 // chunk below Modal's 64-KiB aggregate argument ceiling after both wrappers.

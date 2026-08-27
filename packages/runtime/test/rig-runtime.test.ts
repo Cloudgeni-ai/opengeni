@@ -428,6 +428,28 @@ describe("runRigSetupHook (M3)", () => {
     expect(calls.every((call) => !String(call.cmd).includes(script))).toBe(true);
   });
 
+  test("stages moderate scripts before wrapper expansion reaches provider ARG_MAX", async () => {
+    const script = `set -eu\n${"printf x >/dev/null\n".repeat(240)}`;
+    const calls: Array<Record<string, unknown>> = [];
+    const session = {
+      exec: async (args: Record<string, unknown>) => {
+        calls.push(args);
+        return calls.length === 1 ? { status: 42, output: "" } : { status: 0, output: "" };
+      },
+    };
+
+    await runRigSetupHook(session as any, {
+      environment: {},
+      rigSetup: rigSetup({ script }),
+    });
+
+    expect(Buffer.byteLength(script, "utf8")).toBeGreaterThan(4 * 1024);
+    expect(calls.some((call) => String(call.cmd).includes("base64 -d"))).toBe(true);
+    expect(calls.every((call) => Buffer.byteLength(String(call.cmd), "utf8") < 8 * 1024)).toBe(
+      true,
+    );
+  });
+
   test("a cached large setup skips before transferring its payload", async () => {
     const script = `set -eu\n${"printf x >/dev/null\n".repeat(5_000)}`;
     const { session, calls } = fakeSession({
