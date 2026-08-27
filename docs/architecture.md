@@ -186,7 +186,12 @@ and never silently repairs arbitrary callers. Completed pending tool receipts
 retain the model-facing SDK result item separately from the exact
 `agent.toolCall.output` audit value, allowing worker-death recovery to publish
 the same complete event projection as the live path without exposing its extra
-MCP fields to later model requests. A `requires_action` pause additionally
+MCP fields to later model requests. Before every follow-up provider request,
+the worker awaits a mandatory reconciliation of the SDK's complete prior
+history; native and generic provider dispatch therefore cannot overtake durable
+call/result truth. The first request naturally has no prior model/tool history
+to flush.
+A `requires_action` pause additionally
 stamps `interruption_kind` and `tied_reasoning_items` on those receipts so
 unpaired calls never enter model-facing history; resume promotes reasoning +
 call + bounded result as one pair. Side-effecting approvals invoke through the

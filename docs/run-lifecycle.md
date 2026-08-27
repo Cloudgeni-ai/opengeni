@@ -1691,9 +1691,13 @@ Provider request lifecycle diagnostics are synchronous, bounded, and best-effort
 Native diagnostic observers run before the existing awaited
 `agent.model.request` durable audit callback and cannot block or change it.
 Durable append/publish fencing and ordering therefore remain the source of audit
-truth. For generic providers, an attempt-local async context instead awaits the
-durable `started` checkpoint at the literal pre-fetch boundary; request bytes
-cannot reach the wire first. Model-preparation `started` is durable before
+truth. Every provider path first awaits a mandatory reconciliation of the SDK's
+complete prior history at the follow-up request boundary. A provider can
+therefore consume a completed tool batch only after its call/result pair is
+replay-safe; the first request has no prior model/tool history to append.
+For generic providers, an attempt-local async context then awaits the durable
+`started` checkpoint at the literal pre-fetch boundary; request bytes cannot
+reach the wire first. Model-preparation `started` is durable before
 `runStream` is invoked, including an immediately-calling native transport. A
 semantic terminal is latched before downstream stream cleanup; if the consumer
 cancels after parsing it, the audit remains `completed` rather than producing a
