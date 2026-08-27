@@ -139,7 +139,10 @@ function composerDraftRetryDelay(failures: number): number {
   );
   // Independent tabs should not retry on the same millisecond after ingress
   // maintenance ends.
-  return Math.round(exponential * (0.8 + Math.random() * 0.4));
+  return Math.min(
+    COMPOSER_DRAFT_RETRY_MAX_MS,
+    Math.round(exponential * (0.8 + Math.random() * 0.4)),
+  );
 }
 
 // A remount must not manufacture a new operation while the previous mutation
