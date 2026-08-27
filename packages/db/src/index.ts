@@ -63233,7 +63233,11 @@ export async function getScheduledTargetSessionExecution(
         { latencyMode: latestStarted?.latencyMode },
         session.latencyMode as LatencyMode,
       ),
-      tools: (latestStarted?.tools ?? session.tools) as ToolRef[],
+      // A turn stores omitted `tools` as the non-null database default `[]`.
+      // Only the companion marker distinguishes that inherited state from an
+      // explicit empty override, so never let the array alone narrow a later
+      // scheduled occurrence.
+      tools: (latestStarted?.toolsProvided ? latestStarted.tools : session.tools) as ToolRef[],
       sandboxBackend: (latestStarted?.sandboxBackend ?? session.sandboxBackend) as SandboxBackend,
       sandboxOs: (latestStarted?.sandboxOs ?? session.sandboxOs) as SandboxOs,
       firstPartyMcpTools: session.firstPartyMcpTools as FirstPartyMcpToolName[],
