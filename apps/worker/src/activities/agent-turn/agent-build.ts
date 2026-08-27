@@ -49,7 +49,7 @@ import {
   ImageGenerationReferenceError,
   resolveImageGenerationReferencesForTool,
 } from "../image-generation-references";
-import { SandboxChannelAService, type ChannelASession } from "@opengeni/runtime/sandbox";
+import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { VideoGenerationRejectedResult } from "@opengeni/contracts";
 
@@ -77,6 +77,7 @@ import type {
   SandboxRuntimeState,
 } from "./turn-context";
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
+import { resolveImageReferenceSandboxSession } from "./image-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
   input: RunAgentTurnInput;
@@ -253,17 +254,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       subjectId: fileAuthoritySubjectId,
       references,
       readSandboxFile: async (path, maxBytes) => {
-        const imageReferenceSession = (sandboxState.setupBoxSession ??
-          media.sdkOwnedSandboxSession) as ChannelASession | null;
-        if (!imageReferenceSession) {
-          throw new Error("Sandbox image reference is unavailable");
-        }
+        const imageReferenceSandbox = await resolveImageReferenceSandboxSession(
+          sandboxState,
+          media.sdkOwnedSandboxSession,
+        );
         const relativePath = path.slice("/workspace/".length);
         const referenceRunAs = sandboxRunAs(eventing.modelRunSettings);
         const channel = new SandboxChannelAService({
-          session: imageReferenceSession,
+          session: imageReferenceSandbox.session,
           workspaceRoot: "/workspace",
-          leaseEpoch: sandboxState.resolvedSandbox?.leaseEpoch ?? 0,
+          leaseEpoch: imageReferenceSandbox.leaseEpoch,
           ...(referenceRunAs ? { runAs: referenceRunAs } : {}),
         });
         const read = await channel.fsRead({
