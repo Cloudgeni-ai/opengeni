@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/artifact-client";
 import { OpenGeniApiError } from "../src/errors";
 import {
   OPENGENI_API_CONTRACT_REVISION,

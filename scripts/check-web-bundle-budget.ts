@@ -267,6 +267,13 @@ const budgets = {
   // graph measures 2,198,819 raw bytes. The policy-derived 2,149-KiB envelope
   // retains 1,757 bytes of headroom; compressed, file-count, initial, lazy,
   // CSS, and unrelated per-file caps remain fixed.
+  // The optional-operator-surface split moves six Document authority and tenancy-backfill
+  // methods behind the optional SDK surface while preserving them on the root
+  // and legacy core clients. The exact Linux/x64 Bun 1.4 direct-session graph falls to 2,197,216
+  // raw bytes, and a planted unused-method A/B bundle test proves future methods
+  // on that surface add zero bytes to the browser core. Tighten the raw envelope
+  // to the policy-derived 2,147 KiB; every compressed, file-count, initial,
+  // lazy, CSS, and unrelated per-file cap remains fixed.
   directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 603 * kib,
   directSessionFiles: 31,

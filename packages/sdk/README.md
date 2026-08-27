@@ -37,6 +37,21 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+Browser consoles that do not need operator-only surfaces can import
+`OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Document authority migration
+and Default-collection backfill methods stay available on the backward-compatible
+root and `@opengeni/sdk/core` clients, or through the focused
+`@opengeni/sdk/document-authority` entry:
+
+```ts
+import { OpenGeniDocumentAuthorityClient } from "@opengeni/sdk/document-authority";
+
+const operatorClient = new OpenGeniDocumentAuthorityClient({
+  baseUrl: "https://api.example.com",
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
+```
+
 ## Session visibility and forks
 
 For organizations with session-tenancy activation, a canonical managed-cookie

@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
 import type { IntegrationDefinitionSummary } from "@/types";
 
-const context: { client: OpenGeniCoreClient } = { client: {} as OpenGeniCoreClient };
+const context: { client: OpenGeniBrowserClient } = { client: {} as OpenGeniBrowserClient };
 
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("sonner", () => ({ toast: { error: () => {}, success: () => {} } }));
@@ -54,7 +54,7 @@ function fakeClient(definitions: Promise<{ definitions: IntegrationDefinitionSum
     listSlackInstallationBindings: async () => [],
     listIntegrationDefinitions: async () => await definitions,
     listApiIntegrations: async () => ({ integrations: [] }),
-  } as unknown as OpenGeniCoreClient;
+  } as unknown as OpenGeniBrowserClient;
 }
 
 describe("useCapabilitiesCatalog", () => {
@@ -119,7 +119,7 @@ describe("useCapabilitiesCatalog", () => {
       listSlackInstallationBindings: async () => [],
       listIntegrationDefinitions: async () => ({ definitions: [] }),
       listApiIntegrations: async () => ({ integrations: [] }),
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
     const healthy = fakeClient(Promise.resolve({ definitions: [] }));
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;

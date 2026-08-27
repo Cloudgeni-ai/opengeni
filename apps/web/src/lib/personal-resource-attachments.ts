@@ -9,7 +9,7 @@ import {
   type VariableSet,
   type Workspace,
 } from "@opengeni/sdk";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import type { AuthSession } from "@/types";
 import type { ManagedSelfContext } from "./managed-self-context";
@@ -102,7 +102,7 @@ export function resolvePersonalResourceOwnerScope(input: {
 }
 
 async function listAuthorityPages(
-  client: OpenGeniCoreClient,
+  client: OpenGeniBrowserClient,
   workspaceId: string,
   resourceKind: "variable_set" | "rig" | "connected_machine",
 ): Promise<{
@@ -126,7 +126,7 @@ async function listAuthorityPages(
 
 /** Bounded metadata-only load. Resource values and grant credentials never enter web state. */
 export async function loadPersonalResourceCatalog(
-  client: OpenGeniCoreClient,
+  client: OpenGeniBrowserClient,
   scope: PersonalResourceOwnerScope,
 ): Promise<PersonalResourceCatalog> {
   const [variableSets, rigs, variableSetPage, rigPage, connectedMachinePage] = await Promise.all([
