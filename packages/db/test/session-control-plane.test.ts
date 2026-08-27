@@ -240,6 +240,65 @@ async function claimTestSessionWork(
 }
 
 describe("clean session control plane", () => {
+  test("records native tool-search results whose id only survives in provider data", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "find matching tools");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const callId = "tool-search-provider-id";
+
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId,
+        callType: "tool_search_call",
+        callItem: {
+          type: "tool_search_call",
+          call_id: callId,
+          execution: "client",
+          arguments: { query: "matching tools" },
+        },
+      }),
+    ).toEqual({ accepted: true, registered: true });
+
+    const resultItem = {
+      type: "tool_search_output",
+      tools: [{ name: "matching_tool" }],
+      providerData: { call_id: callId },
+    };
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId,
+        resultItem,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+
+    const [pending] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .from(schema.sessionPendingToolCalls)
+        .where(eq(schema.sessionPendingToolCalls.callId, callId)),
+    );
+    expect(pending?.resultItem).toEqual(resultItem);
+  });
+
   test("provider-artifact shape constraints are rolling-safe and enforce new writes", async () => {
     const constraints = await shared.admin<
       Array<{ conname: string; convalidated: boolean }>
