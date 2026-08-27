@@ -277,7 +277,7 @@ describe("PATCH /codex/settings — rotation settings", () => {
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
       headers: {
-        authorization: await bearer(["workspace:admin"]),
+        authorization: await bearer(["connections:write"]),
         "content-type": "application/json",
       },
       body: JSON.stringify({ rotationEnabled: true }),
@@ -299,7 +299,7 @@ describe("PATCH /codex/settings — rotation settings", () => {
       const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
         method: "PATCH",
         headers: {
-          authorization: await bearer(["workspace:admin"]),
+          authorization: await bearer(["connections:write"]),
           "content-type": "application/json",
         },
         body: JSON.stringify({ rotationStrategy }),
@@ -316,7 +316,7 @@ describe("PATCH /codex/settings — rotation settings", () => {
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",
       headers: {
-        authorization: await bearer(["workspace:admin"]),
+        authorization: await bearer(["connections:write"]),
         "content-type": "application/json",
       },
       body: JSON.stringify({}),
@@ -324,7 +324,7 @@ describe("PATCH /codex/settings — rotation settings", () => {
     expect(res.status).toBe(400);
   });
 
-  test("requires workspace:admin (read-only token is 403/401)", async () => {
+  test("requires connections:write (read-only token is 403/401)", async () => {
     spySettings();
     const res = await app().request(`/v1/workspaces/${WS}/codex/settings`, {
       method: "PATCH",

@@ -15,6 +15,7 @@ import {
   type ChildRequiresActionRespondedByKind,
   ModelContextContributionSummaries,
   OPENGENI_PERSONAL_SLACK_MCP_URL,
+  ListWorkspaceMemberCandidatesResponse,
   OrganizationMember,
   WorkspaceMember as WorkspaceMemberContract,
   SessionGoalSnapshot,
@@ -69,6 +70,7 @@ import type {
   ManagedAccount,
   ManagedOrganizationMembershipProjection,
   OrganizationMember as OrganizationMemberType,
+  WorkspaceMemberCandidate,
   McpPersonalConnectionDelegation,
   ModelContextContributionSummary,
   Permission,
@@ -1212,6 +1214,7 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -1251,6 +1254,7 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "github:use",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
   "variable-sets:write",
@@ -1268,6 +1272,35 @@ export const managedPersonalWorkspacePermissions: Permission[] = [
   "artifacts:read",
   "artifacts:publish",
 ];
+
+/**
+ * Resolve the synthetic personal-workspace grant for a subject whose human
+ * identity was authenticated out of band (for example, in HMAC-signed OAuth
+ * state). This is intentionally narrower than ordinary access resolution:
+ * the requested workspace must still be the subject's current personal
+ * workspace pointer and its organization membership must remain active.
+ */
+export async function resolveNamedManagedPersonalWorkspaceGrant(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<AccessGrant | null> {
+  const personalWorkspaceId = await namedSubjectPersonalWorkspaceId(db, {
+    accountId: input.accountId,
+    subjectId: input.subjectId,
+  });
+  if (personalWorkspaceId !== input.workspaceId) return null;
+
+  const live = await namedSubjectHasLiveWorkspaceAuthority(db, input);
+  if (!live) return null;
+
+  return {
+    workspaceId: input.workspaceId,
+    accountId: input.accountId,
+    subjectId: input.subjectId,
+    permissions: managedPersonalWorkspacePermissions,
+    principalKind: "human_session",
+  };
+}
 
 export const allAccountPermissions: Permission[] = [
   "account:read",
@@ -1599,7 +1632,10 @@ async function projectManagedOrganizationAccess(
     }
   }
   const organizationAccounts = await db
-    .select({ id: schema.managedAccounts.id, name: schema.managedAccounts.name })
+    .select({
+      id: schema.managedAccounts.id,
+      name: schema.managedAccounts.name,
+    })
     .from(schema.managedAccounts)
     .where(
       inArray(
@@ -1670,10 +1706,9 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         )`,
       );
     }
-    const [existingOrganizationMembershipResult] = await rawRows<{ result: unknown }>(
-      txDb,
-      sql`select list_self_organization_memberships(${subjectId}) as result`,
-    );
+    const [existingOrganizationMembershipResult] = await rawRows<{
+      result: unknown;
+    }>(txDb, sql`select list_self_organization_memberships(${subjectId}) as result`);
     const existingOrganizationMemberships = OrganizationMember.array().parse(
       existingOrganizationMembershipResult?.result ?? [],
     );
@@ -1693,7 +1728,10 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
       );
       let preferredDefaultWorkspaceId: string | null = null;
       if (fallbackAccount && firstActiveMembership?.organizationId === fallbackAccount.id) {
-        await setRlsContext(txDb, { accountId: fallbackAccount.id, workspaceId: null });
+        await setRlsContext(txDb, {
+          accountId: fallbackAccount.id,
+          workspaceId: null,
+        });
         const [legacyDefaultWorkspace] = await tx
           .select({ id: schema.workspaces.id })
           .from(schema.workspaces)
@@ -2251,6 +2289,55 @@ export async function grantWorkspaceAccess(
     });
 }
 
+/** Prove workspace-scoped management and same-organization active membership. */
+export async function assertWorkspaceMemberManagementCandidate(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetSubjectId: string;
+  },
+): Promise<void> {
+  await withWorkspaceSubjectRls(db, input.workspaceId, input.actorSubjectId, async (scopedDb) => {
+    await scopedDb.execute(sql`select assert_workspace_member_management_candidate(
+        ${input.accountId}::uuid,
+        ${input.workspaceId}::uuid,
+        ${input.actorSubjectId},
+        ${input.targetSubjectId}
+      )`);
+  });
+}
+
+/** List active same-organization humans who do not already have workspace access. */
+export async function listWorkspaceMemberManagementCandidates(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+  },
+): Promise<WorkspaceMemberCandidate[]> {
+  return await withWorkspaceSubjectRls(
+    db,
+    input.workspaceId,
+    input.actorSubjectId,
+    async (scopedDb) => {
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select list_workspace_member_management_candidates(
+          ${input.accountId}::uuid,
+          ${input.workspaceId}::uuid,
+          ${input.actorSubjectId}
+        ) as result`,
+      );
+      return ListWorkspaceMemberCandidatesResponse.parse({
+        members: row?.result ?? [],
+      }).members;
+    },
+  );
+}
+
 async function withOrganizationSharedWorkspaceAdministration<T>(
   db: Database,
   input: {
@@ -2756,7 +2843,9 @@ export async function deleteWorkspaceIfQuiescent(
             return { status: "active_video_generations" as const };
           }
 
-          const [backgroundCommands] = await tx.execute<{ activeCount: number | string }>(sql`
+          const [backgroundCommands] = await tx.execute<{
+            activeCount: number | string;
+          }>(sql`
             select opengeni_private.prepare_workspace_background_command_deletion(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid
@@ -10211,7 +10300,10 @@ export async function getOrCreateSlackInteraction(
     | "terminalDeliveryState"
     | "createdAt"
     | "updatedAt"
-  > & { initiatingSlackUserId?: string | null; routedWorkspaceLabel?: string | null },
+  > & {
+    initiatingSlackUserId?: string | null;
+    routedWorkspaceLabel?: string | null;
+  },
 ): Promise<{ created: boolean; interaction: SlackInteraction }> {
   const outcome = await withRlsContext(db, input, async (scopedDb) => {
     const [created] = await scopedDb
@@ -10224,7 +10316,10 @@ export async function getOrCreateSlackInteraction(
       .onConflictDoNothing()
       .returning();
     if (created) {
-      return { created: true, interaction: mapSlackInteraction(created) } as const;
+      return {
+        created: true,
+        interaction: mapSlackInteraction(created),
+      } as const;
     }
     const [existing] = await scopedDb
       .select()
@@ -10237,7 +10332,10 @@ export async function getOrCreateSlackInteraction(
       )
       .limit(1);
     return existing
-      ? ({ created: false, interaction: mapSlackInteraction(existing) } as const)
+      ? ({
+          created: false,
+          interaction: mapSlackInteraction(existing),
+        } as const)
       : ({ created: false, interaction: null } as const);
   });
   if (outcome.interaction) {
@@ -19097,7 +19195,11 @@ export async function namedSubjectHasLiveWorkspaceAuthority(
  */
 export async function resolveSlackTargetAuthority(
   db: Database,
-  input: { subjectId: string; targetAccountId: string; targetWorkspaceId: string },
+  input: {
+    subjectId: string;
+    targetAccountId: string;
+    targetWorkspaceId: string;
+  },
 ): Promise<AccessGrant | null> {
   const grant = await getWorkspaceGrant(db, input.subjectId, input.targetWorkspaceId, {
     principalKind: "human_session",
@@ -40467,7 +40569,11 @@ export type LeaseHolderHeartbeatStatus =
       fence: "unsupported_kind" | "lease_missing" | "holder_gone";
     }
   | { holderAlive: true; leaseExtended: true; fence: null }
-  | { holderAlive: true; leaseExtended: false; fence: "epoch" | "liveness" | "rotation_requested" };
+  | {
+      holderAlive: true;
+      leaseExtended: false;
+      fence: "epoch" | "liveness" | "rotation_requested";
+    };
 
 export async function heartbeatLeaseHolderStatus(
   db: Database,
@@ -40482,7 +40588,11 @@ export async function heartbeatLeaseHolderStatus(
   },
 ): Promise<LeaseHolderHeartbeatStatus> {
   if (input.kind === "process") {
-    return { holderAlive: false, leaseExtended: false, fence: "unsupported_kind" };
+    return {
+      holderAlive: false,
+      leaseExtended: false,
+      fence: "unsupported_kind",
+    };
   }
   return await withRlsContext(
     db,
@@ -40505,7 +40615,12 @@ export async function heartbeatLeaseHolderStatus(
           for update
         `);
         const lease = leases[0];
-        if (!lease) return { holderAlive: false, leaseExtended: false, fence: "lease_missing" };
+        if (!lease)
+          return {
+            holderAlive: false,
+            leaseExtended: false,
+            fence: "lease_missing",
+          };
 
         // Holder liveness and lease authority are separate signals. Even after
         // rotation fences lease extension, the still-running owner can spend
@@ -40521,7 +40636,11 @@ export async function heartbeatLeaseHolderStatus(
         });
         if (!holderAlive) {
           // reaped or no longer the exact active attempt
-          return { holderAlive: false, leaseExtended: false, fence: "holder_gone" };
+          return {
+            holderAlive: false,
+            leaseExtended: false,
+            fence: "holder_gone",
+          };
         }
         // Recheck the same fence in the write even though its row lock is held,
         // keeping the mutation independently auditable and future-proof.
@@ -40540,9 +40659,17 @@ export async function heartbeatLeaseHolderStatus(
           return { holderAlive: true, leaseExtended: false, fence: "epoch" };
         }
         if (lease.liveness !== "warm" && lease.liveness !== "warming") {
-          return { holderAlive: true, leaseExtended: false, fence: "liveness" };
+          return {
+            holderAlive: true,
+            leaseExtended: false,
+            fence: "liveness",
+          };
         }
-        return { holderAlive: true, leaseExtended: false, fence: "rotation_requested" };
+        return {
+          holderAlive: true,
+          leaseExtended: false,
+          fence: "rotation_requested",
+        };
       }),
   );
 }
@@ -53128,7 +53255,12 @@ export async function holdSessionGoalContinuationWithEvent(
         .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
         .where(eq(schema.sessions.id, sessionId));
       await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
-        result: { goal, eventId: event.id, holdTurnId: input.command.actor.turnId, untilAt },
+        result: {
+          goal,
+          eventId: event.id,
+          holdTurnId: input.command.actor.turnId,
+          untilAt,
+        },
       });
       return {
         goal,
@@ -53465,7 +53597,10 @@ export async function updateSessionTitleWithEvent(
                 sessionId: input.sessionId,
                 sequence,
                 type: "session.title_set",
-                payload: { title: updated.title ?? title, source: input.source },
+                payload: {
+                  title: updated.title ?? title,
+                  source: input.source,
+                },
                 occurredAt: now,
               },
               "payload",
@@ -53474,7 +53609,11 @@ export async function updateSessionTitleWithEvent(
           )
           .returning();
         if (!event) throw new Error("Failed to append session.title_set event");
-        return { updated: true, title: updated.title, events: [mapEvent(event)] };
+        return {
+          updated: true,
+          title: updated.title,
+          events: [mapEvent(event)],
+        };
       }),
   );
 }
@@ -54431,7 +54570,11 @@ export async function materializeGoalContinuation(
                 reason: GOAL_IDLE_BACKOFF_WAKE_REASON,
                 notBefore: dueAt,
               });
-              return { action: "deferred", events: [], notBefore: dueAt } as const;
+              return {
+                action: "deferred",
+                events: [],
+                notBefore: dueAt,
+              } as const;
             }
           }
         }
@@ -59450,7 +59593,10 @@ async function goalContinuationHoldStateTx(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  goal: { continuationHoldTurnId: string | null; continuationHoldUntil: Date | null },
+  goal: {
+    continuationHoldTurnId: string | null;
+    continuationHoldUntil: Date | null;
+  },
 ): Promise<{ current: boolean; deadlinePassed: boolean }> {
   if (!goal.continuationHoldTurnId || !goal.continuationHoldUntil) {
     return { current: false, deadlinePassed: false };
@@ -60905,7 +61051,9 @@ async function claimTurnStartupMilestone(
  */
 async function sealPreLedgerTurnStartupHistory(
   tx: Database,
-  input: TurnStartupLedgerScope & { queueEvent: { id: string; sequence: number } },
+  input: TurnStartupLedgerScope & {
+    queueEvent: { id: string; sequence: number };
+  },
 ): Promise<boolean> {
   const [earlier] = await tx
     .select({ id: schema.sessionEvents.id })
@@ -60924,7 +61072,11 @@ async function sealPreLedgerTurnStartupHistory(
   const ledger = schema.sessionTurnStartupMilestones;
   await tx
     .update(ledger)
-    .set({ canonicalSource: "pre_ledger_history", eventId: null, occurredAt: null })
+    .set({
+      canonicalSource: "pre_ledger_history",
+      eventId: null,
+      occurredAt: null,
+    })
     .where(
       and(
         eq(ledger.workspaceId, input.workspaceId),
@@ -63831,7 +63983,10 @@ async function enqueueFailedChildOutboxWithoutTurnTx(
 function parseChildLifecycleOutboxPayload(
   input: unknown,
   kind: string,
-): { kind: ChildLifecycleSystemUpdateKind; payload: ChildLifecycleOutboxPayload } {
+): {
+  kind: ChildLifecycleSystemUpdateKind;
+  payload: ChildLifecycleOutboxPayload;
+} {
   if (!isChildLifecycleSystemUpdateKind(kind)) {
     throw new Error(`System-update outbox contains retired kind ${kind}`);
   }
@@ -63875,7 +64030,10 @@ export function sessionSystemUpdateOutboxKindPayload(
   if (outbox.payload.type !== outbox.kind) {
     throw new Error(`Outbox ${outbox.kind} carries a ${outbox.payload.type} payload`);
   }
-  return { kind: outbox.kind, payload: outbox.payload } as SessionSystemUpdateOutboxKindPayload;
+  return {
+    kind: outbox.kind,
+    payload: outbox.payload,
+  } as SessionSystemUpdateOutboxKindPayload;
 }
 
 function mapSystemUpdateOutboxRow(row: {
@@ -64016,7 +64174,11 @@ export async function claimPendingSessionSystemUpdateOutbox(
         async (scopedDb) => {
           await scopedDb
             .update(schema.sessionSystemUpdateOutbox)
-            .set({ status: "failed", lastError: message.slice(0, 500), updatedAt: new Date() })
+            .set({
+              status: "failed",
+              lastError: message.slice(0, 500),
+              updatedAt: new Date(),
+            })
             .where(
               and(
                 eq(schema.sessionSystemUpdateOutbox.workspaceId, row.workspace_id),
@@ -64845,7 +65007,11 @@ export async function addSessionSystemUpdateWithSourceMutation(
         // blocked boundary (a re-freeze is a new generation and a new notice).
         const supersededUpdateIds = await supersedeStaleChildLifecycleNoticesInTransaction(
           tx as unknown as Database,
-          { workspaceId: input.workspaceId, sessionId: input.sessionId, inserted },
+          {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            inserted,
+          },
         );
         const [supersededEvent] =
           supersededUpdateIds.length > 0
@@ -65144,7 +65310,11 @@ export async function childRequiresActionResolutionExists(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  boundary: { childSessionId: string; childTurnId: string; childTurnGeneration: number },
+  boundary: {
+    childSessionId: string;
+    childTurnId: string;
+    childTurnGeneration: number;
+  },
 ): Promise<boolean> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb

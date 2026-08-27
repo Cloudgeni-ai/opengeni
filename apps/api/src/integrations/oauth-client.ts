@@ -22,6 +22,7 @@ import {
   loadIntegrationOAuthClient,
   normalizeBearerScheme,
   replaceIntegrationOAuthClientIfCurrent,
+  resolveNamedManagedPersonalWorkspaceGrant,
   storeIntegrationOAuthClient,
   updateConnection,
   withDatabaseStatementTimeout,
@@ -792,7 +793,13 @@ export function requireIntegrationsStateSecret(settings: Settings): string {
 }
 
 async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload): Promise<void> {
-  const grant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
+  const membershipGrant = await getWorkspaceGrant(db, state.subjectId, state.workspaceId);
+  const grant =
+    membershipGrant?.accountId === state.accountId
+      ? membershipGrant
+      : state.personalOwnerVerified
+        ? await resolveNamedManagedPersonalWorkspaceGrant(db, state)
+        : null;
   if (
     !grant ||
     grant.accountId !== state.accountId ||

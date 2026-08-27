@@ -4,6 +4,7 @@ import { HTTPException } from "hono/http-exception";
 import {
   assertWorkspaceDeletable,
   assertWorkspaceMemberRemovable,
+  assertWorkspaceMemberUpdateAllowed,
   isUserMember,
   memberCanAdminister,
   resolveMemberSubjectId,
@@ -94,8 +95,14 @@ describe("workspace member helpers", () => {
 });
 
 describe("assertWorkspaceMemberRemovable", () => {
-  const owner = member({ subjectId: "user:owner", permissions: ["workspace:admin"] });
-  const collaborator = member({ subjectId: "user:collab", permissions: ["sessions:read"] });
+  const owner = member({
+    subjectId: "user:owner",
+    permissions: ["workspace:admin"],
+  });
+  const collaborator = member({
+    subjectId: "user:collab",
+    permissions: ["sessions:read"],
+  });
 
   test("refuses (409) to remove your own membership", () => {
     expect(
@@ -122,7 +129,10 @@ describe("assertWorkspaceMemberRemovable", () => {
   });
 
   test("allows removing an admin when another admin remains", () => {
-    const secondAdmin = member({ subjectId: "user:admin2", permissions: ["members:manage"] });
+    const secondAdmin = member({
+      subjectId: "user:admin2",
+      permissions: ["members:manage"],
+    });
     expect(
       statusOf(() =>
         assertWorkspaceMemberRemovable({
@@ -159,11 +169,64 @@ describe("assertWorkspaceMemberRemovable", () => {
   });
 });
 
+describe("assertWorkspaceMemberUpdateAllowed", () => {
+  const owner = member({
+    subjectId: "user:owner",
+    permissions: ["workspace:admin"],
+  });
+  const collaborator = member({
+    subjectId: "user:collab",
+    permissions: ["sessions:read"],
+  });
+
+  test("refuses to change the caller's own workspace grant", () => {
+    expect(
+      statusOf(() =>
+        assertWorkspaceMemberUpdateAllowed({
+          members: [owner, collaborator],
+          subjectId: owner.subjectId,
+          callerSubjectId: owner.subjectId,
+          nextPermissions: ["workspace:read"],
+        }),
+      ),
+    ).toBe(409);
+  });
+
+  test("preserves at least one workspace administrator", () => {
+    expect(
+      statusOf(() =>
+        assertWorkspaceMemberUpdateAllowed({
+          members: [owner, collaborator],
+          subjectId: owner.subjectId,
+          callerSubjectId: collaborator.subjectId,
+          nextPermissions: ["workspace:read"],
+        }),
+      ),
+    ).toBe(409);
+  });
+
+  test("allows changing another member when an administrator remains", () => {
+    expect(
+      statusOf(() =>
+        assertWorkspaceMemberUpdateAllowed({
+          members: [owner, collaborator],
+          subjectId: collaborator.subjectId,
+          callerSubjectId: owner.subjectId,
+          nextPermissions: ["workspace:read"],
+        }),
+      ),
+    ).toBe("no-throw");
+  });
+});
+
 describe("assertWorkspaceDeletable", () => {
   test("refuses (409) to delete the account's only workspace", () => {
     expect(
       statusOf(() =>
-        assertWorkspaceDeletable({ workspaceCountForAccount: 1, activeSessionCount: 0 }),
+        assertWorkspaceDeletable({
+          workspaceCountForAccount: 1,
+          activeSessionCount: 0,
+        }),
       ),
     ).toBe(409);
   });
@@ -171,7 +234,10 @@ describe("assertWorkspaceDeletable", () => {
   test("refuses (409) while a session is still active", () => {
     expect(
       statusOf(() =>
-        assertWorkspaceDeletable({ workspaceCountForAccount: 3, activeSessionCount: 2 }),
+        assertWorkspaceDeletable({
+          workspaceCountForAccount: 3,
+          activeSessionCount: 2,
+        }),
       ),
     ).toBe(409);
   });
@@ -179,7 +245,10 @@ describe("assertWorkspaceDeletable", () => {
   test("allows deletion when another workspace exists and no session is active", () => {
     expect(
       statusOf(() =>
-        assertWorkspaceDeletable({ workspaceCountForAccount: 2, activeSessionCount: 0 }),
+        assertWorkspaceDeletable({
+          workspaceCountForAccount: 2,
+          activeSessionCount: 0,
+        }),
       ),
     ).toBe("no-throw");
   });

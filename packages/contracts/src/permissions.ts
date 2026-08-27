@@ -29,6 +29,7 @@ export const Permission = z.enum([
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "capabilities:manage",
   /** @deprecated alias of variable-sets:manage */
   "environments:manage",
   /** @deprecated alias of variable-sets:use */

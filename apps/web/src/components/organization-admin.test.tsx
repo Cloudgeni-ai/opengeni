@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, StrictMode, type ReactNode } from "react";
@@ -51,6 +51,45 @@ mock.module("@/components/ui/confirm-dialog", () => ({
       </div>
     ) : null,
 }));
+
+mock.module("@/components/ui/dialog", () => ({
+  Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
+    open ? <div>{children}</div> : null,
+  DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  DialogFooter: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
+}));
+
+mock.module("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => <>{children}</>,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuItem: ({
+    children,
+    onSelect,
+    ...props
+  }: {
+    children: ReactNode;
+    onSelect?: () => void;
+    [key: string]: unknown;
+  }) => (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onSelect}
+      aria-label={typeof props["aria-label"] === "string" ? props["aria-label"] : undefined}
+    >
+      {children}
+    </button>
+  ),
+  DropdownMenuSeparator: () => <hr />,
+}));
+
+GlobalRegistrator.register();
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 
 const {
   OrganizationOverviewSection,
@@ -211,6 +250,23 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
   return match;
 }
 
+function menuItem(label: string): HTMLElement {
+  const match = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (!match) throw new Error(`Missing menu item: ${label}`);
+  return match;
+}
+
+async function openMenu(trigger: HTMLButtonElement) {
+  await act(async () => {
+    trigger.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+    );
+    await Promise.resolve();
+  });
+}
+
 async function flush() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -234,13 +290,6 @@ async function enterText(input: HTMLInputElement, value: string) {
     await Promise.resolve();
   });
 }
-
-beforeAll(() => {
-  GlobalRegistrator.register();
-  (
-    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
-  ).IS_REACT_ACT_ENVIRONMENT = true;
-});
 
 afterAll(() => {
   mock.restore();
@@ -411,6 +460,14 @@ describe("organization administration component fences", () => {
     expect(container.textContent).toContain("Company platform");
     expect(container.textContent).toContain("2 members");
     expect(container.textContent).not.toContain("Private roadmap");
+    expect(button(container, "Create new workspace")).toBeInstanceOf(HTMLButtonElement);
+    expect(container.querySelector('input[aria-label="New workspace name"]')).toBeNull();
+    const workspaceSettingsLink = container.querySelector<HTMLAnchorElement>(
+      'a[aria-label="Open Company platform workspace settings"]',
+    );
+    expect(workspaceSettingsLink?.getAttribute("href")).toBe(
+      "/workspaces/workspace-company/settings?section=general",
+    );
     await act(async () => button(container, "Rename").click());
     const nameInput = container.querySelector<HTMLInputElement>(
       'input[aria-label="Organization name"]',
@@ -494,6 +551,9 @@ describe("organization administration component fences", () => {
       'select[aria-label="Workspace access for Alice Example"]',
     );
     if (!access) throw new Error("Missing workspace access select");
+    expect(Array.from(access.options).map((option) => option.textContent)).not.toContain(
+      "Custom permissions…",
+    );
     await act(async () => {
       Object.getOwnPropertyDescriptor(Object.getPrototypeOf(access), "value")?.set?.call(
         access,
@@ -513,6 +573,12 @@ describe("organization administration component fences", () => {
         operationId: expect.any(String),
       },
     );
+
+    const fineTune = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Fine-tune permissions for Alice Example"]',
+    );
+    if (!fineTune) throw new Error("Missing fine-tune permissions button");
+    expect(fineTune.disabled).toBe(false);
 
     await act(async () => root.unmount());
     container.remove();
@@ -687,8 +753,19 @@ describe("organization administration component fences", () => {
     await flush();
 
     expect(listOrganizationAdministrationMembers.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(container.textContent).toContain("No organization invitations yet.");
+    expect(container.textContent).toContain("No pending invitations");
+    expect(container.textContent).not.toContain("Invitations for you");
     expect(container.textContent).toContain("Second Owner");
+    expect(container.textContent).toContain("2 people");
+    expect(container.textContent).toContain("Shared workspaces");
+    const peopleSearch = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search organization people"]',
+    );
+    if (!peopleSearch) throw new Error("Missing people search");
+    await enterText(peopleSearch, "Second Owner");
+    expect(container.textContent).toContain("1 of 2");
+    expect(container.textContent).not.toContain("Test person (you)");
+    await enterText(peopleSearch, "");
     const roleSelect = container.querySelector<HTMLSelectElement>(
       'select[aria-label="Organization role for Test person (you)"]',
     );
@@ -699,8 +776,14 @@ describe("organization administration component fences", () => {
     );
     expect(container.textContent).not.toContain("Suspend");
     expect(container.textContent).not.toContain("Offboard");
-    expect(container.textContent).toContain("Remove");
-    await act(async () => button(container, "Pause access").click());
+    const actorActions = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions for Test person (you)"]',
+    );
+    expect(actorActions).not.toBeNull();
+    if (!actorActions) throw new Error("Missing member actions");
+    await openMenu(actorActions);
+    expect(document.body.textContent).toContain("Remove from organization");
+    await act(async () => menuItem("Pause access").click());
     await act(async () => button(container, "Confirm pause").click());
     await flush();
 
@@ -820,22 +903,35 @@ describe("organization administration component fences", () => {
       );
     });
     await flush();
-    const email = container.querySelector<HTMLInputElement>("#organization-invite-email");
+    expect(document.body.querySelector("#organization-invite-email")).toBeNull();
+    await act(async () => button(container, "Invite person").click());
+    const email = document.body.querySelector<HTMLInputElement>("#organization-invite-email");
     if (!email) throw new Error("Missing invitation email field");
     await enterText(email, "new-member@example.test");
+    const sendInvitationForm =
+      document.body.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (!sendInvitationForm) throw new Error("Missing send invitation button");
 
     await act(async () => button(container, "Load more invitations").click());
-    expect(button(container, "Invite").disabled).toBe(true);
-    expect(button(container, "Revoke invitation for member@example.test").disabled).toBe(true);
+    expect(sendInvitationForm.disabled).toBe(true);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="More actions for invitation to member@example.test"]',
+      )?.disabled,
+    ).toBe(true);
     expect(createOrganizationInvitation).not.toHaveBeenCalled();
     expect(revokeOrganizationInvitation).not.toHaveBeenCalled();
 
     pageRead.resolve({ invitations: [], nextCursor: "page-2" });
     await flush();
-    expect(button(container, "Invite").disabled).toBe(false);
-    expect(button(container, "Revoke invitation for member@example.test").disabled).toBe(false);
+    expect(sendInvitationForm.disabled).toBe(false);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        'button[aria-label="More actions for invitation to member@example.test"]',
+      )?.disabled,
+    ).toBe(false);
 
-    await act(async () => button(container, "Invite").click());
+    await act(async () => sendInvitationForm.click());
     expect(createOrganizationInvitation).toHaveBeenCalledTimes(1);
     expect(button(container, "Load more invitations").disabled).toBe(true);
     createResult.resolve({
@@ -850,22 +946,32 @@ describe("organization administration component fences", () => {
     );
     expect(toastSuccess).toHaveBeenCalledWith("Organization invitation recorded");
     expect(button(container, "Load more invitations").disabled).toBe(false);
-    const sendInvitation = container.querySelector<HTMLButtonElement>(
+    const sendInvitation = document.body.querySelector<HTMLButtonElement>(
       'button[aria-label="Send invitation to new-member@example.test"]',
     );
     expect(sendInvitation).not.toBeNull();
     await act(async () => sendInvitation?.click());
     await flush();
     expect(requestJson).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain("Email sent");
+    expect(container.textContent).toContain("Sent · Expires");
 
-    await act(async () => button(container, "Revoke invitation for member@example.test").click());
-    await act(async () => button(container, "Revoke invitation").click());
+    const revokeInvitation = document.body.querySelector<HTMLButtonElement>(
+      'button[aria-label="Revoke invitation for member@example.test"]',
+    );
+    if (!revokeInvitation) throw new Error("Missing revoke invitation action");
+    await act(async () => revokeInvitation.click());
+    const revokeDialog = container.querySelector<HTMLElement>('[data-testid="confirm-dialog"]');
+    if (!revokeDialog) throw new Error("Missing revoke confirmation");
+    await act(async () => button(revokeDialog, "Revoke invitation").click());
     expect(revokeOrganizationInvitation).toHaveBeenCalledTimes(1);
     expect(button(container, "Load more invitations").disabled).toBe(true);
     revokeResult.resolve({ ...listedInvite, status: "revoked", revision: 2 });
     await flush();
-    expect(container.textContent).toContain("Member · revoked");
+    expect(
+      container.querySelector(
+        'button[aria-label="More actions for invitation to member@example.test"]',
+      ),
+    ).toBeNull();
     expect(button(container, "Load more invitations").disabled).toBe(false);
 
     await act(async () => root.unmount());
@@ -905,7 +1011,7 @@ describe("organization administration component fences", () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
-    const acceptLabel = `Accept invitation to organization ${identityA.organizationId.slice(0, 8)}`;
+    const acceptLabel = "Accept";
 
     await act(async () => {
       root.render(
@@ -920,7 +1026,7 @@ describe("organization administration component fences", () => {
     });
     await flush();
 
-    await act(async () => button(container, "Load more incoming invitations").click());
+    await act(async () => button(container, "Load more invitations").click());
     expect(button(container, acceptLabel).disabled).toBe(true);
     expect(acceptOrganizationInvitation).not.toHaveBeenCalled();
     pageRead.resolve({ invitations: [], nextCursor: "page-2" });
@@ -929,11 +1035,11 @@ describe("organization administration component fences", () => {
 
     await act(async () => button(container, acceptLabel).click());
     expect(acceptOrganizationInvitation).toHaveBeenCalledTimes(1);
-    expect(button(container, "Load more incoming invitations").disabled).toBe(true);
+    expect(button(container, "Load more invitations").disabled).toBe(true);
     acceptResult.resolve(undefined);
     await flush();
     expect(onAuthorityChanged).toHaveBeenCalledTimes(1);
-    expect(button(container, "Load more incoming invitations").disabled).toBe(false);
+    expect(button(container, "Load more invitations").disabled).toBe(false);
 
     await act(async () => root.unmount());
     container.remove();
@@ -982,7 +1088,12 @@ describe("organization administration component fences", () => {
       );
     });
     await flush();
-    await act(async () => button(container, "Pause access").click());
+    const actorActions = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions for Test person (you)"]',
+    );
+    if (!actorActions) throw new Error("Missing member actions");
+    await openMenu(actorActions);
+    await act(async () => menuItem("Pause access").click());
     await act(async () => button(container, "Confirm pause").click());
 
     await act(async () => {
@@ -1008,7 +1119,7 @@ describe("organization administration component fences", () => {
     expect(updateOrganizationMember).toHaveBeenCalledTimes(1);
     expect(onAuthorityChanged).not.toHaveBeenCalled();
     expect(toastSuccess).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("You");
+    expect(container.textContent).toContain("Test person (you)");
     expect(container.textContent).not.toContain("Second Owner");
 
     await act(async () => root.unmount());
@@ -1107,9 +1218,15 @@ describe("organization administration component fences", () => {
     });
     await flush();
 
-    expect(container.textContent).not.toContain("Revoke invitation for owner@example.test");
-    expect(container.textContent).not.toContain("Revoke invitation for admin@example.test");
-    expect(container.textContent).toContain("Revoke invitation for member@example.test");
+    expect(
+      document.body.querySelector('button[aria-label="Revoke invitation for owner@example.test"]'),
+    ).toBeNull();
+    expect(
+      document.body.querySelector('button[aria-label="Revoke invitation for admin@example.test"]'),
+    ).toBeNull();
+    expect(
+      document.body.querySelector('button[aria-label="Revoke invitation for member@example.test"]'),
+    ).not.toBeNull();
     for (const row of Array.from(container.querySelectorAll("div")).filter((candidate) =>
       /^(owner|admin)@example\.test/.test(candidate.textContent?.trim() ?? ""),
     )) {

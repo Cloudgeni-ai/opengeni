@@ -55,7 +55,7 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/library/:libraryId/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const libraryId = decodeURIComponent(c.req.param("libraryId"));
     const payload = InstallLibrarySkillRequest.parse(await c.req.json());
     let loaded: ReturnType<typeof loadSkillLibrarySkill>;
@@ -136,7 +136,7 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const payload = InstallSkillRequest.parse(await c.req.json());
     const resolved = await resolveForRoute(payload.url, github);
     if (
@@ -204,7 +204,7 @@ export function registerSkillRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/skills/:capabilityId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
     const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
     const payload = UninstallSkillRequest.parse(await c.req.json());
     try {

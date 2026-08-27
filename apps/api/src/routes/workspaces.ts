@@ -1,6 +1,7 @@
 import {
   AddWorkspaceMemberRequest,
   CreateWorkspaceRequest,
+  ListWorkspaceMemberCandidatesResponse,
   ListWorkspaceMembersResponse,
   SetWorkspaceDefaultRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -16,19 +17,23 @@ import {
   workspaceControlUtf8Bytes,
   type AccessContext,
   type Permission,
+  type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
+  assertWorkspaceMemberManagementCandidate,
   createWorkspace,
   deleteWorkspaceIfQuiescent,
-  getManagedUserByEmail,
+  getManagedUserProfilesByIds,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listWorkspaceMembers,
+  listWorkspaceMemberManagementCandidates,
   normalizeWorkspaceMembershipPermissions,
   listWorkspaceControlEvents,
   listWorkspacesForSubject,
+  nestedPostgresSqlState,
   removeWorkspaceMember,
   requireWorkspace,
   getRig,
@@ -55,8 +60,8 @@ import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   assertWorkspaceMemberRemovable,
+  assertWorkspaceMemberUpdateAllowed,
   controlHumanWorkspace,
-  resolveMemberSubjectId,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
@@ -139,10 +144,16 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = CreateWorkspaceRequest.parse(await c.req.json());
     const accountId = payload.accountId ?? context.defaultAccountId;
     if (!accountId) {
-      throw new HTTPException(409, { message: "account selection is required" });
+      throw new HTTPException(409, {
+        message: "account selection is required",
+      });
     }
     requireAccountPermission(context, accountId, "workspace:create");
-    await requireLimit(deps, { accountId, action: "workspace:create", quantity: 1 });
+    await requireLimit(deps, {
+      accountId,
+      action: "workspace:create",
+      quantity: 1,
+    });
     const workspace = await createWorkspace(deps.db, {
       accountId,
       name: payload.name.trim(),
@@ -150,7 +161,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       externalSource: payload.externalSource ?? null,
       externalId: payload.externalId ?? null,
       ...(payload.agentInstructions !== undefined
-        ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+        ? {
+            agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
+          }
         : {}),
     });
     await grantWorkspaceAccess(deps.db, {
@@ -189,7 +202,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(payload.name !== undefined ? { name: payload.name.trim() } : {}),
       ...(payload.slug !== undefined ? { slug: payload.slug?.trim() || null } : {}),
       ...(payload.agentInstructions !== undefined
-        ? { agentInstructions: normalizeAgentInstructions(payload.agentInstructions) }
+        ? {
+            agentInstructions: normalizeAgentInstructions(payload.agentInstructions),
+          }
         : {}),
     });
     return c.json(Workspace.parse(workspace));
@@ -202,7 +217,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid workspace settings patch" });
+      throw new HTTPException(400, {
+        message: "invalid workspace settings patch",
+      });
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy
     // workspace yields the retryable 503 instead of parking this request.
@@ -333,11 +350,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
     if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
-      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+      throw new HTTPException(400, {
+        message: "workspace-control actor is too large",
+      });
     }
     const parsed = WorkspaceInferenceControlRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid workspace inference-control request" });
+      throw new HTTPException(400, {
+        message: "invalid workspace inference-control request",
+      });
     }
     return c.json(
       await controlHumanWorkspace(
@@ -399,7 +420,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (payload.rigId) {
       const rig = await getRig(deps.db, workspaceId, payload.rigId);
       if (!rig) {
-        throw new HTTPException(422, { message: `unknown rigId: ${payload.rigId}` });
+        throw new HTTPException(422, {
+          message: `unknown rigId: ${payload.rigId}`,
+        });
       }
     }
     const workspace = await setWorkspaceDefaultRig(deps.db, workspaceId, payload.rigId);
@@ -421,7 +444,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "workspace not found" });
     }
     if (deleted.status === "only_workspace") {
-      throw new HTTPException(409, { message: "cannot delete the account's only workspace" });
+      throw new HTTPException(409, {
+        message: "cannot delete the account's only workspace",
+      });
     }
     if (deleted.status === "active_sessions") {
       throw new HTTPException(409, {
@@ -453,7 +478,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         db: deps.db,
         deleteSchedule: async (temporalScheduleId) => {
-          await deps.workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId });
+          await deps.workflowClient.deleteScheduledTaskSchedule({
+            temporalScheduleId,
+          });
         },
         ...(deps.observability ? { observability: deps.observability } : {}),
       },
@@ -467,28 +494,67 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/members", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const members = await listWorkspaceMembers(deps.db, workspaceId);
+    const members = await listWorkspacePeople(deps, workspaceId);
     return c.json(workspaceMembersResponse(members));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/member-candidates", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
+    try {
+      return c.json(
+        ListWorkspaceMemberCandidatesResponse.parse({
+          members: await listWorkspaceMemberManagementCandidates(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            actorSubjectId: grant.subjectId,
+          }),
+        }),
+      );
+    } catch (error) {
+      rethrowWorkspaceMemberCandidateError(error);
+    }
   });
 
   app.post("/v1/workspaces/:workspaceId/members", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const payload = AddWorkspaceMemberRequest.parse(await c.req.json());
-    const email = payload.email.trim();
-    // Email invites for not-yet-registered users are deferred: an unknown email
-    // resolves to null, which resolveMemberSubjectId turns into a 404.
-    const subjectId = resolveMemberSubjectId(await getManagedUserByEmail(deps.db, email));
+    let candidates: WorkspaceMemberCandidate[];
+    try {
+      candidates = await listWorkspaceMemberManagementCandidates(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        actorSubjectId: grant.subjectId,
+      });
+    } catch (error) {
+      rethrowWorkspaceMemberCandidateError(error);
+    }
+    const candidate = candidates.find(
+      (entry) => entry.organizationMembershipId === payload.organizationMembershipId,
+    );
+    if (!candidate) {
+      throw new HTTPException(404, {
+        message: "this organization member is not available to add",
+      });
+    }
+    const subjectId = candidate.subjectId;
+    const existing = await listWorkspaceMembers(deps.db, workspaceId);
+    if (existing.some((member) => member.subjectId === subjectId)) {
+      throw new HTTPException(409, {
+        message: "this person already has access to the workspace",
+      });
+    }
     await grantWorkspaceAccess(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       subjectId,
-      subjectLabel: email,
+      subjectLabel: candidate.name?.trim() || candidate.email || subjectId,
       ...(payload.role !== undefined ? { role: payload.role } : {}),
       permissions: payload.permissions,
     });
-    const members = await listWorkspaceMembers(deps.db, workspaceId);
-    const member = members.find((candidate) => candidate.subjectId === subjectId);
+    const members = await listWorkspacePeople(deps, workspaceId);
+    const member = members.find((addedMember) => addedMember.subjectId === subjectId);
     if (!member) {
       throw new HTTPException(500, { message: "failed to add member" });
     }
@@ -500,11 +566,23 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "members:manage");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const payload = UpdateWorkspaceMemberRequest.parse(await c.req.json());
-    const existing = await listWorkspaceMembers(deps.db, workspaceId);
+    const existing = await listWorkspacePeople(deps, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {
       throw new HTTPException(404, { message: "member not found" });
     }
+    assertWorkspaceMemberUpdateAllowed({
+      members: existing,
+      subjectId,
+      callerSubjectId: grant.subjectId,
+      nextPermissions: payload.permissions,
+    });
+    await requireWorkspaceMemberCandidate(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      actorSubjectId: grant.subjectId,
+      targetSubjectId: subjectId,
+    });
     await grantWorkspaceAccess(deps.db, {
       accountId: grant.accountId,
       workspaceId,
@@ -513,7 +591,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       role: payload.role ?? current.role,
       permissions: payload.permissions,
     });
-    const members = await listWorkspaceMembers(deps.db, workspaceId);
+    const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((candidate) => candidate.subjectId === subjectId);
     if (!member) {
       throw new HTTPException(500, { message: "failed to update member" });
@@ -528,7 +606,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.
     // The fenced removal command re-enforces both guards fail-closed.
-    assertWorkspaceMemberRemovable({ members, subjectId, callerSubjectId: grant.subjectId });
+    assertWorkspaceMemberRemovable({
+      members,
+      subjectId,
+      callerSubjectId: grant.subjectId,
+    });
     await removeWorkspaceMember(deps.db, {
       accountId: grant.accountId,
       workspaceId,
@@ -537,6 +619,69 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
     return c.body(null, 204);
   });
+}
+
+async function listWorkspacePeople(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<WorkspaceMemberValue[]> {
+  const members = await listWorkspaceMembers(deps.db, workspaceId);
+  const userIds = members.flatMap((member) =>
+    member.subjectId.startsWith("user:") ? [member.subjectId.slice("user:".length)] : [],
+  );
+  const profiles = await getManagedUserProfilesByIds(deps.db, userIds);
+  const profileBySubject = new Map(
+    profiles.map((profile) => [`user:${profile.id}`, profile.name?.trim() || profile.email]),
+  );
+  return members.map((member) => ({
+    ...member,
+    subjectLabel: profileBySubject.get(member.subjectId) ?? member.subjectLabel,
+  }));
+}
+
+async function requireWorkspaceMemberCandidate(
+  deps: ApiRouteDeps,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actorSubjectId: string;
+    targetSubjectId: string;
+  },
+): Promise<void> {
+  try {
+    await assertWorkspaceMemberManagementCandidate(deps.db, input);
+  } catch (error) {
+    const sqlState = nestedPostgresSqlState(error);
+    if (sqlState === "P0002") {
+      throw new HTTPException(404, {
+        message: "active organization member not found",
+      });
+    }
+    if (sqlState === "42501") {
+      throw new HTTPException(403, {
+        message: "workspace member management is not allowed",
+      });
+    }
+    throw error;
+  }
+}
+
+function rethrowWorkspaceMemberCandidateError(error: unknown): never {
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "P0002") {
+    throw new HTTPException(404, { message: "workspace not found" });
+  }
+  if (sqlState === "42501") {
+    throw new HTTPException(403, {
+      message: "workspace member management is not allowed",
+    });
+  }
+  if (sqlState === "54000") {
+    throw new HTTPException(409, {
+      message: "this organization has too many members to show here",
+    });
+  }
+  throw error;
 }
 
 // A persona override that is null or trims to empty collapses to null (use the
@@ -560,6 +705,8 @@ function requireAccountPermission(
     !grant ||
     (!grant.permissions.includes(permission) && !grant.permissions.includes("account:admin"))
   ) {
-    throw new HTTPException(403, { message: `missing permission: ${permission}` });
+    throw new HTTPException(403, {
+      message: `missing permission: ${permission}`,
+    });
   }
 }

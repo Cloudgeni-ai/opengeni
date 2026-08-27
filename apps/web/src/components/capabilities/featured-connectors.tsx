@@ -92,14 +92,16 @@ export function FeaturedConnectorTile({
       data-featured-connector={item.id}
       className={cn(
         "group flex min-w-0 flex-col gap-2.5 rounded-xl border border-border bg-surface p-4",
-        "transition-colors hover:border-border-strong",
+        "transition-[border-color,background-color,box-shadow] duration-150",
+        "hover:border-brand/40 hover:bg-accent hover:shadow-sm",
+        "focus-within:border-brand/60 focus-within:ring-1 focus-within:ring-brand/30",
       )}
     >
       <button
         type="button"
         onClick={onOpen}
         aria-label={`${item.name}. ${chip.label}`}
-        className="flex min-w-0 flex-col gap-2.5 rounded-lg text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
+        className="flex min-w-0 flex-col gap-2.5 text-left focus-visible:outline-none"
       >
         <span className="flex min-w-0 items-center gap-2.5">
           <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
