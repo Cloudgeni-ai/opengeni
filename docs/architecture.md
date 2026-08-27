@@ -294,9 +294,11 @@ independent roots have diverged; Knowledge and preference retain their narrower
 lock path. The preceding learning-policy snapshot uses that same canonical
 workspace -> session -> turn -> attempt order and revalidates after any wait, so
 its exact-attempt read cannot deadlock a concurrent session lifecycle writer or
-accept authority that changed while blocked. A common immutable Knowledge
-review binds the full input hash and operation UUID across all destinations;
-exact retry reconstructs the same
+accept authority that changed while blocked. Its attempt `SHARE` lock remains
+held through commit; interruption writers take that same attempt `FOR UPDATE`
+before inserting, so a live interruption cannot cross the final revalidation
+and immutable snapshot insertion. A common immutable Knowledge review binds the
+full input hash and operation UUID across all destinations; exact retry reconstructs the same
 content-free receipt and changed input conflicts. The preference path adds an
 immutable destination receipt so later human activation, rejection, or
 supersession cannot rewrite replay identity. Human-governed destination

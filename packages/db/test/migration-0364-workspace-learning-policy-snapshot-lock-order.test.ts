@@ -248,4 +248,102 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
       await writer.end();
     }
   }, 180_000);
+
+  test("holds the attempt fence through commit so interruption creation cannot cross revalidation", async () => {
+    if (!available) return;
+    const fixture = await seedAttempt();
+    const interruptionApplicationName = `learning-policy-interruption-${crypto.randomUUID()}`;
+    const snapshot = postgres(shared!.appUrl, { max: 1, prepare: false });
+    const interruptionWriter = postgres(shared!.adminUrl, {
+      max: 1,
+      prepare: false,
+      connection: { application_name: interruptionApplicationName },
+    });
+    const snapshotCreated = deferred();
+    const releaseSnapshot = deferred();
+    const operationId = crypto.randomUUID();
+    let snapshotCall: Promise<Array<{ snapshotId: string }>> | undefined;
+    let interruptionCall: Promise<unknown> | undefined;
+
+    try {
+      snapshotCall = snapshot.begin(async (tx) => {
+        await tx`select set_config('opengeni.account_id', ${fixture.accountId}, true)`;
+        await tx`select set_config('opengeni.workspace_id', ${fixture.workspaceId}, true)`;
+        const rows = await tx<Array<{ snapshotId: string }>>`
+          select snapshot_id as "snapshotId"
+          from workspace_learning_policy_get_or_create_snapshot(
+            ${fixture.accountId}::uuid,
+            ${fixture.workspaceId}::uuid,
+            ${fixture.sessionId}::uuid,
+            ${fixture.turnId}::uuid,
+            ${fixture.attemptId}::uuid,
+            ${fixture.executionGeneration}::integer
+          )`;
+        snapshotCreated.resolve();
+        await releaseSnapshot.promise;
+        return rows;
+      });
+      void snapshotCall.catch(() => undefined);
+      await within(snapshotCreated.promise, 10_000, "Snapshot transaction did not reach commit");
+
+      interruptionCall = interruptionWriter.begin(async (tx) => {
+        await tx`
+          insert into session_command_receipts (
+            id, account_id, workspace_id, actor_type, actor_subject_id,
+            action, target_session_id, target_turn_id, operation_key,
+            canonical_request_hash
+          ) values (
+            ${operationId}, ${fixture.accountId}, ${fixture.workspaceId},
+            'operator', 'operator:learning-policy-lock-order', 'steer',
+            ${fixture.sessionId}, ${fixture.turnId},
+            ${`learning-policy-interruption-${operationId}`}, ${"a".repeat(64)}
+          )`;
+        await tx`
+          select id from session_turn_attempts
+          where account_id = ${fixture.accountId}
+            and workspace_id = ${fixture.workspaceId}
+            and session_id = ${fixture.sessionId}
+            and turn_id = ${fixture.turnId}
+            and id = ${fixture.attemptId}
+          for update`;
+        await tx`
+          insert into session_attempt_interruptions (
+            account_id, workspace_id, session_id, operation_id,
+            attempt_id, kind, control_revision
+          ) values (
+            ${fixture.accountId}, ${fixture.workspaceId}, ${fixture.sessionId},
+            ${operationId}, ${fixture.attemptId}, 'steer', 1
+          )`;
+      });
+      void interruptionCall.catch(() => undefined);
+      await waitForApplicationLock(interruptionApplicationName);
+
+      const [beforeCommit] = await shared!.admin<Array<{ count: number }>>`
+        select count(*)::int as count
+        from session_attempt_interruptions
+        where operation_id = ${operationId}`;
+      expect(beforeCommit?.count).toBe(0);
+
+      releaseSnapshot.resolve();
+      const [snapshotRows] = await within(
+        Promise.all([snapshotCall, interruptionCall]),
+        10_000,
+        "Snapshot commit and interruption creation did not settle",
+      );
+      expect(snapshotRows).toHaveLength(1);
+      const [interruption] = await shared!.admin<Array<{ state: string }>>`
+        select state
+        from session_attempt_interruptions
+        where operation_id = ${operationId}
+          and attempt_id = ${fixture.attemptId}`;
+      expect(interruption?.state).toBe("pending");
+    } finally {
+      releaseSnapshot.resolve();
+      await Promise.allSettled(
+        [snapshotCall, interruptionCall].filter(Boolean) as Promise<unknown>[],
+      );
+      await interruptionWriter.end();
+      await snapshot.end();
+    }
+  }, 180_000);
 });

@@ -121,6 +121,11 @@ BEGIN
           USING ERRCODE = '23514';
       END IF;
 
+      -- This attempt SHARE lock is also the interruption-creation fence. Every
+      -- supported interruption writer takes the exact attempt FOR UPDATE before
+      -- inserting session_attempt_interruptions. Row locks live until transaction
+      -- end, so no such writer can cross the revalidation -> insert -> commit
+      -- interval below.
       -- A lock acquisition may wait behind Pause, Steer, replacement, or
       -- settlement. Re-evaluate the complete tuple in a fresh READ COMMITTED
       -- statement after the canonical rows are locked so a pre-wait snapshot

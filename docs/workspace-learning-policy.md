@@ -27,7 +27,7 @@ Revision creation does not activate a policy. Activation and rollback require an
 
 Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to the future governed derived-learning path; it does not disable `memory_search`.
 
-Migration `0364_workspace_learning_policy_snapshot_lock_order.sql` repairs the accepted-attempt snapshot lock order without changing policy semantics. Snapshot creation locks the workspace, session, turn, and attempt explicitly in the same order as ordinary session lifecycle writers, then revalidates the complete authority and interruption tuple in a fresh statement. PostgreSQL query planning therefore cannot invert session and turn locks, while a Pause, Steer, replacement, or settlement that completed during a lock wait still causes the snapshot to fail closed.
+Migration `0364_workspace_learning_policy_snapshot_lock_order.sql` repairs the accepted-attempt snapshot lock order without changing policy semantics. Snapshot creation locks the workspace, session, turn, and attempt explicitly in the same order as ordinary session lifecycle writers, then revalidates the complete authority and interruption tuple in a fresh statement. The attempt `SHARE` lock remains held through commit and every supported interruption writer takes that attempt `FOR UPDATE` before insertion, so an interruption cannot cross the revalidation-to-insert interval. PostgreSQL query planning therefore cannot invert session and turn locks, while a Pause, Steer, replacement, or settlement that completed during a lock wait still causes the snapshot to fail closed.
 
 ## Effective resolution and governed evaluation
 
