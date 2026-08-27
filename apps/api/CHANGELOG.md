@@ -1,5 +1,18 @@
 # @opengeni/api-router
 
+## 2.4.2
+
+### Patch Changes
+
+- 3a004ff: Preserve optional structured human-input answers, replay terminal settlements idempotently, and retain Slack replies when expiry or cancellation wins a response race.
+- Updated dependencies [18afc44]
+- Updated dependencies [bc88a28]
+- Updated dependencies [3a004ff]
+  - @opengeni/db@3.5.2
+  - @opengeni/core@2.5.2
+  - @opengeni/documents@0.8.5
+  - @opengeni/events@0.4.3
+
 ## 2.4.1
 
 ### Patch Changes

@@ -1,5 +1,13 @@
 # @opengeni/db
 
+## 3.5.2
+
+### Patch Changes
+
+- 18afc44: Accept native tool-search results whose correlation id is carried only in provider metadata.
+- bc88a28: Keep recoverable sessions durably wakeable until exact attempt quiescence, including when a retained process settles after the workflow's final reconciliation check.
+- 3a004ff: Preserve optional structured human-input answers, replay terminal settlements idempotently, and retain Slack replies when expiry or cancellation wins a response race.
+
 ## 3.5.1
 
 ### Patch Changes

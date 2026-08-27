@@ -1,5 +1,18 @@
 # @opengeni/worker-bundle
 
+## 0.22.7
+
+### Patch Changes
+
+- f8c7b3b: Keep a turn active when its post-compaction continuation ends without a terminal model response, recovering from the durable compacted checkpoint instead of emitting an empty completion and advancing queued prompts.
+- Updated dependencies [18afc44]
+- Updated dependencies [bc88a28]
+- Updated dependencies [3a004ff]
+  - @opengeni/db@3.5.2
+  - @opengeni/core@2.5.2
+  - @opengeni/documents@0.8.5
+  - @opengeni/events@0.4.3
+
 ## 0.22.6
 
 ### Patch Changes
