@@ -189,7 +189,8 @@ the same complete event projection as the live path without exposing its extra
 MCP fields to later model requests. Before every follow-up provider request,
 the worker awaits a mandatory reconciliation of the SDK's complete prior
 history; native and generic provider dispatch therefore cannot overtake durable
-call/result truth. The first request naturally has no stream history to flush.
+call/result truth. The first request naturally has no prior model/tool history
+to flush.
 A `requires_action` pause additionally
 stamps `interruption_kind` and `tied_reasoning_items` on those receipts so
 unpaired calls never enter model-facing history; resume promotes reasoning +
