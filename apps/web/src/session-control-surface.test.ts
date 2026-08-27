@@ -88,6 +88,11 @@ describe("session control surface architecture", () => {
     expect(route).toContain("refreshPersonalResourceCatalogs");
     expect(route).toContain("canLoadVariableSetCatalog");
     expect(route).toContain("canResolveVariableSetAttachments");
+    expect(route).toContain("const selectedRigDefaultVariableSetIds =");
+    expect(route).toContain("selectedRigDefaultVariableSetIds,");
+    expect(route).toContain(
+      "selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey",
+    );
     expect(route).toContain("Couldn’t verify the selected Variable Set or Rig");
     expect(route).toContain("onRetry: () => void refreshPersonalResourceCatalogs()");
     expect(establishedControl).not.toContain("<fieldset");

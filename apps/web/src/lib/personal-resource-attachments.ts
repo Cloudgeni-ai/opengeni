@@ -300,11 +300,14 @@ export function newSessionVariableSetResolutionSource(input: {
  * Reconcile fixed resources restored from a durable new-session draft against
  * the scoped catalogs without discarding them while those catalogs are still
  * loading. A selected Rig also waits for the Variable Set catalog because its
- * active version can contribute default Variable Sets to the attachment.
+ * active version can contribute default Variable Sets to the attachment; every
+ * inherited default must resolve in the target workspace before the Rig is
+ * considered attachable.
  */
 export function reconcileNewSessionFixedResources(input: {
   selectedVariableSetIds: readonly string[];
   selectedRigId: string;
+  selectedRigDefaultVariableSetIds: readonly string[];
   selectableVariableSetIds: readonly string[];
   selectableRigIds: readonly string[];
   variableSetsSettled: boolean;
@@ -319,8 +322,14 @@ export function reconcileNewSessionFixedResources(input: {
   const variableSetIds = input.variableSetsSettled
     ? input.selectedVariableSetIds.filter((id) => selectableVariableSetIds.has(id))
     : [...input.selectedVariableSetIds];
+  const selectedRigDefaultsResolved = input.selectedRigDefaultVariableSetIds.every((id) =>
+    selectableVariableSetIds.has(id),
+  );
   const rigId =
-    input.rigsSettled && input.selectedRigId && !selectableRigIds.has(input.selectedRigId)
+    input.selectedRigId &&
+    input.rigsSettled &&
+    (!selectableRigIds.has(input.selectedRigId) ||
+      (input.variableSetsSettled && !selectedRigDefaultsResolved))
       ? ""
       : input.selectedRigId;
   const variableSetCatalogRequired =
@@ -328,7 +337,8 @@ export function reconcileNewSessionFixedResources(input: {
   const variableSetSelectionResolved =
     !variableSetCatalogRequired ||
     (input.variableSetsSettled &&
-      input.selectedVariableSetIds.every((id) => selectableVariableSetIds.has(id)));
+      input.selectedVariableSetIds.every((id) => selectableVariableSetIds.has(id)) &&
+      selectedRigDefaultsResolved);
   const rigSelectionResolved =
     input.selectedRigId.length === 0 ||
     (input.rigsSettled && selectableRigIds.has(input.selectedRigId));

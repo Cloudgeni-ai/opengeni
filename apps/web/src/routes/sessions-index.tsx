@@ -295,11 +295,10 @@ function SessionsIndexRouteContent({
     (rig) => rig.scope !== "user" || personalResourcesAvailable,
   );
   const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
+  const selectedRigDefaultVariableSetIds = selectedRig?.activeVersion?.defaultVariableSetIds ?? [];
+  const selectedRigDefaultVariableSetIdsKey = selectedRigDefaultVariableSetIds.join("\u0000");
   const variableSetAttachmentIds = [
-    ...new Set([
-      ...draft.variableSetIds,
-      ...(selectedRig?.activeVersion?.defaultVariableSetIds ?? []),
-    ]),
+    ...new Set([...draft.variableSetIds, ...selectedRigDefaultVariableSetIds]),
   ];
   const variableSetAttachmentIdsKey = variableSetAttachmentIds.join("\u0000");
   const variableSetAttachmentResolutionGeneration = useRef(0);
@@ -381,6 +380,7 @@ function SessionsIndexRouteContent({
   const fixedResourceSelection = reconcileNewSessionFixedResources({
     selectedVariableSetIds: draft.variableSetIds,
     selectedRigId: draft.rigId,
+    selectedRigDefaultVariableSetIds,
     selectableVariableSetIds: fixedResourceCatalogEnabled
       ? resolvedVariableSetIds
       : draft.variableSetIds,
@@ -409,6 +409,9 @@ function SessionsIndexRouteContent({
       const reconciled = reconcileNewSessionFixedResources({
         selectedVariableSetIds: current.variableSetIds,
         selectedRigId: current.rigId,
+        selectedRigDefaultVariableSetIds: selectedRigDefaultVariableSetIdsKey
+          ? selectedRigDefaultVariableSetIdsKey.split("\u0000")
+          : [],
         selectableVariableSetIds: resolvedVariableSetIdsKey
           ? resolvedVariableSetIdsKey.split("\u0000")
           : [],
@@ -435,6 +438,7 @@ function SessionsIndexRouteContent({
     rigs.error,
     rigs.loading,
     selectedFixedResourceKey,
+    selectedRigDefaultVariableSetIdsKey,
     selectableRigIdsKey,
     resolvedVariableSetIdsKey,
     variableSetsSettled,

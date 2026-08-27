@@ -110,6 +110,7 @@ describe("personal resource attachment authority", () => {
       reconcileNewSessionFixedResources({
         selectedVariableSetIds: [variableSetId],
         selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [],
         selectableVariableSetIds: [],
         selectableRigIds: [],
         variableSetsSettled: false,
@@ -125,6 +126,7 @@ describe("personal resource attachment authority", () => {
       reconcileNewSessionFixedResources({
         selectedVariableSetIds: [variableSetId],
         selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [],
         selectableVariableSetIds: [variableSetId],
         selectableRigIds: [rigId],
         variableSetsSettled: true,
@@ -140,8 +142,47 @@ describe("personal resource attachment authority", () => {
       reconcileNewSessionFixedResources({
         selectedVariableSetIds: [variableSetId],
         selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [],
         selectableVariableSetIds: [],
         selectableRigIds: [],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId: "", selectionResolved: false });
+  });
+
+  test("clears a cross-workspace personal Rig when an inherited workspace default is omitted", () => {
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [workspaceVariableSetId],
+        selectableVariableSetIds: [],
+        selectableRigIds: [rigId],
+        variableSetsSettled: false,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId, selectionResolved: false });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [workspaceVariableSetId],
+        selectableVariableSetIds: [workspaceVariableSetId],
+        selectableRigIds: [rigId],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId, selectionResolved: true });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [workspaceVariableSetId],
+        selectableVariableSetIds: [],
+        selectableRigIds: [rigId],
         variableSetsSettled: true,
         rigsSettled: true,
       }),
