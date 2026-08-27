@@ -1,5 +1,6 @@
 import type { SessionHumanInputRequest, SubmitHumanInputResponseRequest } from "@opengeni/sdk";
 import { useEffect, useMemo, useRef } from "react";
+import { isActionableHumanInputRequest } from "../human-input";
 import { cn } from "../lib/cn";
 import {
   HumanInputForm,
@@ -36,12 +37,15 @@ export function HumanInputSurface({
   const batchTotalRef = useRef(0);
 
   const ordered = useMemo(() => {
-    return [...requests].sort((a, b) => {
-      const aAt = a.createdAt ? Date.parse(a.createdAt) : 0;
-      const bAt = b.createdAt ? Date.parse(b.createdAt) : 0;
-      if (aAt !== bAt) return aAt - bAt;
-      return a.id.localeCompare(b.id);
-    });
+    const now = Date.now();
+    return requests
+      .filter((request) => isActionableHumanInputRequest(request, now))
+      .sort((a, b) => {
+        const aAt = a.createdAt ? Date.parse(a.createdAt) : 0;
+        const bAt = b.createdAt ? Date.parse(b.createdAt) : 0;
+        if (aAt !== bAt) return aAt - bAt;
+        return a.id.localeCompare(b.id);
+      });
   }, [requests]);
 
   useEffect(() => {

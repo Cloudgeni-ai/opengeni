@@ -4747,13 +4747,13 @@ function registerWorkspaceOrchestrationTools(
             });
           }
           if (accepted.action === "conflict") {
-            throw new Error(`human-input request is ${accepted.request.status}`);
+            throw new Error("human-input request is not currently actionable");
           }
           return json(
             mcpMutationReceipt({
               operation: "session_human_input_respond",
               committed: true,
-              outcome: accepted.events.length === 0 ? "replayed" : "updated",
+              outcome: accepted.action === "completed" ? "replayed" : "updated",
               changed: accepted.events.length > 0,
               resource: {
                 type: "session_human_input_request",
@@ -4763,7 +4763,7 @@ function registerWorkspaceOrchestrationTools(
               relatedResources: [{ type: "session", id: sessionId }],
               timestamp: accepted.request.respondedAt ?? new Date().toISOString(),
               idempotency: {
-                status: accepted.events.length === 0 ? "replayed" : "applied",
+                status: accepted.action === "completed" ? "replayed" : "applied",
               },
               facts: { outcome: accepted.request.response?.outcome ?? null },
               nextAction: { tool: "session_get", arguments: { sessionId } },
