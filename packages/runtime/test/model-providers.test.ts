@@ -837,6 +837,40 @@ describe("pinned Responses protocol conformance", () => {
     expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
   });
 
+  test("reconstructs sparse output indices without inventing missing items", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.output_item.done",
+        output_index: 7,
+        item: responseMessage("message-seven", "seven"),
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 2,
+        item: responseMessage("message-two", "two"),
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "completed",
+          status: "completed",
+          output: [],
+          usage: null,
+        },
+      },
+    ]);
+    expect(result.error).toBeUndefined();
+    const terminalModel = result.events.find(
+      (event) =>
+        event.type === "model" &&
+        (event.event as { type?: unknown } | undefined)?.type === "response.completed",
+    );
+    const output = (terminalModel?.event as { response?: { output?: Array<{ id?: string }> } })
+      ?.response?.output;
+    expect(output?.map((item) => item.id)).toEqual(["message-two", "message-seven"]);
+    expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
+  });
+
   test("fails closed on duplicate output indices", async () => {
     const result = await consumeDirectResponses([
       {
@@ -860,6 +894,27 @@ describe("pinned Responses protocol conformance", () => {
       },
     ]);
     expect(String((result.error as Error).message)).toContain("duplicate output_item.done index");
+    expect(result.events.some((event) => event.type === "response_done")).toBe(false);
+  });
+
+  test("fails closed on invalid output indices", async () => {
+    const result = await consumeDirectResponses([
+      {
+        type: "response.output_item.done",
+        output_index: -1,
+        item: responseMessage("invalid", "invalid"),
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "completed",
+          status: "completed",
+          output: [],
+          usage: null,
+        },
+      },
+    ]);
+    expect(String((result.error as Error).message)).toContain("invalid index");
     expect(result.events.some((event) => event.type === "response_done")).toBe(false);
   });
 
@@ -999,22 +1054,6 @@ describe("pinned Responses protocol conformance", () => {
 
     const malformedCases: DirectResponsesEvent[][] = [
       [{ type: "response.created", response: { id: "unterminated" } }],
-      [
-        {
-          type: "response.output_item.done",
-          output_index: 2,
-          item: responseMessage("sparse", "sparse"),
-        },
-        {
-          type: "response.completed",
-          response: {
-            id: "sparse",
-            status: "completed",
-            output: [],
-            usage: null,
-          },
-        },
-      ],
       [
         {
           type: "response.output_item.done",
