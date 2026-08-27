@@ -35,13 +35,13 @@ describe("web bundle budget policy", () => {
     expect(() => wholeKibEnvelope(1, 0)).toThrow("positive safe integer");
   });
 
-  test("retains the exact current-main Variable Set merge-tree envelope", () => {
-    expect(VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT).toBe(2_203_278);
-    expect(VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET).toBe(2153 * KIB);
+  test("retains the exact version-frozen release-source envelope", () => {
+    expect(VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT).toBe(2_205_043);
+    expect(VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET).toBe(2155 * KIB);
     expect(
       VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET -
         VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT,
-    ).toBe(1_394);
+    ).toBe(1_677);
     expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(
       Math.max(DIRECT_SESSION_RAW_BUDGET, VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET),
     );
