@@ -115,36 +115,6 @@ type StoredOptimisticSendOperation = Omit<OptimisticSendOperation, "input" | "ca
 
 const PENDING_COMPOSER_STORAGE_PREFIX = "opengeni.pending-composer.v1:";
 const OPTIMISTIC_SEND_STORAGE_PREFIX = "opengeni.optimistic-sends.v1:";
-const COMPOSER_DRAFT_RETRY_BASE_MS = 1_000;
-const COMPOSER_DRAFT_RETRY_MAX_MS = 30_000;
-
-function isRetryableDraftReadError(error: unknown): boolean {
-  if (
-    typeof DOMException !== "undefined" &&
-    error instanceof DOMException &&
-    error.name === "AbortError"
-  ) {
-    return false;
-  }
-  if (error && typeof error === "object" && "retryable" in error) {
-    return error.retryable === true;
-  }
-  return error instanceof TypeError;
-}
-
-function composerDraftRetryDelay(failures: number): number {
-  const exponential = Math.min(
-    COMPOSER_DRAFT_RETRY_MAX_MS,
-    COMPOSER_DRAFT_RETRY_BASE_MS * 2 ** Math.max(0, failures - 1),
-  );
-  // Independent tabs should not retry on the same millisecond after ingress
-  // maintenance ends.
-  return Math.min(
-    COMPOSER_DRAFT_RETRY_MAX_MS,
-    Math.round(exponential * (0.8 + Math.random() * 0.4)),
-  );
-}
-
 // A remount must not manufacture a new operation while the previous mutation
 // is still outcome-unknown. Keep only non-credential request fields here; the
 // mounted hook retains the exact input, including any credential updates. The
@@ -726,17 +696,12 @@ export function useComposer(
   const localEditRevision = useRef(initialShadow ? 1 : 0);
   const targetGeneration = useRef(0);
   const draftReadGeneration = useRef(0);
-  const draftReadInFlightRef = useRef<{
-    targetKey: string;
-    promise: Promise<void>;
-  } | null>(null);
+  const draftReadInFlightRef = useRef<string | null>(null);
   const draftReadRetryRef = useRef<{
     targetKey: string;
     failures: number;
-    notBefore: number;
     timer: ReturnType<typeof setTimeout> | null;
-  }>({ targetKey, failures: 0, notBefore: 0, timer: null });
-  const latestLoadDraftRef = useRef<(replaceLocal: boolean) => Promise<void>>(async () => {});
+  }>({ targetKey, failures: 0, timer: null });
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
@@ -768,7 +733,7 @@ export function useComposer(
     if (draftReadRetryRef.current.timer !== null) {
       clearTimeout(draftReadRetryRef.current.timer);
     }
-    draftReadRetryRef.current = { targetKey, failures: 0, notBefore: 0, timer: null };
+    draftReadRetryRef.current = { targetKey, failures: 0, timer: null };
     targetKeyRef.current = targetKey;
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
@@ -941,38 +906,27 @@ export function useComposer(
       let retry = draftReadRetryRef.current;
       if (retry.targetKey !== targetKey) {
         if (retry.timer !== null) clearTimeout(retry.timer);
-        retry = { targetKey, failures: 0, notBefore: 0, timer: null };
+        retry = { targetKey, failures: 0, timer: null };
         draftReadRetryRef.current = retry;
       }
       const scheduleRetry = (): void => {
-        if (retry.timer !== null || retry.notBefore <= 0) return;
+        if (retry.timer !== null) return;
         retry.timer = setTimeout(
           () => {
             if (draftReadRetryRef.current !== retry || targetKeyRef.current !== targetKey) return;
             retry.timer = null;
-            void latestLoadDraftRef.current(false);
+            void loadDraft(false);
           },
-          Math.max(0, retry.notBefore - Date.now()),
+          Math.min(25_000, 1_000 * 2 ** (retry.failures - 1)) * (0.8 + Math.random() * 0.4),
         );
       };
-      if (!replaceLocal && Date.now() < retry.notBefore) {
-        scheduleRetry();
-        return;
-      }
-      const currentRead = draftReadInFlightRef.current;
-      if (currentRead?.targetKey === targetKey) {
-        await currentRead.promise;
-        return;
-      }
+      if (!replaceLocal && retry.timer !== null) return;
+      if (draftReadInFlightRef.current === targetKey) return;
       if (retry.timer !== null) {
         clearTimeout(retry.timer);
         retry.timer = null;
       }
-      let settleInFlight: (() => void) | undefined;
-      const inFlight = new Promise<void>((resolve) => {
-        settleInFlight = resolve;
-      });
-      draftReadInFlightRef.current = { targetKey, promise: inFlight };
+      draftReadInFlightRef.current = targetKey;
       const generation = targetGeneration.current;
       const readTicket = ++draftReadGeneration.current;
       const localAtStart = localEditRevision.current;
@@ -1014,7 +968,6 @@ export function useComposer(
         }
         if (retry.timer !== null) clearTimeout(retry.timer);
         retry.failures = 0;
-        retry.notBefore = 0;
         retry.timer = null;
         const currentRevision = draftRef.current?.revision ?? -1;
         // Reconnect and client-generation effects can legitimately ask for the
@@ -1073,14 +1026,15 @@ export function useComposer(
           readTicket === draftReadGeneration.current
         ) {
           setError(asError(cause));
-          if (isRetryableDraftReadError(cause)) {
+          if (
+            cause instanceof TypeError ||
+            (cause && typeof cause === "object" && "retryable" in cause && cause.retryable === true)
+          ) {
             retry.failures += 1;
-            retry.notBefore = Date.now() + composerDraftRetryDelay(retry.failures);
             scheduleRetry();
           } else {
             if (retry.timer !== null) clearTimeout(retry.timer);
             retry.failures = 0;
-            retry.notBefore = 0;
             retry.timer = null;
           }
         }
@@ -1092,15 +1046,13 @@ export function useComposer(
         ) {
           setDraftLoading(false);
         }
-        settleInFlight?.();
-        if (draftReadInFlightRef.current?.promise === inFlight) {
+        if (draftReadInFlightRef.current === targetKey) {
           draftReadInFlightRef.current = null;
         }
       }
     },
     [client, durableDrafts, sessionId, targetKey, workspaceId],
   );
-  latestLoadDraftRef.current = loadDraft;
 
   useEffect(() => {
     if (!sessionId || !durableDrafts) {
