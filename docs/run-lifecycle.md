@@ -819,6 +819,21 @@ logical turn `recovering`; Steer closes it as `superseded`, makes the steered
 human prompt first, and does not revive the old turn. A missing or already
 closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
+
+Pause/Resume command persistence distinguishes `changed`, `unchanged`, and
+`replayed` before allocating a control revision. A fresh Pause is unchanged
+only when the selected direct recursive blocker is already represented, no
+newer descendant run override must be invalidated, every live attempt is
+already covered by an actionable Pause interruption, and no adopted command is
+still running. A fresh Resume is unchanged only when the selected branch has no
+undefeated blocker and every currently continuable descendant already has an
+undelivered workflow wake; otherwise it advances the override and repairs wake
+delivery. Workspace Pause/Resume applies the same rules across the workspace.
+An unchanged result writes only its operation receipt: no control revision,
+control/session event, audit event, child notice, interruption, command stop,
+or workflow wake. Reusing that exact operation key remains `replayed`, not
+`unchanged`.
+
 If provider failure races with an accepted exact-attempt Pause or Steer, that
 control request owns the attempt: recovery returns stale and the normal
 settlement/quiescence path completes the transition. The workspace-control lock

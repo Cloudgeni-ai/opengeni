@@ -480,6 +480,14 @@ through the claim transaction. Pause blocks admission without pretending that
 physical execution has already stopped. Cancel fences a session subtree and is
 terminal for the affected sessions.
 
+Pause and Resume are desired-state commands with durable semantic receipts. A
+fresh key allocates a control revision, events, interruptions, and wakes only
+when it changes direct blocker/override truth or repairs an uncovered lifecycle
+effect. Effective state alone is insufficient: a later ancestor Pause must
+invalidate newer descendant Resume overrides, and a narrower child Pause under
+an inherited blocker remains a real change. Exact idempotency retries stay
+`replayed`; represented intent with no repair stays `unchanged`.
+
 Failed sessions can be revived by new accepted work. Cancellation remains the
 terminal boundary.
 

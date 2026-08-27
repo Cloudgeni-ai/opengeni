@@ -186,7 +186,7 @@ import {
 import {
   acceptSessionUserMessageWithOutcome,
   controlAgentSessionWorkstream,
-  controlHumanSessionWorkstream,
+  controlHumanSessionWorkstreamWithOutcome,
   createSessionForRequestWithOutcome,
   SessionSpawnDeniedError,
   sessionSpawnDenialEnvelope,
@@ -223,7 +223,11 @@ import {
   SESSION_WAIT_MAX_TARGETS,
   waitForSessionChanges,
 } from "./session-wait";
-import { mcpMutationReceipt, sessionCreateMutationReceipt } from "./receipts";
+import {
+  mcpMutationReceipt,
+  sessionControlMutationReceipt,
+  sessionCreateMutationReceipt,
+} from "./receipts";
 import {
   boundScheduledTaskDetailMcp,
   boundScheduledTaskMcpPage,
@@ -4537,27 +4541,18 @@ function registerWorkspaceOrchestrationTools(
             controlled.authorization?.relatedSessionAccess ?? "root",
           );
           return json(
-            mcpMutationReceipt({
+            sessionControlMutationReceipt({
               operation: "session_pause",
-              committed: true,
-              outcome: controlled.replay ? "replayed" : "updated",
-              changed: !controlled.replay,
-              resource: {
-                type: "session",
-                id: sessionId,
-                state: effectiveControl.state,
-              },
-              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              sessionId,
+              state: effectiveControl.state,
+              receiptId: controlled.receipt.id,
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: {
-                status: controlled.replay ? "replayed" : "applied",
-              },
-              facts: { interruptionCount: controlled.interruptionCount },
-              nextAction: { tool: "session_get", arguments: { sessionId } },
+              outcome: controlled.outcome,
+              interruptionCount: controlled.interruptionCount,
             }),
           );
         }
-        const controlled = await controlHumanSessionWorkstream(
+        const controlled = await controlHumanSessionWorkstreamWithOutcome(
           deps,
           {
             accountId: grant.accountId,
@@ -4572,7 +4567,17 @@ function registerWorkspaceOrchestrationTools(
             ...(reason ? { reason } : {}),
           },
         );
-        return json(controlled);
+        return json(
+          sessionControlMutationReceipt({
+            operation: "session_pause",
+            sessionId,
+            state: controlled.response.effectiveControl.state,
+            receiptId: controlled.response.receipt.id,
+            timestamp: controlled.response.receipt.createdAt,
+            outcome: controlled.outcome,
+            interruptionCount: controlled.response.interruptionCount,
+          }),
+        );
       },
     );
 
@@ -4605,27 +4610,18 @@ function registerWorkspaceOrchestrationTools(
             controlled.authorization?.relatedSessionAccess ?? "root",
           );
           return json(
-            mcpMutationReceipt({
+            sessionControlMutationReceipt({
               operation: "session_resume",
-              committed: true,
-              outcome: controlled.replay ? "replayed" : "updated",
-              changed: !controlled.replay,
-              resource: {
-                type: "session",
-                id: sessionId,
-                state: effectiveControl.state,
-              },
-              relatedResources: [{ type: "session_command_receipt", id: controlled.receipt.id }],
+              sessionId,
+              state: effectiveControl.state,
+              receiptId: controlled.receipt.id,
               timestamp: controlled.receipt.createdAt.toISOString(),
-              idempotency: {
-                status: controlled.replay ? "replayed" : "applied",
-              },
-              facts: { interruptionCount: controlled.interruptionCount },
-              nextAction: { tool: "session_get", arguments: { sessionId } },
+              outcome: controlled.outcome,
+              interruptionCount: controlled.interruptionCount,
             }),
           );
         }
-        const controlled = await controlHumanSessionWorkstream(
+        const controlled = await controlHumanSessionWorkstreamWithOutcome(
           deps,
           {
             accountId: grant.accountId,
@@ -4640,7 +4636,17 @@ function registerWorkspaceOrchestrationTools(
             ...(reason ? { reason } : {}),
           },
         );
-        return json(controlled);
+        return json(
+          sessionControlMutationReceipt({
+            operation: "session_resume",
+            sessionId,
+            state: controlled.response.effectiveControl.state,
+            receiptId: controlled.response.receipt.id,
+            timestamp: controlled.response.receipt.createdAt,
+            outcome: controlled.outcome,
+            interruptionCount: controlled.response.interruptionCount,
+          }),
+        );
       },
     );
 

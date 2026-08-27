@@ -26,6 +26,40 @@ export function mcpMutationReceipt(input: McpMutationReceiptInput): McpMutationR
   });
 }
 
+export function sessionControlMutationReceipt(input: {
+  operation: "session_pause" | "session_resume";
+  sessionId: string;
+  state: string;
+  receiptId: string;
+  timestamp: string;
+  outcome: "changed" | "unchanged" | "replayed";
+  interruptionCount: number;
+}): McpMutationReceiptType {
+  return mcpMutationReceipt({
+    operation: input.operation,
+    committed: true,
+    outcome:
+      input.outcome === "changed"
+        ? "updated"
+        : input.outcome === "unchanged"
+          ? "unchanged"
+          : "replayed",
+    changed: input.outcome === "changed",
+    resource: {
+      type: "session",
+      id: input.sessionId,
+      state: input.state,
+    },
+    relatedResources: [{ type: "session_command_receipt", id: input.receiptId }],
+    timestamp: input.timestamp,
+    idempotency: {
+      status: input.outcome === "replayed" ? "replayed" : "applied",
+    },
+    facts: { interruptionCount: input.interruptionCount },
+    nextAction: { tool: "session_get", arguments: { sessionId: input.sessionId } },
+  });
+}
+
 export type SessionCreateReceiptResult = {
   session: {
     id: string;
