@@ -945,6 +945,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // while explicitly removing tables introduced by later migrations.
     const post0353RuntimeTables = new Set([
       "company_profile_agent_automatic_activation_receipts",
+      "deployment_model_catalog",
       "organization_company_profile_agent_policies",
       "organization_company_profile_agent_policy_events",
       "organization_codex_rotation_settings",
@@ -966,6 +967,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "session_work_claim_write_capabilities",
       "session_work_claims",
       "workspace_codex_subscription_preferences",
+      "workspace_gateway_custom_models",
     ]);
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
