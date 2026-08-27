@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { usePacks } from "@opengeni/react";
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -234,7 +234,7 @@ async function render(element: ReactNode) {
   };
 }
 
-function stubClient(empty: boolean, failed = false): OpenGeniCoreClient {
+function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
   if (failed) {
     return {
       listInstalledSkills: async () => {
@@ -243,12 +243,12 @@ function stubClient(empty: boolean, failed = false): OpenGeniCoreClient {
       listInstalledPlugins: async () => {
         throw new Error("network is down");
       },
-    } as unknown as OpenGeniCoreClient;
+    } as unknown as OpenGeniBrowserClient;
   }
   return {
     listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),
-  } as unknown as OpenGeniCoreClient;
+  } as unknown as OpenGeniBrowserClient;
 }
 
 function packsState(empty: boolean, failed = false): ReturnType<typeof usePacks> {

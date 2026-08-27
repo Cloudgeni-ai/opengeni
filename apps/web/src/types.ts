@@ -1,7 +1,7 @@
 // Wire shapes come from @opengeni/sdk (pinned to @opengeni/contracts by the
 // SDK's contract-parity tests) — the console does not mirror them. Only the
 // console-local shapes (managed auth session and drafts) live here.
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 export type {
   AccessContext,
@@ -153,19 +153,19 @@ export type {
 // shapes. Organization private-session settings are exported directly because
 // their request helpers live in an opt-in SDK subpath.
 export type OrganizationInvitation = Awaited<
-  ReturnType<OpenGeniCoreClient["listOrganizationInvitations"]>
+  ReturnType<OpenGeniBrowserClient["listOrganizationInvitations"]>
 >["invitations"][number];
 export type OrganizationMember = Awaited<
-  ReturnType<OpenGeniCoreClient["listOrganizationMembers"]>
+  ReturnType<OpenGeniBrowserClient["listOrganizationMembers"]>
 >["members"][number];
 export type OrganizationMembershipRole = OrganizationMember["role"];
 export type OrganizationAdministrationOverview = Awaited<
-  ReturnType<OpenGeniCoreClient["getOrganizationAdministrationOverview"]>
+  ReturnType<OpenGeniBrowserClient["getOrganizationAdministrationOverview"]>
 >;
 export type OrganizationWorkspaceAccess = OrganizationAdministrationOverview["workspaces"][number];
 export type OrganizationWorkspaceAccessMember = OrganizationWorkspaceAccess["members"][number];
 export type OrganizationRetentionPolicy = Awaited<
-  ReturnType<OpenGeniCoreClient["getOrganizationRetentionPolicy"]>
+  ReturnType<OpenGeniBrowserClient["getOrganizationRetentionPolicy"]>
 >;
 
 export type WorkspaceVariableSet = VariableSet;

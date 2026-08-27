@@ -1,6 +1,6 @@
-import type { OpenGeniCoreClient } from "@opengeni/sdk/core";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
-type RetainedVideoClient = Pick<OpenGeniCoreClient, "createVideoArtifactPlaybackSource">;
+type RetainedVideoClient = Pick<OpenGeniBrowserClient, "createVideoArtifactPlaybackSource">;
 
 /** Bind expiring generated-video playback sources to one authenticated workspace. */
 export function createWorkspaceRetainedVideoLoader(

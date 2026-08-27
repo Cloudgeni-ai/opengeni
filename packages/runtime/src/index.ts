@@ -442,6 +442,7 @@ export {
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
 } from "./run-events";
+export { toolCallIdFromSdkItem } from "./tool-call-identity";
 export {
   compactMcpResultCustomDataRunState,
   OPENGENI_INNER_MCP_CUSTOM_DATA_KEY,
@@ -2118,7 +2119,7 @@ export function buildOpenGeniAgent(
       ? agentTool({
           name: "generate_image",
           description:
-            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
+            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
           parameters: GenerateImageToolInput,
           errorFunction: null,
           execute: async (input, _context, details) => {

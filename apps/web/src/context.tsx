@@ -7,7 +7,7 @@ import {
   resolveWorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
 import type { CreateSessionRequest, SessionEvent } from "@opengeni/sdk";
-import { OpenGeniApiError, type OpenGeniCoreClient } from "@opengeni/sdk/core";
+import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { composerSubmissionErrorMessage, type SessionEventsConnectionState } from "@opengeni/react";
 import type { BrowserAccountTransition } from "@opengeni/react/accounts";
 import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
@@ -164,7 +164,7 @@ function captureProductAnalyticsEvent(
 }
 
 export type AppContextValue = {
-  client: OpenGeniCoreClient;
+  client: OpenGeniBrowserClient;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;

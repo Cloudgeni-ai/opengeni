@@ -745,6 +745,14 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 adds hooks and UI. `apps/web` is a consumer of those packages and should not
 become a hidden source of domain semantics.
 
+The stock web console imports the browser-focused `@opengeni/sdk/browser`
+entry. Operator-only Document-authority and tenancy-backfill methods live in
+the optional `@opengeni/sdk/document-authority` entry, while the root and
+`core` clients retain their compatibility surface. New SDK methods that the web
+does not call belong in a focused optional entry so they add nothing to the
+direct-session browser graph; bundle-boundary and browser-surface tests pin that
+separation.
+
 Most product integrations use the standalone service through a server-side SDK
 proxy and optional React surfaces. Advanced in-process embedding may bind host
 identity, persistence, event, billing, credential, and worker ports, but must
@@ -969,7 +977,7 @@ This index intentionally routes at subsystem granularity. Use
 | Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review-pack.md`](pr-review-pack.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
-| SDK or React public surface | `packages/sdk/src/`, `packages/react/src/` | Package READMEs and §3.10 |
+| SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
 | Standalone product integration | `packages/sdk/`, `packages/react/` | [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |

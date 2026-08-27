@@ -1,4 +1,4 @@
-import { OpenGeniClient as OpenGeniCoreClient } from "./client";
+import { OpenGeniDocumentAuthorityClient } from "./document-authority-client";
 import type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
@@ -23,8 +23,8 @@ import type {
   WorkspaceArtifactMutationResponse,
 } from "./workspace-artifacts";
 
-/** Public SDK client. Artifact operations stay out of the console's eager core graph. */
-export class OpenGeniClient extends OpenGeniCoreClient {
+/** Public SDK client. Optional operator and artifact operations stay out of the console core. */
+export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
   async createEditableArtifact(
     workspaceId: string,
     request: CreateEditableArtifactResourceRequest,
