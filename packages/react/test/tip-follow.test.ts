@@ -7,6 +7,7 @@ import {
   tipFollowCompensateViewportShrink,
   tipFollowNoteGrowth,
   tipFollowNoteViewportShrink,
+  tipFollowObserveContentShrink,
   tipFollowStep,
   tipFollowTauMs,
   TIP_FOLLOW_HOT_IDLE_MS,
@@ -35,6 +36,39 @@ describe("tipFollowCompensateShrink", () => {
 
   test("tiny reflow shrink is ignored (no micro bob)", () => {
     expect(tipFollowCompensateShrink(1600, 2000, 1998, 400)).toBe(1600);
+  });
+
+  test("cumulative deadband compensation is invariant to animation cadence", () => {
+    const run = (steps: readonly number[]) => {
+      let baseline: Parameters<typeof tipFollowObserveContentShrink>[0] = null;
+      let committedHeight = 2000;
+      let observedHeight = 2000;
+      let shellTop = 1600;
+      let domTop = 1600;
+      for (const step of steps) {
+        const nextHeight = observedHeight - step;
+        // Model the browser's own tip clamp before ResizeObserver/scroll work.
+        domTop = Math.min(domTop, nextHeight - 400);
+        const observation = tipFollowObserveContentShrink(
+          baseline,
+          committedHeight,
+          shellTop,
+          nextHeight,
+          400,
+        );
+        baseline = observation.baseline;
+        if (observation.compensatedScrollTop !== null) {
+          domTop = observation.compensatedScrollTop;
+          committedHeight = nextHeight;
+        }
+        shellTop = domTop;
+        observedHeight = nextHeight;
+      }
+      return domTop;
+    };
+
+    expect(run(Array.from({ length: 20 }, () => 3))).toBe(1540);
+    expect(run(Array.from({ length: 10 }, () => 6))).toBe(1540);
   });
 });
 
@@ -97,6 +131,13 @@ describe("tipFollowNoteGrowth", () => {
     state = tipFollowNoteGrowth(state, 1024, 1100);
     expect(state.hotUntil).toBe(1100 + TIP_FOLLOW_HOT_IDLE_MS);
     expect(state.lastHeight).toBe(1024);
+  });
+
+  test("sub-eps content shrink holds the height baseline", () => {
+    let state = createTipFollowState();
+    state = tipFollowNoteGrowth(state, 1000, 1000);
+    state = tipFollowNoteGrowth(state, 997, 1016);
+    expect(state.lastHeight).toBe(1000);
   });
 });
 

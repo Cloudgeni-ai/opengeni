@@ -460,6 +460,21 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("an unmatched explicit tool output id never completes another running call", () => {
+    reset();
+    const items = buildTimeline([
+      event("agent.toolCall.created", { id: "call-open", name: "lookup", arguments: {} }),
+      event("agent.toolCall.output", { id: "call-missing", output: "wrong result" }),
+    ]);
+    const [call] = items as ToolCallItem[];
+
+    expect(call).toMatchObject({
+      callId: "call-open",
+      status: "running",
+      output: undefined,
+    });
+  });
+
   test("keeps accumulated text when completed text does not extend it", () => {
     reset();
     const items = buildTimeline([

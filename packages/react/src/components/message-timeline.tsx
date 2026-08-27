@@ -57,12 +57,13 @@ import {
   createTipFollowState,
   readerScrollUpPx,
   tipFollowCancel,
-  tipFollowCompensateShrink,
   tipFollowCompensateViewportShrink,
+  tipFollowObserveContentShrink,
   tipFollowStep,
   supportsScrollEndEvent,
   TIP_FOLLOW_READER_UP_EPS_PX,
   TIP_FOLLOW_SHRINK_EPS_PX,
+  type TipFollowContentShrinkBaseline,
   type TipFollowState,
 } from "./tip-follow";
 import {
@@ -497,6 +498,8 @@ export function MessageTimeline({
    * jumps (Vimium) settle via scrollend while the camera is idle.
    */
   const readerIntentArmRef = useRef(false);
+  /** Gesture-start geometry; cumulative tiny pointer scrolls share one budget. */
+  const readerIntentStartRef = useRef<{ scrollTop: number; maxScroll: number } | null>(null);
   /**
    * Count of camera/snap scrollTop writes whose scroll echoes are not yet
    * consumed. A boolean was wrong when the browser coalesced two writes into
@@ -570,6 +573,7 @@ export function MessageTimeline({
   // Pure tip-follow camera. Pin intent uses clamp conservation, not timers.
   const followRef = useRef<TipFollowState>(createTipFollowState());
   const followFrameRef = useRef<number | null>(null);
+  const contentShrinkBaselineRef = useRef<TipFollowContentShrinkBaseline | null>(null);
 
   const syncScrollBaseline = useCallback((node: HTMLElement) => {
     lastScrollTopRef.current = node.scrollTop;
@@ -606,7 +610,13 @@ export function MessageTimeline({
     cancelLeaveFallback();
   }, [cancelLeaveFallback]);
 
+  const clearReaderIntent = useCallback(() => {
+    readerIntentArmRef.current = false;
+    readerIntentStartRef.current = null;
+  }, []);
+
   const stopFollow = useCallback(() => {
+    contentShrinkBaselineRef.current = null;
     followRef.current = tipFollowCancel(followRef.current);
     if (followFrameRef.current != null) {
       cancelFrame(followFrameRef.current);
@@ -624,7 +634,7 @@ export function MessageTimeline({
       if (node && maxScrollOf(node) <= 1) {
         return;
       }
-      readerIntentArmRef.current = false;
+      clearReaderIntent();
       clearPendingReaderLeave();
       stopFollow();
       applyPinned(false);
@@ -636,7 +646,7 @@ export function MessageTimeline({
         setOlderPrefetchArmed(true);
       }
     },
-    [autoFollow, applyPinned, clearPendingReaderLeave, stopFollow],
+    [autoFollow, applyPinned, clearPendingReaderLeave, clearReaderIntent, stopFollow],
   );
 
   /**
@@ -709,6 +719,7 @@ export function MessageTimeline({
     button: number;
     pointerType: string;
     target: EventTarget | null;
+    currentTarget: EventTarget | null;
   }) => {
     // Primary button / touch / pen only. Ignore right-click etc.
     if (event.button && event.pointerType === "mouse") {
@@ -723,7 +734,12 @@ export function MessageTimeline({
       return;
     }
     disclosureKeepsUnpinnedRef.current = false;
+    const node =
+      event.currentTarget instanceof HTMLElement ? event.currentTarget : scrollRef.current;
     readerIntentArmRef.current = true;
+    readerIntentStartRef.current = node
+      ? { scrollTop: node.scrollTop, maxScroll: maxScrollOf(node) }
+      : null;
   };
 
   const onKeyDown = (event: { key: string; currentTarget: EventTarget | null }) => {
@@ -747,6 +763,7 @@ export function MessageTimeline({
 
   const snapToBottom = useCallback(
     (node: HTMLElement) => {
+      clearReaderIntent();
       stopFollow();
       cancelLeaveFallback();
       writeScrollTop(node, Math.max(0, node.scrollHeight - node.clientHeight));
@@ -758,7 +775,7 @@ export function MessageTimeline({
         cameraTop: null,
       };
     },
-    [cancelLeaveFallback, stopFollow, syncScrollBaseline, writeScrollTop],
+    [cancelLeaveFallback, clearReaderIntent, stopFollow, syncScrollBaseline, writeScrollTop],
   );
 
   const beginUserMessageDisclosureChange = useCallback(
@@ -896,19 +913,41 @@ export function MessageTimeline({
           : typeof performance !== "undefined"
             ? performance.now()
             : Date.now();
-      const previousHeight = followRef.current.lastHeight;
+      let previousHeight = followRef.current.lastHeight;
+      const previousObservedHeight = lastScrollHeightRef.current;
+      if (
+        contentShrinkBaselineRef.current &&
+        previousObservedHeight > 0 &&
+        node.scrollHeight > previousObservedHeight
+      ) {
+        // A reversal ends the collapse sequence. If it remains below the held
+        // baseline, adopt the recovered height; if it grew beyond the baseline,
+        // leave that baseline for tipFollowStep to observe as real growth.
+        contentShrinkBaselineRef.current = null;
+        if (node.scrollHeight < previousHeight) {
+          followRef.current = {
+            ...followRef.current,
+            lastHeight: node.scrollHeight,
+            cameraTop: null,
+          };
+          previousHeight = node.scrollHeight;
+        }
+      }
+      const shrinkObservation = tipFollowObserveContentShrink(
+        contentShrinkBaselineRef.current,
+        previousHeight,
+        lastScrollTopRef.current,
+        node.scrollHeight,
+        node.clientHeight,
+      );
+      contentShrinkBaselineRef.current = shrinkObservation.baseline;
       // Settle-collapse: compensate Δh from the pre-shrink baseline (browser
       // may already have clamped — don't double-subtract). Keep the follow rAF
       // alive so when collapse ends (or stream resumes) we ease instead of a
       // hard stop → flick. Do NOT tip-ease on the same frame as a real shrink
       // (that fight was the top-of-viewport flicker).
-      if (previousHeight > 0 && node.scrollHeight < previousHeight - TIP_FOLLOW_SHRINK_EPS_PX) {
-        let nextTop = tipFollowCompensateShrink(
-          lastScrollTopRef.current,
-          previousHeight,
-          node.scrollHeight,
-          node.clientHeight,
-        );
+      if (shrinkObservation.compensatedScrollTop !== null) {
+        let nextTop = shrinkObservation.compensatedScrollTop;
         // A chrome/composer dock can land on the same frame as a settle-fold
         // (the "turn blocked" moment). Compensate BOTH in one write — adopting
         // the shrunk clientHeight below without gluing left the chrome height
@@ -943,15 +982,6 @@ export function MessageTimeline({
           });
         }
         return;
-      }
-      // Sub-eps height noise: adopt height without moving the camera. Do NOT
-      // adopt clientHeight here — tipFollowStep (next line) owns that baseline
-      // and must still see a same-frame viewport shrink to glue it.
-      if (previousHeight > 0 && node.scrollHeight < previousHeight) {
-        followRef.current = {
-          ...followRef.current,
-          lastHeight: node.scrollHeight,
-        };
       }
       const result = tipFollowStep(followRef.current, {
         scrollTop: node.scrollTop,
@@ -1257,9 +1287,11 @@ export function MessageTimeline({
     foldMemoryRef.current.clear();
     userMessageDisclosureMemoryRef.current.clear();
     disclosureKeepsUnpinnedRef.current = false;
+    clearReaderIntent();
+    contentShrinkBaselineRef.current = null;
     seenActivityIdsRef.current.clear();
     applyPinned(true);
-  }, [allGroups.length, revealed, applyPinned]);
+  }, [allGroups.length, revealed, applyPinned, clearReaderIntent]);
 
   // Parent commits cover the initial/history-loading cases. Disclosure state
   // changes are child-local, so the ResizeObserver below owns dynamic collapse
@@ -1476,6 +1508,16 @@ export function MessageTimeline({
     const readerUp = readerScrollUpPx(previousTop, nextTop, previousMaxScroll, nextMaxScroll);
     const maxFell = nextMaxScroll < previousMaxScroll - 1;
     const readerArmed = readerIntentArmRef.current;
+    const readerIntentStart = readerIntentStartRef.current;
+    const cumulativeReaderUp =
+      readerArmed && readerIntentStart
+        ? readerScrollUpPx(
+            readerIntentStart.scrollTop,
+            nextTop,
+            readerIntentStart.maxScroll,
+            nextMaxScroll,
+          )
+        : readerUp;
     const heightShrunk =
       followRef.current.lastHeight > 0 &&
       nextHeight < followRef.current.lastHeight - TIP_FOLLOW_SHRINK_EPS_PX;
@@ -1501,7 +1543,7 @@ export function MessageTimeline({
       // Fold / composer content shrink: compensate before baseline sync so
       // driveFollow still sees the pre-shrink scrollTop (avoid double-subtract).
       if (heightShrunk || maxFell || viewportShrunk) {
-        readerIntentArmRef.current = false;
+        clearReaderIntent();
         clearPendingReaderLeave();
         driveFollow(node);
         return;
@@ -1523,8 +1565,8 @@ export function MessageTimeline({
         clearPendingReaderLeave();
       }
       // Pointer-dragged scroll-up away from tip. Layout churn never arms this.
-      if (readerArmed && readerUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
-        readerIntentArmRef.current = false;
+      if (readerArmed && cumulativeReaderUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
+        clearReaderIntent();
         releasePinFromReader(node);
         rearmOlderPrefetchAfterLeavingTop(node);
         return;

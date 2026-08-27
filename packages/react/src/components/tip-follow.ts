@@ -200,6 +200,11 @@ export function tipFollowNoteGrowth(
   if (previous <= 0) {
     return { ...state, lastHeight: height };
   }
+  if (height < previous && previous - height <= TIP_FOLLOW_SHRINK_EPS_PX) {
+    // Match viewport-shrink deadband memory: the shell retains the paired
+    // pre-shrink scrollTop and this state retains the corresponding height.
+    return state;
+  }
   if (height <= previous) {
     return { ...state, lastHeight: height };
   }
@@ -439,6 +444,53 @@ export function tipFollowCompensateShrink(
   }
   const maxScroll = Math.max(0, nextHeight - clientHeight);
   return Math.max(0, Math.min(maxScroll, scrollTop - delta));
+}
+
+export type TipFollowContentShrinkBaseline = {
+  scrollHeight: number;
+  scrollTop: number;
+};
+
+export type TipFollowContentShrinkObservation = {
+  baseline: TipFollowContentShrinkBaseline | null;
+  compensatedScrollTop: number | null;
+};
+
+/**
+ * Retain the geometry from the first sub-epsilon content-shrink frame until
+ * the cumulative collapse crosses the deadband. Browsers may clamp scrollTop
+ * after every tiny frame, so compensating from the latest DOM top would count
+ * those already-applied clamps twice and make the result animation-cadence
+ * dependent.
+ */
+export function tipFollowObserveContentShrink(
+  baseline: TipFollowContentShrinkBaseline | null,
+  previousHeight: number,
+  previousScrollTop: number,
+  nextHeight: number,
+  clientHeight: number,
+  epsPx: number = TIP_FOLLOW_SHRINK_EPS_PX,
+): TipFollowContentShrinkObservation {
+  if (previousHeight <= 0 || nextHeight >= previousHeight) {
+    return { baseline: null, compensatedScrollTop: null };
+  }
+  const retained = baseline ?? {
+    scrollHeight: previousHeight,
+    scrollTop: previousScrollTop,
+  };
+  if (retained.scrollHeight - nextHeight <= epsPx) {
+    return { baseline: retained, compensatedScrollTop: null };
+  }
+  return {
+    baseline: null,
+    compensatedScrollTop: tipFollowCompensateShrink(
+      retained.scrollTop,
+      retained.scrollHeight,
+      nextHeight,
+      clientHeight,
+      epsPx,
+    ),
+  };
 }
 
 /**
