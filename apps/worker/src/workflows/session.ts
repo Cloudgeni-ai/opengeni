@@ -16,9 +16,13 @@ import type * as activities from "../activities";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE,
+  POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
   type EscapedMcpTimeoutRecoveryDetail,
+  type PostClaimDatabaseRecoveryDetail,
+  type PreClaimFailureDetail,
   type PreClaimFailureDisposition,
 } from "../activities/types";
 import {
@@ -205,7 +209,7 @@ export function escapedMcpTimeoutRecoveryDetail(
 }
 
 /** Read only the upgraded turn worker's explicit pre-claim wire contract. */
-export function preClaimFailureDisposition(error: unknown): PreClaimFailureDisposition | undefined {
+export function preClaimFailureDetail(error: unknown): PreClaimFailureDetail | undefined {
   if (!(error instanceof ActivityFailure) || error.activityType !== "runAgentTurn") {
     return undefined;
   }
@@ -235,7 +239,43 @@ export function preClaimFailureDisposition(error: unknown): PreClaimFailureDispo
     return undefined;
   }
   if (detail.code === "claim_invariant" && disposition !== "permanent") return undefined;
-  return disposition;
+  return { disposition, code: detail.code };
+}
+
+export function preClaimFailureDisposition(error: unknown): PreClaimFailureDisposition | undefined {
+  return preClaimFailureDetail(error)?.disposition;
+}
+
+/** Read only the upgraded turn worker's exact post-claim DB recovery wire. */
+export function postClaimDatabaseRecoveryDetail(
+  error: unknown,
+): PostClaimDatabaseRecoveryDetail | null {
+  if (!(error instanceof ActivityFailure) || error.activityType !== "runAgentTurn") {
+    return null;
+  }
+  const cause = error.cause;
+  if (
+    !(cause instanceof ApplicationFailure) ||
+    cause.type !== POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE ||
+    cause.message !== POST_CLAIM_DATABASE_RECOVERY_FAILURE_MESSAGE
+  ) {
+    return null;
+  }
+  const detail = cause.details?.[0] as Partial<PostClaimDatabaseRecoveryDetail> | undefined;
+  if (
+    typeof detail?.turnId !== "string" ||
+    detail.turnId.length === 0 ||
+    typeof detail.triggerEventId !== "string" ||
+    detail.triggerEventId.length === 0 ||
+    !Number.isSafeInteger(detail.executionGeneration) ||
+    (detail.executionGeneration ?? 0) < 1 ||
+    (detail.code !== "db_deadlock" &&
+      detail.code !== "db_serialization_failure" &&
+      detail.code !== "db_failure")
+  ) {
+    return null;
+  }
+  return detail as PostClaimDatabaseRecoveryDetail;
 }
 
 /**
@@ -911,17 +951,23 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         return true;
       }
       const retryDelayMs = unclaimedAttemptRetryDelayMs(unclaimedAttemptFailures + 1);
-      const admissionFailureDisposition = preClaimFailureDisposition(outcome.error);
+      const admissionFailure = preClaimFailureDetail(outcome.error);
+      const admissionFailureDisposition = admissionFailure?.disposition;
+      const classifiedPostClaimDatabaseRecovery = patched("session-postclaim-database-recovery-v1");
+      const postClaimDatabaseRecovery = classifiedPostClaimDatabaseRecovery
+        ? postClaimDatabaseRecoveryDetail(outcome.error)
+        : null;
       // Keep this marker immediately adjacent to the changed command. A
-      // history that already recorded the v2 activity replays the old shape;
-      // an open history that has never reached this branch can record v3.
+      // history that already recorded the v3 activity replays the old shape;
+      // an open history that has never reached this branch can record v4.
       const classifiedPreClaimFailure = patched("session-preclaim-failure-classification-v1");
-      const retryWakeBaseline = classifiedPreClaimFailure
-        ? preDispatchRetryWakeBaseline
-        : postDispatchRetryWakeBaseline;
+      const retryWakeBaseline =
+        classifiedPostClaimDatabaseRecovery || classifiedPreClaimFailure
+          ? preDispatchRetryWakeBaseline
+          : postDispatchRetryWakeBaseline;
       const failure: activities.FailSessionAttemptResult | undefined =
         await activity.failSessionAttempt(
-          classifiedPreClaimFailure
+          classifiedPostClaimDatabaseRecovery
             ? {
                 accountId,
                 workspaceId,
@@ -932,20 +978,36 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
                 ...(admissionFailureDisposition
                   ? { preClaimFailureDisposition: admissionFailureDisposition }
                   : {}),
+                ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
+                ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
                 trigger,
                 error: workflowFailureMessage(outcome.error),
               }
-            : {
-                // Replay the exact v2 command shape. Adding optional fields to
-                // a Temporal activity argument still changes command history.
-                accountId,
-                workspaceId,
-                sessionId,
-                attemptId,
-                workflowId: workflowInfo().workflowId,
-                retryDelayMs,
-                error: workflowFailureMessage(outcome.error),
-              },
+            : classifiedPreClaimFailure
+              ? {
+                  accountId,
+                  workspaceId,
+                  sessionId,
+                  attemptId,
+                  workflowId: workflowInfo().workflowId,
+                  retryDelayMs,
+                  ...(admissionFailureDisposition
+                    ? { preClaimFailureDisposition: admissionFailureDisposition }
+                    : {}),
+                  trigger,
+                  error: workflowFailureMessage(outcome.error),
+                }
+              : {
+                  // Replay the exact v2 command shape. Adding optional fields to
+                  // a Temporal activity argument still changes command history.
+                  accountId,
+                  workspaceId,
+                  sessionId,
+                  attemptId,
+                  workflowId: workflowInfo().workflowId,
+                  retryDelayMs,
+                  error: workflowFailureMessage(outcome.error),
+                },
         );
       // During a rolling deploy an upgraded workflow worker can schedule this
       // activity on a legacy control worker whose wire result was void. Treat
@@ -953,7 +1015,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // re-read durable state. A legacy worker that settled the failure leaves
       // an idle turn; one that no-op'd before claim leaves recoverable work.
       // Neither path replays model or tool side effects speculatively.
-      if (!failure || failure.action === "unclaimed") {
+      if (!failure || failure.action === "unclaimed" || failure.action === "recovering") {
         unclaimedAttemptFailures += 1;
         await condition(() => {
           const current = {

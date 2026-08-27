@@ -143,7 +143,9 @@ export function createSessionStateActivities(
       });
       if (attempt) return { action: "stale" };
 
-      if (input.preClaimFailureDisposition === "permanent" && input.trigger) {
+      const preClaimFailureDisposition =
+        input.preClaimFailure?.disposition ?? input.preClaimFailureDisposition;
+      if (preClaimFailureDisposition === "permanent" && input.trigger) {
         const failed = await failSessionWorkBeforeAttemptClaimFn(db, input.workspaceId, {
           accountId: input.accountId,
           sessionId: input.sessionId,
@@ -179,6 +181,43 @@ export function createSessionStateActivities(
         notBefore: new Date(Date.now() + retryDelayMs),
       });
       return { action: "unclaimed" };
+    }
+    const postClaimRecovery = input.postClaimDatabaseRecovery;
+    const postClaimIdentityMatches = Boolean(
+      postClaimRecovery &&
+      turn.id === postClaimRecovery.turnId &&
+      turn.triggerEventId === postClaimRecovery.triggerEventId &&
+      turn.executionGeneration === postClaimRecovery.executionGeneration,
+    );
+    const recoveredClaimCode = postClaimIdentityMatches
+      ? postClaimRecovery!.code
+      : input.preClaimFailure?.disposition === "retryable" &&
+          input.preClaimFailure.code !== "claim_invariant"
+        ? input.preClaimFailure.code
+        : null;
+    if (recoveredClaimCode) {
+      const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
+        attemptId: input.attemptId,
+        reason: "claimed_attempt_database_failure",
+        detail: {
+          code: recoveredClaimCode,
+          retryable: true,
+          recoverySource: "workflow_activity_failure",
+        },
+        fromStatuses: ["running"],
+      });
+      if (recovery.action !== "recovering") return { action: "stale" };
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, recovery.events);
+      await refreshQueuedTurnsGauge(
+        db,
+        observability,
+        countQueuedTurnsFn,
+        recordTurnsQueuedGaugeFn,
+      );
+      return { action: "recovering" };
     }
     const trigger = await getSessionEventFn(db, input.workspaceId, turn.triggerEventId);
     const result = await applySessionTurnSettlementFn(db, input.workspaceId, {

@@ -483,6 +483,13 @@ terminal for the affected sessions.
 Failed sessions can be revived by new accepted work. Cancellation remains the
 terminal boundary.
 
+An operational database failure after an exact claim but before turn-start
+completion revalidates that immutable attempt and uses the ordinary same-turn
+recovery and bounded redispatch path. A lost claim response that later reveals
+the exact active attempt follows the same transition. Permanent database or
+state failures remain terminal, and no model, tool, or provider work is replayed
+or converted into a new queue item.
+
 ### 5.3 Goals, schedules, automations, and child work
 
 These producers all converge on the ordinary session/turn runtime:
@@ -494,6 +501,10 @@ These producers all converge on the ordinary session/turn runtime:
   trigger revision, and creates an ordinary session/run; and
 - a **child session** is a normal session with explicit lineage, depth, compute,
   visibility, and initiating-authority rules.
+
+For an existing session, a scheduled turn that omits its turn-level `tools`
+field inherits the durable session tool policy; explicit `tools: []` remains an
+empty override.
 
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage
@@ -525,11 +536,22 @@ billing attribution, governance context, initiating authority, and relevant
 tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
 
+Human preference snapshots require an exact causal human. Service-only turns
+with no causal human skip that human-bound capability; service continuations
+and legacy subject turns use only their already-frozen causal human.
+
 Tool disclosure is progressive, but authority is not. A tool may be eager or
 lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
 still resolves through the current authorized catalog and the same execution
 fences. Approval-required tools remain approval-required regardless of access
 path.
+
+Before every follow-up provider request, the worker reconciles the SDK's
+complete prior history into durable call/result truth; the first request has no
+prior model/tool history to flush. An empty Responses terminal is reconstructed
+from observed `output_item.done` events in numeric `output_index` order. Sparse
+indices do not create synthetic history items, while duplicate indices remain
+invalid.
 
 Compute is established lazily where possible. A text-only turn can begin
 without provisioning a box or contacting a Connected Machine. Once a tool
@@ -684,6 +706,12 @@ control adapters. `@opengeni/core` owns reusable access, domain, billing, and
 admission behavior. A route should not create a second implementation of a
 domain rule already used by MCP, workers, or embedded hosts.
 
+Composer draft submission is one shared application command in
+`packages/core/src/application/composer-submit.ts`. The stock HTTP route and
+in-process embedding hosts call that command so validation, draft rotation,
+event append, turn routing, receipt/replay behavior, and the response contract
+have one owner.
+
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
 
@@ -796,6 +824,12 @@ session history. Capturing a workspace requires proof that no unaccounted writer
 can race the snapshot. A failed or unverifiable capture cannot be treated as an
 empty successful snapshot, and teardown must not destroy the only recoverable
 workspace state.
+
+Repeated retained-process Modal binding-missing or binding-mismatch observations
+may be quarantined for a 24-hour recheck after five claimed probes, but the
+process, admission, PTY, and holder remain capture blockers. Quarantine never
+becomes exit/loss proof and never authorizes capture, rotation, provider
+termination, or replay.
 
 Desktop/browser capability is layered on a compute target. The stock desktop
 image and browser daemon are separate from the ordinary headless image and
@@ -974,6 +1008,7 @@ This index intentionally routes at subsystem granularity. Use
 | Editable artifacts | `packages/artifact-tool/`, `packages/core/src/domain/editable-artifacts/` | [`artifact-engine.md`](artifact-engine.md), [`artifact-collaboration.md`](artifact-collaboration.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
+| Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review-pack.md`](pr-review-pack.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |

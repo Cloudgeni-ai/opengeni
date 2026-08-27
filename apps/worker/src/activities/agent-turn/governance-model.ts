@@ -128,6 +128,33 @@ export type GovernanceModelOk = {
 
 export type GovernanceModelOutcome = { exit: RunAgentTurnResult } | { ok: GovernanceModelOk };
 
+type PreferenceSnapshotTurn = Pick<ClaimTurnOk["turn"], "initiatingHumanSubjectId" | "initiator">;
+
+export function preferenceSnapshotHumanSubjectId(turn: PreferenceSnapshotTurn): string | null {
+  return (
+    turn.initiatingHumanSubjectId ??
+    (turn.initiator.kind === "subject" ? turn.initiator.subjectId : null)
+  );
+}
+
+/**
+ * Preferences are scoped partly to the frozen initiating human. A service-only
+ * turn has no such scope, so avoid calling the human-bound snapshot capability
+ * merely to catch its expected authority rejection.
+ */
+export async function preferenceSnapshotForTurn<T>(
+  turn: PreferenceSnapshotTurn,
+  load: () => Promise<T>,
+): Promise<T | null> {
+  if (!preferenceSnapshotHumanSubjectId(turn)) return null;
+  try {
+    return await load();
+  } catch (error) {
+    if (error instanceof PreferenceRegistryInitiatorError) return null;
+    throw error;
+  }
+}
+
 export async function prepareGovernanceAndModel(
   deps: GovernanceModelDeps,
 ): Promise<GovernanceModelOutcome> {
@@ -197,10 +224,10 @@ export async function prepareGovernanceAndModel(
       getWorkspace(db, input.workspaceId),
       getOrCreateCompanyProfileSnapshot(db, governanceClaims),
       getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-      getOrCreatePreferenceRegistrySnapshot(db, governanceClaims).catch((error) => {
-        if (error instanceof PreferenceRegistryInitiatorError) return null;
-        throw error;
-      }),
+      preferenceSnapshotForTurn(
+        turn,
+        async () => await getOrCreatePreferenceRegistrySnapshot(db, governanceClaims),
+      ),
     ]),
     getWorkspaceModelPolicy(db, input.workspaceId),
   ]);
