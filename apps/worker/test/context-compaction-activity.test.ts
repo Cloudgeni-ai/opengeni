@@ -1262,6 +1262,220 @@ describe("standalone context compaction execution", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
   });
 
+  test("a post-compaction stream without a terminal response recovers before queued input advances", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Empty post-compaction continuation test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Empty post-compaction continuation test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "finish the active task after compacting",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+      goal: null,
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        position: 0,
+        item: {
+          type: "message",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "durable completed work ".repeat(1_000) }],
+        },
+      });
+    });
+    const queued = await withWorkspaceSubjectSessionActivityRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      async (db) =>
+        await submitHumanPromptInTransaction(db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          subjectId: grant.subjectId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "this must remain queued until the active turn actually finishes",
+          resources: [],
+          tools: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+    );
+    expect(queued.routing).toBe("queued_for_execution");
+
+    const scriptedModel = new ScriptedModel([
+      {
+        error: new CompactionNeededError({
+          signalTokens: 250_000,
+          thresholdTokens: 225_000,
+          signalSource: "provider",
+        }),
+      },
+      { outputText: "a cancelled continuation must not settle this text" },
+    ]);
+    let summaryCalls = 0;
+    const summarizerClient = {
+      chat: {
+        completions: {
+          create: async () => {
+            summaryCalls += 1;
+            return {
+              id: "chatcmpl-post-compaction-checkpoint",
+              usage: {
+                prompt_tokens: 321,
+                completion_tokens: 12,
+                total_tokens: 333,
+              },
+              choices: [
+                {
+                  message: {
+                    content: "The active task and its durable completed work must continue.",
+                  },
+                  finish_reason: "stop",
+                },
+              ],
+            };
+          },
+        },
+      },
+    } as unknown as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>["client"];
+    const productionRuntime = createProductionAgentRuntime({ model: scriptedModel });
+    let runStreamCalls = 0;
+    const runtime: OpenGeniRuntime = {
+      ...productionRuntime,
+      configure: () => undefined,
+      resolveTurnModel: () => ({
+        provider: {
+          id: "test-chat",
+          label: "Test chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
+        client: summarizerClient,
+        model: scriptedModel,
+        configured: {
+          id: "scripted-model",
+          label: "Scripted model",
+          providerId: "test-chat",
+          providerLabel: "Test chat",
+          api: "chat",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactTokenLimit: 225_000,
+          reasoningEffort: false,
+          hostedWebSearch: false,
+        },
+      }),
+      runStream: async (agent, preparedInput, settings, options) => {
+        runStreamCalls += 1;
+        if (runStreamCalls === 1) {
+          return await productionRuntime.runStream(agent, preparedInput, settings, options);
+        }
+        const cancelledContinuation = new AbortController();
+        cancelledContinuation.abort(new Error("synthetic cancelled post-compaction stream"));
+        return await productionRuntime.runStream(agent, preparedInput, settings, {
+          ...options,
+          signal: cancelledContinuation.signal,
+        });
+      },
+    };
+    const bus = new MemoryEventBus();
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiModel: "scripted-model",
+        sandboxBackend: "none",
+      }),
+      db: client.db,
+      bus,
+      runtime,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+
+    expect(result).toMatchObject({
+      status: "recovering",
+      attemptId,
+      continueDelayMs: 2_000,
+    });
+    if (result.status === "unclaimed") throw new Error("User turn was not claimed");
+    expect(runStreamCalls).toBe(2);
+    expect(summaryCalls).toBe(1);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
+      source: "user",
+      status: "recovering",
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "recovering",
+      activeTurnId: result.turnId,
+    });
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items.map(
+        (turn) => turn.id,
+      ),
+    ).toEqual([queued.turnId]);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, queued.turnId)).toMatchObject({
+      status: "queued",
+    });
+    const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(JSON.stringify(history.map((row) => row.item))).toContain(
+      "The active task and its durable completed work must continue.",
+    );
+    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
+      after: 0,
+      limit: 200,
+    });
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.context.compacted" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
+    expect(
+      events.some((event) => event.type === "turn.completed" && event.turnId === result.turnId),
+    ).toBe(false);
+    expect(
+      events.some(
+        (event) => event.type === "agent.message.completed" && event.turnId === result.turnId,
+      ),
+    ).toBe(false);
+    expect(
+      events.some((event) => event.type === "turn.started" && event.turnId === queued.turnId),
+    ).toBe(false);
+  });
+
   test("same-turn empty-summary recovery settles once and waits for actionable durable input", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {

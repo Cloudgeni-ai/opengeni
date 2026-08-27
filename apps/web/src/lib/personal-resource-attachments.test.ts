@@ -7,8 +7,15 @@ import {
   buildPersonalResourceAttachmentIntent,
   isPersonalAttachmentConflict,
   loadPersonalResourceCatalog,
+  newSessionFixedResourceCatalogFailed,
+  newSessionPersonalResourceAttachment,
+  newSessionVariableSetResolutionSource,
+  personalResourceSelectionIdentityKey,
   personalSelection,
+  reconcileNewSessionFixedResources,
+  recoverNewSessionPersonalResourceAttachment,
   resolvePersonalResourceOwnerScope,
+  selectableSessionVariableSets,
 } from "./personal-resource-attachments";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -98,6 +105,218 @@ function ownerScope(session?: Pick<Session, "id" | "tenancy">) {
 }
 
 describe("personal resource attachment authority", () => {
+  test("holds restored fixed resources until scoped catalogs settle, then reconciles authority", () => {
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [],
+        selectableVariableSetIds: [],
+        selectableRigIds: [],
+        variableSetsSettled: false,
+        rigsSettled: false,
+      }),
+    ).toEqual({
+      variableSetIds: [variableSetId],
+      rigId,
+      selectionResolved: false,
+    });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [],
+        selectableVariableSetIds: [variableSetId],
+        selectableRigIds: [rigId],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({
+      variableSetIds: [variableSetId],
+      rigId,
+      selectionResolved: true,
+    });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [],
+        selectableVariableSetIds: [],
+        selectableRigIds: [],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId: "", selectionResolved: false });
+  });
+
+  test("clears a cross-workspace personal Rig when an inherited workspace default is omitted", () => {
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [workspaceVariableSetId],
+        selectableVariableSetIds: [],
+        selectableRigIds: [rigId],
+        variableSetsSettled: false,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId, selectionResolved: false });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [workspaceVariableSetId],
+        selectableVariableSetIds: [workspaceVariableSetId],
+        selectableRigIds: [rigId],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId, selectionResolved: true });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectedRigDefaultVariableSetIds: [workspaceVariableSetId],
+        selectableVariableSetIds: [],
+        selectableRigIds: [rigId],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId: "", selectionResolved: false });
+  });
+
+  test("uses exact-id attachment resolution when metadata-list permissions are unavailable", () => {
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: true,
+        canUse: true,
+        canListVariableSets: true,
+        canListSecrets: true,
+      }),
+    ).toBe("catalog");
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: true,
+        canUse: true,
+        canListVariableSets: true,
+        canListSecrets: false,
+      }),
+    ).toBe("attachment");
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: true,
+        canUse: true,
+        canListVariableSets: false,
+        canListSecrets: true,
+      }),
+    ).toBe("attachment");
+    expect(
+      newSessionVariableSetResolutionSource({
+        canAttach: false,
+        canUse: true,
+        canListVariableSets: true,
+        canListSecrets: true,
+      }),
+    ).toBe("denied");
+  });
+
+  test("keys acknowledgement by typed resource identity rather than display name", () => {
+    const first = personalResourceSelectionIdentityKey({
+      variableSetIds: [variableSetId],
+      rigId,
+    });
+    const replacement = personalResourceSelectionIdentityKey({
+      variableSetIds: [workspaceVariableSetId],
+      rigId,
+    });
+    expect(first).toBe([`rig:${rigId}`, `variable_set:${variableSetId}`].sort().join("\u0000"));
+    expect(replacement).not.toBe(first);
+  });
+
+  test("surfaces retry only when a failed catalog blocks a restored fixed selection", () => {
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: "",
+        selectionResolved: false,
+        variableSetCatalogFailed: true,
+        rigCatalogFailed: false,
+      }),
+    ).toBe(true);
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [],
+        selectedRigId: rigId,
+        selectionResolved: false,
+        variableSetCatalogFailed: false,
+        rigCatalogFailed: true,
+      }),
+    ).toBe(true);
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: "",
+        selectionResolved: true,
+        variableSetCatalogFailed: false,
+        rigCatalogFailed: true,
+      }),
+    ).toBe(false);
+    expect(
+      newSessionFixedResourceCatalogFailed({
+        selectedVariableSetIds: [],
+        selectedRigId: "",
+        selectionResolved: true,
+        variableSetCatalogFailed: true,
+        rigCatalogFailed: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("resets acknowledgement and refreshes both catalogs after a definitive conflict", async () => {
+    const events: string[] = [];
+    const recovered = await recoverNewSessionPersonalResourceAttachment({
+      error: new OpenGeniApiError(409, "stale personal resource"),
+      attemptedInput: {
+        personalResourceAttachment: {
+          mode: "session",
+          workspaceSharedAcknowledged: true,
+          sharedOutputWarningVersion: 1,
+        },
+      },
+      resetAcknowledgement: () => events.push("reset"),
+      refreshCatalogs: async () => {
+        events.push("variable_sets");
+        events.push("rigs");
+      },
+    });
+    expect(recovered).toBe(true);
+    expect(events).toEqual(["reset", "variable_sets", "rigs"]);
+
+    events.length = 0;
+    expect(
+      await recoverNewSessionPersonalResourceAttachment({
+        error: new OpenGeniApiError(503, "temporary outage"),
+        attemptedInput: {
+          personalResourceAttachment: {
+            mode: "session",
+            workspaceSharedAcknowledged: true,
+            sharedOutputWarningVersion: 1,
+          },
+        },
+        resetAcknowledgement: () => events.push("reset"),
+        refreshCatalogs: async () => {
+          events.push("variable_sets");
+          events.push("rigs");
+        },
+      }),
+    ).toBe(false);
+    expect(events).toEqual([]);
+  });
+
   test("requires the exact managed owner projection and rejects a shared nonowner", () => {
     expect(ownerScope()).not.toBeNull();
     expect(
@@ -367,6 +586,86 @@ describe("personal resource attachment authority", () => {
       expectedAuthorityEpoch: 3,
       workspaceSharedAcknowledged: true,
       sharedOutputWarningVersion: 1,
+    });
+  });
+
+  test("offers only attachable Variable Sets and hides unavailable personal choices", () => {
+    const personal = personalVariableSet();
+    const workspaceVariableSet = {
+      ...personal,
+      id: workspaceVariableSetId,
+      workspaceId,
+      scope: "workspace" as const,
+      name: "Workspace defaults",
+    };
+    const inactivePersonal = {
+      ...personal,
+      id: "12121212-1212-4212-8212-121212121212",
+      status: "revoked" as const,
+      name: "Revoked personal set",
+    };
+
+    expect(
+      selectableSessionVariableSets([workspaceVariableSet, personal, inactivePersonal], {
+        canAttach: true,
+        canUse: true,
+        personalResourcesAvailable: false,
+      }).map((variableSet) => variableSet.id),
+    ).toEqual([workspaceVariableSetId]);
+    expect(
+      selectableSessionVariableSets([workspaceVariableSet, personal], {
+        canAttach: true,
+        canUse: true,
+        personalResourcesAvailable: true,
+      }).map((variableSet) => variableSet.id),
+    ).toEqual([workspaceVariableSetId, variableSetId]);
+    expect(
+      selectableSessionVariableSets([workspaceVariableSet, personal], {
+        canAttach: false,
+        canUse: true,
+        personalResourcesAvailable: true,
+      }),
+    ).toEqual([]);
+  });
+
+  test("authorized personal resources start private sessions with session-scoped authority", () => {
+    expect(
+      newSessionPersonalResourceAttachment({
+        personalResourceCount: 2,
+        visibility: "private",
+        sharedAcknowledged: false,
+      }),
+    ).toEqual({
+      requiresAcknowledgement: false,
+      intent: {
+        mode: "session",
+        workspaceSharedAcknowledged: false,
+        sharedOutputWarningVersion: 1,
+      },
+    });
+  });
+
+  test("workspace-visible personal resources use one inline acknowledgement", () => {
+    expect(
+      newSessionPersonalResourceAttachment({
+        personalResourceCount: 1,
+        visibility: "workspace",
+        sharedAcknowledged: false,
+      }),
+    ).toEqual({ requiresAcknowledgement: true, intent: undefined });
+    expect(
+      newSessionPersonalResourceAttachment({
+        personalResourceCount: 1,
+        visibility: "workspace",
+        sharedAcknowledged: true,
+      }),
+    ).toEqual({
+      requiresAcknowledgement: false,
+      intent: {
+        mode: "session",
+        workspaceSharedAcknowledged: true,
+        sharedOutputWarningVersion: 1,
+      },
     });
   });
 

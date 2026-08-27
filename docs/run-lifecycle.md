@@ -371,6 +371,9 @@ The same accepted logical-turn boundary governs prompt policy and structured
 preferences. After claim, the owning attempt installs immutable instruction-
 policy and preference-descriptor snapshots reconstructed from lifecycle events
 as of the turn's immutable `created_at`, not from mutable heads at claim time.
+Service-only turns have no human preference scope and skip the preference
+snapshot capability entirely; service continuations carrying a frozen causal
+human and legacy subject turns still snapshot that human's applicable entries.
 The session's normalized policy role is independent of workspace membership and
 memory roles. Service-initiated goal continuations and compactions may preserve
 the causal human in `initiating_human_subject_id` solely for personal
@@ -548,7 +551,11 @@ A Codex terminal SSE failure carried
 on HTTP 200 is converted to one bounded, marked, non-retried provider error; it
 cannot masquerade as an empty successful summary. After a fenced durable
 replacement, the same activity, turn, attempt, and sandbox rebuild model input
-and continue; compaction never creates queue or recovery work.
+and continue; compaction itself never creates queue or recovery work. If that
+fresh continuation ends without any terminal model response, it is not accepted
+as an empty completion: cancellation still wins, otherwise the compacted
+checkpoint enters the ordinary bounded same-turn recovery path while newer
+queued prompts remain behind it.
 A no-shrink result publishes a clear recovery message and leaves the session
 `idle`, so zero-progress churn cannot loop. Exhausted, empty-summary, or
 otherwise failed compaction identifies compaction summarization or the provider
@@ -816,6 +823,21 @@ logical turn `recovering`; Steer closes it as `superseded`, makes the steered
 human prompt first, and does not revive the old turn. A missing or already
 closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
+
+Pause/Resume command persistence distinguishes `changed`, `unchanged`, and
+`replayed` before allocating a control revision. A fresh Pause is unchanged
+only when the selected direct recursive blocker is already represented, no
+newer descendant run override must be invalidated, every live attempt is
+already covered by an actionable Pause interruption, and no adopted command is
+still running. A fresh Resume is unchanged only when the selected branch has no
+undefeated blocker and every currently continuable descendant already has an
+undelivered workflow wake; otherwise it advances the override and repairs wake
+delivery. Workspace Pause/Resume applies the same rules across the workspace.
+An unchanged result writes only its operation receipt: no control revision,
+control/session event, audit event, child notice, interruption, command stop,
+or workflow wake. Reusing that exact operation key remains `replayed`, not
+`unchanged`.
+
 If provider failure races with an accepted exact-attempt Pause or Steer, that
 control request owns the attempt: recovery returns stale and the normal
 settlement/quiescence path completes the transition. The workspace-control lock
@@ -979,13 +1001,18 @@ best-effort live fanout; a NATS failure cannot trigger proof recovery or undo a
 committed receipt.
 
 Settling or stale-rejecting an interruption atomically commits its own durable
-control wake. While the receipt is absent, wake acknowledgement remains pending,
+control wake. Activity-owned recoverable shutdown commits an ordinary durable
+wake in the same transaction as `turn.recovery.requested`. While the receipt is
+absent, wake acknowledgement remains pending for either recovery form,
 `peekSessionWork` returns `cancellation-wait`, and every claim path remains
 `control-pending` from the interruption ledger alone—queue presentation metadata
 is never admission authority. The workflow waits up to five seconds for a wake
 and may then close without running another turn activity; the outbox continues
-bounded redelivery until the exact activity disappears or supplies its proof. A
-proof accepted at that timeout boundary is persisted before close. Once the
+bounded redelivery until the exact activity disappears or supplies its proof.
+When an attempt-owned retained process was the final writer, its terminal
+settlement advances that outbox revision atomically, so settlement racing the
+workflow's last reconciliation check cannot be lost. A proof accepted at that
+timeout boundary is persisted before close. Once the
 receipt commits, its coalescing outbox wake uses immediate `signalWithStart` on
 the same stable workflow id, which restarts the exact
 session and admits the replacement once. This event-driven path needs no

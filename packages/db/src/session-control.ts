@@ -2224,8 +2224,8 @@ export async function updateSessionCommandReceiptResult(
 export type SessionControlMutationResult = {
   receipt: SessionCommandReceiptRow;
   control: EffectiveSessionControl;
-  sessionControlEventId: string;
-  workspaceControlEventId: string;
+  sessionControlEventId: string | null;
+  workspaceControlEventId: string | null;
   interruptionCount: number;
   backgroundCommandCount: number;
   wakeCount: number;
@@ -2233,6 +2233,7 @@ export type SessionControlMutationResult = {
   cancelledTurnCount: number;
   affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
   workflowWake: SessionControlWorkflowWake | null;
+  outcome: "changed" | "unchanged" | "replayed";
   replay: boolean;
 };
 
@@ -2276,6 +2277,115 @@ async function pendingSessionControlWorkflowWake(
     temporalWorkflowId: wake.temporalWorkflowId,
     wakeRevision: wake.wakeRevision,
   };
+}
+
+async function sessionPauseEffectsNeeded(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; directPauseRevision: number },
+): Promise<boolean> {
+  const rows = await db.execute<{ needed: boolean }>(sql`
+    with recursive subtree(id, path, cycle) as (
+      select session.id, array[session.id]::uuid[], false
+      from ${schema.sessions} session
+      where session.workspace_id = ${input.workspaceId}
+        and session.id = ${input.sessionId}
+      union all
+      select child.id, parent.path || child.id, child.id = any(parent.path)
+      from subtree parent
+      join ${schema.sessions} child
+        on child.workspace_id = ${input.workspaceId}
+       and child.parent_session_id = parent.id
+      where not parent.cycle
+        and cardinality(parent.path) <= ${SESSION_ANCESTRY_LIMIT}
+    ), scoped_sessions as (
+      select session.id, session.subtree_run_override_revision
+      from subtree
+      join ${schema.sessions} session
+        on session.workspace_id = ${input.workspaceId}
+       and session.id = subtree.id
+      where not subtree.cycle
+    )
+    select exists (
+      select 1
+      from scoped_sessions session
+      where session.subtree_run_override_revision > ${input.directPauseRevision}
+      union all
+      select 1
+      from ${schema.sessionTurnAttempts} attempt
+      join scoped_sessions session on session.id = attempt.session_id
+      where attempt.workspace_id = ${input.workspaceId}
+        and attempt.state in ('claimed', 'running')
+        and not exists (
+          select 1
+          from ${schema.sessionAttemptInterruptions} interruption
+          where interruption.workspace_id = attempt.workspace_id
+            and interruption.attempt_id = attempt.id
+            and interruption.kind in ('session_pause', 'workspace_pause')
+            and interruption.state in ('pending', 'delivered', 'acknowledged')
+        )
+      union all
+      select 1
+      from ${schema.sessionBackgroundCommands} command
+      join scoped_sessions session on session.id = command.session_id
+      where command.workspace_id = ${input.workspaceId}
+        and command.state = 'running'
+    ) as needed
+  `);
+  return rows[0]?.needed ?? false;
+}
+
+async function workspacePauseEffectsNeeded(
+  db: Database,
+  input: { workspaceId: string; workspacePauseRevision: number },
+): Promise<boolean> {
+  const rows = await db.execute<{ needed: boolean }>(sql`
+    select exists (
+      select 1
+      from ${schema.sessions} session
+      where session.workspace_id = ${input.workspaceId}
+        and session.subtree_run_override_revision > ${input.workspacePauseRevision}
+      union all
+      select 1
+      from ${schema.sessionTurnAttempts} attempt
+      where attempt.workspace_id = ${input.workspaceId}
+        and attempt.state in ('claimed', 'running')
+        and not exists (
+          select 1
+          from ${schema.sessionAttemptInterruptions} interruption
+          where interruption.workspace_id = attempt.workspace_id
+            and interruption.attempt_id = attempt.id
+            and interruption.kind in ('session_pause', 'workspace_pause')
+            and interruption.state in ('pending', 'delivered', 'acknowledged')
+        )
+      union all
+      select 1
+      from ${schema.sessionBackgroundCommands} command
+      where command.workspace_id = ${input.workspaceId}
+        and command.state = 'running'
+    ) as needed
+  `);
+  return rows[0]?.needed ?? false;
+}
+
+async function continuableWakeRepairNeeded(
+  db: Database,
+  input: { workspaceId: string; rootSessionId: string | null },
+): Promise<boolean> {
+  const rows = await db.execute<{ needed: boolean }>(sql`
+    select exists (
+      select 1
+      from opengeni_private.list_continuable_sessions(
+        ${input.workspaceId}::uuid,
+        ${input.rootSessionId}::uuid
+      ) eligible
+      left join ${schema.sessionWorkflowWakeOutbox} wake
+        on wake.workspace_id = eligible.workspace_id
+       and wake.session_id = eligible.session_id
+      where wake.session_id is null
+        or wake.wake_revision <= wake.delivered_revision
+    ) as needed
+  `);
+  return rows[0]?.needed ?? false;
 }
 
 async function loadSessionSubtreeIds(
@@ -3017,13 +3127,23 @@ export async function mutateSessionControlInTransaction(
     operationKey: input.operationKey,
     canonicalRequestHash: hash,
   });
-  if (reserved.replay && reserved.receipt.appliedControlRevision !== null) {
-    const workspaceControlEventId = String(reserved.receipt.result.workspaceControlEventId ?? "");
-    if (!workspaceControlEventId) {
+  if (reserved.replay) {
+    const storedOutcome = reserved.receipt.result.outcome;
+    const unchanged =
+      storedOutcome === "unchanged" && reserved.receipt.appliedControlRevision === null;
+    if (!unchanged && reserved.receipt.appliedControlRevision === null) {
+      throw new SessionControlInvariantError(
+        "Replayed session control receipt has no applied control revision",
+      );
+    }
+    const workspaceControlEventId = unchanged
+      ? null
+      : String(reserved.receipt.result.workspaceControlEventId ?? "");
+    if (!unchanged && !workspaceControlEventId) {
       throw new SessionControlInvariantError("Replayed session control receipt has no event");
     }
-    const sessionControlEventId = String(reserved.receipt.result.eventId ?? "");
-    if (!sessionControlEventId) {
+    const sessionControlEventId = unchanged ? null : String(reserved.receipt.result.eventId ?? "");
+    if (!unchanged && !sessionControlEventId) {
       throw new SessionControlInvariantError(
         "Replayed session control receipt has no session event",
       );
@@ -3046,13 +3166,16 @@ export async function mutateSessionControlInTransaction(
             sessionId: string;
             eventIds: string[];
           }>)
-        : [{ sessionId: input.sessionId, eventIds: [sessionControlEventId] }],
+        : sessionControlEventId
+          ? [{ sessionId: input.sessionId, eventIds: [sessionControlEventId] }]
+          : [],
       workflowWake: await pendingSessionControlWorkflowWake(
         db,
         input.workspaceId,
         input.sessionId,
         wakeCount,
       ),
+      outcome: "replayed",
       replay: true,
     };
   }
@@ -3072,6 +3195,59 @@ export async function mutateSessionControlInTransaction(
   });
   if (input.expectedControlEtag && input.expectedControlEtag !== before.controlEtag) {
     throw new SessionControlConflictError();
+  }
+
+  if (input.action !== "cancel") {
+    const targetSession = locks.sessions.find((session) => session.id === input.sessionId);
+    if (!targetSession) {
+      throw new SessionControlInvariantError(`Session ${input.sessionId} disappeared`);
+    }
+    const directPauseRevision = asSafeRevision(
+      targetSession.directPauseRevision,
+      "direct pause revision",
+    );
+    const changed =
+      input.action === "pause"
+        ? targetSession.directControlState !== "paused" ||
+          directPauseRevision === null ||
+          (await sessionPauseEffectsNeeded(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            directPauseRevision,
+          }))
+        : before.state === "paused" ||
+          (await continuableWakeRepairNeeded(db, {
+            workspaceId: input.workspaceId,
+            rootSessionId: input.sessionId,
+          }));
+    if (!changed) {
+      const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
+        result: {
+          outcome: "unchanged",
+          interruptionCount: 0,
+          backgroundCommandCount: 0,
+          wakeCount: 0,
+          cancelledSessionCount: 0,
+          cancelledTurnCount: 0,
+          affectedSessionEvents: [],
+        },
+      });
+      return {
+        receipt,
+        control: before,
+        sessionControlEventId: null,
+        workspaceControlEventId: null,
+        interruptionCount: 0,
+        backgroundCommandCount: 0,
+        wakeCount: 0,
+        cancelledSessionCount: 0,
+        cancelledTurnCount: 0,
+        affectedSessionEvents: [],
+        workflowWake: null,
+        outcome: "unchanged",
+        replay: false,
+      };
+    }
   }
 
   const revision = nextRevision(workspace);
@@ -3281,6 +3457,7 @@ export async function mutateSessionControlInTransaction(
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: revision,
     result: {
+      outcome: "changed",
       interruptionCount,
       backgroundCommandCount,
       wakeCount,
@@ -3311,6 +3488,7 @@ export async function mutateSessionControlInTransaction(
       input.sessionId,
       wakeCount,
     ),
+    outcome: "changed",
     replay: false,
   };
 }
@@ -3406,11 +3584,12 @@ export async function autoResumeSessionBranchInTransaction(
 export type WorkspaceControlMutationResult = {
   receipt: SessionCommandReceiptRow;
   revision: number;
-  workspaceControlEventId: string;
+  workspaceControlEventId: string | null;
   workspaceState: EffectiveControlState;
   interruptionCount: number;
   backgroundCommandCount: number;
   wakeCount: number;
+  outcome: "changed" | "unchanged" | "replayed";
   replay: boolean;
 };
 
@@ -3449,24 +3628,77 @@ export async function mutateWorkspaceControlInTransaction(
     operationKey: input.operationKey,
     canonicalRequestHash: hash,
   });
-  if (reserved.replay && reserved.receipt.appliedControlRevision !== null) {
-    const workspaceControlEventId = String(reserved.receipt.result.workspaceControlEventId ?? "");
-    if (!workspaceControlEventId) {
+  if (reserved.replay) {
+    const storedOutcome = reserved.receipt.result.outcome;
+    const unchanged =
+      storedOutcome === "unchanged" && reserved.receipt.appliedControlRevision === null;
+    if (!unchanged && reserved.receipt.appliedControlRevision === null) {
+      throw new SessionControlInvariantError(
+        "Replayed workspace control receipt has no applied control revision",
+      );
+    }
+    const workspaceControlEventId = unchanged
+      ? null
+      : String(reserved.receipt.result.workspaceControlEventId ?? "");
+    if (!unchanged && !workspaceControlEventId) {
       throw new SessionControlInvariantError("Replayed workspace control receipt has no event");
     }
     return {
       receipt: reserved.receipt,
-      revision: Number(reserved.receipt.appliedControlRevision),
-      workspaceControlEventId,
-      workspaceState: input.action === "pause" ? "paused" : "active",
+      revision:
+        reserved.receipt.appliedControlRevision === null
+          ? currentRevision
+          : Number(reserved.receipt.appliedControlRevision),
+      workspaceControlEventId: workspaceControlEventId || null,
+      workspaceState: workspace.workspaceState === "paused" ? "paused" : "active",
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
       backgroundCommandCount: Number(reserved.receipt.result.backgroundCommandCount ?? 0),
       wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
+      outcome: "replayed",
       replay: true,
     };
   }
   if (input.expectedRevision !== null && input.expectedRevision !== undefined) {
     if (input.expectedRevision !== currentRevision) throw new SessionControlConflictError();
+  }
+
+  const workspacePauseRevision = asSafeRevision(
+    workspace.workspacePauseRevision,
+    "workspace pause revision",
+  );
+  const changed =
+    input.action === "pause"
+      ? workspace.workspaceState !== "paused" ||
+        workspacePauseRevision === null ||
+        (await workspacePauseEffectsNeeded(db, {
+          workspaceId: input.workspaceId,
+          workspacePauseRevision,
+        }))
+      : workspace.workspaceState !== "active" ||
+        (await continuableWakeRepairNeeded(db, {
+          workspaceId: input.workspaceId,
+          rootSessionId: null,
+        }));
+  if (!changed) {
+    const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
+      result: {
+        outcome: "unchanged",
+        interruptionCount: 0,
+        backgroundCommandCount: 0,
+        wakeCount: 0,
+      },
+    });
+    return {
+      receipt,
+      revision: currentRevision,
+      workspaceControlEventId: null,
+      workspaceState: workspace.workspaceState === "paused" ? "paused" : "active",
+      interruptionCount: 0,
+      backgroundCommandCount: 0,
+      wakeCount: 0,
+      outcome: "unchanged",
+      replay: false,
+    };
   }
 
   const revision = nextRevision(workspace);
@@ -3533,7 +3765,13 @@ export async function mutateWorkspaceControlInTransaction(
         });
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: revision,
-    result: { interruptionCount, backgroundCommandCount, wakeCount, workspaceControlEventId },
+    result: {
+      outcome: "changed",
+      interruptionCount,
+      backgroundCommandCount,
+      wakeCount,
+      workspaceControlEventId,
+    },
   });
   return {
     receipt,
@@ -3543,6 +3781,7 @@ export async function mutateWorkspaceControlInTransaction(
     interruptionCount,
     backgroundCommandCount,
     wakeCount,
+    outcome: "changed",
     replay: false,
   };
 }

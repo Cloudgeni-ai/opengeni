@@ -1596,12 +1596,47 @@ describe("embedding host session authorization routes", () => {
       sessionId: target.id,
       idempotencyKey: crypto.randomUUID(),
     });
-    expect(paused.resource.state).toBe("paused");
+    expect(paused).toMatchObject({
+      operation: "session_pause",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "applied" },
+    });
+    const unchangedPauseKey = crypto.randomUUID();
+    const unchangedPause = await callMcpTool<McpMutationReceiptType>(server, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: unchangedPauseKey,
+    });
+    expect(unchangedPause).toMatchObject({
+      operation: "session_pause",
+      outcome: "unchanged",
+      changed: false,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "applied" },
+    });
+    const replayedPause = await callMcpTool<McpMutationReceiptType>(server, "session_pause", {
+      sessionId: target.id,
+      idempotencyKey: unchangedPauseKey,
+    });
+    expect(replayedPause).toMatchObject({
+      operation: "session_pause",
+      outcome: "replayed",
+      changed: false,
+      resource: { type: "session", id: target.id, state: "paused" },
+      idempotency: { status: "replayed" },
+    });
+    expect(replayedPause.relatedResources).toEqual(unchangedPause.relatedResources);
     const resumed = await callMcpTool<McpMutationReceiptType>(server, "session_resume", {
       sessionId: target.id,
       idempotencyKey: crypto.randomUUID(),
     });
-    expect(resumed.resource.state).toBe("active");
+    expect(resumed).toMatchObject({
+      operation: "session_resume",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "active" },
+    });
     const steered = await callMcpTool<{ updateId: string }>(server, "session_steer", {
       sessionId: target.id,
       instruction: "Take the newest direction exactly once",
@@ -1613,22 +1648,51 @@ describe("embedding host session authorization routes", () => {
       ...value.grant,
       permissions: ["workspace:read", "sessions:read", "sessions:control"],
     });
-    const operatorPaused = await callMcpTool<{
-      effectiveControl: { state: string };
-    }>(operatorServer, "session_pause", {
-      sessionId: target.id,
-      idempotencyKey: crypto.randomUUID(),
+    const operatorPaused = await callMcpTool<McpMutationReceiptType>(
+      operatorServer,
+      "session_pause",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorPaused).toMatchObject({
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_pause",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "paused" },
+      relatedResources: [{ type: "session_command_receipt" }],
     });
-    expect(operatorPaused.effectiveControl.state).toBe("paused");
-    const operatorResumed = await callMcpTool<{
-      effectiveControl: { state: string };
-    }>(operatorServer, "session_resume", {
-      sessionId: target.id,
-      idempotencyKey: crypto.randomUUID(),
+    expect(operatorPaused).not.toHaveProperty("effectiveControl");
+    const operatorResumed = await callMcpTool<McpMutationReceiptType>(
+      operatorServer,
+      "session_resume",
+      {
+        sessionId: target.id,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    );
+    expect(operatorResumed).toMatchObject({
+      receiptVersion: "mcp-mutation-receipt.v1",
+      operation: "session_resume",
+      outcome: "updated",
+      changed: true,
+      resource: { type: "session", id: target.id, state: "active" },
     });
-    expect(operatorResumed.effectiveControl.state).toBe("active");
+    expect(operatorResumed).not.toHaveProperty("effectiveControl");
 
     expect(decisions).toEqual([
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
+      {
+        operation: "session.control",
+        surface: "first_party_mcp",
+        sessionId: target.id,
+      },
       {
         operation: "session.control",
         surface: "first_party_mcp",
