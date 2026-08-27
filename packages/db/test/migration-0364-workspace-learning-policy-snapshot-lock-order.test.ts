@@ -288,6 +288,14 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
 
       interruptionCall = interruptionWriter.begin(async (tx) => {
         await tx`
+          select id from session_turn_attempts
+          where account_id = ${fixture.accountId}
+            and workspace_id = ${fixture.workspaceId}
+            and session_id = ${fixture.sessionId}
+            and turn_id = ${fixture.turnId}
+            and id = ${fixture.attemptId}
+          for update`;
+        await tx`
           insert into session_command_receipts (
             id, account_id, workspace_id, actor_type, actor_subject_id,
             action, target_session_id, target_turn_id, operation_key,
@@ -299,14 +307,6 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
             ${`learning-policy-interruption-${operationId}`}, ${"a".repeat(64)}
           )`;
         await tx`
-          select id from session_turn_attempts
-          where account_id = ${fixture.accountId}
-            and workspace_id = ${fixture.workspaceId}
-            and session_id = ${fixture.sessionId}
-            and turn_id = ${fixture.turnId}
-            and id = ${fixture.attemptId}
-          for update`;
-        await tx`
           insert into session_attempt_interruptions (
             account_id, workspace_id, session_id, operation_id,
             attempt_id, kind, control_revision
@@ -316,7 +316,12 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
           )`;
       });
       void interruptionCall.catch(() => undefined);
-      await waitForApplicationLock(interruptionApplicationName);
+      await Promise.race([
+        waitForApplicationLock(interruptionApplicationName),
+        interruptionCall.then(() => {
+          throw new Error("Interruption writer completed before reaching the attempt fence");
+        }),
+      ]);
 
       const [beforeCommit] = await shared!.admin<Array<{ count: number }>>`
         select count(*)::int as count
