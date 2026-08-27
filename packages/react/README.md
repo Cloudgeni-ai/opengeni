@@ -135,6 +135,21 @@ can therefore implement only the methods used by each hook. A shared event feed
 also avoids requiring a client-owned event stream at runtime. Workspace-level
 Resume is an optional authority.
 
+Use `createEmbeddedSessionClient(base, options)` to bind that narrow surface
+from a full SDK client or host proxy. Delegated methods preserve their SDK
+receiver, `options.overrides.submitComposerDraft` can route atomic submission
+through a host-authenticated endpoint, and `mapComposerDraft` can project every
+read/save/submit draft before React adopts it. Construction fails immediately
+when a required method is missing, and submit returns the host/native
+`SubmitComposerDraftResponse` unchanged apart from an explicitly configured
+draft projection.
+
+The styled file surfaces accept a presentation-only node predicate:
+`FileBrowser.isNodeVisible`, `SandboxFiles.isNodeVisible`, and
+`SandboxWorkspace.isFileNodeVisible`. Hidden parents never expose orphaned
+children, hidden selections/reveal requests are ignored, and omitting the prop
+preserves the complete authoritative tree. This is not an authorization seam.
+
 The styled root surface ships with ready-to-use CSS. Import it once; the host
 does not need Tailwind:
 

@@ -8,6 +8,7 @@ import {
   type ComposerSendExtras,
   type ComposerState,
   composeSendInput,
+  createEmbeddedSessionClient,
   creditExhaustedFromEvents,
   extractSessionRef,
   FILE_ONLY_MESSAGE_TEXT,
@@ -113,6 +114,12 @@ export const sessionClient = {
   resumeSession: unused,
   sendApprovalDecision: unused,
 } satisfies SessionClientLike;
+
+export const constructedSessionClient = createEmbeddedSessionClient(sessionClient, {
+  overrides: {
+    submitComposerDraft: unused,
+  },
+});
 
 export const humanInputSessionClient = {
   getSession: unused,
