@@ -180,7 +180,8 @@ Rules of thumb:
   host's connection remains authoritative; the sandbox bearer is never treated
   as a second GitHub/GitLab/Azure identity.
 
-Details: first-party tools and grants in [architecture.md](architecture.md),
+Details: the architectural capability/connection/MCP boundary in
+[architecture.md](architecture.md) §7.4,
 first-party mutation receipts and read/action response classes in
 [mcp-response-contracts.md](mcp-response-contracts.md),
 per-session servers in [session-mcp-servers.md](session-mcp-servers.md),

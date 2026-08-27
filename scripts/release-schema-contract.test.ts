@@ -152,6 +152,9 @@ describe("release schema contract", () => {
     const organizationRecoveryCustody = completeSourceContract.migrations.some(
       (migration) => migration.path === "0363_organization_recovery_custody.sql",
     );
+    const workspaceLearningPolicySnapshotLockOrder = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0364_workspace_learning_policy_snapshot_lock_order.sql",
+    );
     const workspaceMemberManagementScope = completeSourceContract.migrations.some(
       (migration) => migration.path === "0365_workspace_member_management_scope.sql",
     );
@@ -170,6 +173,7 @@ describe("release schema contract", () => {
       "0361_remember_knowledge_memory_materialization.sql",
       "0362_managed_auth_session_sets.sql",
       "0363_organization_recovery_custody.sql",
+      "0364_workspace_learning_policy_snapshot_lock_order.sql",
       "0365_workspace_member_management_scope.sql",
       "0366_workspace_member_candidate_inventory.sql",
     ]);
@@ -191,37 +195,40 @@ describe("release schema contract", () => {
         (rememberKnowledgeMemoryMaterialization ? 1 : 0) +
         (managedAuthSessionSets ? 1 : 0) +
         (organizationRecoveryCustody ? 1 : 0) +
+        (workspaceLearningPolicySnapshotLockOrder ? 1 : 0) +
         (workspaceMemberManagementScope ? 1 : 0) +
         (workspaceMemberCandidateInventory ? 1 : 0),
       latestMigration: workspaceMemberCandidateInventory
         ? "0366_workspace_member_candidate_inventory.sql"
         : workspaceMemberManagementScope
           ? "0365_workspace_member_management_scope.sql"
-          : organizationRecoveryCustody
-            ? "0363_organization_recovery_custody.sql"
-            : managedAuthSessionSets
-              ? "0362_managed_auth_session_sets.sql"
-              : rememberKnowledgeMemoryMaterialization
-                ? "0361_remember_knowledge_memory_materialization.sql"
-                : organizationIdentityConfirmationPrompt
-                  ? "0360_organization_identity_confirmation_prompt.sql"
-                  : insightsForceRlsReadCapability
-                    ? "0359_insights_force_rls_read_capability.sql"
-                    : prReviewManagedGithubApp
-                      ? "0358_pr_review_managed_github_app.sql"
-                      : rigPlatformBaseOnly
-                        ? "0357_rig_platform_base_only.sql"
-                        : setBasedInsightsSessionVisibility
-                          ? "0356_set_based_insights_session_visibility.sql"
-                          : automaticSessionTitleQuarantine
-                            ? "0355_automatic_session_title_quarantine.sql"
-                            : automaticSessionTitleQuarantineIndex
-                              ? "0354_automatic_session_title_quarantine_index.sql"
-                              : automaticSessionTitlePolicyFence
-                                ? "0353_automatic_session_title_policy_fence.sql"
-                                : sessionVariableSetAttachments
-                                  ? "0352_session_variable_set_attachments.sql"
-                                  : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
+          : workspaceLearningPolicySnapshotLockOrder
+            ? "0364_workspace_learning_policy_snapshot_lock_order.sql"
+            : organizationRecoveryCustody
+              ? "0363_organization_recovery_custody.sql"
+              : managedAuthSessionSets
+                ? "0362_managed_auth_session_sets.sql"
+                : rememberKnowledgeMemoryMaterialization
+                  ? "0361_remember_knowledge_memory_materialization.sql"
+                  : organizationIdentityConfirmationPrompt
+                    ? "0360_organization_identity_confirmation_prompt.sql"
+                    : insightsForceRlsReadCapability
+                      ? "0359_insights_force_rls_read_capability.sql"
+                      : prReviewManagedGithubApp
+                        ? "0358_pr_review_managed_github_app.sql"
+                        : rigPlatformBaseOnly
+                          ? "0357_rig_platform_base_only.sql"
+                          : setBasedInsightsSessionVisibility
+                            ? "0356_set_based_insights_session_visibility.sql"
+                            : automaticSessionTitleQuarantine
+                              ? "0355_automatic_session_title_quarantine.sql"
+                              : automaticSessionTitleQuarantineIndex
+                                ? "0354_automatic_session_title_quarantine_index.sql"
+                                : automaticSessionTitlePolicyFence
+                                  ? "0353_automatic_session_title_policy_fence.sql"
+                                  : sessionVariableSetAttachments
+                                    ? "0352_session_variable_set_attachments.sql"
+                                    : migrationsBeforeAutomaticSessionTitles.at(-1)?.path,
     });
   });
 
@@ -323,6 +330,7 @@ describe("release schema contract", () => {
       "0361_remember_knowledge_memory_materialization.sql",
       "0362_managed_auth_session_sets.sql",
       "0363_organization_recovery_custody.sql",
+      "0364_workspace_learning_policy_snapshot_lock_order.sql",
       "0365_workspace_member_management_scope.sql",
       "0366_workspace_member_candidate_inventory.sql",
     ].filter((path) =>
@@ -400,6 +408,9 @@ describe("release schema contract", () => {
     const organizationRecoveryCustody = completeSourceContract.migrations.some(
       (migration) => migration.path === "0363_organization_recovery_custody.sql",
     );
+    const workspaceLearningPolicySnapshotLockOrder = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0364_workspace_learning_policy_snapshot_lock_order.sql",
+    );
     const workspaceMemberManagementScope = completeSourceContract.migrations.some(
       (migration) => migration.path === "0365_workspace_member_management_scope.sql",
     );
@@ -425,49 +436,52 @@ describe("release schema contract", () => {
         (sessionVariableSetAttachments ? 1 : 0) +
         (managedAuthSessionSets ? 1 : 0) +
         (organizationRecoveryCustody ? 1 : 0) +
+        (workspaceLearningPolicySnapshotLockOrder ? 1 : 0) +
         (workspaceMemberManagementScope ? 1 : 0) +
         (workspaceMemberCandidateInventory ? 1 : 0),
       latestMigration: workspaceMemberCandidateInventory
         ? "0366_workspace_member_candidate_inventory.sql"
         : workspaceMemberManagementScope
           ? "0365_workspace_member_management_scope.sql"
-          : organizationRecoveryCustody
-            ? "0363_organization_recovery_custody.sql"
-            : managedAuthSessionSets
-              ? "0362_managed_auth_session_sets.sql"
-              : sessionVariableSetAttachments
-                ? "0352_session_variable_set_attachments.sql"
-                : organizationUserSetupDelivery
-                  ? "0351_organization_user_setup_delivery.sql"
-                  : organizationSharedWorkspaceAdministration
-                    ? "0350_organization_shared_workspace_administration.sql"
-                    : greenfieldSessionTenancyActivation
-                      ? "0349_greenfield_session_tenancy_activation.sql"
-                      : namedSignupAndUserSetup
-                        ? "0348_named_signup_and_user_setup.sql"
-                        : connectionAuthorityConvergenceEvidence
-                          ? "0347_connection_authority_convergence_evidence.sql"
-                          : documentMigrationAuditSurface
-                            ? "0346_document_migration_audit_surface.sql"
-                            : tenantScopedSessionTenancyFence
-                              ? "0345_tenant_scoped_session_tenancy_fence.sql"
-                              : privateSessionVisibilityTransitionGate
-                                ? "0344_private_session_visibility_transition_gate.sql"
-                                : personalDocumentForceRlsRepair
-                                  ? "0343_personal_document_force_rls_lock_repair.sql"
-                                  : slackRoutePromptSinglePending
-                                    ? "0342_slack_route_prompt_single_pending.sql"
-                                    : slackRoutingProbeFence
-                                      ? "0341_slack_routing_probe_organization_fence.sql"
-                                      : tenancyBackfillActivationEvidence
-                                        ? "0340_tenancy_backfill_activation_evidence.sql"
-                                        : documentAuthorityReclassification
-                                          ? "0339_document_authority_reclassification.sql"
-                                          : atomicConnectedMachineAttachments
-                                            ? "0338_atomic_connected_machine_attachments.sql"
-                                            : routedSlackHandles
-                                              ? "0337_slack_routed_action_handles.sql"
-                                              : "0336_atomic_session_fork_visibility.sql",
+          : workspaceLearningPolicySnapshotLockOrder
+            ? "0364_workspace_learning_policy_snapshot_lock_order.sql"
+            : organizationRecoveryCustody
+              ? "0363_organization_recovery_custody.sql"
+              : managedAuthSessionSets
+                ? "0362_managed_auth_session_sets.sql"
+                : sessionVariableSetAttachments
+                  ? "0352_session_variable_set_attachments.sql"
+                  : organizationUserSetupDelivery
+                    ? "0351_organization_user_setup_delivery.sql"
+                    : organizationSharedWorkspaceAdministration
+                      ? "0350_organization_shared_workspace_administration.sql"
+                      : greenfieldSessionTenancyActivation
+                        ? "0349_greenfield_session_tenancy_activation.sql"
+                        : namedSignupAndUserSetup
+                          ? "0348_named_signup_and_user_setup.sql"
+                          : connectionAuthorityConvergenceEvidence
+                            ? "0347_connection_authority_convergence_evidence.sql"
+                            : documentMigrationAuditSurface
+                              ? "0346_document_migration_audit_surface.sql"
+                              : tenantScopedSessionTenancyFence
+                                ? "0345_tenant_scoped_session_tenancy_fence.sql"
+                                : privateSessionVisibilityTransitionGate
+                                  ? "0344_private_session_visibility_transition_gate.sql"
+                                  : personalDocumentForceRlsRepair
+                                    ? "0343_personal_document_force_rls_lock_repair.sql"
+                                    : slackRoutePromptSinglePending
+                                      ? "0342_slack_route_prompt_single_pending.sql"
+                                      : slackRoutingProbeFence
+                                        ? "0341_slack_routing_probe_organization_fence.sql"
+                                        : tenancyBackfillActivationEvidence
+                                          ? "0340_tenancy_backfill_activation_evidence.sql"
+                                          : documentAuthorityReclassification
+                                            ? "0339_document_authority_reclassification.sql"
+                                            : atomicConnectedMachineAttachments
+                                              ? "0338_atomic_connected_machine_attachments.sql"
+                                              : routedSlackHandles
+                                                ? "0337_slack_routed_action_handles.sql"
+                                                : "0336_atomic_session_fork_visibility.sql",
     });
     expect(
       completeSourceContract.migrations.find(

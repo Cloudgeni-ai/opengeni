@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   mcpMutationReceipt,
+  sessionControlMutationReceipt,
   sessionCreateMutationReceipt,
   type SessionCreateReceiptResult,
 } from "../src/mcp/receipts";
@@ -80,6 +81,33 @@ describe("first-party MCP receipt builder", () => {
       rootSessionId: sessionCreateResult.session.rootSessionId,
       nestedAgentDepth: 0,
       effectiveMaxNestedAgentDepth: 3,
+    });
+  });
+
+  test("maps session control persistence outcomes without caller-shape drift", () => {
+    const base = {
+      operation: "session_pause" as const,
+      sessionId: "00000000-0000-4000-8000-000000000005",
+      state: "paused",
+      receiptId: "00000000-0000-4000-8000-000000000006",
+      timestamp: "2026-08-27T00:00:00.000Z",
+      interruptionCount: 0,
+    };
+
+    expect(sessionControlMutationReceipt({ ...base, outcome: "changed" })).toMatchObject({
+      outcome: "updated",
+      changed: true,
+      idempotency: { status: "applied" },
+    });
+    expect(sessionControlMutationReceipt({ ...base, outcome: "unchanged" })).toMatchObject({
+      outcome: "unchanged",
+      changed: false,
+      idempotency: { status: "applied" },
+    });
+    expect(sessionControlMutationReceipt({ ...base, outcome: "replayed" })).toMatchObject({
+      outcome: "replayed",
+      changed: false,
+      idempotency: { status: "replayed" },
     });
   });
 

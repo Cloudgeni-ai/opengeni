@@ -1,5 +1,29 @@
 # @opengeni/documents
 
+## 0.8.4
+
+### Patch Changes
+
+- Updated dependencies [da0c2d2]
+- Updated dependencies [92f227f]
+  - @opengeni/db@3.5.1
+
+## 0.8.3
+
+### Patch Changes
+
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+- Updated dependencies [a7912ea]
+- Updated dependencies [d7ab403]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [03d1c6e]
+- Updated dependencies [6e12f3a]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/db@3.5.0
+  - @opengeni/storage@0.2.109
+
 ## 0.8.2
 
 ### Patch Changes

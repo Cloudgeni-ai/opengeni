@@ -1,5 +1,33 @@
 # @opengeni/db
 
+## 3.5.1
+
+### Patch Changes
+
+- da0c2d2: Prevent accepted-attempt workspace learning-policy snapshots from deadlocking with ordinary session lifecycle writers. The snapshot function now locks the workspace, session, turn, and attempt explicitly in the canonical order, then revalidates the complete live-attempt and interruption tuple in a fresh statement before deriving the immutable policy snapshot.
+- 92f227f: Make session and workspace Pause/Resume desired-state mutations report authoritative changed, unchanged, and replayed outcomes. Represented no-ops no longer allocate control revisions, events, interruptions, or wakes, while newer descendant overrides and missing lifecycle repairs still produce real mutations. First-party MCP session control now returns the same versioned mutation receipt for agent-bound and sessionless callers.
+
+## 3.5.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+- 6e12f3a: Add canonical-human organization recovery custody with exactly three accepted custodians, two-person approval, a fixed seven-day cooldown, promotion-only co-owner execution, durable notification evidence, and immutable workspace organization ownership.
+
+### Patch Changes
+
+- d7ab403: Bundle Workspace Insights usage and model projections into bounded analytical reads while preserving filter, visibility, and UTC boundary semantics.
+- 9ef491b: Add the Agent Knowledge product surface, Personal workspace knowledge views and defaults, workspace learning-autonomy administration, explicit routing guidance between Memory, Skills, and Workspace instructions, authority-first organization Document search, exact replay-safe confirmed Memory materialization, and the narrower organization identity/mission boundary with richer facts retrieved from organization knowledge.
+- 03d1c6e: Repair Workspace Insights analytical reads under production FORCE RLS while preserving ordinary fact visibility and write policies.
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/codemode@0.4.16
+
 ## 3.4.0
 
 ### Minor Changes
