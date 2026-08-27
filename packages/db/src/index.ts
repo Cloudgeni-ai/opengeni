@@ -42314,6 +42314,20 @@ async function hasPendingSessionAttemptQuiescenceTx(
           )
           or (
             attempt.outcome = 'interrupted_recoverable'
+            and not exists (
+              select 1
+              from session_turn_attempts successor
+              where successor.account_id = attempt.account_id
+                and successor.workspace_id = attempt.workspace_id
+                and successor.session_id = attempt.session_id
+                and (
+                  successor.started_at > attempt.started_at
+                  or (
+                    successor.started_at = attempt.started_at
+                    and successor.id > attempt.id
+                  )
+                )
+            )
             and exists (
               select 1
               from session_events event
