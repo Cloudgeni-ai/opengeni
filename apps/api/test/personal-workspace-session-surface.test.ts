@@ -992,6 +992,7 @@ describe("managed-human session surface inside their own personal workspace", ()
   test("persists and consumes the private create snapshot in the owner's own personal workspace", async () => {
     if (!shared || !client) return;
     const human = await provisionManagedHuman();
+    await activateSessionTenancy(human);
     const text = "draft in my own private Personal workspace";
     const headers = { cookie: human.cookie, "content-type": "application/json" };
 
