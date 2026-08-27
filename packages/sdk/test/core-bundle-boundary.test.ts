@@ -5,7 +5,7 @@ import { OpenGeniCoreClient } from "../src/core";
 import { OpenGeniDocumentAuthorityClient } from "../src/document-authority";
 
 const fixtureRoot = path.resolve(import.meta.dir, "fixtures");
-const unusedOperatorMethodMarker = "OPE355_UNUSED_OPERATOR_METHOD_SENTINEL";
+const unusedOperatorMethodMarker = "UNUSED_OPERATOR_METHOD_SENTINEL";
 
 async function bundle(entrypoint: string, injectUnusedOperatorMethod = false): Promise<string> {
   const result = await Bun.build({
@@ -23,7 +23,7 @@ async function bundle(entrypoint: string, injectUnusedOperatorMethod = false): P
                 const classEnd = source.lastIndexOf("\n}");
                 if (classEnd < 0) throw new Error("Could not find the operator client class end");
                 return {
-                  contents: `${source.slice(0, classEnd)}\n  async ope355UnusedOperatorMethod(): Promise<string> {\n    return "${unusedOperatorMethodMarker}";\n  }\n${source.slice(classEnd)}`,
+                  contents: `${source.slice(0, classEnd)}\n  async plantedUnusedOperatorMethod(): Promise<string> {\n    return "${unusedOperatorMethodMarker}";\n  }\n${source.slice(classEnd)}`,
                   loader: "ts",
                 };
               });
