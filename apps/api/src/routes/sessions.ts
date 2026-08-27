@@ -244,7 +244,6 @@ import {
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
-  acceptSessionUserMessageWithOutcome,
   controlHumanSessionWorkstream,
   createSessionForRequest,
   deleteHumanQueuePrompt,
@@ -260,6 +259,7 @@ import {
   SessionSpawnDeniedError,
   sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
+  submitComposerDraftForRequest,
   updateSessionMcpApprovalPolicy,
   updateManagedHumanSessionVisibility,
   updateSessionToolPolicy,
@@ -2848,46 +2848,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
-    let result: Awaited<ReturnType<typeof acceptSessionUserMessageWithOutcome>>;
+    let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, {
-        text: payload.text,
-        annotations: payload.annotations,
-        modelContext: payload.modelContext ?? null,
-        resources: payload.resources,
-        model: payload.model,
-        reasoningEffort: payload.reasoningEffort,
-        latencyMode: payload.latencyMode,
-        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-        connectionAuthorities: payload.connectionAuthorities,
-        ...(payload.personalResourceAttachment
-          ? { personalResourceAttachment: payload.personalResourceAttachment }
-          : {}),
+      result = await submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
         authorization,
-        delivery: payload.delivery,
-        origin: "human",
-        expectedDraftRevision: payload.expectedDraftRevision,
-        clientEventId: payload.clientEventId,
-        ...(payload.controlEtag ? { controlEtag: payload.controlEtag } : {}),
       });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
-    if (!result.draft) {
-      throw new Error("Accepted composer draft submission did not return its next draft");
-    }
-    return c.json(
-      {
-        accepted: result.accepted,
-        turn: result.turn,
-        draft: result.draft,
-        receipt: result.receipt,
-        routing: result.routing,
-        interruptionCount: result.interruptionCount,
-        replay: result.replay,
-      },
-      202,
-    );
+    return c.json(result, 202);
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
