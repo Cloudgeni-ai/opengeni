@@ -252,7 +252,9 @@ describe("migration 0364 workspace learning-policy snapshot lock order", () => {
   test("holds the attempt fence through commit so interruption creation cannot cross revalidation", async () => {
     if (!available) return;
     const fixture = await seedAttempt();
-    const interruptionApplicationName = `learning-policy-interruption-${crypto.randomUUID()}`;
+    // PostgreSQL truncates application_name to NAMEDATALEN - 1 (63 bytes).
+    // Keep this probe below that limit so pg_stat_activity can match it exactly.
+    const interruptionApplicationName = `lp-interruption-${crypto.randomUUID()}`;
     const snapshot = postgres(shared!.appUrl, { max: 1, prepare: false });
     const interruptionWriter = postgres(shared!.adminUrl, {
       max: 1,
