@@ -1,5 +1,33 @@
 # @opengeni/core
 
+## 2.5.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 5d4edd4: Add a public atomic composer application command shared by HTTP and in-process hosts, including atomic host-authorized resource augmentation without a trusted draft rewrite; add a receiver-safe narrow React session client constructor with host submit overrides and draft projection; and add presentation-only file-node filtering across the packaged workbench surfaces.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+
+### Patch Changes
+
+- d7ab403: Bundle Workspace Insights usage and model projections into bounded analytical reads while preserving filter, visibility, and UTC boundary semantics.
+- Updated dependencies [a7912ea]
+- Updated dependencies [d7ab403]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [03d1c6e]
+- Updated dependencies [f6375f2]
+- Updated dependencies [6e12f3a]
+- Updated dependencies [a521e65]
+  - @opengeni/config@0.21.0
+  - @opengeni/contracts@2.6.0
+  - @opengeni/db@3.5.0
+  - @opengeni/documents@0.8.3
+  - @opengeni/runtime@1.4.1
+  - @opengeni/storage@0.2.109
+  - @opengeni/events@0.4.1
+  - @opengeni/observability@0.8.7
+
 ## 2.4.0
 
 ### Minor Changes
