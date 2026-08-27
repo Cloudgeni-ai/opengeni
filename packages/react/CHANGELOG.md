@@ -1,5 +1,26 @@
 # @opengeni/react
 
+## 2.6.0
+
+### Minor Changes
+
+- 5d4edd4: Add a public atomic composer application command shared by HTTP and in-process hosts, including atomic host-authorized resource augmentation without a trusted draft rewrite; add a receiver-safe narrow React session client constructor with host submit overrides and draft projection; and add presentation-only file-node filtering across the packaged workbench surfaces.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+
+### Patch Changes
+
+- f1f7c22: Keep controlled composer inputs on the latest local draft while older autosave settlements render.
+- 720ca4a: Render controlled composer edits synchronously before deferred host delivery settles.
+- 27f3364: Clear ordinary Send drafts before host submission callbacks can re-project the submitted text.
+- 82e72ce: Preserve the latest controlled composer edit across synchronous child-controller renders.
+- 1135a6b: Keep pinned session streaming at the rendered layout tip so the viewport no longer reveals already-rendered output through a delayed catch-up glide.
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+- Updated dependencies [9a8c822]
+  - @opengeni/sdk@2.6.0
+
 ## 2.5.0
 
 ### Minor Changes

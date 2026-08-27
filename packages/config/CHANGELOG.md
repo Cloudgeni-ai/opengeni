@@ -1,5 +1,20 @@
 # @opengeni/config
 
+## 0.21.0
+
+### Minor Changes
+
+- a7912ea: Add a one-click, owner-authorized OpenGeni Lens GitHub App installation flow for the PR Review Pack, backed by durable single-use OAuth authority, shared signed-webhook routing, and exact-repository least-privilege installation tokens. Keep bring-your-own GitHub App, GitLab, and Azure DevOps registration as the provider-neutral advanced path.
+- 986f5fe: Add provider-neutral browser login session sets with bounded independently revocable slots, explicit actor switching, isolated add and re-authentication, scoped logout, non-enumerating cross-slot deep-link recovery, and rolling legacy/dual/broker compatibility.
+
+### Patch Changes
+
+- Updated dependencies [a7912ea]
+- Updated dependencies [9ef491b]
+- Updated dependencies [986f5fe]
+- Updated dependencies [6e12f3a]
+  - @opengeni/contracts@2.6.0
+
 ## 0.20.1
 
 ### Patch Changes
