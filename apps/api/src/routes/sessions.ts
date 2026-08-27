@@ -560,12 +560,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     let session: Session;
     try {
-      const request = CreateSessionRequest.parse(payload);
+      CreateSessionRequest.parse(payload);
       session = await createSessionForRequest(
         await catalogDeps(grant.accountId, workspaceId),
         grant,
         workspaceId,
-        request,
+        payload,
         authorization,
       );
     } catch (error) {
@@ -580,7 +580,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    const catalog = await deps.resolveCatalogSettings();
+    const catalog = await resolveWorkspaceCatalogSettings(db, settings, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
     return c.json(
       await getActorNewSessionDraft({ settings: catalog.settings, db }, grant, workspaceId),
     );
