@@ -1,7 +1,7 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 
-import { DIRECT_SESSION_RAW_BUDGET, KIB as kib } from "./web-bundle-budget-policy";
+import { EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, KIB as kib } from "./web-bundle-budget-policy";
 
 type ManifestEntry = {
   file: string;
@@ -279,7 +279,14 @@ const budgets = {
   // entry. The exact merged Bun 1.4 Linux/x64 graph measures 2,198,390 raw
   // bytes. Advance only the policy-derived raw envelope to 2,148 KiB, retaining
   // 1,162 bytes of headroom; every other cap remains fixed.
-  directSessionRaw: DIRECT_SESSION_RAW_BUDGET,
+  // Exact-ID Variable Set attachment resolution keeps attach/use-only grants
+  // out of the metadata catalog, while the selected-row repair keeps restored
+  // exact IDs visible without catalog permission. Combined with current main's
+  // attachment preview, the Linux/x64 Bun 1.3.14 merge tree measures 2,203,278
+  // raw bytes. Its 2,153-KiB envelope retains 1,394 bytes of headroom; take the
+  // maximum with current main's independent exact measurement so either graph
+  // may advance without weakening the gate.
+  directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 603 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,

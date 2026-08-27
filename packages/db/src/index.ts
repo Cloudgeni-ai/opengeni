@@ -16178,6 +16178,43 @@ export async function listVariableSets(
   });
 }
 
+export async function resolveVariableSetAttachments(
+  db: Database,
+  context: VariableSetAccessContext,
+  variableSetIds: readonly string[],
+): Promise<Array<Pick<VariableSet, "id" | "scope">>> {
+  if (variableSetIds.length === 0) return [];
+  // Drizzle expands a bare JavaScript array into a parameter list rather than
+  // one PostgreSQL array value. Build the bounded requested relation directly.
+  const requestedValues = sql.join(
+    variableSetIds.map(
+      (variableSetId, index) => sql`(${variableSetId}::uuid, ${index + 1}::integer)`,
+    ),
+    sql`, `,
+  );
+  return await withRlsContext(db, context, async (scopedDb) => {
+    await setSubjectRlsContext(scopedDb, context.subjectId);
+    return await rawRows<Pick<VariableSet, "id" | "scope">>(
+      scopedDb,
+      sql`with requested(variable_set_id, ordinal) as (
+        values ${requestedValues}
+      )
+      select
+        resolved.value->>'id' as id,
+        resolved.value->>'scope' as scope
+      from requested
+      cross join lateral list_scoped_variable_sets(
+        ${context.accountId}::uuid,
+        ${context.workspaceId}::uuid,
+        requested.variable_set_id,
+        null,
+        null
+      ) resolved(value)
+      order by requested.ordinal`,
+    );
+  });
+}
+
 export async function getVariableSet(
   db: Database,
   context: VariableSetAccessContext,

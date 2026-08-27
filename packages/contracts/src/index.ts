@@ -7729,6 +7729,44 @@ export type VariableSetSecret = z.infer<typeof VariableSetSecret>;
 export const VariableSetScope = z.enum(["organization", "workspace", "user"]);
 export type VariableSetScope = z.infer<typeof VariableSetScope>;
 
+/**
+ * Exact-ID metadata used only to validate attachments. This deliberately omits
+ * names, descriptions, and variable-name metadata so attach/use authority does
+ * not become general catalog access.
+ */
+export const VariableSetAttachmentMetadata = z.object({
+  id: z.string().uuid(),
+  scope: VariableSetScope,
+});
+export type VariableSetAttachmentMetadata = z.infer<typeof VariableSetAttachmentMetadata>;
+
+export const MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS = MAX_SELECTED_VARIABLE_SETS * 2;
+export const ResolveVariableSetAttachmentsRequest = z
+  .object({
+    // One create can carry 25 explicit selections plus 25 defaults from its Rig.
+    variableSetIds: z.array(z.string().uuid()).max(MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (new Set(value.variableSetIds).size !== value.variableSetIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["variableSetIds"],
+        message: "variableSetIds must not contain duplicates",
+      });
+    }
+  });
+export type ResolveVariableSetAttachmentsRequest = z.infer<
+  typeof ResolveVariableSetAttachmentsRequest
+>;
+
+export const ResolveVariableSetAttachmentsResponse = z.object({
+  variableSets: z.array(VariableSetAttachmentMetadata),
+});
+export type ResolveVariableSetAttachmentsResponse = z.infer<
+  typeof ResolveVariableSetAttachmentsResponse
+>;
+
 export const VariableSet = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),

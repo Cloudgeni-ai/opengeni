@@ -150,6 +150,15 @@ export function isSessionDraftComputeReady(draft: SessionDraft): boolean {
   return draft.compute.kind !== "machine" || draft.compute.sandboxId !== null;
 }
 
+/** Personal workspaces are presented as Only me and must create the matching
+ * private tenancy instead of silently persisting a workspace-visible row. */
+export function newSessionCreateVisibility(
+  personalWorkspace: boolean,
+  selectedVisibility: "private" | "workspace",
+): "private" | "workspace" {
+  return personalWorkspace ? "private" : selectedVisibility;
+}
+
 export type SessionDraftSubmission = {
   /** TurnSubmission extras merged into the create payload. */
   extras: Omit<TurnSubmission, "text">;
@@ -413,6 +422,7 @@ export function submissionFromSessionDraft(
 export function newSessionDraftOptionsFromSessionDraft(
   draft: SessionDraft,
   defaultFirstPartyMcpTools: readonly FirstPartyMcpToolName[] = DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  effectiveVisibility: "private" | "workspace" = draft.visibility,
 ): NewSessionDraftOptions {
   const goal = goalFromDraft(draft);
   const permissions = draft.customMcpPermissions
@@ -427,7 +437,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   if (draft.compute.kind === "machine") {
     const workingDir = workingDirFromFolder(draft.compute.folder);
     return {
-      visibility: draft.visibility,
+      visibility: effectiveVisibility,
       ...(draft.compute.sandboxId ? { targetSandboxId: draft.compute.sandboxId } : {}),
       ...(workingDir ? { workingDir } : {}),
       ...(goal ? { goal } : {}),
@@ -437,7 +447,7 @@ export function newSessionDraftOptionsFromSessionDraft(
   }
 
   return {
-    visibility: draft.visibility,
+    visibility: effectiveVisibility,
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
     ...(draft.variableSetIds.length
       ? {
