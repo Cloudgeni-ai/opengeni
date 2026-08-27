@@ -15,8 +15,20 @@ export const TOOL_RESULT_TYPE_BY_CALL_TYPE: Readonly<Record<string, string>> = {
 };
 
 export function historyCallId(item: Record<string, unknown>): string | null {
-  const value = item.callId ?? item.call_id ?? item.id;
-  return typeof value === "string" && value.length > 0 ? value : null;
+  // Native tool-search rows can expose a provider item id at `id` while the
+  // correlation id survives only in providerData. Match runtime precedence so
+  // durable settlement never mistakes the provider item for the logical call.
+  for (const value of [item.callId, item.call_id]) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  const providerData = item.providerData;
+  if (providerData && typeof providerData === "object" && !Array.isArray(providerData)) {
+    const provider = providerData as Record<string, unknown>;
+    for (const value of [provider.call_id, provider.callId]) {
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+  }
+  return typeof item.id === "string" && item.id.length > 0 ? item.id : null;
 }
 
 export function historyItemType(item: Record<string, unknown>): string | null {
