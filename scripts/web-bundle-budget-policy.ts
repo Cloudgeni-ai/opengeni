@@ -18,8 +18,8 @@ export function wholeKibEnvelope(
 export const DIRECT_SESSION_RAW_MEASUREMENT = 2_200_819;
 export const DIRECT_SESSION_RAW_BUDGET = wholeKibEnvelope(DIRECT_SESSION_RAW_MEASUREMENT);
 
-/** Exact Variable Set selection plus attachment-preview merge-tree measurement. */
-export const VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT = 2_203_278;
+/** Exact version-frozen release-source Linux/x64 Bun 1.4 workload measurement. */
+export const VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT = 2_205_043;
 export const VARIABLE_SET_SELECTION_MERGE_TREE_RAW_BUDGET = wholeKibEnvelope(
   VARIABLE_SET_SELECTION_MERGE_TREE_RAW_MEASUREMENT,
 );
