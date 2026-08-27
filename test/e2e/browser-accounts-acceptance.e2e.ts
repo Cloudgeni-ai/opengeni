@@ -846,6 +846,23 @@ async function expectAndConsumeConsoleErrors(
   problems.consoleErrors.splice(0);
 }
 
+function optionalWebKitReauthenticationReloadError(
+  problems: BrowserProblems,
+  engine: EngineName,
+): string[] {
+  if (engine !== "webkit") return [];
+  // WebKit can report the deliberately replaced document's canceled root
+  // module import after the re-authenticated document has already won. Keep
+  // the phase, message, hashed entry asset, and maximum count exact.
+  return problems.consoleErrors
+    .filter((message) =>
+      /^\[slot-revocation-reauthentication\] TypeError: Importing a module script failed\. @ \/assets\/index-[A-Za-z0-9_-]+\.js$/u.test(
+        message,
+      ),
+    )
+    .slice(0, 1);
+}
+
 async function expectAndConsumeActorTransitionResponse(
   page: Page,
   problems: BrowserProblems,
@@ -2474,8 +2491,10 @@ describe("provider-neutral browser account acceptance", () => {
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
+          `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 403 (Forbidden) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/attention`,
+          ...optionalWebKitReauthenticationReloadError(pageProblems, engine),
         ],
         [],
       );
