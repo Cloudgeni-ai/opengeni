@@ -53,8 +53,6 @@ describe("Variable Set attachment resolution", () => {
     const second = await createVariableSet(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
-      scope: "user",
-      subjectId,
       name: `second-${suffix}`,
     });
 
@@ -69,7 +67,7 @@ describe("Variable Set attachment resolution", () => {
         [second.id, crypto.randomUUID(), first.id],
       ),
     ).resolves.toEqual([
-      { id: second.id, scope: "user" },
+      { id: second.id, scope: "workspace" },
       { id: first.id, scope: "workspace" },
     ]);
   });
