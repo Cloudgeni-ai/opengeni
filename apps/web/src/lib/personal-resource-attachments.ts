@@ -287,6 +287,66 @@ export function selectableSessionVariableSets(
 }
 
 /**
+ * Reconcile fixed resources restored from a durable new-session draft against
+ * the scoped catalogs without discarding them while those catalogs are still
+ * loading. A selected Rig also waits for the Variable Set catalog because its
+ * active version can contribute default Variable Sets to the attachment.
+ */
+export function reconcileNewSessionFixedResources(input: {
+  selectedVariableSetIds: readonly string[];
+  selectedRigId: string;
+  selectableVariableSetIds: readonly string[];
+  selectableRigIds: readonly string[];
+  variableSetsSettled: boolean;
+  rigsSettled: boolean;
+}): {
+  variableSetIds: string[];
+  rigId: string;
+  selectionResolved: boolean;
+} {
+  const selectableVariableSetIds = new Set(input.selectableVariableSetIds);
+  const selectableRigIds = new Set(input.selectableRigIds);
+  const variableSetIds = input.variableSetsSettled
+    ? input.selectedVariableSetIds.filter((id) => selectableVariableSetIds.has(id))
+    : [...input.selectedVariableSetIds];
+  const rigId =
+    input.rigsSettled && input.selectedRigId && !selectableRigIds.has(input.selectedRigId)
+      ? ""
+      : input.selectedRigId;
+  const variableSetCatalogRequired =
+    input.selectedVariableSetIds.length > 0 || input.selectedRigId.length > 0;
+  const variableSetSelectionResolved =
+    !variableSetCatalogRequired ||
+    (input.variableSetsSettled &&
+      input.selectedVariableSetIds.every((id) => selectableVariableSetIds.has(id)));
+  const rigSelectionResolved =
+    input.selectedRigId.length === 0 ||
+    (input.rigsSettled && selectableRigIds.has(input.selectedRigId));
+  return {
+    variableSetIds,
+    rigId,
+    selectionResolved: variableSetSelectionResolved && rigSelectionResolved,
+  };
+}
+
+/** Stable typed identity for resetting shared-output acknowledgement. */
+export function personalResourceSelectionIdentityKey(input: {
+  variableSetIds: readonly string[];
+  rigId?: string | null | undefined;
+  connectedMachineId?: string | null | undefined;
+}): string {
+  return [
+    ...new Set([
+      ...input.variableSetIds.map((id) => `variable_set:${id}`),
+      ...(input.rigId ? [`rig:${input.rigId}`] : []),
+      ...(input.connectedMachineId ? [`connected_machine:${input.connectedMachineId}`] : []),
+    ]),
+  ]
+    .sort()
+    .join("\u0000");
+}
+
+/**
  * New-session selection is already session-scoped, so personal resources use
  * the matching lifecycle mode without asking for a second duration decision.
  * Workspace-visible sessions still require the existing explicit warning
@@ -326,4 +386,18 @@ export function isPersonalAttachmentConflict(
     (candidate.status === 403 || candidate.status === 409) &&
     candidate.outcomeUnknown !== true,
   );
+}
+
+/** Reset consent and refresh both fixed-resource catalogs after a definitive conflict. */
+export async function recoverNewSessionPersonalResourceAttachment(input: {
+  error: unknown;
+  attemptedInput: { personalResourceAttachment?: PersonalResourceAttachmentIntent } | undefined;
+  resetAcknowledgement: () => void;
+  refreshVariableSets: () => Promise<void>;
+  refreshRigs: () => Promise<void>;
+}): Promise<boolean> {
+  if (!isPersonalAttachmentConflict(input.error, input.attemptedInput)) return false;
+  input.resetAcknowledgement();
+  await Promise.all([input.refreshVariableSets(), input.refreshRigs()]);
+  return true;
 }

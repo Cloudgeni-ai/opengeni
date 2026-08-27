@@ -76,6 +76,13 @@ describe("session control surface architecture", () => {
     expect(route).not.toContain("PersonalResourceAttachmentControl");
     expect(route).not.toContain("Your resource access");
     expect(route).not.toContain("loadPersonalResourceCatalog");
+    expect(route).toContain("reconcileNewSessionFixedResources");
+    expect(route).toContain("fixedResourceSelection.selectionResolved");
+    expect(route).toContain("personalResourceSelectionIdentityKey");
+    expect(route).toContain("recoverPersonalResourceAttachment(error, request)");
+    expect(route).toContain("recoverNewSessionPersonalResourceAttachment");
+    expect(route).toContain("refreshVariableSets: variableSets.refresh");
+    expect(route).toContain("refreshRigs: rigs.refresh");
     expect(establishedControl).not.toContain("<fieldset");
     expect(establishedControl).not.toContain("Your resource access");
     expect(establishedControl).not.toContain("couldn’t check access");

@@ -97,7 +97,11 @@ import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
+  isPersonalAttachmentConflict,
   newSessionPersonalResourceAttachment,
+  personalResourceSelectionIdentityKey,
+  reconcileNewSessionFixedResources,
+  recoverNewSessionPersonalResourceAttachment,
   resolvePersonalResourceOwnerScope,
   selectableSessionVariableSets,
 } from "@/lib/personal-resource-attachments";
@@ -265,36 +269,59 @@ function SessionsIndexRouteContent({
     .join("\u0000");
   const personalResourceEligibilitySettled =
     personalWorkspace || personalOwnerScope === null || tenancyCapabilities !== null;
+  const selectableRigs = rigs.rigs.filter(
+    (rig) => rig.scope !== "user" || personalResourcesAvailable,
+  );
+  const selectableRigIdsKey = selectableRigs.map((rig) => rig.id).join("\u0000");
+  const selectedFixedResourceKey = [...draft.variableSetIds, `rig:${draft.rigId}`].join("\u0000");
+  const fixedResourceSelection = reconcileNewSessionFixedResources({
+    selectedVariableSetIds: draft.variableSetIds,
+    selectedRigId: draft.rigId,
+    selectableVariableSetIds: selectableVariableSets.map((variableSet) => variableSet.id),
+    selectableRigIds: selectableRigs.map((rig) => rig.id),
+    variableSetsSettled:
+      personalResourceEligibilitySettled && !variableSets.loading && variableSets.error === null,
+    rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
+  });
   useEffect(() => {
-    if (variableSets.loading || variableSets.error || !personalResourceEligibilitySettled) {
-      return;
-    }
-    const selectableIds = new Set(
-      selectableVariableSetIdsKey ? selectableVariableSetIdsKey.split("\u0000") : [],
-    );
     setDraft((current) => {
-      const nextIds = current.variableSetIds.filter((id) => selectableIds.has(id));
+      const reconciled = reconcileNewSessionFixedResources({
+        selectedVariableSetIds: current.variableSetIds,
+        selectedRigId: current.rigId,
+        selectableVariableSetIds: selectableVariableSetIdsKey
+          ? selectableVariableSetIdsKey.split("\u0000")
+          : [],
+        selectableRigIds: selectableRigIdsKey ? selectableRigIdsKey.split("\u0000") : [],
+        variableSetsSettled:
+          personalResourceEligibilitySettled &&
+          !variableSets.loading &&
+          variableSets.error === null,
+        rigsSettled: personalResourceEligibilitySettled && !rigs.loading && rigs.error === null,
+      });
       if (
-        nextIds.length === current.variableSetIds.length &&
-        nextIds.every((id, index) => id === current.variableSetIds[index])
+        reconciled.variableSetIds.length === current.variableSetIds.length &&
+        reconciled.variableSetIds.every((id, index) => id === current.variableSetIds[index]) &&
+        reconciled.rigId === current.rigId
       ) {
         return current;
       }
       return {
         ...current,
-        variableSetIds: nextIds,
-        variableSetId: nextIds.at(-1) ?? "",
+        variableSetIds: reconciled.variableSetIds,
+        variableSetId: reconciled.variableSetIds.at(-1) ?? "",
+        rigId: reconciled.rigId,
       };
     });
   }, [
     personalResourceEligibilitySettled,
+    rigs.error,
+    rigs.loading,
+    selectedFixedResourceKey,
+    selectableRigIdsKey,
     selectableVariableSetIdsKey,
     variableSets.error,
     variableSets.loading,
   ]);
-  const selectableRigs = rigs.rigs.filter(
-    (rig) => rig.scope !== "user" || personalResourcesAvailable,
-  );
   const selectedRig = selectableRigs.find((candidate) => candidate.id === draft.rigId);
   const personalAttachmentVariableSetIds = [
     ...new Set([
@@ -331,17 +358,46 @@ function SessionsIndexRouteContent({
       : personalMachineSelected && selectedMachine
         ? [selectedMachine.name]
         : [];
-  const personalResourceSelectionKey = selectedPersonalResourceNames.join("\u0000");
+  const personalResourceSelectionKey = personalResourceSelectionIdentityKey({
+    variableSetIds: selectedPersonalVariableSets.map((variableSet) => variableSet.id),
+    rigId: selectedRig?.scope === "user" ? selectedRig.id : null,
+    connectedMachineId:
+      personalMachineSelected && selectedMachine ? selectedMachine.enrollmentId : null,
+  });
+  const selectedPersonalResourceCount = personalResourceSelectionKey
+    ? personalResourceSelectionKey.split("\u0000").length
+    : 0;
   const [personalResourcesSharedAcknowledged, setPersonalResourcesSharedAcknowledged] =
     useState(false);
+  const [personalResourceCatalogRefreshPending, setPersonalResourceCatalogRefreshPending] =
+    useState(false);
+  const personalResourceCatalogRefreshGeneration = useRef(0);
   useEffect(() => {
     setPersonalResourcesSharedAcknowledged(false);
   }, [personalResourceSelectionKey, draft.visibility]);
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
-    personalResourceCount: selectedPersonalResourceNames.length,
+    personalResourceCount: selectedPersonalResourceCount,
     visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
     sharedAcknowledged: personalResourcesSharedAcknowledged,
   });
+  const recoverPersonalResourceAttachment = useLatestCallback(
+    (error: unknown, attemptedInput: Parameters<typeof isPersonalAttachmentConflict>[1]): void => {
+      if (!isPersonalAttachmentConflict(error, attemptedInput)) return;
+      const generation = ++personalResourceCatalogRefreshGeneration.current;
+      setPersonalResourceCatalogRefreshPending(true);
+      void recoverNewSessionPersonalResourceAttachment({
+        error,
+        attemptedInput,
+        resetAcknowledgement: () => setPersonalResourcesSharedAcknowledged(false),
+        refreshVariableSets: variableSets.refresh,
+        refreshRigs: rigs.refresh,
+      }).finally(() => {
+        if (personalResourceCatalogRefreshGeneration.current === generation) {
+          setPersonalResourceCatalogRefreshPending(false);
+        }
+      });
+    },
+  );
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
@@ -566,6 +622,8 @@ function SessionsIndexRouteContent({
         newSessionDraft.conflict ||
         !newSessionPolicyValid ||
         privateCreateUnavailable ||
+        personalResourceCatalogRefreshPending ||
+        (createdSessionAuthority === null && !fixedResourceSelection.selectionResolved) ||
         (createdSessionAuthority === null && personalResourceAttachment.requiresAcknowledgement)
       )
         return false;
@@ -605,7 +663,11 @@ function SessionsIndexRouteContent({
                 });
                 return null;
               }
-              const submission = submissionFromSessionDraft(draft, defaultFirstPartyMcpTools);
+              const submission = submissionFromSessionDraft(
+                draft,
+                defaultFirstPartyMcpTools,
+                personalResourceAttachment.intent,
+              );
               const created = await context.startSession(
                 workspaceId,
                 {
@@ -628,6 +690,8 @@ function SessionsIndexRouteContent({
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
                   ),
+                  onFailure: ({ error, request }) =>
+                    recoverPersonalResourceAttachment(error, request),
                 },
               );
               if (!created) return null;
@@ -674,6 +738,8 @@ function SessionsIndexRouteContent({
                   personalWorkspace,
                   submission.options.visibility ?? "workspace",
                 ),
+                onFailure: ({ error, request }) =>
+                  recoverPersonalResourceAttachment(error, request),
               },
             );
             if (!created) return null;
@@ -800,6 +866,8 @@ function SessionsIndexRouteContent({
       !newSessionDraft.loading &&
       !newSessionDraft.conflict &&
       newSessionPolicyValid &&
+      !personalResourceCatalogRefreshPending &&
+      (createdSessionAuthority !== null || fixedResourceSelection.selectionResolved) &&
       (createdSessionAuthority !== null || !personalResourceAttachment.requiresAcknowledgement) &&
       (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},

@@ -8,7 +8,10 @@ import {
   isPersonalAttachmentConflict,
   loadPersonalResourceCatalog,
   newSessionPersonalResourceAttachment,
+  personalResourceSelectionIdentityKey,
   personalSelection,
+  reconcileNewSessionFixedResources,
+  recoverNewSessionPersonalResourceAttachment,
   resolvePersonalResourceOwnerScope,
   selectableSessionVariableSets,
 } from "./personal-resource-attachments";
@@ -100,6 +103,107 @@ function ownerScope(session?: Pick<Session, "id" | "tenancy">) {
 }
 
 describe("personal resource attachment authority", () => {
+  test("holds restored fixed resources until scoped catalogs settle, then reconciles authority", () => {
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: rigId,
+        selectableVariableSetIds: [],
+        selectableRigIds: [],
+        variableSetsSettled: false,
+        rigsSettled: false,
+      }),
+    ).toEqual({
+      variableSetIds: [variableSetId],
+      rigId,
+      selectionResolved: false,
+    });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: rigId,
+        selectableVariableSetIds: [variableSetId],
+        selectableRigIds: [rigId],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({
+      variableSetIds: [variableSetId],
+      rigId,
+      selectionResolved: true,
+    });
+
+    expect(
+      reconcileNewSessionFixedResources({
+        selectedVariableSetIds: [variableSetId],
+        selectedRigId: rigId,
+        selectableVariableSetIds: [],
+        selectableRigIds: [],
+        variableSetsSettled: true,
+        rigsSettled: true,
+      }),
+    ).toEqual({ variableSetIds: [], rigId: "", selectionResolved: false });
+  });
+
+  test("keys acknowledgement by typed resource identity rather than display name", () => {
+    const first = personalResourceSelectionIdentityKey({
+      variableSetIds: [variableSetId],
+      rigId,
+    });
+    const replacement = personalResourceSelectionIdentityKey({
+      variableSetIds: [workspaceVariableSetId],
+      rigId,
+    });
+    expect(first).toBe([`rig:${rigId}`, `variable_set:${variableSetId}`].sort().join("\u0000"));
+    expect(replacement).not.toBe(first);
+  });
+
+  test("resets acknowledgement and refreshes both catalogs after a definitive conflict", async () => {
+    const events: string[] = [];
+    const recovered = await recoverNewSessionPersonalResourceAttachment({
+      error: new OpenGeniApiError(409, "stale personal resource"),
+      attemptedInput: {
+        personalResourceAttachment: {
+          mode: "session",
+          workspaceSharedAcknowledged: true,
+          sharedOutputWarningVersion: 1,
+        },
+      },
+      resetAcknowledgement: () => events.push("reset"),
+      refreshVariableSets: async () => {
+        events.push("variable_sets");
+      },
+      refreshRigs: async () => {
+        events.push("rigs");
+      },
+    });
+    expect(recovered).toBe(true);
+    expect(events).toEqual(["reset", "variable_sets", "rigs"]);
+
+    events.length = 0;
+    expect(
+      await recoverNewSessionPersonalResourceAttachment({
+        error: new OpenGeniApiError(503, "temporary outage"),
+        attemptedInput: {
+          personalResourceAttachment: {
+            mode: "session",
+            workspaceSharedAcknowledged: true,
+            sharedOutputWarningVersion: 1,
+          },
+        },
+        resetAcknowledgement: () => events.push("reset"),
+        refreshVariableSets: async () => {
+          events.push("variable_sets");
+        },
+        refreshRigs: async () => {
+          events.push("rigs");
+        },
+      }),
+    ).toBe(false);
+    expect(events).toEqual([]);
+  });
+
   test("requires the exact managed owner projection and rejects a shared nonowner", () => {
     expect(ownerScope()).not.toBeNull();
     expect(
