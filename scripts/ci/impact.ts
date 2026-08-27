@@ -267,6 +267,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/personal-github-identity.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/browser-accounts-acceptance.e2e.ts": [
     "opengeni-web",
     "@opengeni/api-router",
