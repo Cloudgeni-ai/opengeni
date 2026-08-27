@@ -264,6 +264,57 @@ export function buildPersonalResourceAttachmentIntent(input: {
   };
 }
 
+/**
+ * The session composer must offer only resources the current workspace grant
+ * can actually attach. The scoped Variable Set list already applies the
+ * account/workspace/subject RLS boundary; these final capability and product
+ * gates keep read-only and non-managed callers from seeing unusable choices.
+ */
+export function selectableSessionVariableSets(
+  variableSets: readonly VariableSet[],
+  input: {
+    canAttach: boolean;
+    canUse: boolean;
+    personalResourcesAvailable: boolean;
+  },
+): VariableSet[] {
+  if (!input.canAttach || !input.canUse) return [];
+  return variableSets.filter(
+    (variableSet) =>
+      variableSet.status === "active" &&
+      (variableSet.scope !== "user" || input.personalResourcesAvailable),
+  );
+}
+
+/**
+ * New-session selection is already session-scoped, so personal resources use
+ * the matching lifecycle mode without asking for a second duration decision.
+ * Workspace-visible sessions still require the existing explicit warning
+ * acknowledgement before the create request can be submitted.
+ */
+export function newSessionPersonalResourceAttachment(input: {
+  personalResourceCount: number;
+  visibility: "private" | "workspace";
+  sharedAcknowledged: boolean;
+}): {
+  intent: PersonalResourceAttachmentIntent | undefined;
+  requiresAcknowledgement: boolean;
+} {
+  const requiresAcknowledgement =
+    input.personalResourceCount > 0 &&
+    input.visibility === "workspace" &&
+    !input.sharedAcknowledged;
+  return {
+    requiresAcknowledgement,
+    intent: buildPersonalResourceAttachmentIntent({
+      mode: "session",
+      visibility: input.visibility,
+      acknowledged: input.sharedAcknowledged,
+      resourceCount: input.personalResourceCount,
+    }),
+  };
+}
+
 export function isPersonalAttachmentConflict(
   error: unknown,
   input: { personalResourceAttachment?: PersonalResourceAttachmentIntent } | undefined,

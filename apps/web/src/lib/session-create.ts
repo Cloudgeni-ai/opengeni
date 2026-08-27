@@ -150,6 +150,15 @@ export function isSessionDraftComputeReady(draft: SessionDraft): boolean {
   return draft.compute.kind !== "machine" || draft.compute.sandboxId !== null;
 }
 
+/** Personal workspaces are presented as Only me and must create the matching
+ * private tenancy instead of silently persisting a workspace-visible row. */
+export function newSessionCreateVisibility(
+  personalWorkspace: boolean,
+  selectedVisibility: "private" | "workspace",
+): "private" | "workspace" {
+  return personalWorkspace ? "private" : selectedVisibility;
+}
+
 export type SessionDraftSubmission = {
   /** TurnSubmission extras merged into the create payload. */
   extras: Omit<TurnSubmission, "text">;

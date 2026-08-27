@@ -65,6 +65,22 @@ describe("session control surface architecture", () => {
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
+  test("keeps Variable Set access inside the multi-select setup instead of a status box", async () => {
+    const [route, establishedControl] = await Promise.all([
+      source("routes/sessions-index.tsx"),
+      source("components/personal-resource-attachment-control.tsx"),
+    ]);
+    expect(route).toContain("Add Variable Set…");
+    expect(route).toContain("draft.variableSetIds.map");
+    expect(route).toContain("PersonalResourceAccessInline");
+    expect(route).not.toContain("PersonalResourceAttachmentControl");
+    expect(route).not.toContain("Your resource access");
+    expect(route).not.toContain("loadPersonalResourceCatalog");
+    expect(establishedControl).not.toContain("<fieldset");
+    expect(establishedControl).not.toContain("Your resource access");
+    expect(establishedControl).not.toContain("couldn’t check access");
+  });
+
   test("announces pin results through an independent live region", async () => {
     const [header, list] = await Promise.all([
       source("components/rail/session-header.tsx"),

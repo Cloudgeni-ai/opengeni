@@ -7,8 +7,10 @@ import {
   buildPersonalResourceAttachmentIntent,
   isPersonalAttachmentConflict,
   loadPersonalResourceCatalog,
+  newSessionPersonalResourceAttachment,
   personalSelection,
   resolvePersonalResourceOwnerScope,
+  selectableSessionVariableSets,
 } from "./personal-resource-attachments";
 
 const organizationId = "11111111-1111-4111-8111-111111111111";
@@ -367,6 +369,86 @@ describe("personal resource attachment authority", () => {
       expectedAuthorityEpoch: 3,
       workspaceSharedAcknowledged: true,
       sharedOutputWarningVersion: 1,
+    });
+  });
+
+  test("offers only attachable Variable Sets and hides unavailable personal choices", () => {
+    const personal = personalVariableSet();
+    const workspaceVariableSet = {
+      ...personal,
+      id: workspaceVariableSetId,
+      workspaceId,
+      scope: "workspace" as const,
+      name: "Workspace defaults",
+    };
+    const inactivePersonal = {
+      ...personal,
+      id: "12121212-1212-4212-8212-121212121212",
+      status: "revoked" as const,
+      name: "Revoked personal set",
+    };
+
+    expect(
+      selectableSessionVariableSets([workspaceVariableSet, personal, inactivePersonal], {
+        canAttach: true,
+        canUse: true,
+        personalResourcesAvailable: false,
+      }).map((variableSet) => variableSet.id),
+    ).toEqual([workspaceVariableSetId]);
+    expect(
+      selectableSessionVariableSets([workspaceVariableSet, personal], {
+        canAttach: true,
+        canUse: true,
+        personalResourcesAvailable: true,
+      }).map((variableSet) => variableSet.id),
+    ).toEqual([workspaceVariableSetId, variableSetId]);
+    expect(
+      selectableSessionVariableSets([workspaceVariableSet, personal], {
+        canAttach: false,
+        canUse: true,
+        personalResourcesAvailable: true,
+      }),
+    ).toEqual([]);
+  });
+
+  test("authorized personal resources start private sessions with session-scoped authority", () => {
+    expect(
+      newSessionPersonalResourceAttachment({
+        personalResourceCount: 2,
+        visibility: "private",
+        sharedAcknowledged: false,
+      }),
+    ).toEqual({
+      requiresAcknowledgement: false,
+      intent: {
+        mode: "session",
+        workspaceSharedAcknowledged: false,
+        sharedOutputWarningVersion: 1,
+      },
+    });
+  });
+
+  test("workspace-visible personal resources use one inline acknowledgement", () => {
+    expect(
+      newSessionPersonalResourceAttachment({
+        personalResourceCount: 1,
+        visibility: "workspace",
+        sharedAcknowledged: false,
+      }),
+    ).toEqual({ requiresAcknowledgement: true, intent: undefined });
+    expect(
+      newSessionPersonalResourceAttachment({
+        personalResourceCount: 1,
+        visibility: "workspace",
+        sharedAcknowledged: true,
+      }),
+    ).toEqual({
+      requiresAcknowledgement: false,
+      intent: {
+        mode: "session",
+        workspaceSharedAcknowledged: true,
+        sharedOutputWarningVersion: 1,
+      },
     });
   });
 
