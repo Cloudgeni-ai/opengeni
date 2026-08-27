@@ -17,6 +17,7 @@
 // lightweight local opt-in.
 import {
   FILE_ONLY_MESSAGE_TEXT,
+  LightboxProvider,
   useChannels,
   useRigs,
   useVariableSets,
@@ -50,7 +51,15 @@ import {
   ServerIcon,
   XIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { toast } from "sonner";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
@@ -817,7 +826,9 @@ function SessionsIndexRouteContent({
       : null;
   });
 
-  return (
+  return createElement(
+    LightboxProvider,
+    null,
     // The canvas parent is overflow-hidden, so this route owns its scrolling —
     // without it the page clips (recent sessions were unreachable below the fold).
     <div data-workspace-scroll-owner="self-managed" className="min-h-0 flex-1 overflow-y-auto">
@@ -996,7 +1007,7 @@ function SessionsIndexRouteContent({
         }}
         onSubmit={() => void createProject()}
       />
-    </div>
+    </div>,
   );
 }
 

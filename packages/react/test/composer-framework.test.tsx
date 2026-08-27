@@ -75,6 +75,7 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     addFromPaste: () => {},
     restoreReadyFiles: () => {},
     retry: () => {},
+    retainPreview: () => undefined,
     remove: () => {},
     removeReadyFiles: () => {},
     clear: () => {},

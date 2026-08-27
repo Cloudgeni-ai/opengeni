@@ -55,7 +55,14 @@ export type UseFileAttachmentsResult = {
    * source file). No-op for an id that isn't a known failed upload.
    */
   retry: (id: string) => void;
-  /** Remove one attachment; revokes its object-URL. */
+  /**
+   * Keep an attachment's object-URL alive for a consumer that outlives its
+   * queue entry (for example, an open route-level lightbox). The returned
+   * release is idempotent; pending revocation finishes after the last holder
+   * releases. Returns `undefined` when the attachment has no local preview.
+   */
+  retainPreview: (id: string) => (() => void) | undefined;
+  /** Remove one attachment; revokes its object-URL after retained users finish. */
   remove: (id: string) => void;
   /**
    * Remove only finalized files whose durable ids were accepted by a send.
@@ -63,7 +70,7 @@ export type UseFileAttachmentsResult = {
    * next message.
    */
   removeReadyFiles: (fileIds: Iterable<string>) => void;
-  /** Remove all attachments and revoke every object-URL. */
+  /** Remove all attachments and revoke every unretained object-URL. */
   clear: () => void;
 };
 
@@ -91,17 +98,41 @@ export function useFileAttachments(
   // state update when its component unmounts in the same batch that minted the
   // preview. The registry remains available to cleanup even before a render.
   const previewUrls = useRef<Map<string, string>>(new Map());
+  const previewRetainers = useRef<Map<string, number>>(new Map());
+  const pendingPreviewRevocations = useRef<Set<string>>(new Set());
   const revokePreview = useCallback((id: string) => {
     const previewUrl = previewUrls.current.get(id);
     if (!previewUrl) return;
+    if ((previewRetainers.current.get(id) ?? 0) > 0) {
+      pendingPreviewRevocations.current.add(id);
+      return;
+    }
     previewUrls.current.delete(id);
+    pendingPreviewRevocations.current.delete(id);
     URL.revokeObjectURL(previewUrl);
   }, []);
   const revokeAllPreviews = useCallback(() => {
-    const urls = [...previewUrls.current.values()];
-    previewUrls.current.clear();
-    for (const previewUrl of urls) URL.revokeObjectURL(previewUrl);
-  }, []);
+    for (const id of previewUrls.current.keys()) revokePreview(id);
+  }, [revokePreview]);
+  const retainPreview = useCallback(
+    (id: string): (() => void) | undefined => {
+      if (!previewUrls.current.has(id)) return undefined;
+      previewRetainers.current.set(id, (previewRetainers.current.get(id) ?? 0) + 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const remaining = (previewRetainers.current.get(id) ?? 1) - 1;
+        if (remaining > 0) {
+          previewRetainers.current.set(id, remaining);
+          return;
+        }
+        previewRetainers.current.delete(id);
+        if (pendingPreviewRevocations.current.has(id)) revokePreview(id);
+      };
+    },
+    [revokePreview],
+  );
   // Ready-file reconciliation uses functional state updaters, which React may
   // evaluate during a concurrent render that later suspends or is abandoned.
   // Diff only committed attachment sets here so URL revocation cannot run from
@@ -338,6 +369,7 @@ export function useFileAttachments(
     addFromPaste,
     restoreReadyFiles,
     retry,
+    retainPreview,
     remove,
     removeReadyFiles,
     clear,
