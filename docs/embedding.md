@@ -50,7 +50,10 @@ submitComposerDraftForRequest(
   workspaceId,
   sessionId,
   submitComposerDraftRequest,
-  authorization,
+  {
+    authorization,
+    additionalResources: hostAuthorizedResources,
+  },
 );
 controlHumanSessionWorkstream(deps, context, {
   action: "cancel",
@@ -66,7 +69,11 @@ expect the documented dependency slice plus an `AccessGrant`.
 application boundary used by both the stock HTTP route and an in-process host.
 It validates/accepts the exact durable draft revision, appends the event,
 creates or steers the turn, rotates the draft, and returns the native
-`SubmitComposerDraftResponse`. Terminal control lives in
+`SubmitComposerDraftResponse`. An in-process host may provide
+`additionalResources`; they join the accepted command, idempotency hash, turn,
+and durable session resource set atomically while the saved actor draft remains
+the exact fence. This avoids a trusted draft PUT solely to add host-authorized
+repositories or files. Terminal control lives in
 `packages/core/src/application/session-commands.ts` and uses an explicit
 authenticated command context. Scheduled-task validation/sync helpers live in
 `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing,

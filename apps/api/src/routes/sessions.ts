@@ -2744,14 +2744,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = SubmitComposerDraftRequest.parse(await c.req.json().catch(() => null));
     let result: Awaited<ReturnType<typeof submitComposerDraftForRequest>>;
     try {
-      result = await submitComposerDraftForRequest(
-        deps,
-        grant,
-        workspaceId,
-        sessionId,
-        payload,
+      result = await submitComposerDraftForRequest(deps, grant, workspaceId, sessionId, payload, {
         authorization,
-      );
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }

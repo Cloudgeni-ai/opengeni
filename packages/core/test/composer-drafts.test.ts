@@ -327,6 +327,16 @@ describe("established-session composer drafts", () => {
       },
     );
     const clientEventId = crypto.randomUUID();
+    const hostRepository: ResourceRef = {
+      kind: "repository",
+      uri: "https://dev.azure.com/example/project/_git/repository",
+      ref: "main",
+      mountPath: "repositories/host-authorized",
+      provider: "azure_devops",
+      repositoryId: "host-authorized",
+      connectionId: "connection-host-authorized",
+      access: "write",
+    };
     const input = {
       clientEventId,
       expectedDraftRevision: saved.revision,
@@ -353,6 +363,7 @@ describe("established-session composer drafts", () => {
       workspaceId,
       session.id,
       input,
+      { additionalResources: [hostRepository] },
     );
     expect(accepted).toMatchObject({
       replay: false,
@@ -365,9 +376,17 @@ describe("established-session composer drafts", () => {
         sourceTurnVersion: null,
       },
       receipt: { operationKey: clientEventId },
+      turn: { resources: [hostRepository] },
     });
 
-    const replay = await submitComposerDraftForRequest(deps, grant, workspaceId, session.id, input);
+    const replay = await submitComposerDraftForRequest(
+      deps,
+      grant,
+      workspaceId,
+      session.id,
+      input,
+      { additionalResources: [hostRepository] },
+    );
     expect(replay).toMatchObject({
       replay: true,
       accepted: { id: accepted.accepted.id, clientEventId },
@@ -377,9 +396,22 @@ describe("established-session composer drafts", () => {
     });
 
     await expect(
-      submitComposerDraftForRequest(deps, grant, workspaceId, session.id, {
-        ...input,
-        text: "changed after acceptance",
+      submitComposerDraftForRequest(
+        deps,
+        grant,
+        workspaceId,
+        session.id,
+        {
+          ...input,
+          text: "changed after acceptance",
+        },
+        { additionalResources: [hostRepository] },
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    await expect(
+      submitComposerDraftForRequest(deps, grant, workspaceId, session.id, input, {
+        additionalResources: [{ ...hostRepository, ref: "changed" }],
       }),
     ).rejects.toMatchObject({ status: 409 });
   }, 180_000);

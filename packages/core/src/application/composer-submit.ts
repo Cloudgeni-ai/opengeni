@@ -1,11 +1,24 @@
 import type {
   AccessGrant,
+  ResourceRef,
   SubmitComposerDraftRequest,
   SubmitComposerDraftResponse,
 } from "@opengeni/contracts";
 import type { AccessGrantAuthorization } from "../access";
 import type { AcceptSessionUserMessageDependencies } from "../dependencies";
 import { acceptSessionUserMessageWithOutcome } from "../domain/sessions";
+
+export type SubmitComposerDraftForRequestOptions = {
+  authorization?: AccessGrantAuthorization | undefined;
+  /**
+   * Trusted host-owned resources admitted with this command without writing
+   * them into the actor's browser-visible draft first. The saved draft remains
+   * the exact content fence for actor-owned text, annotations, resources, and
+   * execution policy; these resources participate in the accepted command's
+   * idempotency hash, validation, turn, and durable session resource set.
+   */
+  additionalResources?: ResourceRef[] | undefined;
+};
 
 /**
  * Atomically accept one established-session composer draft.
@@ -22,13 +35,15 @@ export async function submitComposerDraftForRequest(
   workspaceId: string,
   sessionId: string,
   input: SubmitComposerDraftRequest,
-  authorization?: AccessGrantAuthorization,
+  options: SubmitComposerDraftForRequestOptions = {},
 ): Promise<SubmitComposerDraftResponse> {
+  const additionalResources = options.additionalResources ?? [];
   const result = await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, {
     text: input.text,
     annotations: input.annotations,
     modelContext: input.modelContext ?? null,
-    resources: input.resources,
+    resources: [...input.resources, ...additionalResources],
+    ...(additionalResources.length > 0 ? { composerDraftResources: input.resources } : {}),
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     latencyMode: input.latencyMode,
@@ -37,7 +52,7 @@ export async function submitComposerDraftForRequest(
     ...(input.personalResourceAttachment
       ? { personalResourceAttachment: input.personalResourceAttachment }
       : {}),
-    ...(authorization ? { authorization } : {}),
+    ...(options.authorization ? { authorization: options.authorization } : {}),
     delivery: input.delivery,
     origin: "human",
     expectedDraftRevision: input.expectedDraftRevision,

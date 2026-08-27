@@ -19,6 +19,8 @@ describe("composer submit application boundary", () => {
     const handler = routeSource.slice(start, end);
 
     expect(handler).toContain("submitComposerDraftForRequest(");
+    expect(handler).toContain("payload, {");
+    expect(handler).toContain("authorization,");
     expect(handler).not.toContain("acceptSessionUserMessageWithOutcome(");
     expect(handler).not.toContain(
       "Accepted composer draft submission did not return its next draft",
@@ -36,5 +38,7 @@ describe("composer submit application boundary", () => {
     expect(coreIndex).toContain('export * from "./application/composer-submit"');
     expect(command).toContain("Promise<SubmitComposerDraftResponse>");
     expect(command).toContain("acceptSessionUserMessageWithOutcome(");
+    expect(command).toContain("additionalResources");
+    expect(command).toContain("composerDraftResources: input.resources");
   });
 });
