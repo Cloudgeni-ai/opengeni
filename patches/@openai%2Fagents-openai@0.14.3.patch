@@ -57,11 +57,11 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
 +    if (completedOutputItemsByIndex.size === 0) {
 +        return response;
 +    }
-+    const orderedOutputItems = [...completedOutputItemsByIndex.entries()].sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex);
-+    if (orderedOutputItems.some(([index]) => !Number.isSafeInteger(index) || index < 0)) {
-+        throw new agents_core_1.ModelBehaviorError('Responses stream emitted output_item.done with an invalid index.');
-+    }
-+    const output = orderedOutputItems.map(([, item]) => item);
++    // Provider positions can be sparse; only numeric order is semantic.
++    // Every index was validated at output_item.done ingress.
++    const output = [...completedOutputItemsByIndex.entries()]
++        .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
++        .map(([, item]) => item);
 +    return { ...response, output };
 +}
  function getOpenAIResponseRequestId(response) {
@@ -123,8 +123,8 @@ index 07012f1f42b1e29b0daf915ac965e7e79142ffb7..67b49b785b52de3e982b9e27f21bc246
                  }
 +                if (eventType === 'response.output_item.done') {
 +                    const outputItemDone = event;
-+                    if (typeof outputItemDone.output_index !== 'number' || !outputItemDone.item) {
-+                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted output_item.done without an indexed item.');
++                    if (!Number.isSafeInteger(outputItemDone.output_index) || outputItemDone.output_index < 0 || !outputItemDone.item) {
++                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted output_item.done with an invalid index or missing item.');
 +                    }
 +                    if (completedOutputItemsByIndex.has(outputItemDone.output_index)) {
 +                        throw new agents_core_1.ModelBehaviorError('Responses stream emitted a duplicate output_item.done index.');
@@ -248,11 +248,11 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
 +    if (completedOutputItemsByIndex.size === 0) {
 +        return response;
 +    }
-+    const orderedOutputItems = [...completedOutputItemsByIndex.entries()].sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex);
-+    if (orderedOutputItems.some(([index]) => !Number.isSafeInteger(index) || index < 0)) {
-+        throw new ModelBehaviorError('Responses stream emitted output_item.done with an invalid index.');
-+    }
-+    const output = orderedOutputItems.map(([, item]) => item);
++    // Provider positions can be sparse; only numeric order is semantic.
++    // Every index was validated at output_item.done ingress.
++    const output = [...completedOutputItemsByIndex.entries()]
++        .sort(([leftIndex], [rightIndex]) => leftIndex - rightIndex)
++        .map(([, item]) => item);
 +    return { ...response, output };
 +}
  function getOpenAIResponseRequestId(response) {
@@ -314,8 +314,8 @@ index 3bc6e0a9335690a97120570c4d6355ac4447caf3..57889914542217a8ad595631d32b7eda
                  }
 +                if (eventType === 'response.output_item.done') {
 +                    const outputItemDone = event;
-+                    if (typeof outputItemDone.output_index !== 'number' || !outputItemDone.item) {
-+                        throw new ModelBehaviorError('Responses stream emitted output_item.done without an indexed item.');
++                    if (!Number.isSafeInteger(outputItemDone.output_index) || outputItemDone.output_index < 0 || !outputItemDone.item) {
++                        throw new ModelBehaviorError('Responses stream emitted output_item.done with an invalid index or missing item.');
 +                    }
 +                    if (completedOutputItemsByIndex.has(outputItemDone.output_index)) {
 +                        throw new ModelBehaviorError('Responses stream emitted a duplicate output_item.done index.');

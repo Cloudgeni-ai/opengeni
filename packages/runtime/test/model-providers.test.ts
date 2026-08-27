@@ -868,7 +868,13 @@ describe("pinned Responses protocol conformance", () => {
     const output = (terminalModel?.event as { response?: { output?: Array<{ id?: string }> } })
       ?.response?.output;
     expect(output?.map((item) => item.id)).toEqual(["message-two", "message-seven"]);
-    expect(result.events.filter((event) => event.type === "response_done")).toHaveLength(1);
+    const responseDone = result.events.find((event) => event.type === "response_done") as
+      | { response?: { output?: Array<{ id?: string }> } }
+      | undefined;
+    expect(responseDone?.response?.output?.map((item) => item.id)).toEqual([
+      "message-two",
+      "message-seven",
+    ]);
   });
 
   test("fails closed on duplicate output indices", async () => {
@@ -909,12 +915,12 @@ describe("pinned Responses protocol conformance", () => {
         response: {
           id: "completed",
           status: "completed",
-          output: [],
+          output: [responseMessage("terminal", "terminal")],
           usage: null,
         },
       },
     ]);
-    expect(String((result.error as Error).message)).toContain("invalid index");
+    expect(String((result.error as Error).message)).toContain("invalid index or missing item");
     expect(result.events.some((event) => event.type === "response_done")).toBe(false);
   });
 
