@@ -12674,7 +12674,7 @@ export const workspaceGatewayCustomModels = pgTable(
     ),
     upstreamCheck: check(
       "workspace_gateway_custom_models_upstream_chk",
-      sql`${table.upstreamModelId} ~ '^[!-~]{1,256}$'`,
+      sql`octet_length(${table.upstreamModelId}) between 1 and 256 and ${table.upstreamModelId} ~ '^[!-~]+$'`,
     ),
     labelCheck: check(
       "workspace_gateway_custom_models_label_chk",
